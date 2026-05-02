@@ -81,6 +81,12 @@ class Database:
     def _fetchall_dicts(self, cursor: Any) -> list[dict[str, Any]]:
         return [self._row_to_dict(row) for row in cursor.fetchall()]
 
+    def _inserted_id(self, cursor: Any) -> int:
+        if self._use_postgres:
+            row = cursor.fetchone()
+            return int(self._row_value(row, "id", 0, 0) or 0)
+        return int(getattr(cursor, "lastrowid", 0) or 0)
+
     @staticmethod
     def _row_value(row: Any, key: str, index: int, default: Any = None) -> Any:
         if row is None:
@@ -246,25 +252,20 @@ class Database:
     ) -> int:
         payload = asdict(signal) if is_dataclass(signal) else dict(signal)
         raw_signal_json = json_dumps(payload)
+        sql = """
+            INSERT INTO trades(
+                timestamp, mode, symbol, strategy_type, side, entry, stop_loss, take_profit_1,
+                take_profit_2, trailing_stop, size, leverage, risk_amount, confidence_score,
+                reason, status, realized_pnl, unrealized_pnl, fees, slippage, error_message,
+                raw_signal_json, raw_order_response_sanitized
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """
+        if self._use_postgres:
+            sql = sql.replace("?", "%s") + " RETURNING id"
         with self._connect() as conn:
             cur = conn.execute(
-                """
-                INSERT INTO trades(
-                    timestamp, mode, symbol, strategy_type, side, entry, stop_loss, take_profit_1,
-                    take_profit_2, trailing_stop, size, leverage, risk_amount, confidence_score,
-                    reason, status, realized_pnl, unrealized_pnl, fees, slippage, error_message,
-                    raw_signal_json, raw_order_response_sanitized
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """.replace("?", "%s") if self._use_postgres else """
-                INSERT INTO trades(
-                    timestamp, mode, symbol, strategy_type, side, entry, stop_loss, take_profit_1,
-                    take_profit_2, trailing_stop, size, leverage, risk_amount, confidence_score,
-                    reason, status, realized_pnl, unrealized_pnl, fees, slippage, error_message,
-                    raw_signal_json, raw_order_response_sanitized
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
+                sql,
                 (
                     iso_utc(),
                     mode,
@@ -291,7 +292,7 @@ class Database:
                     json_dumps(sanitize(raw_order_response or {})),
                 ),
             )
-            return int(getattr(cur, "lastrowid", 0) or 0)
+            return self._inserted_id(cur)
 
     def record_signal_observation(self, observation: dict[str, Any]) -> int:
         allowed = {
@@ -354,10 +355,10 @@ class Database:
         placeholders = ", ".join(["?"] * len(columns))
         sql = f"INSERT INTO signal_observations({', '.join(columns)}) VALUES ({placeholders})"
         if self._use_postgres:
-            sql = sql.replace("?", "%s")
+            sql = sql.replace("?", "%s") + " RETURNING id"
         with self._connect() as conn:
             cur = conn.execute(sql, tuple(payload[col] for col in columns))
-            return int(getattr(cur, "lastrowid", 0) or 0)
+            return self._inserted_id(cur)
 
     def update_signal_observation(self, observation_id: int, **updates: Any) -> None:
         allowed = {
@@ -397,10 +398,10 @@ class Database:
         placeholders = ", ".join(["?"] * len(columns))
         sql = f"INSERT INTO signal_labels({', '.join(columns)}) VALUES ({placeholders})"
         if self._use_postgres:
-            sql = sql.replace("?", "%s")
+            sql = sql.replace("?", "%s") + " RETURNING id"
         with self._connect() as conn:
             cur = conn.execute(sql, tuple(payload[col] for col in columns))
-            return int(getattr(cur, "lastrowid", 0) or 0)
+            return self._inserted_id(cur)
 
     def fetch_signal_observations(self, limit: int | None = None) -> list[dict[str, Any]]:
         sql = "SELECT * FROM signal_observations ORDER BY timestamp ASC"
