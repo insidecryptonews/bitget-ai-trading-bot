@@ -17,13 +17,16 @@ class Database:
         self.logger = logger
         self.sqlite_path = PROJECT_ROOT / "bot_state.db"
         self._postgres = None
+        self._postgres_dict_row = None
         self._use_postgres = False
 
         if config.database_url and config.use_postgres_if_available:
             try:
                 import psycopg  # type: ignore
+                from psycopg.rows import dict_row  # type: ignore
 
                 self._postgres = psycopg
+                self._postgres_dict_row = dict_row
                 self._use_postgres = True
             except Exception:
                 self.logger.warning("DATABASE_URL existe, pero psycopg no está disponible. Usando SQLite local.")
@@ -40,7 +43,8 @@ class Database:
     def _connect(self) -> Iterator[Any]:
         if self._use_postgres:
             assert self._postgres is not None
-            with self._postgres.connect(self.config.database_url) as conn:
+            connect_kwargs = {"row_factory": self._postgres_dict_row} if self._postgres_dict_row is not None else {}
+            with self._postgres.connect(self.config.database_url, **connect_kwargs) as conn:
                 yield conn
         else:
             conn = sqlite3.connect(self.sqlite_path)
@@ -61,6 +65,31 @@ class Database:
             sql = sql.replace("INTEGER PRIMARY KEY AUTOINCREMENT", "SERIAL PRIMARY KEY")
             sql = sql.replace("?", "%s")
         conn.execute(sql, params)
+
+    @staticmethod
+    def _row_to_dict(row: Any) -> dict[str, Any]:
+        if isinstance(row, dict):
+            return dict(row)
+        try:
+            return dict(row)
+        except (TypeError, ValueError) as exc:
+            raise TypeError(
+                "La fila de base de datos no es convertible a dict. "
+                "En PostgreSQL debe usarse psycopg.rows.dict_row."
+            ) from exc
+
+    def _fetchall_dicts(self, cursor: Any) -> list[dict[str, Any]]:
+        return [self._row_to_dict(row) for row in cursor.fetchall()]
+
+    @staticmethod
+    def _row_value(row: Any, key: str, index: int, default: Any = None) -> Any:
+        if row is None:
+            return default
+        if isinstance(row, dict):
+            return row.get(key, default)
+        if isinstance(row, sqlite3.Row):
+            return row[key]
+        return row[index] if len(row) > index else default
 
     def _create_tables(self, conn: Any) -> None:
         self._execute(
@@ -383,7 +412,7 @@ class Database:
             sql = sql.replace("?", "%s")
         with self._connect() as conn:
             cur = conn.execute(sql, params)
-            return [dict(row) for row in cur.fetchall()]
+            return self._fetchall_dicts(cur)
 
     def fetch_labeled_signal_rows(self, limit: int | None = None) -> list[dict[str, Any]]:
         sql = """
@@ -402,7 +431,7 @@ class Database:
             sql = sql.replace("?", "%s")
         with self._connect() as conn:
             cur = conn.execute(sql, params)
-            return [dict(row) for row in cur.fetchall()]
+            return self._fetchall_dicts(cur)
 
     def get_paper_trade_summary(self) -> dict[str, int]:
         with self._connect() as conn:
@@ -424,13 +453,11 @@ class Database:
             row = conn.execute(sql, ("paper",)).fetchone()
             if row is None:
                 return {"total": 0, "open": 0, "closed": 0}
-            if isinstance(row, sqlite3.Row):
-                return {
-                    "total": int(row["total"] or 0),
-                    "open": int(row["open_count"] or 0),
-                    "closed": int(row["closed_count"] or 0),
-                }
-            return {"total": int(row[0] or 0), "open": int(row[1] or 0), "closed": int(row[2] or 0)}
+            return {
+                "total": int(self._row_value(row, "total", 0, 0) or 0),
+                "open": int(self._row_value(row, "open_count", 1, 0) or 0),
+                "closed": int(self._row_value(row, "closed_count", 2, 0) or 0),
+            }
 
     def fetch_unlabeled_signal_observations(self, limit: int = 200) -> list[dict[str, Any]]:
         sql = """
@@ -445,7 +472,7 @@ class Database:
             sql = sql.replace("?", "%s")
         with self._connect() as conn:
             cur = conn.execute(sql, (limit,))
-            return [dict(row) for row in cur.fetchall()]
+            return self._fetchall_dicts(cur)
 
     def update_trade_status(
         self,
@@ -471,7 +498,7 @@ class Database:
             row = cur.fetchone()
             if row is None:
                 return 0.0
-            return float(row["pnl"] if isinstance(row, sqlite3.Row) else row[0])
+            return float(self._row_value(row, "pnl", 0, 0.0) or 0.0)
 
     def get_daily_realized_pnl(self) -> float:
         now = datetime.now(timezone.utc)
@@ -505,5 +532,4 @@ class Database:
     def list_open_trades(self) -> list[dict[str, Any]]:
         with self._connect() as conn:
             cur = conn.execute("SELECT * FROM trades WHERE status IN ('OPEN', 'PAPER_OPEN', 'LIVE_OPEN')")
-            rows = cur.fetchall()
-            return [dict(row) for row in rows]
+            return self._fetchall_dicts(cur)
