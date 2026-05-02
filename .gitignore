@@ -1,0 +1,13 @@
+.env
+*.db
+__pycache__/
+.pytest_cache/
+.venv/
+logs/
+*.log
+.env.local
+.env.production
+.manual_test_tmp/
+bot_state.db
+.deps/
+.tmp/
