@@ -92,6 +92,8 @@ class BotConfig:
     enable_feature_logging: bool = True
     enable_signal_labeling: bool = True
     enable_meta_model: bool = False
+    enable_research_auto_report: bool = True
+    research_report_interval_minutes: int = 60
     meta_model_min_samples: int = 300
     meta_model_min_positives: int = 50
     meta_model_min_negatives: int = 50
@@ -238,6 +240,8 @@ def load_config(load_dotenv_file: bool = True) -> BotConfig:
         enable_feature_logging=env_bool(os.getenv("ENABLE_FEATURE_LOGGING"), True),
         enable_signal_labeling=env_bool(os.getenv("ENABLE_SIGNAL_LABELING"), True),
         enable_meta_model=env_bool(os.getenv("ENABLE_META_MODEL"), False),
+        enable_research_auto_report=env_bool(os.getenv("ENABLE_RESEARCH_AUTO_REPORT"), True),
+        research_report_interval_minutes=env_int(os.getenv("RESEARCH_REPORT_INTERVAL_MINUTES"), 60),
         meta_model_min_samples=env_int(os.getenv("META_MODEL_MIN_SAMPLES"), 300),
         meta_model_min_positives=env_int(os.getenv("META_MODEL_MIN_POSITIVES"), 50),
         meta_model_min_negatives=env_int(os.getenv("META_MODEL_MIN_NEGATIVES"), 50),

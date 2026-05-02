@@ -18,6 +18,7 @@ class ResearchEngine:
     def build_report(self) -> str:
         observations = self.db.fetch_signal_observations()
         labeled = self.db.fetch_labeled_signal_rows()
+        paper_summary = self.db.get_paper_trade_summary()
         lines: list[str] = []
         lines.append("Research report")
         lines.append("=" * 15)
@@ -25,12 +26,17 @@ class ResearchEngine:
         lines.append(f"senales operadas: {sum(1 for row in observations if int(row.get('operated') or 0) == 1)}")
         lines.append(f"senales no operadas: {sum(1 for row in observations if int(row.get('operated') or 0) == 0)}")
         lines.append(f"senales etiquetadas: {len(labeled)}")
+        lines.append(f"operaciones paper abiertas: {paper_summary['open']}")
+        lines.append(f"operaciones paper cerradas: {paper_summary['closed']}")
         if not labeled:
-            lines.append("Aun no hay etiquetas triple-barrier suficientes para diagnostico.")
+            lines.append("Aún no hay etiquetas triple-barrier suficientes.")
             return "\n".join(lines)
 
+        overall = self._stats(labeled)
+        lines.append(f"win rate labels: {overall['win_rate']:.1%}")
+        lines.append(f"profit factor labels: {overall['profit_factor']:.2f}")
         lines.extend(self._ranked_section("Win rate por estrategia", labeled, "strategy_type"))
-        lines.extend(self._ranked_section("Mejor/peor simbolo", labeled, "symbol"))
+        lines.extend(self._ranked_section("Resumen por simbolo", labeled, "symbol"))
         lines.extend(self._ranked_section("Mejor/peor regimen", labeled, "market_regime"))
         lines.extend(self._bucket_section("RSI bucket", labeled, lambda row: self._bucket(safe_float(row.get("rsi_14")), [30, 45, 60, 72])))
         lines.extend(self._bucket_section("Volume relative bucket", labeled, lambda row: self._bucket(safe_float(row.get("volume_relative")), [0.8, 1.2, 1.8, 2.5])))

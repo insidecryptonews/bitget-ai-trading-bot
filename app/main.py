@@ -21,6 +21,7 @@ from .paper_trader import PaperTrader
 from .portfolio_allocator import PortfolioAllocator
 from .position_manager import PositionManager
 from .regime_detector import RegimeDetector
+from .research_engine import ResearchEngine
 from .risk_manager import RiskManager
 from .signal_engine import Signal, SignalEngine
 from .telegram_alerts import TelegramAlerts
@@ -72,6 +73,8 @@ def main() -> None:
     news_intel = NewsIntel(config, logger)
     feature_logger = FeatureLogger(db, logger) if config.enable_feature_logging else None
     labeler = TripleBarrierLabeler(config, db, logger) if config.enable_signal_labeling else None
+    research_engine = ResearchEngine(db, logger) if config.enable_research_auto_report else None
+    last_research_report_at = 0.0
     meta_model = MetaModel(config, db, logger) if config.enable_meta_model and config.meta_model_mode != "off" else None
     if meta_model:
         labeled_rows = db.fetch_labeled_signal_rows()
@@ -306,6 +309,13 @@ def main() -> None:
                     "daily_pnl": daily_pnl,
                 },
             )
+            last_research_report_at = _emit_research_auto_report_if_due(
+                config,
+                research_engine,
+                logger,
+                last_research_report_at,
+                time.monotonic(),
+            )
             elapsed = time.time() - cycle_start
             sleep_for = max(1, config.scan_interval_seconds - elapsed)
             time.sleep(sleep_for)
@@ -318,6 +328,20 @@ def main() -> None:
 
     logger.info("Apagado solicitado. Cerrando limpio.")
     telegram.send("Bot detenido limpiamente.")
+
+
+def _emit_research_auto_report_if_due(config, research_engine: ResearchEngine | None, logger, last_report_at: float, now: float) -> float:
+    if not config.enable_research_auto_report or research_engine is None:
+        return last_report_at
+    interval_seconds = max(1, config.research_report_interval_minutes) * 60
+    if last_report_at > 0 and now - last_report_at < interval_seconds:
+        return last_report_at
+    try:
+        report = research_engine.build_report()
+        logger.info("===== RESEARCH REPORT START =====\n%s\n===== RESEARCH REPORT END =====", report)
+    except Exception as exc:
+        logger.warning("No se pudo generar research auto-report: %s", exc)
+    return now
 
 
 def _load_instruments(symbols: list[str], client: BitgetClient, logger, require_real_validation: bool) -> dict[str, InstrumentRules]:

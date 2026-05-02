@@ -140,6 +140,14 @@ Devuelve modo, uptime, posiciones abiertas, PnL diario, último escaneo y circui
 
 En `PAPER_TRADING=true`, el bot no requiere `BITGET_API_KEY`, `BITGET_API_SECRET` ni `BITGET_PASSPHRASE`; usa datos publicos de mercado, no envia ordenes reales y sigue guardando `signal_observations` y `signal_labels`. Con `META_MODEL_MODE=observe_only`, el meta-model no bloquea senales.
 
+Si `ENABLE_RESEARCH_AUTO_REPORT=true`, el bot imprime el informe de investigacion en los logs cada `RESEARCH_REPORT_INTERVAL_MINUTES`. En Railway puedes buscar:
+
+```text
+RESEARCH REPORT START
+```
+
+para ver el bloque completo sin abrir una shell.
+
 ## GitHub Seguro
 
 ```bash
@@ -174,6 +182,8 @@ Variables principales:
 ENABLE_FEATURE_LOGGING=true
 ENABLE_SIGNAL_LABELING=true
 ENABLE_META_MODEL=false
+ENABLE_RESEARCH_AUTO_REPORT=true
+RESEARCH_REPORT_INTERVAL_MINUTES=60
 META_MODEL_MODE=observe_only
 META_MODEL_MIN_SAMPLES=300
 META_MODEL_MIN_POSITIVES=50

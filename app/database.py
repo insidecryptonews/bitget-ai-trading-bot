@@ -404,6 +404,34 @@ class Database:
             cur = conn.execute(sql, params)
             return [dict(row) for row in cur.fetchall()]
 
+    def get_paper_trade_summary(self) -> dict[str, int]:
+        with self._connect() as conn:
+            sql = """
+                SELECT
+                    COUNT(*) AS total,
+                    SUM(CASE WHEN status IN ('PAPER_OPEN', 'OPEN') THEN 1 ELSE 0 END) AS open_count,
+                    SUM(
+                        CASE
+                            WHEN status NOT IN ('PAPER_OPEN', 'OPEN', 'PAPER_READY') THEN 1
+                            ELSE 0
+                        END
+                    ) AS closed_count
+                FROM trades
+                WHERE mode = ?
+            """
+            if self._use_postgres:
+                sql = sql.replace("?", "%s")
+            row = conn.execute(sql, ("paper",)).fetchone()
+            if row is None:
+                return {"total": 0, "open": 0, "closed": 0}
+            if isinstance(row, sqlite3.Row):
+                return {
+                    "total": int(row["total"] or 0),
+                    "open": int(row["open_count"] or 0),
+                    "closed": int(row["closed_count"] or 0),
+                }
+            return {"total": int(row[0] or 0), "open": int(row[1] or 0), "closed": int(row[2] or 0)}
+
     def fetch_unlabeled_signal_observations(self, limit: int = 200) -> list[dict[str, Any]]:
         sql = """
             SELECT so.*

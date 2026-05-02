@@ -6,9 +6,11 @@ from app.config import BotConfig
 from app.database import Database
 from app.feature_logger import FeatureLogger
 from app.labeler import TripleBarrierLabeler
+from app.main import _emit_research_auto_report_if_due
 from app.market_data import MarketSnapshot
 from app.meta_model import MetaModel
 from app.regime_detector import MarketRegime
+from app.research_engine import ResearchEngine
 from app.signal_engine import Signal
 from app.walkforward import make_walkforward_splits
 
@@ -25,6 +27,14 @@ class DummyLogger:
 
     def error(self, *args, **kwargs):
         pass
+
+
+class CaptureLogger(DummyLogger):
+    def __init__(self):
+        self.messages = []
+
+    def info(self, message, *args, **kwargs):
+        self.messages.append(message % args if args else message)
 
 
 def make_db(tmp_path):
@@ -192,3 +202,50 @@ def test_meta_model_never_approves_signal_blocked_by_risk_manager():
     assert decision.meta_decision == "SKIP"
     assert decision.blocks_trade
     assert "RiskManager" in decision.reason
+
+
+def test_research_report_includes_paper_open_closed_and_no_labels_message(tmp_path):
+    db = make_db(tmp_path)
+    trade_open = db.record_trade(mode="paper", signal=signal(), status="PAPER_OPEN")
+    trade_closed = db.record_trade(mode="paper", signal=signal(), status="PAPER_OPEN")
+    db.update_trade_status(trade_closed, "STOP_LOSS", realized_pnl=-1.0)
+    FeatureLogger(db, DummyLogger()).log_signal(
+        signal=signal(),
+        snapshot=snapshot(),
+        market_regime=MarketRegime("TREND_UP"),
+        all_snapshots={"BTCUSDT": snapshot()},
+        operated=True,
+    )
+
+    report = ResearchEngine(db, DummyLogger()).build_report()
+    assert "operaciones paper abiertas: 1" in report
+    assert "operaciones paper cerradas: 1" in report
+    assert "Aún no hay etiquetas triple-barrier suficientes" in report
+    assert trade_open > 0
+
+
+def test_auto_research_report_logs_markers_when_due():
+    logger = CaptureLogger()
+    config = BotConfig(enable_research_auto_report=True, research_report_interval_minutes=60)
+
+    class FakeResearchEngine:
+        def build_report(self):
+            return "Research report\nok"
+
+    last = _emit_research_auto_report_if_due(config, FakeResearchEngine(), logger, 0.0, 100.0)
+    assert last == 100.0
+    assert any("===== RESEARCH REPORT START =====" in msg for msg in logger.messages)
+    assert any("===== RESEARCH REPORT END =====" in msg for msg in logger.messages)
+
+
+def test_auto_research_report_waits_for_interval():
+    logger = CaptureLogger()
+    config = BotConfig(enable_research_auto_report=True, research_report_interval_minutes=60)
+
+    class FakeResearchEngine:
+        def build_report(self):
+            raise AssertionError("No debe ejecutarse antes del intervalo")
+
+    last = _emit_research_auto_report_if_due(config, FakeResearchEngine(), logger, 100.0, 120.0)
+    assert last == 100.0
+    assert logger.messages == []
