@@ -10,6 +10,7 @@ from .config import load_config
 from .database import Database
 from .execution_engine import ExecutionEngine
 from .feature_logger import FeatureLogger
+from .full_research_report import FullResearchReporter
 from .health_server import HealthState, start_health_server
 from .labeler import TripleBarrierLabeler
 from .logger import setup_logger
@@ -76,7 +77,9 @@ def main() -> None:
     shadow_engine = ShadowStrategyEngine(db, feature_logger, logger) if feature_logger else None
     labeler = TripleBarrierLabeler(config, db, logger) if config.enable_signal_labeling else None
     research_engine = ResearchEngine(db, logger) if config.enable_research_auto_report else None
+    full_research_reporter = FullResearchReporter(db, config, logger) if config.enable_full_research_auto_report else None
     last_research_report_at = 0.0
+    last_full_research_report_at = 0.0
     meta_model = MetaModel(config, db, logger) if config.enable_meta_model and config.meta_model_mode != "off" else None
     if meta_model:
         labeled_rows = db.fetch_labeled_signal_rows()
@@ -324,6 +327,13 @@ def main() -> None:
                 last_research_report_at,
                 time.monotonic(),
             )
+            last_full_research_report_at = _emit_full_research_auto_report_if_due(
+                config,
+                full_research_reporter,
+                logger,
+                last_full_research_report_at,
+                time.monotonic(),
+            )
             elapsed = time.time() - cycle_start
             sleep_for = max(1, config.scan_interval_seconds - elapsed)
             time.sleep(sleep_for)
@@ -349,6 +359,19 @@ def _emit_research_auto_report_if_due(config, research_engine: ResearchEngine | 
         logger.info("===== RESEARCH REPORT START =====\n%s\n===== RESEARCH REPORT END =====", report)
     except Exception as exc:
         logger.warning("No se pudo generar research auto-report: %s", exc)
+    return now
+
+
+def _emit_full_research_auto_report_if_due(config, reporter: FullResearchReporter | None, logger, last_report_at: float, now: float) -> float:
+    if not config.enable_full_research_auto_report or reporter is None:
+        return last_report_at
+    interval_seconds = max(1, config.full_research_report_interval_minutes) * 60
+    if last_report_at > 0 and now - last_report_at < interval_seconds:
+        return last_report_at
+    try:
+        logger.info("%s", reporter.build_report())
+    except Exception as exc:
+        logger.warning("No se pudo generar full research auto-report: %s", exc)
     return now
 
 

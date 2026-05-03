@@ -94,6 +94,8 @@ class BotConfig:
     enable_meta_model: bool = False
     enable_research_auto_report: bool = True
     research_report_interval_minutes: int = 60
+    enable_full_research_auto_report: bool = True
+    full_research_report_interval_minutes: int = 60
     meta_model_min_samples: int = 300
     meta_model_min_positives: int = 50
     meta_model_min_negatives: int = 50
@@ -242,6 +244,8 @@ def load_config(load_dotenv_file: bool = True) -> BotConfig:
         enable_meta_model=env_bool(os.getenv("ENABLE_META_MODEL"), False),
         enable_research_auto_report=env_bool(os.getenv("ENABLE_RESEARCH_AUTO_REPORT"), True),
         research_report_interval_minutes=env_int(os.getenv("RESEARCH_REPORT_INTERVAL_MINUTES"), 60),
+        enable_full_research_auto_report=env_bool(os.getenv("ENABLE_FULL_RESEARCH_AUTO_REPORT"), True),
+        full_research_report_interval_minutes=env_int(os.getenv("FULL_RESEARCH_REPORT_INTERVAL_MINUTES"), 60),
         meta_model_min_samples=env_int(os.getenv("META_MODEL_MIN_SAMPLES"), 300),
         meta_model_min_positives=env_int(os.getenv("META_MODEL_MIN_POSITIVES"), 50),
         meta_model_min_negatives=env_int(os.getenv("META_MODEL_MIN_NEGATIVES"), 50),
