@@ -1,0 +1,4 @@
+name,overfitting_risk_score,reason,status,test_profit_factors,walk_forward_score,windows
+all_labeled,1.0,historico insuficiente,REJECTED_TOO_FEW_SAMPLES,[],0.0,0
+normal_only,1.0,historico insuficiente,REJECTED_TOO_FEW_SAMPLES,[],0.0,0
+reverse_only,1.0,historico insuficiente,REJECTED_TOO_FEW_SAMPLES,[],0.0,0

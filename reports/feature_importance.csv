@@ -1,0 +1,10 @@
+feature,loss_mean,mean_difference,method,win_mean
+confidence_score,0.0,0.0,simple_win_loss_mean_delta_phase_1,0.0
+spread_pct,0.0,0.0,simple_win_loss_mean_delta_phase_1,0.0
+volume_relative,0.0,0.0,simple_win_loss_mean_delta_phase_1,0.0
+rsi_14,0.0,0.0,simple_win_loss_mean_delta_phase_1,0.0
+normalized_atr,0.0,0.0,simple_win_loss_mean_delta_phase_1,0.0
+momentum_5,0.0,0.0,simple_win_loss_mean_delta_phase_1,0.0
+momentum_15,0.0,0.0,simple_win_loss_mean_delta_phase_1,0.0
+stop_distance_pct,0.0,0.0,simple_win_loss_mean_delta_phase_1,0.0
+tp1_to_sl_ratio,0.0,0.0,simple_win_loss_mean_delta_phase_1,0.0
