@@ -217,7 +217,31 @@ Reporte:
 python -m app.research_engine report
 ```
 
-El reporte muestra total de senales, senales operadas/no operadas, win rate y profit factor por estrategia, simbolo y regimen, mejores buckets de RSI, volumen relativo, ATR, spread y distancia a EMA, ademas de recomendaciones para filtrar o potenciar estrategias.
+El reporte muestra total de senales, conteos reales por tabla, ultimas trades, ultimas observaciones operadas, ultimas labels, win rate y profit factor por estrategia, simbolo y regimen, mejores buckets de RSI, volumen relativo, ATR, spread y distancia a EMA, ademas de recomendaciones para filtrar o potenciar estrategias.
+
+Exportar datos:
+
+```bash
+python -m app.research_engine export
+```
+
+Genera `exports/research_export_<timestamp>/` con CSV y JSON de `signal_observations`, `signal_labels`, `trades` y resumenes por simbolo, estrategia, regimen, RSI, volumen relativo, ATR y spread. La carpeta `exports/` esta ignorada por Git.
+
+Variantes shadow:
+
+```bash
+python -m app.research_engine variants
+```
+
+El bot guarda variantes hipoteticas que nunca se operan: umbrales de score, ratios TP/SL, filtros de regimen, long-only, short-only y reverse shadow. Reverse comprueba si una senal LONG habria funcionado mejor como SHORT, o viceversa, manteniendo entry, timestamp y features, pero invirtiendo SL/TP de forma coherente. Estas variantes solo existen para investigacion.
+
+Interpretacion de labels:
+
+- `TP1`/`TP2`: la barrera de beneficio se alcanzo antes que el stop.
+- `SL`: el stop se alcanzo antes que el take profit.
+- `TIME`: no resolvio dentro de `MAX_HOLDING_BARS`; muchas `TIME` suelen indicar poca direccionalidad o targets/stops mal calibrados.
+
+Guardrails: no consideres una variante como prometedora con menos de 100 labels. Si profit factor < 1.2, win rate muy bajo o hay demasiadas `TIME`, no actives live. Aunque una variante reverse tenga mejor profit factor, si tiene pocas labels o demasiadas `TIME`, queda marcada como evidencia debil.
 
 `walkforward.py` separa train, validation y test en ventanas temporales rolling. El meta-model solo deberia activarse si mejora profit factor fuera de muestra, reduce drawdown, mantiene precision minima y no elimina demasiadas operaciones.
 
@@ -228,6 +252,8 @@ python -m compileall app tests
 python -m pytest -q
 python -m app.main
 python -m app.research_engine report
+python -m app.research_engine variants
+python -m app.research_engine export
 ```
 
 Para Railway en paper, confirma:

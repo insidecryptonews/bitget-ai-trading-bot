@@ -23,6 +23,7 @@ from .position_manager import PositionManager
 from .regime_detector import RegimeDetector
 from .research_engine import ResearchEngine
 from .risk_manager import RiskManager
+from .shadow_strategies import ShadowStrategyEngine
 from .signal_engine import Signal, SignalEngine
 from .telegram_alerts import TelegramAlerts
 from .utils import iso_utc, safe_float
@@ -72,6 +73,7 @@ def main() -> None:
     position_manager = PositionManager(config, client, paper_trader, telegram, logger)
     news_intel = NewsIntel(config, logger)
     feature_logger = FeatureLogger(db, logger) if config.enable_feature_logging else None
+    shadow_engine = ShadowStrategyEngine(db, feature_logger, logger) if feature_logger else None
     labeler = TripleBarrierLabeler(config, db, logger) if config.enable_signal_labeling else None
     research_engine = ResearchEngine(db, logger) if config.enable_research_auto_report else None
     last_research_report_at = 0.0
@@ -154,6 +156,12 @@ def main() -> None:
                     )
                     observation_payloads[signal_item.symbol] = observation
                     observation_ids[signal_item.symbol] = feature_logger.record_observation(observation)
+                    if shadow_engine:
+                        shadow_engine.log_variants(
+                            signal=signal_item,
+                            base_observation=observation,
+                            market_regime=regime,
+                        )
             if labeler:
                 _label_matured_observations(config, db, labeler, snapshots, logger)
             _print_radar(signals, snapshots, regime.regime, logger)

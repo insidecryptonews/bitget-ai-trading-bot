@@ -207,6 +207,12 @@ class Database:
                 risk_manager_approved INTEGER DEFAULT 0,
                 meta_probability REAL,
                 meta_decision TEXT,
+                shadow_strategy INTEGER DEFAULT 0,
+                strategy_variant_id INTEGER,
+                variant_params_json TEXT,
+                original_side TEXT,
+                original_strategy_type TEXT,
+                score_bucket TEXT,
                 raw_signal_json TEXT,
                 raw_features_json TEXT
             )
@@ -231,6 +237,57 @@ class Database:
             )
             """,
         )
+        self._execute(
+            conn,
+            """
+            CREATE TABLE IF NOT EXISTS strategy_variants (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT UNIQUE,
+                params_json TEXT,
+                enabled INTEGER DEFAULT 1,
+                created_at TEXT NOT NULL
+            )
+            """,
+        )
+        self._execute(
+            conn,
+            """
+            CREATE TABLE IF NOT EXISTS strategy_variant_results (
+                variant_id INTEGER PRIMARY KEY,
+                total_labels INTEGER DEFAULT 0,
+                tp1_count INTEGER DEFAULT 0,
+                tp2_count INTEGER DEFAULT 0,
+                sl_count INTEGER DEFAULT 0,
+                time_count INTEGER DEFAULT 0,
+                win_rate REAL DEFAULT 0,
+                profit_factor REAL DEFAULT 0,
+                avg_return REAL DEFAULT 0,
+                max_drawdown_estimated REAL DEFAULT 0,
+                score REAL DEFAULT 0,
+                last_updated TEXT NOT NULL
+            )
+            """,
+        )
+        self._ensure_research_columns(conn)
+
+    def _ensure_research_columns(self, conn: Any) -> None:
+        columns = {
+            "shadow_strategy": "INTEGER DEFAULT 0",
+            "strategy_variant_id": "INTEGER",
+            "variant_params_json": "TEXT",
+            "original_side": "TEXT",
+            "original_strategy_type": "TEXT",
+            "score_bucket": "TEXT",
+        }
+        if self._use_postgres:
+            for name, spec in columns.items():
+                self._execute(conn, f"ALTER TABLE signal_observations ADD COLUMN IF NOT EXISTS {name} {spec}")
+            return
+        cur = conn.execute("PRAGMA table_info(signal_observations)")
+        existing = {row["name"] if isinstance(row, sqlite3.Row) else row[1] for row in cur.fetchall()}
+        for name, spec in columns.items():
+            if name not in existing:
+                conn.execute(f"ALTER TABLE signal_observations ADD COLUMN {name} {spec}")
 
     def record_event(self, event_type: str, message: str, level: str = "INFO", payload: Any | None = None) -> None:
         with self._connect() as conn:
@@ -346,6 +403,12 @@ class Database:
             "risk_manager_approved",
             "meta_probability",
             "meta_decision",
+            "shadow_strategy",
+            "strategy_variant_id",
+            "variant_params_json",
+            "original_side",
+            "original_strategy_type",
+            "score_bucket",
             "raw_signal_json",
             "raw_features_json",
         }
@@ -368,6 +431,12 @@ class Database:
             "risk_manager_approved",
             "meta_probability",
             "meta_decision",
+            "shadow_strategy",
+            "strategy_variant_id",
+            "variant_params_json",
+            "original_side",
+            "original_strategy_type",
+            "score_bucket",
         }
         payload = {key: value for key, value in updates.items() if key in allowed}
         if not payload:
@@ -403,6 +472,104 @@ class Database:
             cur = conn.execute(sql, tuple(payload[col] for col in columns))
             return self._inserted_id(cur)
 
+    def ensure_strategy_variant(self, name: str, params: dict[str, Any], enabled: bool = True) -> int:
+        params_json = json_dumps(params)
+        with self._connect() as conn:
+            sql = "SELECT id FROM strategy_variants WHERE name=?"
+            if self._use_postgres:
+                sql = sql.replace("?", "%s")
+            row = conn.execute(sql, (name,)).fetchone()
+            if row:
+                return int(self._row_value(row, "id", 0, 0) or 0)
+            insert_sql = "INSERT INTO strategy_variants(name, params_json, enabled, created_at) VALUES (?, ?, ?, ?)"
+            if self._use_postgres:
+                insert_sql = insert_sql.replace("?", "%s") + " RETURNING id"
+            cur = conn.execute(insert_sql, (name, params_json, int(enabled), iso_utc()))
+            return self._inserted_id(cur)
+
+    def fetch_strategy_variants(self, enabled_only: bool = False) -> list[dict[str, Any]]:
+        sql = "SELECT * FROM strategy_variants"
+        params: tuple[Any, ...] = ()
+        if enabled_only:
+            sql += " WHERE enabled=?"
+            params = (1,)
+        sql += " ORDER BY id ASC"
+        if self._use_postgres:
+            sql = sql.replace("?", "%s")
+        with self._connect() as conn:
+            return self._fetchall_dicts(conn.execute(sql, params))
+
+    def fetch_strategy_variant_results(self) -> list[dict[str, Any]]:
+        sql = """
+            SELECT sv.id, sv.name, sv.params_json, sv.enabled, svr.*
+            FROM strategy_variants sv
+            LEFT JOIN strategy_variant_results svr ON svr.variant_id = sv.id
+            ORDER BY COALESCE(svr.score, 0) DESC, sv.id ASC
+        """
+        with self._connect() as conn:
+            return self._fetchall_dicts(conn.execute(sql))
+
+    def fetch_strategy_variant_labeled_rows(self) -> list[dict[str, Any]]:
+        sql = """
+            SELECT so.*, sl.label, sl.first_barrier_hit, sl.bars_to_outcome,
+                   sl.max_favorable_excursion, sl.max_adverse_excursion,
+                   sl.realized_return_pct, sl.simulated_pnl, sl.would_have_won,
+                   sv.name AS variant_name, sv.params_json AS strategy_variant_params_json
+            FROM signal_observations so
+            JOIN signal_labels sl ON sl.observation_id = so.id
+            LEFT JOIN strategy_variants sv ON sv.id = so.strategy_variant_id
+            WHERE COALESCE(so.shadow_strategy, 0) = 1
+            ORDER BY so.timestamp ASC
+        """
+        with self._connect() as conn:
+            return self._fetchall_dicts(conn.execute(sql))
+
+    def upsert_strategy_variant_result(self, result: dict[str, Any]) -> None:
+        payload = {
+            "variant_id": result.get("variant_id"),
+            "total_labels": result.get("total_labels", 0),
+            "tp1_count": result.get("tp1_count", 0),
+            "tp2_count": result.get("tp2_count", 0),
+            "sl_count": result.get("sl_count", 0),
+            "time_count": result.get("time_count", 0),
+            "win_rate": result.get("win_rate", 0.0),
+            "profit_factor": result.get("profit_factor", 0.0),
+            "avg_return": result.get("avg_return", 0.0),
+            "max_drawdown_estimated": result.get("max_drawdown_estimated", 0.0),
+            "score": result.get("score", 0.0),
+            "last_updated": result.get("last_updated", iso_utc()),
+        }
+        if self._use_postgres:
+            sql = """
+                INSERT INTO strategy_variant_results(
+                    variant_id, total_labels, tp1_count, tp2_count, sl_count, time_count,
+                    win_rate, profit_factor, avg_return, max_drawdown_estimated, score, last_updated
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (variant_id) DO UPDATE SET
+                    total_labels=EXCLUDED.total_labels,
+                    tp1_count=EXCLUDED.tp1_count,
+                    tp2_count=EXCLUDED.tp2_count,
+                    sl_count=EXCLUDED.sl_count,
+                    time_count=EXCLUDED.time_count,
+                    win_rate=EXCLUDED.win_rate,
+                    profit_factor=EXCLUDED.profit_factor,
+                    avg_return=EXCLUDED.avg_return,
+                    max_drawdown_estimated=EXCLUDED.max_drawdown_estimated,
+                    score=EXCLUDED.score,
+                    last_updated=EXCLUDED.last_updated
+            """
+        else:
+            sql = """
+                INSERT OR REPLACE INTO strategy_variant_results(
+                    variant_id, total_labels, tp1_count, tp2_count, sl_count, time_count,
+                    win_rate, profit_factor, avg_return, max_drawdown_estimated, score, last_updated
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """
+        with self._connect() as conn:
+            conn.execute(sql, tuple(payload.values()))
+
     def fetch_signal_observations(self, limit: int | None = None) -> list[dict[str, Any]]:
         sql = "SELECT * FROM signal_observations ORDER BY timestamp ASC"
         params: tuple[Any, ...] = ()
@@ -414,6 +581,17 @@ class Database:
         with self._connect() as conn:
             cur = conn.execute(sql, params)
             return self._fetchall_dicts(cur)
+
+    def fetch_trades(self, limit: int | None = None) -> list[dict[str, Any]]:
+        sql = "SELECT * FROM trades ORDER BY timestamp ASC"
+        params: tuple[Any, ...] = ()
+        if limit:
+            sql += " LIMIT ?"
+            params = (limit,)
+        if self._use_postgres:
+            sql = sql.replace("?", "%s")
+        with self._connect() as conn:
+            return self._fetchall_dicts(conn.execute(sql, params))
 
     def fetch_labeled_signal_rows(self, limit: int | None = None) -> list[dict[str, Any]]:
         sql = """
@@ -433,6 +611,17 @@ class Database:
         with self._connect() as conn:
             cur = conn.execute(sql, params)
             return self._fetchall_dicts(cur)
+
+    def fetch_signal_labels(self, limit: int | None = None) -> list[dict[str, Any]]:
+        sql = "SELECT * FROM signal_labels ORDER BY timestamp ASC"
+        params: tuple[Any, ...] = ()
+        if limit:
+            sql += " LIMIT ?"
+            params = (limit,)
+        if self._use_postgres:
+            sql = sql.replace("?", "%s")
+        with self._connect() as conn:
+            return self._fetchall_dicts(conn.execute(sql, params))
 
     def get_paper_trade_summary(self) -> dict[str, int]:
         with self._connect() as conn:
@@ -459,6 +648,47 @@ class Database:
                 "open": int(self._row_value(row, "open_count", 1, 0) or 0),
                 "closed": int(self._row_value(row, "closed_count", 2, 0) or 0),
             }
+
+    def get_table_counts(self) -> dict[str, int]:
+        tables = [
+            "signal_observations",
+            "signal_labels",
+            "trades",
+            "events",
+            "bot_state",
+            "strategy_variants",
+            "strategy_variant_results",
+        ]
+        counts: dict[str, int] = {}
+        with self._connect() as conn:
+            for table in tables:
+                try:
+                    row = conn.execute(f"SELECT COUNT(*) AS count FROM {table}").fetchone()
+                    counts[table] = int(self._row_value(row, "count", 0, 0) or 0)
+                except Exception:
+                    counts[table] = 0
+        return counts
+
+    def latest_trades(self, limit: int = 5) -> list[dict[str, Any]]:
+        sql = "SELECT * FROM trades ORDER BY timestamp DESC LIMIT ?"
+        if self._use_postgres:
+            sql = sql.replace("?", "%s")
+        with self._connect() as conn:
+            return self._fetchall_dicts(conn.execute(sql, (limit,)))
+
+    def latest_operated_signal_observations(self, limit: int = 5) -> list[dict[str, Any]]:
+        sql = "SELECT * FROM signal_observations WHERE operated=1 ORDER BY timestamp DESC LIMIT ?"
+        if self._use_postgres:
+            sql = sql.replace("?", "%s")
+        with self._connect() as conn:
+            return self._fetchall_dicts(conn.execute(sql, (limit,)))
+
+    def latest_signal_labels(self, limit: int = 5) -> list[dict[str, Any]]:
+        sql = "SELECT * FROM signal_labels ORDER BY timestamp DESC LIMIT ?"
+        if self._use_postgres:
+            sql = sql.replace("?", "%s")
+        with self._connect() as conn:
+            return self._fetchall_dicts(conn.execute(sql, (limit,)))
 
     def fetch_unlabeled_signal_observations(self, limit: int = 200) -> list[dict[str, Any]]:
         sql = """
