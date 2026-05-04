@@ -131,6 +131,17 @@ def main() -> None:
     logger.info("Símbolos activos: %s", ", ".join(valid_symbols))
     logger.info("Advertencia: live trading sin backtest validado aumenta el riesgo. Ejecuta backtests antes de activar real.")
 
+    if full_research_reporter:
+        logger.info("Full research report inicial programado")
+        last_full_research_report_at = _emit_full_research_auto_report_if_due(
+            config,
+            full_research_reporter,
+            logger,
+            last_full_research_report_at,
+            time.monotonic(),
+            initial=True,
+        )
+
     while not STOP_REQUESTED:
         try:
             cycle_start = time.time()
@@ -362,14 +373,25 @@ def _emit_research_auto_report_if_due(config, research_engine: ResearchEngine | 
     return now
 
 
-def _emit_full_research_auto_report_if_due(config, reporter: FullResearchReporter | None, logger, last_report_at: float, now: float) -> float:
+def _emit_full_research_auto_report_if_due(
+    config,
+    reporter: FullResearchReporter | None,
+    logger,
+    last_report_at: float,
+    now: float,
+    initial: bool = False,
+) -> float:
     if not config.enable_full_research_auto_report or reporter is None:
         return last_report_at
     interval_seconds = max(1, config.full_research_report_interval_minutes) * 60
-    if last_report_at > 0 and now - last_report_at < interval_seconds:
+    if not initial and last_report_at > 0 and now - last_report_at < interval_seconds:
         return last_report_at
     try:
         logger.info("%s", reporter.build_report())
+        if initial:
+            logger.info("Full research report inicial generado")
+        else:
+            logger.info("Full research report periódico generado")
     except Exception as exc:
         logger.warning("No se pudo generar full research auto-report: %s", exc)
     return now

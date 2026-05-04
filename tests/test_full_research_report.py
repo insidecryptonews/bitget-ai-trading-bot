@@ -27,6 +27,9 @@ class CaptureLogger(DummyLogger):
     def info(self, message, *args, **kwargs):
         self.messages.append(message % args if args else message)
 
+    def warning(self, message, *args, **kwargs):
+        self.messages.append(message % args if args else message)
+
 
 def make_db(tmp_path):
     db = Database(BotConfig(), DummyLogger())
@@ -158,3 +161,28 @@ def test_full_report_auto_emit_logs_start_end_markers(tmp_path):
     joined = "\n".join(logger.messages)
     assert START_MARKER in joined
     assert END_MARKER in joined
+    assert "Full research report periódico generado" in joined
+
+
+def test_full_report_initial_emit_logs_initial_generated(tmp_path):
+    db = make_db(tmp_path)
+    insert_observation(db, label=1, barrier="TP1", ret=0.03)
+    logger = CaptureLogger()
+    reporter = FullResearchReporter(db, BotConfig(), logger, reports_dir=tmp_path / "reports")
+    last = _emit_full_research_auto_report_if_due(BotConfig(), reporter, logger, 0.0, 100.0, initial=True)
+    joined = "\n".join(logger.messages)
+    assert last == 100.0
+    assert START_MARKER in joined
+    assert END_MARKER in joined
+    assert "Full research report inicial generado" in joined
+
+
+def test_full_report_failure_is_logged_and_does_not_raise():
+    class BrokenReporter:
+        def build_report(self):
+            raise RuntimeError("boom")
+
+    logger = CaptureLogger()
+    last = _emit_full_research_auto_report_if_due(BotConfig(), BrokenReporter(), logger, 0.0, 100.0, initial=True)
+    assert last == 100.0
+    assert any("No se pudo generar full research auto-report" in msg for msg in logger.messages)
