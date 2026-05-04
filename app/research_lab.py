@@ -326,6 +326,72 @@ class ResearchLab:
         path.write_text(self._recommended_config_text(dataset, accepted), encoding="utf-8")
         return path
 
+    def explain_report(self) -> str:
+        from .explainability_engine import ExplainabilityEngine
+
+        report = ExplainabilityEngine(self.db, self.logger).report()
+        self.reports_dir.mkdir(parents=True, exist_ok=True)
+        (self.reports_dir / "explainability_report.md").write_text(report + "\n", encoding="utf-8")
+        return report
+
+    def sl_report(self) -> str:
+        from .stop_loss_analyzer import StopLossAnalyzer
+
+        analyzer = StopLossAnalyzer(self.db, self.logger)
+        result = analyzer.generate()
+        report = analyzer.report()
+        self.reports_dir.mkdir(parents=True, exist_ok=True)
+        (self.reports_dir / "sl_report.md").write_text(report + "\n", encoding="utf-8")
+        write_csv(self.reports_dir / "failure_clusters.csv", result.get("clusters", []))
+        write_csv(self.reports_dir / "stop_loss_analysis.csv", [
+            {"reason": reason, "count": count}
+            for reason, count in result.get("reason_counts", {}).items()
+        ])
+        return report
+
+    def win_report(self) -> str:
+        from .win_analyzer import WinAnalyzer
+
+        analyzer = WinAnalyzer(self.db, self.logger)
+        clusters = analyzer.generate()
+        report = analyzer.report()
+        self.reports_dir.mkdir(parents=True, exist_ok=True)
+        (self.reports_dir / "win_report.md").write_text(report + "\n", encoding="utf-8")
+        write_csv(self.reports_dir / "win_clusters.csv", clusters)
+        return report
+
+    def counterfactuals_report(self) -> str:
+        from .counterfactual_engine import CounterfactualEngine
+
+        engine = CounterfactualEngine(self.db, self.logger)
+        results = engine.generate()
+        report = engine.summary(results)
+        self.reports_dir.mkdir(parents=True, exist_ok=True)
+        (self.reports_dir / "counterfactual_summary.md").write_text(report + "\n", encoding="utf-8")
+        write_csv(self.reports_dir / "counterfactual_results.csv", results)
+        return report
+
+    def feature_importance_report(self) -> str:
+        from .feature_attribution import FeatureAttribution
+
+        report = FeatureAttribution(self.db, self.logger).report()
+        self.reports_dir.mkdir(parents=True, exist_ok=True)
+        (self.reports_dir / "feature_importance.md").write_text(report + "\n", encoding="utf-8")
+        return report
+
+    def recommend_rules_report(self) -> str:
+        from .rule_miner import RuleMiner
+
+        return RuleMiner(self.db, self.logger).report()
+
+    def full_report(self) -> str:
+        from .full_research_report import FullResearchReporter
+
+        report = FullResearchReporter(self.db, self.config, self.logger, reports_dir=self.reports_dir).build_report()
+        self.reports_dir.mkdir(parents=True, exist_ok=True)
+        (self.reports_dir / "full_research_lab_report.md").write_text(report + "\n", encoding="utf-8")
+        return report
+
     def build_markdown_report(
         self,
         dataset: list[dict[str, Any]] | None = None,
@@ -810,7 +876,22 @@ def _print_discovery(result: dict[str, Any]) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Research Lab offline tools")
-    parser.add_argument("command", choices=["discover", "report", "export", "recommend-config"])
+    parser.add_argument(
+        "command",
+        choices=[
+            "discover",
+            "report",
+            "export",
+            "recommend-config",
+            "explain",
+            "sl-report",
+            "win-report",
+            "counterfactuals",
+            "feature-importance",
+            "recommend-rules",
+            "full-report",
+        ],
+    )
     args = parser.parse_args()
     config = load_config()
     logger = setup_logger()
@@ -828,6 +909,20 @@ def main() -> None:
     elif args.command == "recommend-config":
         path = lab.recommend_config()
         print(f"Recommended config saved to {path}")
+    elif args.command == "explain":
+        print(lab.explain_report())
+    elif args.command == "sl-report":
+        print(lab.sl_report())
+    elif args.command == "win-report":
+        print(lab.win_report())
+    elif args.command == "counterfactuals":
+        print(lab.counterfactuals_report())
+    elif args.command == "feature-importance":
+        print(lab.feature_importance_report())
+    elif args.command == "recommend-rules":
+        print(lab.recommend_rules_report())
+    elif args.command == "full-report":
+        print(lab.full_report())
 
 
 if __name__ == "__main__":

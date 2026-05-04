@@ -36,6 +36,12 @@ class FullResearchReporter:
         self.research_lab = ResearchLab(db, config, logger, reports_dir=reports_dir)
 
     def build_report(self) -> str:
+        from .counterfactual_engine import CounterfactualEngine
+        from .feature_attribution import FeatureAttribution
+        from .rule_miner import RuleMiner
+        from .stop_loss_analyzer import StopLossAnalyzer
+        from .win_analyzer import WinAnalyzer
+
         # Variants report refreshes strategy_variant_results when labels exist.
         variants_report = self._safe_section("Variants / reverse shadow summary", self.research_engine.build_variants_report)
         counts = self.db.get_table_counts()
@@ -50,6 +56,25 @@ class FullResearchReporter:
         lab_report = self._safe_section("Research Lab markdown report", lambda: self.research_lab.build_markdown_report(dataset))
         recommended_config_path = self.research_lab.recommend_config()
         engine_report = self._safe_section("Research Engine report", self.research_engine.build_report)
+        sl_report = self._safe_section(
+            "Stop Loss Analysis",
+            lambda: StopLossAnalyzer.format_report(StopLossAnalyzer(self.db, self.logger).analyze_rows(labeled_rows)),
+        )
+        win_report = self._safe_section(
+            "Win Analysis",
+            lambda: WinAnalyzer.format_report(WinAnalyzer(self.db, self.logger).analyze_rows(labeled_rows)),
+        )
+        counterfactual_report = self._safe_section(
+            "Counterfactual Summary",
+            lambda: CounterfactualEngine(self.db, self.logger).summary([
+                item for row in labeled_rows for item in CounterfactualEngine(self.db, self.logger).simulate_row(row)
+            ]),
+        )
+        feature_report = self._safe_section("Feature Importance", lambda: FeatureAttribution(self.db, self.logger).report())
+        rules_report = self._safe_section(
+            "Recommended Rules",
+            lambda: RuleMiner(self.db, self.logger).markdown(RuleMiner(self.db, self.logger).mine_rows(labeled_rows)),
+        )
 
         summary = self._summary(labeled_rows)
         lines = [
@@ -77,6 +102,21 @@ class FullResearchReporter:
             "Diagnostico",
             *self._diagnostic_lines(summary, labeled_rows),
             "",
+            "Stop Loss Analysis",
+            sl_report,
+            "",
+            "Win Analysis",
+            win_report,
+            "",
+            "Counterfactual Summary",
+            counterfactual_report,
+            "",
+            "Feature Importance",
+            feature_report,
+            "",
+            "Recommended Rules",
+            rules_report,
+            "",
             "Normal vs reverse",
             *self._normal_reverse_lines(dataset),
             "",
@@ -100,6 +140,9 @@ class FullResearchReporter:
             lab_report,
             "",
             variants_report,
+            "",
+            "Conclusion simple",
+            self._simple_conclusion(summary, sl_report, win_report, counterfactual_report),
             END_MARKER,
         ]
         return "\n".join(lines)
@@ -278,6 +321,21 @@ class FullResearchReporter:
         if not lines:
             lines.append("- no se detectaron incoherencias criticas.")
         return lines
+
+    @staticmethod
+    def _simple_conclusion(summary: FullResearchSummary, sl_report: str, win_report: str, counterfactual_report: str) -> str:
+        if summary.recommendation == "NO LIVE":
+            return (
+                "El bot todavia no debe operar en real. La estrategia global no demuestra edge suficiente. "
+                "El foco debe ser reducir SL, bajar TIME y validar si reverse o filtros no-trade mejoran en walk-forward."
+            )
+        if summary.recommendation == "PAPER ONLY":
+            return (
+                "Hay alguna mejora debil, pero no suficiente para live. Mantener paper/research y exigir mas muestras."
+            )
+        return (
+            "Hay candidatos para mas pruebas en paper. No activar live automaticamente; revisar reglas y estabilidad temporal."
+        )
 
 
 def mean_return_by_barrier(rows: list[dict[str, Any]], barrier: str) -> float:

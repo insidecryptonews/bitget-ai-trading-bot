@@ -268,6 +268,175 @@ class Database:
             )
             """,
         )
+        self._execute(
+            conn,
+            """
+            CREATE TABLE IF NOT EXISTS signal_explanations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                observation_id INTEGER,
+                label_id INTEGER,
+                symbol TEXT,
+                side TEXT,
+                strategy_type TEXT,
+                label INTEGER,
+                first_barrier_hit TEXT,
+                primary_reason TEXT,
+                secondary_reasons_json TEXT,
+                failure_type TEXT,
+                confidence REAL,
+                explanation_text TEXT,
+                recommended_action TEXT,
+                created_at TEXT NOT NULL
+            )
+            """,
+        )
+        self._execute(
+            conn,
+            """
+            CREATE TABLE IF NOT EXISTS signal_price_paths (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                observation_id INTEGER,
+                label_id INTEGER,
+                max_favorable_excursion_pct REAL,
+                max_adverse_excursion_pct REAL,
+                time_to_max_favorable INTEGER,
+                time_to_max_adverse INTEGER,
+                time_to_sl INTEGER,
+                time_to_tp1 INTEGER,
+                time_to_tp2 INTEGER,
+                candles_until_exit INTEGER,
+                did_price_move_in_favor_first INTEGER,
+                did_price_move_against_first INTEGER,
+                adverse_before_favorable_pct REAL,
+                favorable_before_adverse_pct REAL,
+                close_vs_entry_pct REAL,
+                volatility_during_trade REAL,
+                volume_during_trade_relative REAL,
+                btc_move_during_trade REAL,
+                eth_move_during_trade REAL,
+                created_at TEXT NOT NULL
+            )
+            """,
+        )
+        self._execute(
+            conn,
+            """
+            CREATE TABLE IF NOT EXISTS signal_counterfactuals (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                observation_id INTEGER,
+                label_id INTEGER,
+                scenario_name TEXT,
+                params_json TEXT,
+                would_trade INTEGER,
+                simulated_side TEXT,
+                simulated_sl REAL,
+                simulated_tp1 REAL,
+                simulated_tp2 REAL,
+                simulated_label INTEGER,
+                simulated_first_barrier_hit TEXT,
+                simulated_return_pct REAL,
+                avoided_loss INTEGER,
+                improved_result INTEGER,
+                explanation TEXT,
+                created_at TEXT NOT NULL
+            )
+            """,
+        )
+        self._execute(
+            conn,
+            """
+            CREATE TABLE IF NOT EXISTS stop_loss_failure_clusters (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                cluster_name TEXT,
+                symbol TEXT,
+                side TEXT,
+                strategy_type TEXT,
+                market_regime TEXT,
+                score_bucket TEXT,
+                total_sl INTEGER,
+                total_tp INTEGER,
+                total_time INTEGER,
+                avg_adverse_excursion REAL,
+                avg_favorable_before_sl REAL,
+                reverse_would_have_helped_count INTEGER,
+                wider_stop_would_have_helped_count INTEGER,
+                closer_tp_would_have_helped_count INTEGER,
+                no_trade_filter_would_have_helped_count INTEGER,
+                primary_reason TEXT,
+                recommended_rule TEXT,
+                confidence REAL,
+                created_at TEXT NOT NULL
+            )
+            """,
+        )
+        self._execute(
+            conn,
+            """
+            CREATE TABLE IF NOT EXISTS win_clusters (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                cluster_name TEXT,
+                symbol TEXT,
+                side TEXT,
+                strategy_type TEXT,
+                market_regime TEXT,
+                score_bucket TEXT,
+                total_tp INTEGER,
+                total_sl INTEGER,
+                total_time INTEGER,
+                win_rate REAL,
+                profit_factor REAL,
+                expectancy REAL,
+                common_features_json TEXT,
+                recommended_rule TEXT,
+                confidence REAL,
+                created_at TEXT NOT NULL
+            )
+            """,
+        )
+        self._execute(
+            conn,
+            """
+            CREATE TABLE IF NOT EXISTS research_rules (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                rule_name TEXT,
+                rule_type TEXT,
+                condition_json TEXT,
+                action TEXT,
+                affected_symbols_json TEXT,
+                affected_strategies_json TEXT,
+                total_labels INTEGER,
+                tp_count INTEGER,
+                sl_count INTEGER,
+                time_count INTEGER,
+                win_rate REAL,
+                profit_factor REAL,
+                expectancy REAL,
+                time_ratio REAL,
+                evidence_score REAL,
+                overfit_risk REAL,
+                recommendation TEXT,
+                explanation TEXT,
+                created_at TEXT NOT NULL
+            )
+            """,
+        )
+        self._execute(
+            conn,
+            """
+            CREATE TABLE IF NOT EXISTS market_context_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT,
+                source TEXT,
+                event_type TEXT,
+                symbol TEXT,
+                severity TEXT,
+                title TEXT,
+                summary TEXT,
+                raw_json TEXT,
+                created_at TEXT NOT NULL
+            )
+            """,
+        )
         self._ensure_research_columns(conn)
 
     def _ensure_research_columns(self, conn: Any) -> None:
@@ -658,6 +827,13 @@ class Database:
             "bot_state",
             "strategy_variants",
             "strategy_variant_results",
+            "signal_explanations",
+            "signal_price_paths",
+            "signal_counterfactuals",
+            "stop_loss_failure_clusters",
+            "win_clusters",
+            "research_rules",
+            "market_context_events",
         ]
         counts: dict[str, int] = {}
         with self._connect() as conn:
@@ -764,3 +940,68 @@ class Database:
         with self._connect() as conn:
             cur = conn.execute("SELECT * FROM trades WHERE status IN ('OPEN', 'PAPER_OPEN', 'LIVE_OPEN')")
             return self._fetchall_dicts(cur)
+
+    def _insert_payload(self, table: str, payload: dict[str, Any]) -> int:
+        payload = dict(payload)
+        payload.setdefault("created_at", iso_utc())
+        columns = list(payload.keys())
+        placeholders = ", ".join(["?"] * len(columns))
+        sql = f"INSERT INTO {table}({', '.join(columns)}) VALUES ({placeholders})"
+        if self._use_postgres:
+            sql = sql.replace("?", "%s") + " RETURNING id"
+        with self._connect() as conn:
+            cur = conn.execute(sql, tuple(payload[col] for col in columns))
+            return self._inserted_id(cur)
+
+    def _fetch_table(self, table: str, limit: int | None = None) -> list[dict[str, Any]]:
+        sql = f"SELECT * FROM {table} ORDER BY id ASC"
+        params: tuple[Any, ...] = ()
+        if limit:
+            sql += " LIMIT ?"
+            params = (limit,)
+        if self._use_postgres:
+            sql = sql.replace("?", "%s")
+        with self._connect() as conn:
+            return self._fetchall_dicts(conn.execute(sql, params))
+
+    def record_signal_explanation(self, payload: dict[str, Any]) -> int:
+        return self._insert_payload("signal_explanations", payload)
+
+    def fetch_signal_explanations(self, limit: int | None = None) -> list[dict[str, Any]]:
+        return self._fetch_table("signal_explanations", limit)
+
+    def record_signal_price_path(self, payload: dict[str, Any]) -> int:
+        return self._insert_payload("signal_price_paths", payload)
+
+    def fetch_signal_price_paths(self, limit: int | None = None) -> list[dict[str, Any]]:
+        return self._fetch_table("signal_price_paths", limit)
+
+    def record_signal_counterfactual(self, payload: dict[str, Any]) -> int:
+        return self._insert_payload("signal_counterfactuals", payload)
+
+    def fetch_signal_counterfactuals(self, limit: int | None = None) -> list[dict[str, Any]]:
+        return self._fetch_table("signal_counterfactuals", limit)
+
+    def record_stop_loss_failure_cluster(self, payload: dict[str, Any]) -> int:
+        return self._insert_payload("stop_loss_failure_clusters", payload)
+
+    def fetch_stop_loss_failure_clusters(self, limit: int | None = None) -> list[dict[str, Any]]:
+        return self._fetch_table("stop_loss_failure_clusters", limit)
+
+    def record_win_cluster(self, payload: dict[str, Any]) -> int:
+        return self._insert_payload("win_clusters", payload)
+
+    def fetch_win_clusters(self, limit: int | None = None) -> list[dict[str, Any]]:
+        return self._fetch_table("win_clusters", limit)
+
+    def record_research_rule(self, payload: dict[str, Any]) -> int:
+        return self._insert_payload("research_rules", payload)
+
+    def fetch_research_rules(self, limit: int | None = None) -> list[dict[str, Any]]:
+        return self._fetch_table("research_rules", limit)
+
+    def record_market_context_event(self, payload: dict[str, Any]) -> int:
+        return self._insert_payload("market_context_events", payload)
+
+    def fetch_market_context_events(self, limit: int | None = None) -> list[dict[str, Any]]:
+        return self._fetch_table("market_context_events", limit)

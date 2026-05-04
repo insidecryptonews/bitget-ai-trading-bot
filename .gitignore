@@ -9,6 +9,7 @@ logs/
 .env.production
 .manual_test_tmp/
 exports/
+reports/
 bot_state.db
 .deps/
 .tmp/
