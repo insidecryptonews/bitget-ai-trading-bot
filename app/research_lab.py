@@ -890,8 +890,11 @@ def main() -> None:
             "feature-importance",
             "recommend-rules",
             "full-report",
+            "phase2-persist",
         ],
     )
+    parser.add_argument("--limit", type=int, default=None, help="Maximo de labels a procesar en phase2-persist.")
+    parser.add_argument("--batch-size", type=int, default=None, help="Tamano de lote para phase2-persist.")
     args = parser.parse_args()
     config = load_config()
     logger = setup_logger()
@@ -923,6 +926,13 @@ def main() -> None:
         print(lab.recommend_rules_report())
     elif args.command == "full-report":
         print(lab.full_report())
+    elif args.command == "phase2-persist":
+        from .phase2_persist import Phase2Persister
+
+        limit = args.limit if args.limit is not None else config.phase2_persist_max_labels_per_run
+        batch_size = args.batch_size if args.batch_size is not None else config.phase2_persist_batch_size
+        result = Phase2Persister(db, logger).persist(limit=limit, batch_size=batch_size)
+        print(result.to_text())
 
 
 if __name__ == "__main__":

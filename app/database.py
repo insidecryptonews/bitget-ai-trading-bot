@@ -438,6 +438,7 @@ class Database:
             """,
         )
         self._ensure_research_columns(conn)
+        self._create_indexes(conn)
 
     def _ensure_research_columns(self, conn: Any) -> None:
         columns = {
@@ -457,6 +458,19 @@ class Database:
         for name, spec in columns.items():
             if name not in existing:
                 conn.execute(f"ALTER TABLE signal_observations ADD COLUMN {name} {spec}")
+
+    def _create_indexes(self, conn: Any) -> None:
+        indexes = [
+            "CREATE INDEX IF NOT EXISTS idx_signal_labels_observation_id ON signal_labels(observation_id)",
+            "CREATE INDEX IF NOT EXISTS idx_signal_explanations_observation_label ON signal_explanations(observation_id, label_id)",
+            "CREATE INDEX IF NOT EXISTS idx_signal_price_paths_observation_label ON signal_price_paths(observation_id, label_id)",
+            "CREATE INDEX IF NOT EXISTS idx_signal_counterfactuals_observation_label_scenario ON signal_counterfactuals(observation_id, label_id, scenario_name)",
+            "CREATE INDEX IF NOT EXISTS idx_stop_loss_failure_clusters_name ON stop_loss_failure_clusters(cluster_name)",
+            "CREATE INDEX IF NOT EXISTS idx_win_clusters_name ON win_clusters(cluster_name)",
+            "CREATE INDEX IF NOT EXISTS idx_research_rules_name ON research_rules(rule_name)",
+        ]
+        for sql in indexes:
+            self._execute(conn, sql)
 
     def record_event(self, event_type: str, message: str, level: str = "INFO", payload: Any | None = None) -> None:
         with self._connect() as conn:
@@ -1017,6 +1031,54 @@ class Database:
             cur = conn.execute(sql, (limit,))
             return self._fetchall_dicts(cur)
 
+    def count_phase2_pending_labels(self) -> int:
+        sql = f"""
+            SELECT COUNT(*) AS count
+            FROM signal_labels sl
+            JOIN signal_observations so ON so.id = sl.observation_id
+            WHERE {self._phase2_missing_where()}
+        """
+        with self._connect() as conn:
+            row = conn.execute(sql).fetchone()
+            return int(self._row_value(row, "count", 0, 0) or 0)
+
+    def fetch_phase2_labeled_rows(self, limit: int = 250, offset: int = 0, missing_only: bool = True) -> list[dict[str, Any]]:
+        where = f"WHERE {self._phase2_missing_where()}" if missing_only else ""
+        sql = f"""
+            SELECT so.*, so.id AS observation_id,
+                   sl.id AS label_id, sl.label, sl.first_barrier_hit, sl.bars_to_outcome,
+                   sl.max_favorable_excursion, sl.max_adverse_excursion,
+                   sl.realized_return_pct, sl.simulated_pnl, sl.would_have_won
+            FROM signal_labels sl
+            JOIN signal_observations so ON so.id = sl.observation_id
+            {where}
+            ORDER BY sl.id ASC
+            LIMIT ? OFFSET ?
+        """
+        if self._use_postgres:
+            sql = sql.replace("?", "%s")
+        with self._connect() as conn:
+            return self._fetchall_dicts(conn.execute(sql, (limit, offset)))
+
+    @staticmethod
+    def _phase2_missing_where() -> str:
+        return """
+            (
+                NOT EXISTS (
+                    SELECT 1 FROM signal_explanations se
+                    WHERE se.observation_id = so.id AND se.label_id = sl.id
+                )
+                OR NOT EXISTS (
+                    SELECT 1 FROM signal_price_paths spp
+                    WHERE spp.observation_id = so.id AND spp.label_id = sl.id
+                )
+                OR NOT EXISTS (
+                    SELECT 1 FROM signal_counterfactuals sc
+                    WHERE sc.observation_id = so.id AND sc.label_id = sl.id
+                )
+            )
+        """
+
     def update_trade_status(
         self,
         trade_id: int,
@@ -1100,8 +1162,33 @@ class Database:
         with self._connect() as conn:
             return self._fetchall_dicts(conn.execute(sql, params))
 
+    def _exists_by_fields(self, table: str, fields: dict[str, Any]) -> bool:
+        conditions = " AND ".join(f"{field}=?" for field in fields)
+        sql = f"SELECT 1 FROM {table} WHERE {conditions} LIMIT 1"
+        if self._use_postgres:
+            sql = sql.replace("?", "%s")
+        with self._connect() as conn:
+            return conn.execute(sql, tuple(fields.values())).fetchone() is not None
+
+    def _delete_by_fields(self, table: str, fields: dict[str, Any]) -> None:
+        conditions = " AND ".join(f"{field}=?" for field in fields)
+        sql = f"DELETE FROM {table} WHERE {conditions}"
+        self._execute_sql(sql, tuple(fields.values()))
+
+    def _execute_sql(self, sql: str, params: tuple[Any, ...] = ()) -> None:
+        if self._use_postgres:
+            sql = sql.replace("?", "%s")
+        with self._connect() as conn:
+            conn.execute(sql, params)
+
     def record_signal_explanation(self, payload: dict[str, Any]) -> int:
         return self._insert_payload("signal_explanations", payload)
+
+    def record_signal_explanation_once(self, payload: dict[str, Any]) -> int:
+        fields = {"observation_id": payload.get("observation_id"), "label_id": payload.get("label_id")}
+        if self._exists_by_fields("signal_explanations", fields):
+            return 0
+        return self.record_signal_explanation(payload)
 
     def fetch_signal_explanations(self, limit: int | None = None) -> list[dict[str, Any]]:
         return self._fetch_table("signal_explanations", limit)
@@ -1109,11 +1196,27 @@ class Database:
     def record_signal_price_path(self, payload: dict[str, Any]) -> int:
         return self._insert_payload("signal_price_paths", payload)
 
+    def record_signal_price_path_once(self, payload: dict[str, Any]) -> int:
+        fields = {"observation_id": payload.get("observation_id"), "label_id": payload.get("label_id")}
+        if self._exists_by_fields("signal_price_paths", fields):
+            return 0
+        return self.record_signal_price_path(payload)
+
     def fetch_signal_price_paths(self, limit: int | None = None) -> list[dict[str, Any]]:
         return self._fetch_table("signal_price_paths", limit)
 
     def record_signal_counterfactual(self, payload: dict[str, Any]) -> int:
         return self._insert_payload("signal_counterfactuals", payload)
+
+    def record_signal_counterfactual_once(self, payload: dict[str, Any]) -> int:
+        fields = {
+            "observation_id": payload.get("observation_id"),
+            "label_id": payload.get("label_id"),
+            "scenario_name": payload.get("scenario_name"),
+        }
+        if self._exists_by_fields("signal_counterfactuals", fields):
+            return 0
+        return self.record_signal_counterfactual(payload)
 
     def fetch_signal_counterfactuals(self, limit: int | None = None) -> list[dict[str, Any]]:
         return self._fetch_table("signal_counterfactuals", limit)
@@ -1121,17 +1224,29 @@ class Database:
     def record_stop_loss_failure_cluster(self, payload: dict[str, Any]) -> int:
         return self._insert_payload("stop_loss_failure_clusters", payload)
 
+    def upsert_stop_loss_failure_cluster(self, payload: dict[str, Any]) -> int:
+        self._delete_by_fields("stop_loss_failure_clusters", {"cluster_name": payload.get("cluster_name")})
+        return self.record_stop_loss_failure_cluster(payload)
+
     def fetch_stop_loss_failure_clusters(self, limit: int | None = None) -> list[dict[str, Any]]:
         return self._fetch_table("stop_loss_failure_clusters", limit)
 
     def record_win_cluster(self, payload: dict[str, Any]) -> int:
         return self._insert_payload("win_clusters", payload)
 
+    def upsert_win_cluster(self, payload: dict[str, Any]) -> int:
+        self._delete_by_fields("win_clusters", {"cluster_name": payload.get("cluster_name")})
+        return self.record_win_cluster(payload)
+
     def fetch_win_clusters(self, limit: int | None = None) -> list[dict[str, Any]]:
         return self._fetch_table("win_clusters", limit)
 
     def record_research_rule(self, payload: dict[str, Any]) -> int:
         return self._insert_payload("research_rules", payload)
+
+    def upsert_research_rule(self, payload: dict[str, Any]) -> int:
+        self._delete_by_fields("research_rules", {"rule_name": payload.get("rule_name")})
+        return self.record_research_rule(payload)
 
     def fetch_research_rules(self, limit: int | None = None) -> list[dict[str, Any]]:
         return self._fetch_table("research_rules", limit)
