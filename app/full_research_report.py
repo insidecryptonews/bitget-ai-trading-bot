@@ -44,10 +44,9 @@ class FullResearchReporter:
     def build_compact_report(self) -> str:
         counts = self._timed_section("counts", self.db.get_table_counts, fallback={})
         labeled_rows = self._timed_section("labels", self.db.fetch_labeled_signal_rows, fallback=[])
-        observations = self._timed_section("signals", self.db.fetch_signal_observations, fallback=[])
+        signal_summary = self._timed_section("signals", self.db.get_signal_observation_summary, fallback={})
         summary = self._summary(labeled_rows)
         lines = [
-            START_MARKER,
             "FULL RESEARCH LAB REPORT - COMPACT STARTUP",
             "==========================================",
             "",
@@ -61,7 +60,7 @@ class FullResearchReporter:
             *self._table_count_lines(counts),
             "",
             "Senales",
-            *self._signal_lines(observations),
+            *self._signal_summary_lines(signal_summary),
             "",
             "Labels",
             *self._label_lines(labeled_rows),
@@ -71,7 +70,6 @@ class FullResearchReporter:
             f"- motivo: {summary.reason}",
             "- aviso: informe pesado omitido en arranque para no bloquear Railway.",
             "- aviso: el informe pesado solo se genera si FULL_RESEARCH_HEAVY_REPORT_ENABLED=true y FULL_RESEARCH_REPORT_MODE=heavy.",
-            END_MARKER,
         ]
         return "\n".join(lines)
 
@@ -123,7 +121,6 @@ class FullResearchReporter:
 
         summary = self._summary(labeled_rows)
         lines = [
-            START_MARKER,
             "FULL RESEARCH LAB REPORT",
             "========================",
             "",
@@ -188,7 +185,6 @@ class FullResearchReporter:
             "",
             "Conclusion simple",
             self._simple_conclusion(summary, sl_report, win_report, counterfactual_report),
-            END_MARKER,
         ]
         return "\n".join(lines)
 
@@ -265,6 +261,22 @@ class FullResearchReporter:
             f"- senales operadas: {operated}",
             f"- seleccionadas por allocator: {selected}",
             f"- aprobadas por risk manager: {approved}",
+        ]
+
+    @staticmethod
+    def _signal_summary_lines(summary: dict[str, Any]) -> list[str]:
+        total = safe_int(summary.get("total"))
+        shadow = safe_int(summary.get("shadow_strategy_count"))
+        return [
+            f"- total senales: {total}",
+            f"- senales normales: {max(0, total - shadow)}",
+            f"- senales shadow: {shadow}",
+            f"- senales operadas: {safe_int(summary.get('operated_count'))}",
+            f"- seleccionadas por allocator: {safe_int(summary.get('selected_by_allocator_count'))}",
+            f"- aprobadas por risk manager: {safe_int(summary.get('risk_manager_approved_count'))}",
+            f"- NO_TRADE: {safe_int(summary.get('no_trade_count'))}",
+            f"- LONG: {safe_int(summary.get('long_count'))}",
+            f"- SHORT: {safe_int(summary.get('short_count'))}",
         ]
 
     @staticmethod

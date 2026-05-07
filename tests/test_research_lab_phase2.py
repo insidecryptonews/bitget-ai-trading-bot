@@ -7,6 +7,7 @@ from app.database import Database
 from app.explainability_engine import ExplainabilityEngine
 from app.feature_attribution import FeatureAttribution
 from app.full_research_report import END_MARKER, START_MARKER, FullResearchReporter
+from app.main import _emit_full_research_auto_report_if_due
 from app.rule_miner import RuleMiner
 from app.stop_loss_analyzer import StopLossAnalyzer
 from app.walkforward_validator import WalkForwardValidator
@@ -25,6 +26,17 @@ class DummyLogger:
 
     def error(self, *args, **kwargs):
         pass
+
+
+class CaptureLogger(DummyLogger):
+    def __init__(self):
+        self.messages = []
+
+    def info(self, message, *args, **kwargs):
+        self.messages.append(message % args if args else message)
+
+    def warning(self, message, *args, **kwargs):
+        self.messages.append(message % args if args else message)
 
 
 def make_db(tmp_path):
@@ -225,9 +237,11 @@ def test_full_report_includes_counterfactual_summary(tmp_path):
 
 def test_full_report_keeps_start_end_markers(tmp_path):
     db = make_db(tmp_path)
-    report = FullResearchReporter(db, BotConfig(), DummyLogger(), reports_dir=tmp_path / "reports").build_report()
-    assert START_MARKER in report
-    assert END_MARKER in report
+    logger = CaptureLogger()
+    reporter = FullResearchReporter(db, BotConfig(), logger, reports_dir=tmp_path / "reports")
+    _emit_full_research_auto_report_if_due(BotConfig(), reporter, logger, 0.0, 100.0, initial=True)
+    assert START_MARKER in logger.messages
+    assert END_MARKER in logger.messages
 
 
 def test_recommended_config_never_activates_live(tmp_path):
@@ -262,4 +276,3 @@ def test_execution_engine_live_not_coupled_to_research_phase2():
 def test_isolated_margin_default_untouched():
     assert BotConfig().margin_mode == "isolated"
     assert BotConfig().force_isolated_margin is True
-

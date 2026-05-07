@@ -10,7 +10,7 @@ from .config import load_config
 from .database import Database
 from .execution_engine import ExecutionEngine
 from .feature_logger import FeatureLogger
-from .full_research_report import FullResearchReporter
+from .full_research_report import END_MARKER, START_MARKER, FullResearchReporter
 from .health_server import HealthState, start_health_server
 from .labeler import TripleBarrierLabeler
 from .logger import setup_logger
@@ -386,20 +386,41 @@ def _emit_full_research_auto_report_if_due(
     interval_seconds = max(1, config.full_research_report_interval_minutes) * 60
     if not initial and last_report_at > 0 and now - last_report_at < interval_seconds:
         return last_report_at
+    emitted_start = False
+    generated = False
     try:
+        logger.info(START_MARKER)
+        emitted_start = True
         mode = _full_research_report_mode(config, initial)
         try:
             report = reporter.build_report(mode=mode)
         except TypeError:
             report = reporter.build_report()
-        logger.info("%s", report)
+        logger.info("%s", _strip_full_report_markers(str(report)))
+        generated = True
+    except Exception as exc:
+        logger.warning("No se pudo generar full research auto-report: %s", exc)
+    finally:
+        if emitted_start:
+            logger.info(END_MARKER)
+    if generated:
         if initial:
             logger.info("Full research report inicial generado")
         else:
             logger.info("Full research report periódico generado")
-    except Exception as exc:
-        logger.warning("No se pudo generar full research auto-report: %s", exc)
     return now
+
+
+def _strip_full_report_markers(report: str) -> str:
+    lines = []
+    for line in report.splitlines():
+        if line.strip() in {
+            START_MARKER,
+            END_MARKER,
+        }:
+            continue
+        lines.append(line)
+    return "\n".join(lines)
 
 
 def _full_research_report_mode(config, initial: bool) -> str:

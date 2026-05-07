@@ -4,7 +4,7 @@ import time
 from app.config import BotConfig
 from app.database import Database
 from app.full_research_report import END_MARKER, START_MARKER, FullResearchReporter
-from app.main import _emit_full_research_auto_report_if_due, _full_research_report_mode
+from app.main import _emit_full_research_auto_report_if_due, _full_research_report_mode, _strip_full_report_markers
 
 
 class DummyLogger:
@@ -97,8 +97,6 @@ def test_full_report_generates_without_labels(tmp_path):
     db = make_db(tmp_path)
     insert_observation(db)
     report = FullResearchReporter(db, BotConfig(), DummyLogger(), reports_dir=tmp_path / "reports").build_report()
-    assert START_MARKER in report
-    assert END_MARKER in report
     assert "total labels: 0" in report
     assert "Recomendacion: NO LIVE" in report
 
@@ -106,8 +104,6 @@ def test_full_report_generates_without_labels(tmp_path):
 def test_startup_compact_report_generates_markers(tmp_path):
     db = make_db(tmp_path)
     report = FullResearchReporter(db, BotConfig(), DummyLogger(), reports_dir=tmp_path / "reports").build_report(mode="compact")
-    assert START_MARKER in report
-    assert END_MARKER in report
     assert "FULL RESEARCH LAB REPORT - COMPACT STARTUP" in report
     assert "recomendacion: NO LIVE" in report
 
@@ -118,6 +114,17 @@ def test_startup_compact_report_skips_heavy_sections(tmp_path):
     assert "Counterfactual Summary" not in report
     assert "Feature Importance" not in report
     assert "informe pesado omitido" in report
+
+
+def test_startup_compact_uses_signal_summary_not_full_fetch(tmp_path):
+    db = make_db(tmp_path)
+
+    def fail_full_fetch(*args, **kwargs):
+        raise AssertionError("compact report no debe cargar todas las senales")
+
+    db.fetch_signal_observations = fail_full_fetch
+    report = FullResearchReporter(db, BotConfig(), DummyLogger(), reports_dir=tmp_path / "reports").build_report(mode="compact")
+    assert "total senales" in report
 
 
 def test_full_report_generates_with_labels(tmp_path):
@@ -177,8 +184,8 @@ def test_full_report_auto_emit_logs_start_end_markers(tmp_path):
     last = _emit_full_research_auto_report_if_due(BotConfig(), reporter, logger, 0.0, 100.0)
     assert last == 100.0
     joined = "\n".join(logger.messages)
-    assert START_MARKER in joined
-    assert END_MARKER in joined
+    assert START_MARKER in logger.messages
+    assert END_MARKER in logger.messages
     assert "Full research report periódico generado" in joined
 
 
@@ -190,10 +197,15 @@ def test_full_report_initial_emit_logs_initial_generated(tmp_path):
     last = _emit_full_research_auto_report_if_due(BotConfig(), reporter, logger, 0.0, 100.0, initial=True)
     joined = "\n".join(logger.messages)
     assert last == 100.0
-    assert START_MARKER in joined
-    assert END_MARKER in joined
+    assert START_MARKER in logger.messages
+    assert END_MARKER in logger.messages
     assert "Full research report inicial generado" in joined
     assert "COMPACT STARTUP" in joined
+
+
+def test_strip_full_report_markers_removes_embedded_markers():
+    body = _strip_full_report_markers(f"{START_MARKER}\nbody\n{END_MARKER}")
+    assert body == "body"
 
 
 def test_full_report_failure_is_logged_and_does_not_raise():
@@ -204,6 +216,8 @@ def test_full_report_failure_is_logged_and_does_not_raise():
     logger = CaptureLogger()
     last = _emit_full_research_auto_report_if_due(BotConfig(), BrokenReporter(), logger, 0.0, 100.0, initial=True)
     assert last == 100.0
+    assert START_MARKER in logger.messages
+    assert END_MARKER in logger.messages
     assert any("No se pudo generar full research auto-report" in msg for msg in logger.messages)
 
 

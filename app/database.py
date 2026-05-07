@@ -751,6 +751,44 @@ class Database:
             cur = conn.execute(sql, params)
             return self._fetchall_dicts(cur)
 
+    def get_signal_observation_summary(self) -> dict[str, int]:
+        sql = """
+            SELECT
+                COUNT(*) AS total,
+                SUM(CASE WHEN COALESCE(operated, 0) = 1 THEN 1 ELSE 0 END) AS operated_count,
+                SUM(CASE WHEN COALESCE(selected_by_allocator, 0) = 1 THEN 1 ELSE 0 END) AS selected_by_allocator_count,
+                SUM(CASE WHEN COALESCE(risk_manager_approved, 0) = 1 THEN 1 ELSE 0 END) AS risk_manager_approved_count,
+                SUM(CASE WHEN COALESCE(shadow_strategy, 0) = 1 THEN 1 ELSE 0 END) AS shadow_strategy_count,
+                SUM(CASE WHEN side = 'NO_TRADE' THEN 1 ELSE 0 END) AS no_trade_count,
+                SUM(CASE WHEN side = 'LONG' THEN 1 ELSE 0 END) AS long_count,
+                SUM(CASE WHEN side = 'SHORT' THEN 1 ELSE 0 END) AS short_count
+            FROM signal_observations
+        """
+        try:
+            with self._connect() as conn:
+                row = conn.execute(sql).fetchone()
+                return {
+                    "total": int(self._row_value(row, "total", 0, 0) or 0),
+                    "operated_count": int(self._row_value(row, "operated_count", 1, 0) or 0),
+                    "selected_by_allocator_count": int(self._row_value(row, "selected_by_allocator_count", 2, 0) or 0),
+                    "risk_manager_approved_count": int(self._row_value(row, "risk_manager_approved_count", 3, 0) or 0),
+                    "shadow_strategy_count": int(self._row_value(row, "shadow_strategy_count", 4, 0) or 0),
+                    "no_trade_count": int(self._row_value(row, "no_trade_count", 5, 0) or 0),
+                    "long_count": int(self._row_value(row, "long_count", 6, 0) or 0),
+                    "short_count": int(self._row_value(row, "short_count", 7, 0) or 0),
+                }
+        except Exception:
+            return {
+                "total": 0,
+                "operated_count": 0,
+                "selected_by_allocator_count": 0,
+                "risk_manager_approved_count": 0,
+                "shadow_strategy_count": 0,
+                "no_trade_count": 0,
+                "long_count": 0,
+                "short_count": 0,
+            }
+
     def fetch_trades(self, limit: int | None = None) -> list[dict[str, Any]]:
         sql = "SELECT * FROM trades ORDER BY timestamp ASC"
         params: tuple[Any, ...] = ()
