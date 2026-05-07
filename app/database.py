@@ -789,6 +789,104 @@ class Database:
                 "short_count": 0,
             }
 
+    def get_signal_label_summary(self) -> dict[str, float]:
+        sql = """
+            SELECT
+                COUNT(*) AS total_labels,
+                SUM(CASE WHEN sl.first_barrier_hit = 'TIME' THEN 1 ELSE 0 END) AS time_count,
+                SUM(CASE WHEN sl.first_barrier_hit = 'SL' THEN 1 ELSE 0 END) AS sl_count,
+                SUM(CASE WHEN sl.first_barrier_hit = 'TP1' THEN 1 ELSE 0 END) AS tp1_count,
+                SUM(CASE WHEN sl.first_barrier_hit = 'TP2' THEN 1 ELSE 0 END) AS tp2_count,
+                AVG(CASE WHEN sl.first_barrier_hit = 'TIME' THEN COALESCE(sl.realized_return_pct, 0) ELSE NULL END) AS avg_return_time,
+                AVG(CASE WHEN sl.first_barrier_hit = 'SL' THEN COALESCE(sl.realized_return_pct, 0) ELSE NULL END) AS avg_return_sl,
+                AVG(CASE WHEN sl.first_barrier_hit = 'TP1' THEN COALESCE(sl.realized_return_pct, 0) ELSE NULL END) AS avg_return_tp1,
+                AVG(CASE WHEN sl.first_barrier_hit = 'TP2' THEN COALESCE(sl.realized_return_pct, 0) ELSE NULL END) AS avg_return_tp2,
+                AVG(COALESCE(sl.realized_return_pct, 0)) AS avg_return_all,
+                SUM(CASE WHEN COALESCE(sl.realized_return_pct, 0) > 0 THEN COALESCE(sl.realized_return_pct, 0) ELSE 0 END) AS gains,
+                SUM(CASE WHEN COALESCE(sl.realized_return_pct, 0) < 0 THEN COALESCE(sl.realized_return_pct, 0) ELSE 0 END) AS losses,
+                SUM(CASE WHEN sl.first_barrier_hit IN ('TP1', 'TP2', 'SL') THEN 1 ELSE 0 END) AS decisive_count,
+                SUM(CASE WHEN sl.first_barrier_hit IN ('TP1', 'TP2', 'SL') AND COALESCE(sl.label, 0) = 1 THEN 1 ELSE 0 END) AS decisive_wins,
+                SUM(CASE WHEN COALESCE(so.shadow_strategy, 0) = 1 THEN 1 ELSE 0 END) AS shadow_labels_count
+            FROM signal_labels sl
+            LEFT JOIN signal_observations so ON so.id = sl.observation_id
+        """
+        try:
+            with self._connect() as conn:
+                row = conn.execute(sql).fetchone()
+                return self._signal_label_summary_from_row(row)
+        except Exception:
+            base_sql = """
+                SELECT
+                    COUNT(*) AS total_labels,
+                    SUM(CASE WHEN sl.first_barrier_hit = 'TIME' THEN 1 ELSE 0 END) AS time_count,
+                    SUM(CASE WHEN sl.first_barrier_hit = 'SL' THEN 1 ELSE 0 END) AS sl_count,
+                    SUM(CASE WHEN sl.first_barrier_hit = 'TP1' THEN 1 ELSE 0 END) AS tp1_count,
+                    SUM(CASE WHEN sl.first_barrier_hit = 'TP2' THEN 1 ELSE 0 END) AS tp2_count,
+                    AVG(CASE WHEN sl.first_barrier_hit = 'TIME' THEN COALESCE(sl.realized_return_pct, 0) ELSE NULL END) AS avg_return_time,
+                    AVG(CASE WHEN sl.first_barrier_hit = 'SL' THEN COALESCE(sl.realized_return_pct, 0) ELSE NULL END) AS avg_return_sl,
+                    AVG(CASE WHEN sl.first_barrier_hit = 'TP1' THEN COALESCE(sl.realized_return_pct, 0) ELSE NULL END) AS avg_return_tp1,
+                    AVG(CASE WHEN sl.first_barrier_hit = 'TP2' THEN COALESCE(sl.realized_return_pct, 0) ELSE NULL END) AS avg_return_tp2,
+                    AVG(COALESCE(sl.realized_return_pct, 0)) AS avg_return_all,
+                    SUM(CASE WHEN COALESCE(sl.realized_return_pct, 0) > 0 THEN COALESCE(sl.realized_return_pct, 0) ELSE 0 END) AS gains,
+                    SUM(CASE WHEN COALESCE(sl.realized_return_pct, 0) < 0 THEN COALESCE(sl.realized_return_pct, 0) ELSE 0 END) AS losses,
+                    SUM(CASE WHEN sl.first_barrier_hit IN ('TP1', 'TP2', 'SL') THEN 1 ELSE 0 END) AS decisive_count,
+                    SUM(CASE WHEN sl.first_barrier_hit IN ('TP1', 'TP2', 'SL') AND COALESCE(sl.label, 0) = 1 THEN 1 ELSE 0 END) AS decisive_wins
+                FROM signal_labels sl
+            """
+            try:
+                with self._connect() as conn:
+                    row = conn.execute(base_sql).fetchone()
+                    return self._signal_label_summary_from_row(row, include_shadow=False)
+            except Exception:
+                return self._empty_signal_label_summary()
+
+    def _signal_label_summary_from_row(self, row: Any, include_shadow: bool = True) -> dict[str, float]:
+        total = float(self._row_value(row, "total_labels", 0, 0) or 0)
+        gains = float(self._row_value(row, "gains", 10, 0.0) or 0.0)
+        losses = abs(float(self._row_value(row, "losses", 11, 0.0) or 0.0))
+        decisive_count = float(self._row_value(row, "decisive_count", 12, 0) or 0)
+        decisive_wins = float(self._row_value(row, "decisive_wins", 13, 0) or 0)
+        shadow = float(self._row_value(row, "shadow_labels_count", 14, 0) or 0) if include_shadow else 0.0
+        if losses > 0:
+            profit_factor = gains / losses
+        else:
+            profit_factor = 999.0 if gains > 0 else 0.0
+        return {
+            "total_labels": total,
+            "time_count": float(self._row_value(row, "time_count", 1, 0) or 0),
+            "sl_count": float(self._row_value(row, "sl_count", 2, 0) or 0),
+            "tp1_count": float(self._row_value(row, "tp1_count", 3, 0) or 0),
+            "tp2_count": float(self._row_value(row, "tp2_count", 4, 0) or 0),
+            "avg_return_time": float(self._row_value(row, "avg_return_time", 5, 0.0) or 0.0),
+            "avg_return_sl": float(self._row_value(row, "avg_return_sl", 6, 0.0) or 0.0),
+            "avg_return_tp1": float(self._row_value(row, "avg_return_tp1", 7, 0.0) or 0.0),
+            "avg_return_tp2": float(self._row_value(row, "avg_return_tp2", 8, 0.0) or 0.0),
+            "avg_return_all": float(self._row_value(row, "avg_return_all", 9, 0.0) or 0.0),
+            "profit_factor": profit_factor,
+            "decisive_win_rate": decisive_wins / max(decisive_count, 1.0),
+            "shadow_labels_count": shadow,
+            "normal_labels_count": max(0.0, total - shadow),
+        }
+
+    @staticmethod
+    def _empty_signal_label_summary() -> dict[str, float]:
+        return {
+            "total_labels": 0.0,
+            "time_count": 0.0,
+            "sl_count": 0.0,
+            "tp1_count": 0.0,
+            "tp2_count": 0.0,
+            "avg_return_time": 0.0,
+            "avg_return_sl": 0.0,
+            "avg_return_tp1": 0.0,
+            "avg_return_tp2": 0.0,
+            "avg_return_all": 0.0,
+            "profit_factor": 0.0,
+            "decisive_win_rate": 0.0,
+            "shadow_labels_count": 0.0,
+            "normal_labels_count": 0.0,
+        }
+
     def fetch_trades(self, limit: int | None = None) -> list[dict[str, Any]]:
         sql = "SELECT * FROM trades ORDER BY timestamp ASC"
         params: tuple[Any, ...] = ()

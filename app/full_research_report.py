@@ -43,9 +43,9 @@ class FullResearchReporter:
 
     def build_compact_report(self) -> str:
         counts = self._timed_section("counts", self.db.get_table_counts, fallback={})
-        labeled_rows = self._timed_section("labels", self.db.fetch_labeled_signal_rows, fallback=[])
+        label_summary = self._timed_section("labels", self.db.get_signal_label_summary, fallback={})
         signal_summary = self._timed_section("signals", self.db.get_signal_observation_summary, fallback={})
-        summary = self._summary(labeled_rows)
+        summary = self._summary_from_label_summary(label_summary)
         lines = [
             "FULL RESEARCH LAB REPORT - COMPACT STARTUP",
             "==========================================",
@@ -63,7 +63,7 @@ class FullResearchReporter:
             *self._signal_summary_lines(signal_summary),
             "",
             "Labels",
-            *self._label_lines(labeled_rows),
+            *self._label_summary_lines(label_summary),
             "",
             "Diagnostico rapido",
             f"- recomendacion: {summary.recommendation}",
@@ -236,6 +236,24 @@ class FullResearchReporter:
         return FullResearchSummary("NO LIVE", "Profit factor/expectancy insuficientes o demasiadas salidas negativas/TIME.", pf, expectancy, decisive_wr, time_ratio)
 
     @staticmethod
+    def _summary_from_label_summary(summary: dict[str, Any]) -> FullResearchSummary:
+        total = safe_float(summary.get("total_labels"))
+        time_count = safe_float(summary.get("time_count"))
+        sl_count = safe_float(summary.get("sl_count"))
+        tp_count = safe_float(summary.get("tp1_count")) + safe_float(summary.get("tp2_count"))
+        pf = safe_float(summary.get("profit_factor"))
+        expectancy = safe_float(summary.get("avg_return_all"))
+        decisive_wr = safe_float(summary.get("decisive_win_rate"))
+        time_ratio = time_count / max(total, 1.0)
+        if total <= 0:
+            return FullResearchSummary("NO LIVE", "Aun no hay labels suficientes para evaluar edge.", pf, expectancy, decisive_wr, time_ratio)
+        if pf >= 1.2 and expectancy > 0 and decisive_wr >= 0.55 and total >= 100 and time_ratio < 0.7:
+            return FullResearchSummary("CANDIDATE FOR FURTHER TESTING", "Hay senales iniciales positivas, pero solo para mas paper/research.", pf, expectancy, decisive_wr, time_ratio)
+        if pf >= 1.0 and expectancy > 0 and sl_count <= tp_count:
+            return FullResearchSummary("PAPER ONLY", "Edge debil o inestable; necesita mas datos antes de plantear live.", pf, expectancy, decisive_wr, time_ratio)
+        return FullResearchSummary("NO LIVE", "Profit factor/expectancy insuficientes o demasiadas salidas negativas/TIME.", pf, expectancy, decisive_wr, time_ratio)
+
+    @staticmethod
     def _table_count_lines(counts: dict[str, int]) -> list[str]:
         tables = [
             "signal_observations",
@@ -297,6 +315,25 @@ class FullResearchReporter:
             f"- retorno medio SL: {mean_return_by_barrier(rows, 'SL'):.5f}",
             f"- retorno medio TP1: {mean_return_by_barrier(rows, 'TP1'):.5f}",
             f"- retorno medio TP2: {mean_return_by_barrier(rows, 'TP2'):.5f}",
+        ]
+
+    @staticmethod
+    def _label_summary_lines(summary: dict[str, Any]) -> list[str]:
+        return [
+            f"- total labels: {safe_int(summary.get('total_labels'))}",
+            f"- labels normales: {safe_int(summary.get('normal_labels_count'))}",
+            f"- labels shadow: {safe_int(summary.get('shadow_labels_count'))}",
+            f"- TIME count: {safe_int(summary.get('time_count'))}",
+            f"- SL count: {safe_int(summary.get('sl_count'))}",
+            f"- TP1 count: {safe_int(summary.get('tp1_count'))}",
+            f"- TP2 count: {safe_int(summary.get('tp2_count'))}",
+            f"- win rate real sobre labels decisivas: {safe_float(summary.get('decisive_win_rate')):.1%}",
+            f"- profit factor aproximado: {safe_float(summary.get('profit_factor')):.2f}",
+            f"- expectancy media: {safe_float(summary.get('avg_return_all')):.5f}",
+            f"- retorno medio TIME: {safe_float(summary.get('avg_return_time')):.5f}",
+            f"- retorno medio SL: {safe_float(summary.get('avg_return_sl')):.5f}",
+            f"- retorno medio TP1: {safe_float(summary.get('avg_return_tp1')):.5f}",
+            f"- retorno medio TP2: {safe_float(summary.get('avg_return_tp2')):.5f}",
         ]
 
     @staticmethod

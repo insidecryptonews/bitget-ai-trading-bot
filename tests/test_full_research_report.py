@@ -127,6 +127,43 @@ def test_startup_compact_uses_signal_summary_not_full_fetch(tmp_path):
     assert "total senales" in report
 
 
+def test_startup_compact_uses_label_summary_not_full_fetch(tmp_path):
+    db = make_db(tmp_path)
+    insert_observation(db, index=1, label=1, barrier="TP1", ret=0.03)
+    insert_observation(db, index=2, label=-1, barrier="SL", ret=-0.02)
+    insert_observation(db, index=3, label=0, barrier="TIME", ret=0.0, shadow=True)
+
+    def fail_full_fetch(*args, **kwargs):
+        raise AssertionError("compact report no debe cargar todas las labels")
+
+    db.fetch_labeled_signal_rows = fail_full_fetch
+    report = FullResearchReporter(db, BotConfig(), DummyLogger(), reports_dir=tmp_path / "reports").build_report(mode="compact")
+    assert "total labels: 3" in report
+    assert "labels normales: 2" in report
+    assert "labels shadow: 1" in report
+    assert "TP1 count: 1" in report
+    assert "SL count: 1" in report
+    assert "TIME count: 1" in report
+    assert "profit factor aproximado: 1.50" in report
+    assert "win rate real sobre labels decisivas: 50.0%" in report
+
+
+def test_startup_compact_labels_no_timeout_with_many_labels(tmp_path):
+    db = make_db(tmp_path)
+    for index in range(600):
+        if index % 10 == 0:
+            insert_observation(db, index=index, label=1, barrier="TP1", ret=0.03)
+        elif index % 10 in {1, 2}:
+            insert_observation(db, index=index, label=-1, barrier="SL", ret=-0.02)
+        else:
+            insert_observation(db, index=index, label=0, barrier="TIME", ret=0.0)
+    logger = CaptureLogger()
+    config = BotConfig(full_research_section_timeout_seconds=1)
+    report = FullResearchReporter(db, config, logger, reports_dir=tmp_path / "reports").build_report(mode="compact")
+    assert "total labels: 600" in report
+    assert not any("Full report section timeout: labels" in message for message in logger.messages)
+
+
 def test_full_report_generates_with_labels(tmp_path):
     db = make_db(tmp_path)
     insert_observation(db, index=1, label=1, barrier="TP1", ret=0.03, operated=True)
