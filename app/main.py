@@ -387,7 +387,12 @@ def _emit_full_research_auto_report_if_due(
     if not initial and last_report_at > 0 and now - last_report_at < interval_seconds:
         return last_report_at
     try:
-        logger.info("%s", reporter.build_report())
+        mode = _full_research_report_mode(config, initial)
+        try:
+            report = reporter.build_report(mode=mode)
+        except TypeError:
+            report = reporter.build_report()
+        logger.info("%s", report)
         if initial:
             logger.info("Full research report inicial generado")
         else:
@@ -395,6 +400,14 @@ def _emit_full_research_auto_report_if_due(
     except Exception as exc:
         logger.warning("No se pudo generar full research auto-report: %s", exc)
     return now
+
+
+def _full_research_report_mode(config, initial: bool) -> str:
+    if initial:
+        return config.full_research_startup_mode
+    if config.full_research_report_mode == "heavy" and config.full_research_heavy_report_enabled:
+        return "heavy"
+    return "compact"
 
 
 def _load_instruments(symbols: list[str], client: BitgetClient, logger, require_real_validation: bool) -> dict[str, InstrumentRules]:

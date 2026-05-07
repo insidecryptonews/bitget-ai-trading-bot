@@ -1,9 +1,10 @@
 from datetime import datetime, timedelta, timezone
+import time
 
 from app.config import BotConfig
 from app.database import Database
 from app.full_research_report import END_MARKER, START_MARKER, FullResearchReporter
-from app.main import _emit_full_research_auto_report_if_due
+from app.main import _emit_full_research_auto_report_if_due, _full_research_report_mode
 
 
 class DummyLogger:
@@ -102,6 +103,23 @@ def test_full_report_generates_without_labels(tmp_path):
     assert "Recomendacion: NO LIVE" in report
 
 
+def test_startup_compact_report_generates_markers(tmp_path):
+    db = make_db(tmp_path)
+    report = FullResearchReporter(db, BotConfig(), DummyLogger(), reports_dir=tmp_path / "reports").build_report(mode="compact")
+    assert START_MARKER in report
+    assert END_MARKER in report
+    assert "FULL RESEARCH LAB REPORT - COMPACT STARTUP" in report
+    assert "recomendacion: NO LIVE" in report
+
+
+def test_startup_compact_report_skips_heavy_sections(tmp_path):
+    db = make_db(tmp_path)
+    report = FullResearchReporter(db, BotConfig(), DummyLogger(), reports_dir=tmp_path / "reports").build_report(mode="compact")
+    assert "Counterfactual Summary" not in report
+    assert "Feature Importance" not in report
+    assert "informe pesado omitido" in report
+
+
 def test_full_report_generates_with_labels(tmp_path):
     db = make_db(tmp_path)
     insert_observation(db, index=1, label=1, barrier="TP1", ret=0.03, operated=True)
@@ -175,6 +193,7 @@ def test_full_report_initial_emit_logs_initial_generated(tmp_path):
     assert START_MARKER in joined
     assert END_MARKER in joined
     assert "Full research report inicial generado" in joined
+    assert "COMPACT STARTUP" in joined
 
 
 def test_full_report_failure_is_logged_and_does_not_raise():
@@ -186,3 +205,29 @@ def test_full_report_failure_is_logged_and_does_not_raise():
     last = _emit_full_research_auto_report_if_due(BotConfig(), BrokenReporter(), logger, 0.0, 100.0, initial=True)
     assert last == 100.0
     assert any("No se pudo generar full research auto-report" in msg for msg in logger.messages)
+
+
+def test_full_report_section_failure_continues(tmp_path):
+    db = make_db(tmp_path)
+    logger = CaptureLogger()
+    reporter = FullResearchReporter(db, BotConfig(), logger, reports_dir=tmp_path / "reports")
+    result = reporter._timed_section("broken_section", lambda: (_ for _ in ()).throw(RuntimeError("boom")), fallback="fallback ok")
+    assert result == "fallback ok"
+    assert any("No se pudo generar seccion broken_section" in msg for msg in logger.messages)
+
+
+def test_full_report_section_timeout_is_omitted(tmp_path):
+    db = make_db(tmp_path)
+    logger = CaptureLogger()
+    config = BotConfig(full_research_section_timeout_seconds=1)
+    reporter = FullResearchReporter(db, config, logger, reports_dir=tmp_path / "reports")
+    result = reporter._timed_section("slow_section", lambda: (time.sleep(2), "too late")[1], fallback="timeout fallback")
+    assert result == "timeout fallback"
+    assert any("Full report section timeout: slow_section" in msg for msg in logger.messages)
+
+
+def test_heavy_report_mode_requires_explicit_enable():
+    config = BotConfig(full_research_report_mode="heavy", full_research_heavy_report_enabled=False)
+    assert _full_research_report_mode(config, initial=False) == "compact"
+    enabled = BotConfig(full_research_report_mode="heavy", full_research_heavy_report_enabled=True)
+    assert _full_research_report_mode(enabled, initial=False) == "heavy"

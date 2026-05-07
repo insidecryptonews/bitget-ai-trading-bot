@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, TimeoutError
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -35,7 +36,46 @@ class FullResearchReporter:
         self.research_engine = ResearchEngine(db, logger)
         self.research_lab = ResearchLab(db, config, logger, reports_dir=reports_dir)
 
-    def build_report(self) -> str:
+    def build_report(self, mode: str = "heavy") -> str:
+        if mode == "compact":
+            return self.build_compact_report()
+        return self.build_heavy_report()
+
+    def build_compact_report(self) -> str:
+        counts = self._timed_section("counts", self.db.get_table_counts, fallback={})
+        labeled_rows = self._timed_section("labels", self.db.fetch_labeled_signal_rows, fallback=[])
+        observations = self._timed_section("signals", self.db.fetch_signal_observations, fallback=[])
+        summary = self._summary(labeled_rows)
+        lines = [
+            START_MARKER,
+            "FULL RESEARCH LAB REPORT - COMPACT STARTUP",
+            "==========================================",
+            "",
+            "Modo",
+            f"- bot mode: {self.config.mode}",
+            f"- PAPER_TRADING: {self.config.paper_trading}",
+            f"- LIVE_TRADING: {self.config.live_trading}",
+            f"- DRY_RUN: {self.config.dry_run}",
+            "",
+            "Conteo de tablas",
+            *self._table_count_lines(counts),
+            "",
+            "Senales",
+            *self._signal_lines(observations),
+            "",
+            "Labels",
+            *self._label_lines(labeled_rows),
+            "",
+            "Diagnostico rapido",
+            f"- recomendacion: {summary.recommendation}",
+            f"- motivo: {summary.reason}",
+            "- aviso: informe pesado omitido en arranque para no bloquear Railway.",
+            "- aviso: el informe pesado solo se genera si FULL_RESEARCH_HEAVY_REPORT_ENABLED=true y FULL_RESEARCH_REPORT_MODE=heavy.",
+            END_MARKER,
+        ]
+        return "\n".join(lines)
+
+    def build_heavy_report(self) -> str:
         from .counterfactual_engine import CounterfactualEngine
         from .feature_attribution import FeatureAttribution
         from .rule_miner import RuleMiner
@@ -43,36 +83,41 @@ class FullResearchReporter:
         from .win_analyzer import WinAnalyzer
 
         # Variants report refreshes strategy_variant_results when labels exist.
-        variants_report = self._safe_section("Variants / reverse shadow summary", self.research_engine.build_variants_report)
-        counts = self.db.get_table_counts()
-        observations = self.db.fetch_signal_observations()
-        labels = self.db.fetch_signal_labels()
-        labeled_rows = self.db.fetch_labeled_signal_rows()
-        trades = self.db.latest_trades(10)
-        variants = self.db.fetch_strategy_variants()
-        variant_results = self.db.fetch_strategy_variant_results()
-        dataset = self.research_lab.builder.build()
-        lab_discovery = self.research_lab.discover()
-        lab_report = self._safe_section("Research Lab markdown report", lambda: self.research_lab.build_markdown_report(dataset))
-        recommended_config_path = self.research_lab.recommend_config()
-        engine_report = self._safe_section("Research Engine report", self.research_engine.build_report)
-        sl_report = self._safe_section(
-            "Stop Loss Analysis",
+        variants_report = self._timed_section("variants", self.research_engine.build_variants_report)
+        counts = self._timed_section("counts", self.db.get_table_counts, fallback={})
+        observations = self._timed_section("signals", self.db.fetch_signal_observations, fallback=[])
+        labeled_rows = self._timed_section("labels", self.db.fetch_labeled_signal_rows, fallback=[])
+        trades = self._timed_section("trades", lambda: self.db.latest_trades(10), fallback=[])
+        variants = self._timed_section("strategy_variants", self.db.fetch_strategy_variants, fallback=[])
+        variant_results = self._timed_section("strategy_variant_results", self.db.fetch_strategy_variant_results, fallback=[])
+        dataset = self._timed_section("dataset", self.research_lab.builder.build, fallback=[])
+        lab_discovery = self._timed_section("research_lab_discover", self.research_lab.discover, fallback={
+            "dataset_rows": len(dataset),
+            "labels": len(labeled_rows),
+            "shadow_labels": 0,
+            "live_recommendation": "DO NOT ACTIVATE LIVE",
+            "best_candidate": None,
+        })
+        lab_report = self._timed_section("research_lab_report", lambda: self.research_lab.build_markdown_report(dataset))
+        recommended_config_path = self._timed_section("recommended_config", self.research_lab.recommend_config, fallback="not generated")
+        engine_report = self._timed_section("research_engine_report", self.research_engine.build_report)
+        sl_report = self._timed_section(
+            "sl_analysis",
             lambda: StopLossAnalyzer.format_report(StopLossAnalyzer(self.db, self.logger).analyze_rows(labeled_rows)),
         )
-        win_report = self._safe_section(
-            "Win Analysis",
+        win_report = self._timed_section(
+            "win_analysis",
             lambda: WinAnalyzer.format_report(WinAnalyzer(self.db, self.logger).analyze_rows(labeled_rows)),
         )
-        counterfactual_report = self._safe_section(
-            "Counterfactual Summary",
+        counterfactual_report = self._timed_section(
+            "counterfactual_summary",
             lambda: CounterfactualEngine(self.db, self.logger).summary([
                 item for row in labeled_rows for item in CounterfactualEngine(self.db, self.logger).simulate_row(row)
             ]),
         )
-        feature_report = self._safe_section("Feature Importance", lambda: FeatureAttribution(self.db, self.logger).report())
-        rules_report = self._safe_section(
-            "Recommended Rules",
+        feature_report = self._timed_section("feature_importance", lambda: FeatureAttribution(self.db, self.logger).report())
+        rules_report = self._timed_section(
+            "recommended_rules",
             lambda: RuleMiner(self.db, self.logger).markdown(RuleMiner(self.db, self.logger).mine_rows(labeled_rows)),
         )
 
@@ -154,6 +199,28 @@ class FullResearchReporter:
             if self.logger:
                 self.logger.warning("No se pudo generar seccion %s: %s", title, exc)
             return f"{title}: no disponible ({exc})"
+
+    def _timed_section(self, name: str, builder, fallback: Any = "") -> Any:
+        if self.logger:
+            self.logger.info("Full report section start: %s", name)
+        executor = ThreadPoolExecutor(max_workers=1)
+        future = executor.submit(builder)
+        try:
+            result = future.result(timeout=max(1, self.config.full_research_section_timeout_seconds))
+            if self.logger:
+                self.logger.info("Full report section end: %s", name)
+            return result
+        except TimeoutError:
+            if self.logger:
+                self.logger.warning("Full report section timeout: %s", name)
+            future.cancel()
+            return fallback if fallback != "" else f"{name}: omitido por timeout"
+        except Exception as exc:
+            if self.logger:
+                self.logger.warning("No se pudo generar seccion %s: %s", name, exc)
+            return fallback if fallback != "" else f"{name}: no disponible ({exc})"
+        finally:
+            executor.shutdown(wait=False, cancel_futures=True)
 
     @staticmethod
     def _summary(rows: list[dict[str, Any]]) -> FullResearchSummary:

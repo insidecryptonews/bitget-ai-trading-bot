@@ -96,6 +96,10 @@ class BotConfig:
     research_report_interval_minutes: int = 60
     enable_full_research_auto_report: bool = True
     full_research_report_interval_minutes: int = 60
+    full_research_report_mode: str = "compact"
+    full_research_startup_mode: str = "compact"
+    full_research_section_timeout_seconds: int = 10
+    full_research_heavy_report_enabled: bool = False
     meta_model_min_samples: int = 300
     meta_model_min_positives: int = 50
     meta_model_min_negatives: int = 50
@@ -122,6 +126,8 @@ class BotConfig:
         meta_model_mode = self.meta_model_mode.lower().strip()
         object.__setattr__(self, "margin_mode", margin_mode)
         object.__setattr__(self, "meta_model_mode", meta_model_mode)
+        object.__setattr__(self, "full_research_report_mode", self.full_research_report_mode.lower().strip())
+        object.__setattr__(self, "full_research_startup_mode", self.full_research_startup_mode.lower().strip())
         object.__setattr__(self, "margin_coin", self.margin_coin.upper().strip())
         for field_name in (
             "trade_margin_usdt",
@@ -144,6 +150,10 @@ class BotConfig:
             raise ValueError("MIN_TRADE_MARGIN_USDT no puede superar MAX_TRADE_MARGIN_USDT.")
         if meta_model_mode not in {"off", "observe_only", "filter"}:
             raise ValueError("META_MODEL_MODE debe ser off, observe_only o filter.")
+        if self.full_research_report_mode not in {"compact", "heavy"}:
+            raise ValueError("FULL_RESEARCH_REPORT_MODE debe ser compact o heavy.")
+        if self.full_research_startup_mode not in {"compact", "heavy"}:
+            raise ValueError("FULL_RESEARCH_STARTUP_MODE debe ser compact o heavy.")
         if not 0 <= self.meta_min_probability <= 1:
             raise ValueError("META_MIN_PROBABILITY debe estar entre 0 y 1.")
 
@@ -246,6 +256,10 @@ def load_config(load_dotenv_file: bool = True) -> BotConfig:
         research_report_interval_minutes=env_int(os.getenv("RESEARCH_REPORT_INTERVAL_MINUTES"), 60),
         enable_full_research_auto_report=env_bool(os.getenv("ENABLE_FULL_RESEARCH_AUTO_REPORT"), True),
         full_research_report_interval_minutes=env_int(os.getenv("FULL_RESEARCH_REPORT_INTERVAL_MINUTES"), 60),
+        full_research_report_mode=os.getenv("FULL_RESEARCH_REPORT_MODE", "compact"),
+        full_research_startup_mode=os.getenv("FULL_RESEARCH_STARTUP_MODE", "compact"),
+        full_research_section_timeout_seconds=env_int(os.getenv("FULL_RESEARCH_SECTION_TIMEOUT_SECONDS"), 10),
+        full_research_heavy_report_enabled=env_bool(os.getenv("FULL_RESEARCH_HEAVY_REPORT_ENABLED"), False),
         meta_model_min_samples=env_int(os.getenv("META_MODEL_MIN_SAMPLES"), 300),
         meta_model_min_positives=env_int(os.getenv("META_MODEL_MIN_POSITIVES"), 50),
         meta_model_min_negatives=env_int(os.getenv("META_MODEL_MIN_NEGATIVES"), 50),
