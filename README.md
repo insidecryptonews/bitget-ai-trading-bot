@@ -243,6 +243,26 @@ Interpretacion de labels:
 
 Guardrails: no consideres una variante como prometedora con menos de 100 labels. Si profit factor < 1.2, win rate muy bajo o hay demasiadas `TIME`, no actives live. Aunque una variante reverse tenga mejor profit factor, si tiene pocas labels o demasiadas `TIME`, queda marcada como evidencia debil.
 
+Kronos research-only:
+
+```bash
+python -m app.research_lab kronos-once --limit 100
+python -m app.research_lab kronos-evaluate
+```
+
+Kronos queda apagado por defecto con `ENABLE_KRONOS_RESEARCH=false`. Si lo activas, descarga/carga el modelo opcional configurado, genera predicciones de velas y las cruza con `signal_labels`, shadow/reverse y virtual portfolio. No aprueba ordenes, no toca RiskManager, no usa ExecutionEngine y siempre reporta `NO LIVE`.
+
+Variables principales:
+
+```env
+ENABLE_KRONOS_RESEARCH=false
+KRONOS_MODEL_NAME=NeoQuasar/Kronos-mini
+KRONOS_TOKENIZER_NAME=NeoQuasar/Kronos-Tokenizer-base
+KRONOS_LOOKBACK=256
+KRONOS_PRED_LEN=12
+KRONOS_MAX_SYMBOLS_PER_RUN=5
+```
+
 `walkforward.py` separa train, validation y test en ventanas temporales rolling. El meta-model solo deberia activarse si mejora profit factor fuera de muestra, reduce drawdown, mantiene precision minima y no elimina demasiadas operaciones.
 
 ## Checklist antes de Railway Paper

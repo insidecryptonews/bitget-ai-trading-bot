@@ -110,6 +110,17 @@ class BotConfig:
     enable_virtual_position_research: bool = True
     virtual_max_concurrent_positions: int = 1000
     virtual_portfolio_max_labels_per_run: int = 50000
+    enable_kronos_research: bool = False
+    kronos_model_name: str = "NeoQuasar/Kronos-mini"
+    kronos_tokenizer_name: str = "NeoQuasar/Kronos-Tokenizer-base"
+    kronos_device: str = "auto"
+    kronos_lookback: int = 256
+    kronos_pred_len: int = 12
+    kronos_sample_count: int = 3
+    kronos_top_p: float = 0.9
+    kronos_temperature: float = 1.0
+    kronos_max_symbols_per_run: int = 5
+    kronos_timeout_seconds: int = 30
     meta_model_min_samples: int = 300
     meta_model_min_positives: int = 50
     meta_model_min_negatives: int = 50
@@ -166,6 +177,8 @@ class BotConfig:
             raise ValueError("FULL_RESEARCH_STARTUP_MODE debe ser compact o heavy.")
         if not 0 <= self.meta_min_probability <= 1:
             raise ValueError("META_MIN_PROBABILITY debe estar entre 0 y 1.")
+        if self.kronos_lookback <= 0 or self.kronos_pred_len <= 0:
+            raise ValueError("KRONOS_LOOKBACK y KRONOS_PRED_LEN deben ser positivos.")
 
     @property
     def mode(self) -> str:
@@ -280,6 +293,17 @@ def load_config(load_dotenv_file: bool = True) -> BotConfig:
         enable_virtual_position_research=env_bool(os.getenv("ENABLE_VIRTUAL_POSITION_RESEARCH"), True),
         virtual_max_concurrent_positions=env_int(os.getenv("VIRTUAL_MAX_CONCURRENT_POSITIONS"), 1000),
         virtual_portfolio_max_labels_per_run=env_int(os.getenv("VIRTUAL_PORTFOLIO_MAX_LABELS_PER_RUN"), 50000),
+        enable_kronos_research=env_bool(os.getenv("ENABLE_KRONOS_RESEARCH"), False),
+        kronos_model_name=os.getenv("KRONOS_MODEL_NAME", "NeoQuasar/Kronos-mini"),
+        kronos_tokenizer_name=os.getenv("KRONOS_TOKENIZER_NAME", "NeoQuasar/Kronos-Tokenizer-base"),
+        kronos_device=os.getenv("KRONOS_DEVICE", "auto"),
+        kronos_lookback=env_int(os.getenv("KRONOS_LOOKBACK"), 256),
+        kronos_pred_len=env_int(os.getenv("KRONOS_PRED_LEN"), 12),
+        kronos_sample_count=env_int(os.getenv("KRONOS_SAMPLE_COUNT"), 3),
+        kronos_top_p=env_float(os.getenv("KRONOS_TOP_P"), 0.9),
+        kronos_temperature=env_float(os.getenv("KRONOS_TEMPERATURE"), 1.0),
+        kronos_max_symbols_per_run=env_int(os.getenv("KRONOS_MAX_SYMBOLS_PER_RUN"), 5),
+        kronos_timeout_seconds=env_int(os.getenv("KRONOS_TIMEOUT_SECONDS"), 30),
         meta_model_min_samples=env_int(os.getenv("META_MODEL_MIN_SAMPLES"), 300),
         meta_model_min_positives=env_int(os.getenv("META_MODEL_MIN_POSITIVES"), 50),
         meta_model_min_negatives=env_int(os.getenv("META_MODEL_MIN_NEGATIVES"), 50),

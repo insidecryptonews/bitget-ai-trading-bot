@@ -135,6 +135,10 @@ class ResearchDatasetBuilder:
             "lower_wick_pct": safe_float(observation.get("lower_wick_pct")),
             "bullish_rejection": safe_int(observation.get("bullish_rejection")),
             "bearish_rejection": safe_int(observation.get("bearish_rejection")),
+            "kronos_predicted_return_pct": safe_float(observation.get("kronos_predicted_return_pct")),
+            "kronos_direction": observation.get("kronos_direction"),
+            "kronos_confidence_score": safe_float(observation.get("kronos_confidence_score")),
+            "kronos_disagreement": safe_int(observation.get("kronos_disagreement")),
         }
 
     def _engineer_features(self, row: dict[str, Any]) -> dict[str, Any]:
@@ -391,6 +395,16 @@ class ResearchLab:
         self.reports_dir.mkdir(parents=True, exist_ok=True)
         (self.reports_dir / "full_research_lab_report.md").write_text(report + "\n", encoding="utf-8")
         return report
+
+    def kronos_once(self, limit: int = 100) -> str:
+        from .kronos_research import KronosResearch
+
+        return KronosResearch(self.config, self.db, self.logger).run_once(limit=limit).to_text()
+
+    def kronos_evaluate(self) -> str:
+        from .kronos_research import KronosEvaluator
+
+        return KronosEvaluator(self.db).report()
 
     def build_markdown_report(
         self,
@@ -893,6 +907,8 @@ def main() -> None:
             "phase2-persist",
             "autopilot-once",
             "virtual-portfolio",
+            "kronos-once",
+            "kronos-evaluate",
         ],
     )
     parser.add_argument("--limit", type=int, default=None, help="Maximo de labels a procesar en phase2-persist.")
@@ -947,6 +963,11 @@ def main() -> None:
         from .research_autopilot import ResearchAutopilot
 
         print(ResearchAutopilot(config, db, logger).run_once().to_text())
+    elif args.command == "kronos-once":
+        limit = args.limit if args.limit is not None else 100
+        print(lab.kronos_once(limit=limit))
+    elif args.command == "kronos-evaluate":
+        print(lab.kronos_evaluate())
 
 
 if __name__ == "__main__":

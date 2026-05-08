@@ -262,6 +262,7 @@ class FullResearchReporter:
             "events",
             "strategy_variants",
             "strategy_variant_results",
+            "kronos_predictions",
         ]
         return [f"- {table}: {counts.get(table, 0)}" for table in tables]
 

@@ -100,6 +100,16 @@ class VirtualPortfolioResearch:
     def _variants_for_row(self, row: dict[str, Any]) -> list[dict[str, Any]]:
         variants = [{"variant_name": "NORMAL", "params": {"mode": "normal"}}]
         variants.append({"variant_name": "REVERSE_SIDE", "params": {"reverse": True}})
+        kronos_direction = str(row.get("kronos_direction") or "").upper()
+        kronos_confidence = safe_float(row.get("kronos_confidence_score"))
+        if kronos_direction in {"LONG", "SHORT"} and _kronos_agrees(row):
+            variants.append({"variant_name": "KRONOS_AGREE_ONLY", "params": {"kronos": "agree_only"}})
+        if kronos_direction in {"LONG", "SHORT"} and _kronos_disagrees(row):
+            variants.append({"variant_name": "KRONOS_DISAGREE_REVERSE", "params": {"kronos": "disagree_reverse", "reverse": True}})
+        if kronos_confidence >= 0.65:
+            variants.append({"variant_name": "KRONOS_HIGH_CONFIDENCE_ONLY", "params": {"kronos_confidence_min": 0.65}})
+        if kronos_direction in {"LONG", "SHORT"} and kronos_confidence >= 0.35:
+            variants.append({"variant_name": "KRONOS_FILTER_LOW_CONFIDENCE", "params": {"kronos_confidence_min": 0.35}})
         rsi = safe_float(row.get("rsi_14"))
         volume = safe_float(row.get("volume_relative"))
         distance_ema21 = abs(safe_float(row.get("distance_to_ema_21")))
@@ -126,7 +136,7 @@ class VirtualPortfolioResearch:
         normalized = dict(row)
         normalized["observation_id"] = safe_int(normalized.get("observation_id") or normalized.get("id"))
         normalized["label_id"] = safe_int(normalized.get("label_id"))
-        if variant["variant_name"] == "REVERSE_SIDE":
+        if variant["variant_name"] in {"REVERSE_SIDE", "KRONOS_DISAGREE_REVERSE"}:
             reverse = [
                 item for item in self.counterfactuals.simulate_row(normalized)
                 if item.get("scenario_name") == "REVERSE_SIDE"
@@ -213,6 +223,18 @@ def _score(total: int, profit_factor: float, expectancy: float) -> float:
     pf_score = min(profit_factor / 2, 1.0)
     exp_score = 1.0 if expectancy > 0 else 0.0
     return max(0.0, sample * 0.4 + pf_score * 0.4 + exp_score * 0.2)
+
+
+def _kronos_agrees(row: dict[str, Any]) -> bool:
+    side = str(row.get("side") or "").upper()
+    direction = str(row.get("kronos_direction") or "").upper()
+    return side in {"LONG", "SHORT"} and side == direction
+
+
+def _kronos_disagrees(row: dict[str, Any]) -> bool:
+    side = str(row.get("side") or "").upper()
+    direction = str(row.get("kronos_direction") or "").upper()
+    return side in {"LONG", "SHORT"} and direction in {"LONG", "SHORT"} and side != direction
 
 
 def _summary_lines(rows: list[dict[str, Any]]) -> list[str]:

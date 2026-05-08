@@ -213,6 +213,11 @@ class Database:
                 original_side TEXT,
                 original_strategy_type TEXT,
                 score_bucket TEXT,
+                kronos_predicted_return_pct REAL,
+                kronos_direction TEXT,
+                kronos_confidence_score REAL,
+                kronos_disagreement INTEGER,
+                kronos_prediction_id INTEGER,
                 raw_signal_json TEXT,
                 raw_features_json TEXT
             )
@@ -464,7 +469,32 @@ class Database:
                 decisive_win_rate REAL,
                 max_drawdown_estimated REAL,
                 score REAL,
+                created_at TEXT,
                 last_updated TEXT NOT NULL
+            )
+            """,
+        )
+        self._execute(
+            conn,
+            """
+            CREATE TABLE IF NOT EXISTS kronos_predictions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT NOT NULL,
+                symbol TEXT,
+                observation_id INTEGER,
+                model_name TEXT,
+                tokenizer_name TEXT,
+                lookback INTEGER,
+                pred_len INTEGER,
+                current_close REAL,
+                predicted_close REAL,
+                predicted_return_pct REAL,
+                predicted_range_pct REAL,
+                direction TEXT,
+                confidence_score REAL,
+                volatility_score REAL,
+                forecast_json TEXT,
+                created_at TEXT NOT NULL
             )
             """,
         )
@@ -496,16 +526,26 @@ class Database:
             "original_side": "TEXT",
             "original_strategy_type": "TEXT",
             "score_bucket": "TEXT",
+            "kronos_predicted_return_pct": "REAL",
+            "kronos_direction": "TEXT",
+            "kronos_confidence_score": "REAL",
+            "kronos_disagreement": "INTEGER",
+            "kronos_prediction_id": "INTEGER",
         }
         if self._use_postgres:
             for name, spec in columns.items():
                 self._execute(conn, f"ALTER TABLE signal_observations ADD COLUMN IF NOT EXISTS {name} {spec}")
+            self._execute(conn, "ALTER TABLE virtual_strategy_summary ADD COLUMN IF NOT EXISTS created_at TEXT")
             return
         cur = conn.execute("PRAGMA table_info(signal_observations)")
         existing = {row["name"] if isinstance(row, sqlite3.Row) else row[1] for row in cur.fetchall()}
         for name, spec in columns.items():
             if name not in existing:
                 conn.execute(f"ALTER TABLE signal_observations ADD COLUMN {name} {spec}")
+        cur = conn.execute("PRAGMA table_info(virtual_strategy_summary)")
+        existing_summary = {row["name"] if isinstance(row, sqlite3.Row) else row[1] for row in cur.fetchall()}
+        if "created_at" not in existing_summary:
+            conn.execute("ALTER TABLE virtual_strategy_summary ADD COLUMN created_at TEXT")
 
     def _create_indexes(self, conn: Any) -> None:
         indexes = [
@@ -518,6 +558,8 @@ class Database:
             "CREATE INDEX IF NOT EXISTS idx_research_rules_name ON research_rules(rule_name)",
             "CREATE INDEX IF NOT EXISTS idx_virtual_research_trade_key ON virtual_research_trades(variant_name, observation_id, label_id)",
             "CREATE INDEX IF NOT EXISTS idx_virtual_strategy_summary_variant ON virtual_strategy_summary(variant_name)",
+            "CREATE INDEX IF NOT EXISTS idx_kronos_predictions_observation ON kronos_predictions(observation_id)",
+            "CREATE INDEX IF NOT EXISTS idx_kronos_predictions_symbol_time ON kronos_predictions(symbol, timestamp)",
         ]
         for sql in indexes:
             self._execute(conn, sql)
@@ -642,6 +684,11 @@ class Database:
             "original_side",
             "original_strategy_type",
             "score_bucket",
+            "kronos_predicted_return_pct",
+            "kronos_direction",
+            "kronos_confidence_score",
+            "kronos_disagreement",
+            "kronos_prediction_id",
             "raw_signal_json",
             "raw_features_json",
         }
@@ -670,6 +717,11 @@ class Database:
             "original_side",
             "original_strategy_type",
             "score_bucket",
+            "kronos_predicted_return_pct",
+            "kronos_direction",
+            "kronos_confidence_score",
+            "kronos_disagreement",
+            "kronos_prediction_id",
         }
         payload = {key: value for key, value in updates.items() if key in allowed}
         if not payload:
@@ -1035,6 +1087,7 @@ class Database:
             "research_rules",
             "virtual_research_trades",
             "virtual_strategy_summary",
+            "kronos_predictions",
             "market_context_events",
         ]
         counts: dict[str, int] = {}
@@ -1325,6 +1378,75 @@ class Database:
 
     def fetch_virtual_strategy_summary(self, limit: int | None = None) -> list[dict[str, Any]]:
         return self._fetch_table("virtual_strategy_summary", limit)
+
+    def record_kronos_prediction(self, payload: dict[str, Any]) -> int:
+        payload = dict(payload)
+        payload.setdefault("timestamp", iso_utc())
+        return self._insert_payload("kronos_predictions", payload)
+
+    def fetch_kronos_predictions(self, limit: int | None = None) -> list[dict[str, Any]]:
+        return self._fetch_table("kronos_predictions", limit)
+
+    def fetch_kronos_candidate_observations(self, limit: int = 100) -> list[dict[str, Any]]:
+        sql = """
+            SELECT so.*
+            FROM signal_observations so
+            WHERE so.side IN ('LONG', 'SHORT')
+              AND (
+                  so.kronos_prediction_id IS NULL
+                  OR NOT EXISTS (
+                      SELECT 1 FROM kronos_predictions kp
+                      WHERE kp.observation_id = so.id
+                  )
+              )
+            ORDER BY so.timestamp DESC
+            LIMIT ?
+        """
+        if self._use_postgres:
+            sql = sql.replace("?", "%s")
+        with self._connect() as conn:
+            return self._fetchall_dicts(conn.execute(sql, (max(0, int(limit or 0)),)))
+
+    def fetch_kronos_labeled_rows(self, limit: int | None = None) -> list[dict[str, Any]]:
+        sql = """
+            SELECT kp.id AS kronos_prediction_id,
+                   kp.timestamp AS kronos_timestamp,
+                   kp.symbol,
+                   kp.observation_id,
+                   kp.model_name,
+                   kp.tokenizer_name,
+                   kp.current_close,
+                   kp.predicted_close,
+                   kp.predicted_return_pct,
+                   kp.predicted_range_pct,
+                   kp.direction AS kronos_direction,
+                   kp.confidence_score AS kronos_confidence_score,
+                   kp.volatility_score AS kronos_volatility_score,
+                   so.side,
+                   so.strategy_type,
+                   so.market_regime,
+                   so.confidence_score,
+                   so.shadow_strategy,
+                   so.variant_params_json,
+                   sl.id AS label_id,
+                   sl.label,
+                   sl.first_barrier_hit,
+                   sl.realized_return_pct,
+                   sl.simulated_pnl,
+                   sl.bars_to_outcome
+            FROM kronos_predictions kp
+            JOIN signal_observations so ON so.id = kp.observation_id
+            JOIN signal_labels sl ON sl.observation_id = so.id
+            ORDER BY kp.timestamp ASC
+        """
+        params: tuple[Any, ...] = ()
+        if limit:
+            sql += " LIMIT ?"
+            params = (limit,)
+        if self._use_postgres:
+            sql = sql.replace("?", "%s")
+        with self._connect() as conn:
+            return self._fetchall_dicts(conn.execute(sql, params))
 
     def record_market_context_event(self, payload: dict[str, Any]) -> int:
         return self._insert_payload("market_context_events", payload)
