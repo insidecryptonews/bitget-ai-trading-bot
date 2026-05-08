@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from .config import BotConfig, PROJECT_ROOT
-from .utils import iso_utc, json_dumps, sanitize
+from .utils import iso_utc, json_dumps, safe_float, sanitize
 
 
 class Database:
@@ -1069,6 +1069,52 @@ class Database:
                 "open": int(self._row_value(row, "open_count", 1, 0) or 0),
                 "closed": int(self._row_value(row, "closed_count", 2, 0) or 0),
             }
+
+    def fetch_open_paper_trades(self) -> list[dict[str, Any]]:
+        sql = """
+            SELECT *
+            FROM trades
+            WHERE mode = ?
+              AND status IN ('PAPER_OPEN', 'OPEN')
+            ORDER BY timestamp ASC
+        """
+        if self._use_postgres:
+            sql = sql.replace("?", "%s")
+        with self._connect() as conn:
+            return self._fetchall_dicts(conn.execute(sql, ("paper",)))
+
+    def find_label_for_paper_trade(self, trade: dict[str, Any]) -> dict[str, Any] | None:
+        symbol = str(trade.get("symbol") or "").upper()
+        side = str(trade.get("side") or "").upper()
+        entry = safe_float(trade.get("entry"))
+        tolerance = max(abs(entry) * 0.0005, 1e-9)
+        if not symbol or side not in {"LONG", "SHORT"}:
+            return None
+        sql = """
+            SELECT so.id AS observation_id,
+                   sl.id AS label_id,
+                   sl.timestamp AS label_timestamp,
+                   sl.label,
+                   sl.first_barrier_hit,
+                   sl.bars_to_outcome,
+                   sl.realized_return_pct,
+                   sl.simulated_pnl,
+                   sl.would_have_won
+            FROM signal_observations so
+            JOIN signal_labels sl ON sl.observation_id = so.id
+            WHERE so.symbol = ?
+              AND so.side = ?
+              AND COALESCE(so.operated, 0) = 1
+              AND (? <= 0 OR ABS(COALESCE(so.entry_price, 0) - ?) <= ?)
+            ORDER BY sl.timestamp DESC
+            LIMIT 1
+        """
+        params = (symbol, side, entry, entry, tolerance)
+        if self._use_postgres:
+            sql = sql.replace("?", "%s")
+        with self._connect() as conn:
+            row = conn.execute(sql, params).fetchone()
+            return self._row_to_dict(row) if row else None
 
     def get_table_counts(self) -> dict[str, int]:
         tables = [

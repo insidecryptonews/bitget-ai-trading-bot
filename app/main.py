@@ -20,6 +20,7 @@ from .meta_model import MetaModel
 from .news_intel import NewsIntel
 from .order_manager import InstrumentRules, OrderManager
 from .paper_trader import PaperTrader
+from .paper_reconciler import PaperReconciler
 from .portfolio_allocator import PortfolioAllocator
 from .position_manager import PositionManager
 from .regime_detector import RegimeDetector
@@ -89,6 +90,14 @@ def main() -> None:
         labeled_rows = db.fetch_labeled_signal_rows()
         meta_model.train(labeled_rows)
         logger.info("MetaModel: %s", meta_model.training_reason)
+
+    if paper_trader:
+        if config.enable_paper_reconcile_on_start:
+            try:
+                logger.info("%s", PaperReconciler(config, db, logger).reconcile().to_text())
+            except Exception as exc:
+                logger.warning("Paper reconcile on start fallo sin detener el bot: %s", exc)
+        paper_trader.load_open_positions_from_db()
 
     valid_symbols = [s for s in config.symbols if s in instruments and instruments[s].is_active]
     if not valid_symbols:

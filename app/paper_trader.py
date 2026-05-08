@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from itertools import count
 from typing import Any
@@ -43,6 +44,28 @@ class PaperTrader:
     @property
     def reserved_margin(self) -> float:
         return sum(position.margin_used for position in self.positions.values())
+
+    def load_open_positions_from_db(self) -> int:
+        if not hasattr(self.db, "fetch_open_paper_trades"):
+            return 0
+        loaded = 0
+        try:
+            rows = self.db.fetch_open_paper_trades()
+        except Exception as exc:
+            self.logger.warning("Paper: no se pudieron recuperar PAPER_OPEN desde DB: %s", exc)
+            return 0
+        for row in rows:
+            symbol = str(row.get("symbol") or "").upper()
+            if not symbol or symbol in self.positions:
+                continue
+            position = self._position_from_trade(row)
+            if not position:
+                continue
+            self.positions[symbol] = position
+            loaded += 1
+        if loaded:
+            self.logger.info("Paper: recuperadas %s posiciones PAPER_OPEN desde DB.", loaded)
+        return loaded
 
     def open_position(self, signal: Signal, risk_amount: float = 0.0, risk=None) -> PaperPosition:
         if signal.symbol in self.positions:
@@ -160,6 +183,38 @@ class PaperTrader:
             for p in self.positions.values()
         ]
 
+    def _position_from_trade(self, row: dict[str, Any]) -> PaperPosition | None:
+        symbol = str(row.get("symbol") or "").upper()
+        side = str(row.get("side") or "").upper()
+        entry = float(row.get("entry") or 0.0)
+        size = float(row.get("size") or 0.0)
+        leverage = int(float(row.get("leverage") or self.config.default_leverage or 1))
+        if not symbol or side not in {"LONG", "SHORT"} or entry <= 0 or size <= 0:
+            self.logger.warning("Paper: PAPER_OPEN invalida en DB trade_id=%s. Ejecuta reconcile-paper.", row.get("id"))
+            return None
+        raw_signal = _raw_signal(row)
+        notional = abs(entry * size)
+        margin_used = float(raw_signal.get("selected_margin_usdt") or 0.0)
+        if margin_used <= 0:
+            margin_used = notional / max(leverage, 1)
+        return PaperPosition(
+            trade_id=int(row.get("id") or next(self._ids)),
+            symbol=symbol,
+            side=side,
+            entry=entry,
+            stop_loss=float(row.get("stop_loss") or 0.0),
+            take_profit_1=float(row.get("take_profit_1") or 0.0),
+            take_profit_2=float(row.get("take_profit_2") or 0.0),
+            size=size,
+            leverage=leverage,
+            margin_mode=str(raw_signal.get("margin_mode") or "isolated"),
+            margin_used=margin_used,
+            notional=notional,
+            quantity=size,
+            fees=float(row.get("fees") or 0.0),
+            metadata={"recovered_from_db": True, "strategy": row.get("strategy_type")},
+        )
+
     @staticmethod
     def _liquidation_estimate(signal: Signal, margin_used: float, notional: float) -> float:
         if margin_used <= 0 or notional <= 0:
@@ -168,3 +223,12 @@ class PaperTrader:
         if signal.side == "LONG":
             return signal.entry_price * max(0.0, 1 - cushion_pct)
         return signal.entry_price * (1 + cushion_pct)
+
+
+def _raw_signal(row: dict[str, Any]) -> dict[str, Any]:
+    raw = row.get("raw_signal_json") or "{}"
+    try:
+        data = json.loads(raw)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}

@@ -103,6 +103,7 @@ class BotConfig:
     enable_phase2_persist: bool = False
     phase2_persist_batch_size: int = 250
     phase2_persist_max_labels_per_run: int = 5000
+    enable_paper_reconcile_on_start: bool = False
     enable_research_autopilot: bool = False
     research_autopilot_interval_minutes: int = 60
     research_autopilot_phase2_limit_per_run: int = 5000
@@ -286,6 +287,7 @@ def load_config(load_dotenv_file: bool = True) -> BotConfig:
         enable_phase2_persist=env_bool(os.getenv("ENABLE_PHASE2_PERSIST"), False),
         phase2_persist_batch_size=env_int(os.getenv("PHASE2_PERSIST_BATCH_SIZE"), 250),
         phase2_persist_max_labels_per_run=env_int(os.getenv("PHASE2_PERSIST_MAX_LABELS_PER_RUN"), 5000),
+        enable_paper_reconcile_on_start=env_bool(os.getenv("ENABLE_PAPER_RECONCILE_ON_START"), False),
         enable_research_autopilot=env_bool(os.getenv("ENABLE_RESEARCH_AUTOPILOT"), False),
         research_autopilot_interval_minutes=env_int(os.getenv("RESEARCH_AUTOPILOT_INTERVAL_MINUTES"), 60),
         research_autopilot_phase2_limit_per_run=env_int(os.getenv("RESEARCH_AUTOPILOT_PHASE2_LIMIT_PER_RUN"), 5000),

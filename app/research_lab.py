@@ -406,6 +406,11 @@ class ResearchLab:
 
         return KronosEvaluator(self.db).report()
 
+    def reconcile_paper(self) -> str:
+        from .paper_reconciler import PaperReconciler
+
+        return PaperReconciler(self.config, self.db, self.logger).reconcile().to_text()
+
     def build_markdown_report(
         self,
         dataset: list[dict[str, Any]] | None = None,
@@ -909,6 +914,7 @@ def main() -> None:
             "virtual-portfolio",
             "kronos-once",
             "kronos-evaluate",
+            "reconcile-paper",
         ],
     )
     parser.add_argument("--limit", type=int, default=None, help="Maximo de labels a procesar en phase2-persist.")
@@ -968,6 +974,8 @@ def main() -> None:
         print(lab.kronos_once(limit=limit))
     elif args.command == "kronos-evaluate":
         print(lab.kronos_evaluate())
+    elif args.command == "reconcile-paper":
+        print(lab.reconcile_paper())
 
 
 if __name__ == "__main__":

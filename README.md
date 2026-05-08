@@ -248,9 +248,12 @@ Kronos research-only:
 ```bash
 python -m app.research_lab kronos-once --limit 100
 python -m app.research_lab kronos-evaluate
+python -m app.research_lab reconcile-paper
 ```
 
 Kronos queda apagado por defecto con `ENABLE_KRONOS_RESEARCH=false`. Si lo activas, descarga/carga el modelo opcional configurado, genera predicciones de velas y las cruza con `signal_labels`, shadow/reverse y virtual portfolio. No aprueba ordenes, no toca RiskManager, no usa ExecutionEngine y siempre reporta `NO LIVE`.
+
+`reconcile-paper` limpia solo operaciones simuladas `PAPER_OPEN`: cierra fantasmas antiguos por label o por tiempo y deja el conteo de paper abierto coherente. No toca trades live ni APIs del exchange. El arranque automatico existe pero esta apagado por defecto con `ENABLE_PAPER_RECONCILE_ON_START=false`.
 
 Variables principales:
 
