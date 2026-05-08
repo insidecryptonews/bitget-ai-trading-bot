@@ -3,6 +3,7 @@ from __future__ import annotations
 import signal
 import sys
 import time
+from threading import Thread
 from typing import Any
 
 from .bitget_client import BitgetClient
@@ -22,6 +23,7 @@ from .paper_trader import PaperTrader
 from .portfolio_allocator import PortfolioAllocator
 from .position_manager import PositionManager
 from .regime_detector import RegimeDetector
+from .research_autopilot import ResearchAutopilot
 from .research_engine import ResearchEngine
 from .risk_manager import RiskManager
 from .shadow_strategies import ShadowStrategyEngine
@@ -78,8 +80,10 @@ def main() -> None:
     labeler = TripleBarrierLabeler(config, db, logger) if config.enable_signal_labeling else None
     research_engine = ResearchEngine(db, logger) if config.enable_research_auto_report else None
     full_research_reporter = FullResearchReporter(db, config, logger) if config.enable_full_research_auto_report else None
+    research_autopilot = ResearchAutopilot(config, db, logger) if config.enable_research_autopilot else None
     last_research_report_at = 0.0
     last_full_research_report_at = 0.0
+    last_research_autopilot_at = 0.0
     meta_model = MetaModel(config, db, logger) if config.enable_meta_model and config.meta_model_mode != "off" else None
     if meta_model:
         labeled_rows = db.fetch_labeled_signal_rows()
@@ -345,6 +349,13 @@ def main() -> None:
                 last_full_research_report_at,
                 time.monotonic(),
             )
+            last_research_autopilot_at = _emit_research_autopilot_if_due(
+                config,
+                research_autopilot,
+                logger,
+                last_research_autopilot_at,
+                time.monotonic(),
+            )
             elapsed = time.time() - cycle_start
             sleep_for = max(1, config.scan_interval_seconds - elapsed)
             time.sleep(sleep_for)
@@ -408,6 +419,36 @@ def _emit_full_research_auto_report_if_due(
             logger.info("Full research report inicial generado")
         else:
             logger.info("Full research report periódico generado")
+    return now
+
+
+def _emit_research_autopilot_if_due(
+    config,
+    autopilot: ResearchAutopilot | None,
+    logger,
+    last_run_at: float,
+    now: float,
+) -> float:
+    if not config.enable_research_autopilot or autopilot is None:
+        return last_run_at
+    interval_seconds = max(1, config.research_autopilot_interval_minutes) * 60
+    if last_run_at > 0 and now - last_run_at < interval_seconds:
+        return last_run_at
+    if getattr(autopilot, "running", False):
+        logger.info("Research autopilot ya esta ejecutandose; se omite este ciclo.")
+        return last_run_at
+
+    def _run() -> None:
+        autopilot.running = True
+        try:
+            logger.info("%s", autopilot.run_once().to_text())
+        except Exception as exc:
+            logger.warning("Research autopilot fallo sin detener el bot: %s", exc)
+        finally:
+            autopilot.running = False
+
+    Thread(target=_run, name="research-autopilot", daemon=True).start()
+    logger.info("Research autopilot programado en background.")
     return now
 
 

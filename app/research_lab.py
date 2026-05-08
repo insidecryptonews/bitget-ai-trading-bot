@@ -891,10 +891,13 @@ def main() -> None:
             "recommend-rules",
             "full-report",
             "phase2-persist",
+            "autopilot-once",
+            "virtual-portfolio",
         ],
     )
     parser.add_argument("--limit", type=int, default=None, help="Maximo de labels a procesar en phase2-persist.")
     parser.add_argument("--batch-size", type=int, default=None, help="Tamano de lote para phase2-persist.")
+    parser.add_argument("--max-concurrent", type=int, default=None, help="Maximo de posiciones virtuales concurrentes.")
     args = parser.parse_args()
     config = load_config()
     logger = setup_logger()
@@ -933,6 +936,17 @@ def main() -> None:
         batch_size = args.batch_size if args.batch_size is not None else config.phase2_persist_batch_size
         result = Phase2Persister(db, logger).persist(limit=limit, batch_size=batch_size)
         print(result.to_text())
+    elif args.command == "virtual-portfolio":
+        from .virtual_portfolio import VirtualPortfolioResearch
+
+        limit = args.limit if args.limit is not None else config.virtual_portfolio_max_labels_per_run
+        max_concurrent = args.max_concurrent if args.max_concurrent is not None else config.virtual_max_concurrent_positions
+        result = VirtualPortfolioResearch(db, logger).simulate(limit=limit, max_concurrent=max_concurrent)
+        print(result.to_text())
+    elif args.command == "autopilot-once":
+        from .research_autopilot import ResearchAutopilot
+
+        print(ResearchAutopilot(config, db, logger).run_once().to_text())
 
 
 if __name__ == "__main__":

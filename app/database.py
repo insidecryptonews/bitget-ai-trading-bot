@@ -423,6 +423,54 @@ class Database:
         self._execute(
             conn,
             """
+            CREATE TABLE IF NOT EXISTS virtual_research_trades (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                observation_id INTEGER,
+                label_id INTEGER,
+                variant_name TEXT,
+                params_json TEXT,
+                symbol TEXT,
+                strategy_type TEXT,
+                market_regime TEXT,
+                virtual_side TEXT,
+                entry_price REAL,
+                stop_loss REAL,
+                take_profit_1 REAL,
+                take_profit_2 REAL,
+                outcome TEXT,
+                label INTEGER,
+                return_pct REAL,
+                bars_to_outcome INTEGER,
+                created_at TEXT NOT NULL
+            )
+            """,
+        )
+        self._execute(
+            conn,
+            """
+            CREATE TABLE IF NOT EXISTS virtual_strategy_summary (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                variant_name TEXT,
+                params_json TEXT,
+                symbol TEXT,
+                strategy_type TEXT,
+                market_regime TEXT,
+                total_trades INTEGER,
+                tp_count INTEGER,
+                sl_count INTEGER,
+                time_count INTEGER,
+                profit_factor REAL,
+                expectancy REAL,
+                decisive_win_rate REAL,
+                max_drawdown_estimated REAL,
+                score REAL,
+                last_updated TEXT NOT NULL
+            )
+            """,
+        )
+        self._execute(
+            conn,
+            """
             CREATE TABLE IF NOT EXISTS market_context_events (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 timestamp TEXT,
@@ -468,6 +516,8 @@ class Database:
             "CREATE INDEX IF NOT EXISTS idx_stop_loss_failure_clusters_name ON stop_loss_failure_clusters(cluster_name)",
             "CREATE INDEX IF NOT EXISTS idx_win_clusters_name ON win_clusters(cluster_name)",
             "CREATE INDEX IF NOT EXISTS idx_research_rules_name ON research_rules(rule_name)",
+            "CREATE INDEX IF NOT EXISTS idx_virtual_research_trade_key ON virtual_research_trades(variant_name, observation_id, label_id)",
+            "CREATE INDEX IF NOT EXISTS idx_virtual_strategy_summary_variant ON virtual_strategy_summary(variant_name)",
         ]
         for sql in indexes:
             self._execute(conn, sql)
@@ -983,6 +1033,8 @@ class Database:
             "stop_loss_failure_clusters",
             "win_clusters",
             "research_rules",
+            "virtual_research_trades",
+            "virtual_strategy_summary",
             "market_context_events",
         ]
         counts: dict[str, int] = {}
@@ -1250,6 +1302,29 @@ class Database:
 
     def fetch_research_rules(self, limit: int | None = None) -> list[dict[str, Any]]:
         return self._fetch_table("research_rules", limit)
+
+    def record_virtual_research_trade(self, payload: dict[str, Any]) -> int:
+        return self._insert_payload("virtual_research_trades", payload)
+
+    def record_virtual_research_trade_once(self, payload: dict[str, Any]) -> int:
+        fields = {
+            "variant_name": payload.get("variant_name"),
+            "observation_id": payload.get("observation_id"),
+            "label_id": payload.get("label_id"),
+        }
+        if self._exists_by_fields("virtual_research_trades", fields):
+            return 0
+        return self.record_virtual_research_trade(payload)
+
+    def fetch_virtual_research_trades(self, limit: int | None = None) -> list[dict[str, Any]]:
+        return self._fetch_table("virtual_research_trades", limit)
+
+    def upsert_virtual_strategy_summary(self, payload: dict[str, Any]) -> int:
+        self._delete_by_fields("virtual_strategy_summary", {"variant_name": payload.get("variant_name")})
+        return self._insert_payload("virtual_strategy_summary", payload)
+
+    def fetch_virtual_strategy_summary(self, limit: int | None = None) -> list[dict[str, Any]]:
+        return self._fetch_table("virtual_strategy_summary", limit)
 
     def record_market_context_event(self, payload: dict[str, Any]) -> int:
         return self._insert_payload("market_context_events", payload)
