@@ -411,6 +411,11 @@ class ResearchLab:
 
         return PaperReconciler(self.config, self.db, self.logger).reconcile().to_text()
 
+    def strategy_lab(self, limit: int = 20000, safe_mode: bool = True) -> str:
+        from .strategy_lab import StrategyLab
+
+        return StrategyLab(self.db, self.logger).run(limit=limit, safe_mode=safe_mode).to_text()
+
     def build_markdown_report(
         self,
         dataset: list[dict[str, Any]] | None = None,
@@ -915,11 +920,14 @@ def main() -> None:
             "kronos-once",
             "kronos-evaluate",
             "reconcile-paper",
+            "strategy-lab",
         ],
     )
     parser.add_argument("--limit", type=int, default=None, help="Maximo de labels a procesar en phase2-persist.")
     parser.add_argument("--batch-size", type=int, default=None, help="Tamano de lote para phase2-persist.")
     parser.add_argument("--max-concurrent", type=int, default=None, help="Maximo de posiciones virtuales concurrentes.")
+    parser.add_argument("--safe-mode", action="store_true", default=True, help="Limita memoria y filas para Strategy Lab.")
+    parser.add_argument("--unsafe-mode", action="store_false", dest="safe_mode", help="Desactiva el limite seguro de Strategy Lab.")
     args = parser.parse_args()
     config = load_config()
     logger = setup_logger()
@@ -976,6 +984,9 @@ def main() -> None:
         print(lab.kronos_evaluate())
     elif args.command == "reconcile-paper":
         print(lab.reconcile_paper())
+    elif args.command == "strategy-lab":
+        limit = args.limit if args.limit is not None else 20000
+        print(lab.strategy_lab(limit=limit, safe_mode=args.safe_mode))
 
 
 if __name__ == "__main__":

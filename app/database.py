@@ -515,6 +515,75 @@ class Database:
             )
             """,
         )
+        self._execute(
+            conn,
+            """
+            CREATE TABLE IF NOT EXISTS strategy_lab_candidates (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_id TEXT,
+                candidate_name TEXT,
+                family TEXT,
+                params_json TEXT,
+                status TEXT,
+                reason TEXT,
+                total_samples INTEGER DEFAULT 0,
+                train_samples INTEGER DEFAULT 0,
+                test_samples INTEGER DEFAULT 0,
+                in_sample_profit_factor REAL DEFAULT 0,
+                out_of_sample_profit_factor REAL DEFAULT 0,
+                expectancy REAL DEFAULT 0,
+                decisive_win_rate REAL DEFAULT 0,
+                drawdown_estimated REAL DEFAULT 0,
+                sl_rate REAL DEFAULT 0,
+                tp_rate REAL DEFAULT 0,
+                time_rate REAL DEFAULT 0,
+                stability_score REAL DEFAULT 0,
+                overfit_penalty REAL DEFAULT 0,
+                conservative_score REAL DEFAULT 0,
+                created_at TEXT NOT NULL
+            )
+            """,
+        )
+        self._execute(
+            conn,
+            """
+            CREATE TABLE IF NOT EXISTS strategy_lab_walkforward (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_id TEXT,
+                candidate_name TEXT,
+                window_index INTEGER,
+                train_start TEXT,
+                train_end TEXT,
+                test_start TEXT,
+                test_end TEXT,
+                train_samples INTEGER DEFAULT 0,
+                test_samples INTEGER DEFAULT 0,
+                train_profit_factor REAL DEFAULT 0,
+                test_profit_factor REAL DEFAULT 0,
+                test_expectancy REAL DEFAULT 0,
+                test_drawdown REAL DEFAULT 0,
+                test_time_rate REAL DEFAULT 0,
+                passed INTEGER DEFAULT 0,
+                created_at TEXT NOT NULL
+            )
+            """,
+        )
+        self._execute(
+            conn,
+            """
+            CREATE TABLE IF NOT EXISTS strategy_lab_recommendations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_id TEXT,
+                recommendation_type TEXT,
+                candidate_name TEXT,
+                condition_json TEXT,
+                action TEXT,
+                evidence_score REAL DEFAULT 0,
+                explanation TEXT,
+                created_at TEXT NOT NULL
+            )
+            """,
+        )
         self._ensure_research_columns(conn)
         self._create_indexes(conn)
 
@@ -560,6 +629,9 @@ class Database:
             "CREATE INDEX IF NOT EXISTS idx_virtual_strategy_summary_variant ON virtual_strategy_summary(variant_name)",
             "CREATE INDEX IF NOT EXISTS idx_kronos_predictions_observation ON kronos_predictions(observation_id)",
             "CREATE INDEX IF NOT EXISTS idx_kronos_predictions_symbol_time ON kronos_predictions(symbol, timestamp)",
+            "CREATE INDEX IF NOT EXISTS idx_strategy_lab_candidates_run ON strategy_lab_candidates(run_id)",
+            "CREATE INDEX IF NOT EXISTS idx_strategy_lab_walkforward_run ON strategy_lab_walkforward(run_id)",
+            "CREATE INDEX IF NOT EXISTS idx_strategy_lab_recommendations_run ON strategy_lab_recommendations(run_id)",
         ]
         for sql in indexes:
             self._execute(conn, sql)
@@ -1135,6 +1207,9 @@ class Database:
             "virtual_strategy_summary",
             "kronos_predictions",
             "market_context_events",
+            "strategy_lab_candidates",
+            "strategy_lab_walkforward",
+            "strategy_lab_recommendations",
         ]
         counts: dict[str, int] = {}
         with self._connect() as conn:
@@ -1204,6 +1279,95 @@ class Database:
             JOIN signal_observations so ON so.id = sl.observation_id
             {where}
             ORDER BY sl.id ASC
+            LIMIT ? OFFSET ?
+        """
+        if self._use_postgres:
+            sql = sql.replace("?", "%s")
+        with self._connect() as conn:
+            return self._fetchall_dicts(conn.execute(sql, (limit, offset)))
+
+    def fetch_strategy_lab_rows(self, limit: int = 20000, offset: int = 0) -> list[dict[str, Any]]:
+        limit = max(0, int(limit or 0))
+        offset = max(0, int(offset or 0))
+        if limit <= 0:
+            return []
+        sql = """
+            SELECT so.*, so.id AS observation_id,
+                   sl.id AS label_id,
+                   sl.timestamp AS label_timestamp,
+                   sl.label,
+                   sl.first_barrier_hit,
+                   sl.bars_to_outcome,
+                   sl.max_favorable_excursion,
+                   sl.max_adverse_excursion,
+                   sl.realized_return_pct,
+                   sl.simulated_pnl,
+                   sl.would_have_won,
+                   spp.max_favorable_excursion_pct AS path_max_favorable_excursion_pct,
+                   spp.max_adverse_excursion_pct AS path_max_adverse_excursion_pct,
+                   spp.candles_until_exit AS path_candles_until_exit,
+                   spp.volatility_during_trade AS path_volatility_during_trade,
+                   CASE WHEN EXISTS (
+                       SELECT 1 FROM signal_counterfactuals sc
+                       WHERE sc.observation_id = so.id
+                         AND sc.label_id = sl.id
+                         AND sc.scenario_name = 'REVERSE_SIDE'
+                         AND COALESCE(sc.improved_result, 0) = 1
+                       LIMIT 1
+                   ) THEN 1 ELSE 0 END AS counterfactual_reverse_helped,
+                   CASE WHEN EXISTS (
+                       SELECT 1 FROM signal_counterfactuals sc
+                       WHERE sc.observation_id = so.id
+                         AND sc.label_id = sl.id
+                         AND COALESCE(sc.avoided_loss, 0) = 1
+                       LIMIT 1
+                   ) THEN 1 ELSE 0 END AS counterfactual_avoided_loss,
+                   CASE WHEN EXISTS (
+                       SELECT 1 FROM signal_counterfactuals sc
+                       WHERE sc.observation_id = so.id
+                         AND sc.label_id = sl.id
+                         AND sc.scenario_name IN ('CLOSER_TP_0_5X', 'CLOSER_TP_0_75X')
+                         AND COALESCE(sc.improved_result, 0) = 1
+                       LIMIT 1
+                   ) THEN 1 ELSE 0 END AS counterfactual_closer_tp_helped,
+                   CASE WHEN EXISTS (
+                       SELECT 1 FROM signal_counterfactuals sc
+                       WHERE sc.observation_id = so.id
+                         AND sc.label_id = sl.id
+                         AND sc.scenario_name IN ('WIDER_STOP_1_5X', 'WIDER_STOP_2X')
+                         AND COALESCE(sc.improved_result, 0) = 1
+                       LIMIT 1
+                   ) THEN 1 ELSE 0 END AS counterfactual_wider_stop_helped,
+                   CASE WHEN EXISTS (
+                       SELECT 1 FROM virtual_research_trades vrt
+                       WHERE vrt.observation_id = so.id
+                         AND vrt.label_id = sl.id
+                         AND COALESCE(vrt.return_pct, 0) > 0
+                       LIMIT 1
+                   ) THEN 1 ELSE 0 END AS virtual_research_positive,
+                   CASE WHEN EXISTS (
+                       SELECT 1 FROM stop_loss_failure_clusters slfc
+                       WHERE COALESCE(slfc.symbol, so.symbol) = so.symbol
+                         AND COALESCE(slfc.side, so.side) = so.side
+                         AND COALESCE(slfc.strategy_type, so.strategy_type) = so.strategy_type
+                         AND COALESCE(slfc.market_regime, so.market_regime) = so.market_regime
+                         AND COALESCE(slfc.score_bucket, so.score_bucket) = so.score_bucket
+                       LIMIT 1
+                   ) THEN 1 ELSE 0 END AS in_stop_loss_failure_cluster,
+                   CASE WHEN EXISTS (
+                       SELECT 1 FROM win_clusters wc
+                       WHERE COALESCE(wc.symbol, so.symbol) = so.symbol
+                         AND COALESCE(wc.side, so.side) = so.side
+                         AND COALESCE(wc.strategy_type, so.strategy_type) = so.strategy_type
+                         AND COALESCE(wc.market_regime, so.market_regime) = so.market_regime
+                         AND COALESCE(wc.score_bucket, so.score_bucket) = so.score_bucket
+                       LIMIT 1
+                   ) THEN 1 ELSE 0 END AS in_win_cluster
+            FROM signal_labels sl
+            JOIN signal_observations so ON so.id = sl.observation_id
+            LEFT JOIN signal_price_paths spp ON spp.observation_id = so.id AND spp.label_id = sl.id
+            WHERE so.side IN ('LONG', 'SHORT')
+            ORDER BY sl.timestamp ASC, sl.id ASC
             LIMIT ? OFFSET ?
         """
         if self._use_postgres:
@@ -1499,3 +1663,21 @@ class Database:
 
     def fetch_market_context_events(self, limit: int | None = None) -> list[dict[str, Any]]:
         return self._fetch_table("market_context_events", limit)
+
+    def record_strategy_lab_candidate(self, payload: dict[str, Any]) -> int:
+        return self._insert_payload("strategy_lab_candidates", payload)
+
+    def record_strategy_lab_walkforward(self, payload: dict[str, Any]) -> int:
+        return self._insert_payload("strategy_lab_walkforward", payload)
+
+    def record_strategy_lab_recommendation(self, payload: dict[str, Any]) -> int:
+        return self._insert_payload("strategy_lab_recommendations", payload)
+
+    def fetch_strategy_lab_candidates(self, limit: int | None = None) -> list[dict[str, Any]]:
+        return self._fetch_table("strategy_lab_candidates", limit)
+
+    def fetch_strategy_lab_walkforward(self, limit: int | None = None) -> list[dict[str, Any]]:
+        return self._fetch_table("strategy_lab_walkforward", limit)
+
+    def fetch_strategy_lab_recommendations(self, limit: int | None = None) -> list[dict[str, Any]]:
+        return self._fetch_table("strategy_lab_recommendations", limit)
