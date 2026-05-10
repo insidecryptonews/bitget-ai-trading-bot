@@ -9,6 +9,7 @@ from typing import Any
 from .bitget_client import BitgetClient
 from .config import load_config
 from .database import Database
+from .daily_summary import DailyResearchSummary
 from .execution_engine import ExecutionEngine
 from .feature_logger import FeatureLogger
 from .full_research_report import END_MARKER, START_MARKER, FullResearchReporter
@@ -82,9 +83,11 @@ def main() -> None:
     research_engine = ResearchEngine(db, logger) if config.enable_research_auto_report else None
     full_research_reporter = FullResearchReporter(db, config, logger) if config.enable_full_research_auto_report else None
     research_autopilot = ResearchAutopilot(config, db, logger) if config.enable_research_autopilot else None
+    daily_summary = DailyResearchSummary(config, db, logger) if config.enable_daily_research_summary else None
     last_research_report_at = 0.0
     last_full_research_report_at = 0.0
     last_research_autopilot_at = 0.0
+    last_daily_summary_at = 0.0
     meta_model = MetaModel(config, db, logger) if config.enable_meta_model and config.meta_model_mode != "off" else None
     if meta_model:
         labeled_rows = db.fetch_labeled_signal_rows()
@@ -154,6 +157,14 @@ def main() -> None:
             time.monotonic(),
             initial=True,
         )
+    last_daily_summary_at = _emit_daily_research_summary_if_due(
+        config,
+        daily_summary,
+        logger,
+        last_daily_summary_at,
+        time.monotonic(),
+        initial=True,
+    )
 
     while not STOP_REQUESTED:
         try:
@@ -365,6 +376,13 @@ def main() -> None:
                 last_research_autopilot_at,
                 time.monotonic(),
             )
+            last_daily_summary_at = _emit_daily_research_summary_if_due(
+                config,
+                daily_summary,
+                logger,
+                last_daily_summary_at,
+                time.monotonic(),
+            )
             elapsed = time.time() - cycle_start
             sleep_for = max(1, config.scan_interval_seconds - elapsed)
             time.sleep(sleep_for)
@@ -458,6 +476,30 @@ def _emit_research_autopilot_if_due(
 
     Thread(target=_run, name="research-autopilot", daemon=True).start()
     logger.info("Research autopilot programado en background.")
+    return now
+
+
+def _emit_daily_research_summary_if_due(
+    config,
+    summary: DailyResearchSummary | None,
+    logger,
+    last_summary_at: float,
+    now: float,
+    initial: bool = False,
+) -> float:
+    if not config.enable_daily_research_summary or summary is None:
+        return last_summary_at
+    interval_seconds = max(1, config.daily_research_summary_interval_hours) * 3600
+    if not initial and last_summary_at > 0 and now - last_summary_at < interval_seconds:
+        return last_summary_at
+    try:
+        logger.info("%s", summary.build(hours=config.daily_research_summary_window_hours))
+        if initial:
+            logger.info("Daily research summary inicial generado")
+        else:
+            logger.info("Daily research summary periodico generado")
+    except Exception as exc:
+        logger.warning("No se pudo generar daily research summary: %s", exc)
     return now
 
 

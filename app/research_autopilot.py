@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from typing import Any
 
 from .config import BotConfig
 from .database import Database
 from .phase2_persist import Phase2PersistResult, Phase2Persister
+from .utils import iso_utc
 from .virtual_portfolio import VirtualPortfolioResearch, VirtualPortfolioResult
 
 
@@ -48,12 +50,17 @@ class ResearchAutopilot:
         self.running = False
 
     def run_once(self) -> ResearchAutopilotResult:
+        started_at = iso_utc()
+        started_monotonic = time.monotonic()
+        run_id = self._record_run_started(started_at)
         result = ResearchAutopilotResult()
+        failure_reasons: list[str] = []
         try:
             result.pending_labels = self.db.count_phase2_pending_labels()
         except Exception as exc:
             self._warn("research autopilot no pudo contar labels pendientes: %s", exc)
             result.errors += 1
+            failure_reasons.append(f"pending_count: {exc}")
         try:
             result.phase2 = Phase2Persister(self.db, self.logger).persist(
                 limit=self.config.research_autopilot_phase2_limit_per_run,
@@ -63,6 +70,7 @@ class ResearchAutopilot:
         except Exception as exc:
             self._warn("research autopilot phase2-persist fallo: %s", exc)
             result.errors += 1
+            failure_reasons.append(f"phase2: {exc}")
         if self.config.enable_virtual_position_research:
             try:
                 result.virtual = VirtualPortfolioResearch(self.db, self.logger).simulate(
@@ -72,7 +80,54 @@ class ResearchAutopilot:
             except Exception as exc:
                 self._warn("research autopilot virtual portfolio fallo: %s", exc)
                 result.errors += 1
+                failure_reasons.append(f"virtual: {exc}")
+        self._record_run_finished(run_id, result, started_monotonic, failure_reasons)
         return result
+
+    def _record_run_started(self, started_at: str) -> int:
+        try:
+            return self.db.record_research_autopilot_run_started(
+                {
+                    "started_at": started_at,
+                    "status": "STARTED",
+                    "phase2_limit": self.config.research_autopilot_phase2_limit_per_run,
+                    "batch_size": self.config.research_autopilot_batch_size,
+                    "virtual_limit": self.config.virtual_portfolio_max_labels_per_run,
+                    "virtual_concurrency": self.config.virtual_max_concurrent_positions,
+                }
+            )
+        except Exception as exc:
+            self._warn("research autopilot no pudo registrar STARTED: %s", exc)
+            return 0
+
+    def _record_run_finished(
+        self,
+        run_id: int,
+        result: ResearchAutopilotResult,
+        started_monotonic: float,
+        failure_reasons: list[str],
+    ) -> None:
+        phase2 = result.phase2 or Phase2PersistResult()
+        virtual = result.virtual or VirtualPortfolioResult()
+        total_errors = result.errors + phase2.errors + virtual.errors
+        status = "FAILED" if total_errors else "COMPLETED"
+        try:
+            self.db.update_research_autopilot_run(
+                run_id,
+                ended_at=iso_utc(),
+                status=status,
+                duration_seconds=max(0.0, time.monotonic() - started_monotonic),
+                processed=phase2.processed_labels,
+                explanations_created=phase2.explanations_created,
+                counterfactuals_created=phase2.counterfactuals_created,
+                clusters_updated=phase2.stop_loss_clusters_updated + phase2.win_clusters_updated,
+                rules_generated=phase2.research_rules_generated,
+                virtual_trades_simulated=virtual.virtual_trades_simulated,
+                errors=total_errors,
+                failure_reason="; ".join(failure_reasons)[:1000],
+            )
+        except Exception as exc:
+            self._warn("research autopilot no pudo registrar cierre: %s", exc)
 
     def _warn(self, message: str, *args: Any) -> None:
         if self.logger:

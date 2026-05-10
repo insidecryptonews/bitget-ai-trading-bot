@@ -416,6 +416,11 @@ class ResearchLab:
 
         return StrategyLab(self.db, self.logger).run(limit=limit, safe_mode=safe_mode).to_text()
 
+    def daily_summary(self, hours: int = 24) -> str:
+        from .daily_summary import DailyResearchSummary
+
+        return DailyResearchSummary(self.config, self.db, self.logger).build(hours=hours)
+
     def build_markdown_report(
         self,
         dataset: list[dict[str, Any]] | None = None,
@@ -921,11 +926,13 @@ def main() -> None:
             "kronos-evaluate",
             "reconcile-paper",
             "strategy-lab",
+            "daily-summary",
         ],
     )
     parser.add_argument("--limit", type=int, default=None, help="Maximo de labels a procesar en phase2-persist.")
     parser.add_argument("--batch-size", type=int, default=None, help="Tamano de lote para phase2-persist.")
     parser.add_argument("--max-concurrent", type=int, default=None, help="Maximo de posiciones virtuales concurrentes.")
+    parser.add_argument("--hours", type=int, default=24, help="Ventana de horas para daily-summary.")
     parser.add_argument("--safe-mode", action="store_true", default=True, help="Limita memoria y filas para Strategy Lab.")
     parser.add_argument("--unsafe-mode", action="store_false", dest="safe_mode", help="Desactiva el limite seguro de Strategy Lab.")
     args = parser.parse_args()
@@ -987,6 +994,8 @@ def main() -> None:
     elif args.command == "strategy-lab":
         limit = args.limit if args.limit is not None else 20000
         print(lab.strategy_lab(limit=limit, safe_mode=args.safe_mode))
+    elif args.command == "daily-summary":
+        print(lab.daily_summary(hours=args.hours))
 
 
 if __name__ == "__main__":
