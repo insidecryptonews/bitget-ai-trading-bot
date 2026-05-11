@@ -53,6 +53,8 @@ def main() -> None:
     telegram = TelegramAlerts(config, logger)
     health = HealthState(mode=config.mode)
     start_health_server(health, config.port, logger)
+    if config.worker_lightweight_mode:
+        logger.info("WORKER_LIGHTWEIGHT_MODE activo: research pesado desactivado en worker 24/7")
 
     if config.live_trading and config.dry_run:
         logger.warning("LIVE_TRADING activo pero DRY_RUN=true: no se enviarán órdenes reales.")
@@ -89,7 +91,7 @@ def main() -> None:
     last_research_autopilot_at = 0.0
     last_daily_summary_at = 0.0
     meta_model = MetaModel(config, db, logger) if config.enable_meta_model and config.meta_model_mode != "off" else None
-    if meta_model:
+    if meta_model and config.meta_model_train_on_start and not config.worker_lightweight_mode:
         labeled_rows = db.fetch_labeled_signal_rows()
         meta_model.train(labeled_rows)
         logger.info("MetaModel: %s", meta_model.training_reason)
@@ -147,7 +149,8 @@ def main() -> None:
     logger.info("Símbolos activos: %s", ", ".join(valid_symbols))
     logger.info("Advertencia: live trading sin backtest validado aumenta el riesgo. Ejecuta backtests antes de activar real.")
 
-    if full_research_reporter:
+    startup_monotonic = time.monotonic()
+    if full_research_reporter and config.full_research_startup_enabled and not config.worker_lightweight_mode:
         logger.info("Full research report inicial programado")
         last_full_research_report_at = _emit_full_research_auto_report_if_due(
             config,
@@ -157,17 +160,25 @@ def main() -> None:
             time.monotonic(),
             initial=True,
         )
-    last_daily_summary_at = _emit_daily_research_summary_if_due(
-        config,
-        daily_summary,
-        logger,
-        last_daily_summary_at,
-        time.monotonic(),
-        initial=True,
-    )
+    elif full_research_reporter:
+        last_full_research_report_at = startup_monotonic
+    if daily_summary and config.daily_research_summary_on_start and not config.worker_lightweight_mode:
+        last_daily_summary_at = _emit_daily_research_summary_if_due(
+            config,
+            daily_summary,
+            logger,
+            last_daily_summary_at,
+            time.monotonic(),
+            initial=True,
+        )
+    elif daily_summary:
+        last_daily_summary_at = startup_monotonic
 
+    cycle_count = 0
+    last_memory_log_at = startup_monotonic
     while not STOP_REQUESTED:
         try:
+            cycle_count += 1
             cycle_start = time.time()
             news = news_intel.check()
             snapshots = market_data.fetch_all(valid_symbols)
@@ -202,7 +213,8 @@ def main() -> None:
                         )
             if labeler:
                 _label_matured_observations(config, db, labeler, snapshots, logger)
-            _print_radar(signals, snapshots, regime.regime, logger)
+            if _should_print_radar(config, cycle_count, signals):
+                _print_radar(signals, snapshots, regime.regime, logger)
 
             interesting = [s for s in signals if s.confidence_score >= config.min_score_to_alert]
             for signal_item in interesting:
@@ -383,6 +395,7 @@ def main() -> None:
                 last_daily_summary_at,
                 time.monotonic(),
             )
+            last_memory_log_at = _log_memory_if_due(config, logger, last_memory_log_at, time.monotonic())
             elapsed = time.time() - cycle_start
             sleep_for = max(1, config.scan_interval_seconds - elapsed)
             time.sleep(sleep_for)
@@ -521,6 +534,32 @@ def _full_research_report_mode(config, initial: bool) -> str:
     if config.full_research_report_mode == "heavy" and config.full_research_heavy_report_enabled:
         return "heavy"
     return "compact"
+
+
+def _should_print_radar(config, cycle_count: int, signals: list[Signal]) -> bool:
+    every = max(1, int(config.radar_log_every_n_cycles or 1))
+    if cycle_count % every == 0:
+        return True
+    return any(
+        signal.side != "NO_TRADE" and signal.confidence_score >= config.min_score_to_alert
+        for signal in signals
+    )
+
+
+def _log_memory_if_due(config, logger, last_log_at: float, now: float) -> float:
+    interval_seconds = max(1, int(config.memory_log_interval_minutes or 5)) * 60
+    if last_log_at > 0 and now - last_log_at < interval_seconds:
+        return last_log_at
+    try:
+        import resource  # type: ignore
+
+        usage = resource.getrusage(resource.RUSAGE_SELF)
+        rss = float(getattr(usage, "ru_maxrss", 0.0) or 0.0)
+        rss_mb = rss / 1024.0
+        logger.info("Worker memory lightweight check: max_rss_mb=%.2f", rss_mb)
+    except Exception:
+        return now
+    return now
 
 
 def _load_instruments(symbols: list[str], client: BitgetClient, logger, require_real_validation: bool) -> dict[str, InstrumentRules]:

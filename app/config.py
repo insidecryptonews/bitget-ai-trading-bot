@@ -91,13 +91,16 @@ class BotConfig:
 
     enable_feature_logging: bool = True
     enable_signal_labeling: bool = True
+    worker_lightweight_mode: bool = True
     enable_meta_model: bool = False
+    meta_model_train_on_start: bool = False
     enable_research_auto_report: bool = True
     research_report_interval_minutes: int = 60
     enable_full_research_auto_report: bool = True
     full_research_report_interval_minutes: int = 60
     full_research_report_mode: str = "compact"
     full_research_startup_mode: str = "compact"
+    full_research_startup_enabled: bool = False
     full_research_section_timeout_seconds: int = 10
     full_research_heavy_report_enabled: bool = False
     enable_phase2_persist: bool = False
@@ -112,6 +115,7 @@ class BotConfig:
     virtual_max_concurrent_positions: int = 1000
     virtual_portfolio_max_labels_per_run: int = 50000
     enable_daily_research_summary: bool = True
+    daily_research_summary_on_start: bool = False
     daily_research_summary_interval_hours: int = 6
     daily_research_summary_window_hours: int = 24
     stale_paper_trade_hours: int = 12
@@ -133,6 +137,8 @@ class BotConfig:
     meta_model_mode: str = "observe_only"
     max_holding_bars: int = 48
     label_use_tp2: bool = False
+    radar_log_every_n_cycles: int = 3
+    memory_log_interval_minutes: int = 5
 
     symbols: list[str] = field(default_factory=lambda: [
         "BTCUSDT",
@@ -215,6 +221,42 @@ def load_config(load_dotenv_file: bool = True) -> BotConfig:
 
     max_leverage = min(env_int(os.getenv("MAX_LEVERAGE"), 5), 5)
     default_leverage = min(env_int(os.getenv("DEFAULT_LEVERAGE"), 3), max_leverage)
+    worker_lightweight_mode = env_bool(os.getenv("WORKER_LIGHTWEIGHT_MODE"), True)
+
+    paper_trading = env_bool(os.getenv("PAPER_TRADING"), True)
+    live_trading = env_bool(os.getenv("LIVE_TRADING"), False)
+    dry_run = env_bool(os.getenv("DRY_RUN"), True)
+    enable_feature_logging = env_bool(os.getenv("ENABLE_FEATURE_LOGGING"), True)
+    enable_signal_labeling = env_bool(os.getenv("ENABLE_SIGNAL_LABELING"), True)
+    enable_meta_model = env_bool(os.getenv("ENABLE_META_MODEL"), False)
+    enable_research_auto_report = env_bool(os.getenv("ENABLE_RESEARCH_AUTO_REPORT"), True)
+    enable_full_research_auto_report = env_bool(os.getenv("ENABLE_FULL_RESEARCH_AUTO_REPORT"), True)
+    enable_daily_research_summary = env_bool(os.getenv("ENABLE_DAILY_RESEARCH_SUMMARY"), True)
+    enable_research_autopilot = env_bool(os.getenv("ENABLE_RESEARCH_AUTOPILOT"), False)
+    enable_phase2_persist = env_bool(os.getenv("ENABLE_PHASE2_PERSIST"), False)
+    enable_kronos_research = env_bool(os.getenv("ENABLE_KRONOS_RESEARCH"), False)
+    enable_paper_reconcile_on_start = env_bool(os.getenv("ENABLE_PAPER_RECONCILE_ON_START"), False)
+    meta_model_train_on_start = env_bool(os.getenv("META_MODEL_TRAIN_ON_START"), False)
+    full_research_startup_enabled = env_bool(os.getenv("FULL_RESEARCH_STARTUP_ENABLED"), False)
+    daily_research_summary_on_start = env_bool(os.getenv("DAILY_RESEARCH_SUMMARY_ON_START"), False)
+
+    if worker_lightweight_mode:
+        paper_trading = True
+        live_trading = False
+        dry_run = True
+        enable_feature_logging = True
+        enable_signal_labeling = True
+        enable_meta_model = False
+        enable_research_auto_report = False
+        enable_full_research_auto_report = False
+        enable_daily_research_summary = False
+        enable_research_autopilot = False
+        enable_phase2_persist = False
+        enable_kronos_research = False
+        enable_paper_reconcile_on_start = False
+        meta_model_train_on_start = False
+        full_research_startup_enabled = False
+        daily_research_summary_on_start = False
 
     return BotConfig(
         bitget_api_key=os.getenv("BITGET_API_KEY", ""),
@@ -225,9 +267,9 @@ def load_config(load_dotenv_file: bool = True) -> BotConfig:
         force_isolated_margin=env_bool(os.getenv("FORCE_ISOLATED_MARGIN"), True),
         disallow_crossed_margin=env_bool(os.getenv("DISALLOW_CROSSED_MARGIN"), True),
         auto_margin=env_bool(os.getenv("AUTO_MARGIN"), False),
-        paper_trading=env_bool(os.getenv("PAPER_TRADING"), True),
-        live_trading=env_bool(os.getenv("LIVE_TRADING"), False),
-        dry_run=env_bool(os.getenv("DRY_RUN"), True),
+        paper_trading=paper_trading,
+        live_trading=live_trading,
+        dry_run=dry_run,
         starting_capital_usdt=env_float(os.getenv("STARTING_CAPITAL_USDT"), 40.0),
         risk_profile=os.getenv("RISK_PROFILE", "aggressive_small_account"),
         default_leverage=default_leverage,
@@ -277,33 +319,37 @@ def load_config(load_dotenv_file: bool = True) -> BotConfig:
         enable_news_intel=env_bool(os.getenv("ENABLE_NEWS_INTEL"), False),
         news_api_key=os.getenv("NEWS_API_KEY", ""),
         sentiment_api_key=os.getenv("SENTIMENT_API_KEY", ""),
-        enable_feature_logging=env_bool(os.getenv("ENABLE_FEATURE_LOGGING"), True),
-        enable_signal_labeling=env_bool(os.getenv("ENABLE_SIGNAL_LABELING"), True),
-        enable_meta_model=env_bool(os.getenv("ENABLE_META_MODEL"), False),
-        enable_research_auto_report=env_bool(os.getenv("ENABLE_RESEARCH_AUTO_REPORT"), True),
+        enable_feature_logging=enable_feature_logging,
+        enable_signal_labeling=enable_signal_labeling,
+        worker_lightweight_mode=worker_lightweight_mode,
+        enable_meta_model=enable_meta_model,
+        meta_model_train_on_start=meta_model_train_on_start,
+        enable_research_auto_report=enable_research_auto_report,
         research_report_interval_minutes=env_int(os.getenv("RESEARCH_REPORT_INTERVAL_MINUTES"), 60),
-        enable_full_research_auto_report=env_bool(os.getenv("ENABLE_FULL_RESEARCH_AUTO_REPORT"), True),
+        enable_full_research_auto_report=enable_full_research_auto_report,
         full_research_report_interval_minutes=env_int(os.getenv("FULL_RESEARCH_REPORT_INTERVAL_MINUTES"), 60),
         full_research_report_mode=os.getenv("FULL_RESEARCH_REPORT_MODE", "compact"),
         full_research_startup_mode=os.getenv("FULL_RESEARCH_STARTUP_MODE", "compact"),
+        full_research_startup_enabled=full_research_startup_enabled,
         full_research_section_timeout_seconds=env_int(os.getenv("FULL_RESEARCH_SECTION_TIMEOUT_SECONDS"), 10),
         full_research_heavy_report_enabled=env_bool(os.getenv("FULL_RESEARCH_HEAVY_REPORT_ENABLED"), False),
-        enable_phase2_persist=env_bool(os.getenv("ENABLE_PHASE2_PERSIST"), False),
+        enable_phase2_persist=enable_phase2_persist,
         phase2_persist_batch_size=env_int(os.getenv("PHASE2_PERSIST_BATCH_SIZE"), 250),
         phase2_persist_max_labels_per_run=env_int(os.getenv("PHASE2_PERSIST_MAX_LABELS_PER_RUN"), 5000),
-        enable_paper_reconcile_on_start=env_bool(os.getenv("ENABLE_PAPER_RECONCILE_ON_START"), False),
-        enable_research_autopilot=env_bool(os.getenv("ENABLE_RESEARCH_AUTOPILOT"), False),
+        enable_paper_reconcile_on_start=enable_paper_reconcile_on_start,
+        enable_research_autopilot=enable_research_autopilot,
         research_autopilot_interval_minutes=env_int(os.getenv("RESEARCH_AUTOPILOT_INTERVAL_MINUTES"), 60),
         research_autopilot_phase2_limit_per_run=env_int(os.getenv("RESEARCH_AUTOPILOT_PHASE2_LIMIT_PER_RUN"), 5000),
         research_autopilot_batch_size=env_int(os.getenv("RESEARCH_AUTOPILOT_BATCH_SIZE"), 250),
         enable_virtual_position_research=env_bool(os.getenv("ENABLE_VIRTUAL_POSITION_RESEARCH"), True),
         virtual_max_concurrent_positions=env_int(os.getenv("VIRTUAL_MAX_CONCURRENT_POSITIONS"), 1000),
         virtual_portfolio_max_labels_per_run=env_int(os.getenv("VIRTUAL_PORTFOLIO_MAX_LABELS_PER_RUN"), 50000),
-        enable_daily_research_summary=env_bool(os.getenv("ENABLE_DAILY_RESEARCH_SUMMARY"), True),
+        enable_daily_research_summary=enable_daily_research_summary,
+        daily_research_summary_on_start=daily_research_summary_on_start,
         daily_research_summary_interval_hours=env_int(os.getenv("DAILY_RESEARCH_SUMMARY_INTERVAL_HOURS"), 6),
         daily_research_summary_window_hours=env_int(os.getenv("DAILY_RESEARCH_SUMMARY_WINDOW_HOURS"), 24),
         stale_paper_trade_hours=env_int(os.getenv("STALE_PAPER_TRADE_HOURS"), 12),
-        enable_kronos_research=env_bool(os.getenv("ENABLE_KRONOS_RESEARCH"), False),
+        enable_kronos_research=enable_kronos_research,
         kronos_model_name=os.getenv("KRONOS_MODEL_NAME", "NeoQuasar/Kronos-mini"),
         kronos_tokenizer_name=os.getenv("KRONOS_TOKENIZER_NAME", "NeoQuasar/Kronos-Tokenizer-base"),
         kronos_device=os.getenv("KRONOS_DEVICE", "auto"),
@@ -321,6 +367,8 @@ def load_config(load_dotenv_file: bool = True) -> BotConfig:
         meta_model_mode=os.getenv("META_MODEL_MODE", "observe_only"),
         max_holding_bars=env_int(os.getenv("MAX_HOLDING_BARS"), 48),
         label_use_tp2=env_bool(os.getenv("LABEL_USE_TP2"), False),
+        radar_log_every_n_cycles=env_int(os.getenv("RADAR_LOG_EVERY_N_CYCLES"), 3),
+        memory_log_interval_minutes=env_int(os.getenv("MEMORY_LOG_INTERVAL_MINUTES"), 5),
         symbols=parse_csv_symbols(
             os.getenv(
                 "SYMBOLS",
