@@ -97,7 +97,7 @@ def main() -> None:
         logger.info("MetaModel: %s", meta_model.training_reason)
 
     if paper_trader:
-        if config.enable_paper_reconcile_on_start:
+        if config.enable_paper_reconcile_on_start or config.lightweight_paper_reconcile_on_start:
             try:
                 logger.info("%s", PaperReconciler(config, db, logger).reconcile().to_text())
             except Exception as exc:

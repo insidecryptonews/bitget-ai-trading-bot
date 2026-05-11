@@ -17,6 +17,7 @@ LIGHTWEIGHT_ENV_KEYS = [
     "ENABLE_PHASE2_PERSIST",
     "ENABLE_KRONOS_RESEARCH",
     "ENABLE_PAPER_RECONCILE_ON_START",
+    "LIGHTWEIGHT_PAPER_RECONCILE_ON_START",
     "FULL_RESEARCH_STARTUP_ENABLED",
     "DAILY_RESEARCH_SUMMARY_ON_START",
 ]
@@ -79,9 +80,26 @@ def test_worker_lightweight_forces_kronos_and_reconcile_off(monkeypatch):
         WORKER_LIGHTWEIGHT_MODE="true",
         ENABLE_KRONOS_RESEARCH="true",
         ENABLE_PAPER_RECONCILE_ON_START="true",
+        LIGHTWEIGHT_PAPER_RECONCILE_ON_START="true",
     )
     assert config.enable_kronos_research is False
     assert config.enable_paper_reconcile_on_start is False
+    assert config.lightweight_paper_reconcile_on_start is True
+
+
+def test_lightweight_paper_reconcile_default_true():
+    assert BotConfig().lightweight_paper_reconcile_on_start is True
+
+
+def test_worker_lightweight_does_not_disable_safe_paper_reconcile(monkeypatch):
+    config = load_without_env(
+        monkeypatch,
+        WORKER_LIGHTWEIGHT_MODE="true",
+        ENABLE_PAPER_RECONCILE_ON_START="false",
+    )
+    assert config.worker_lightweight_mode is True
+    assert config.enable_paper_reconcile_on_start is False
+    assert config.lightweight_paper_reconcile_on_start is True
 
 
 def test_worker_lightweight_keeps_safe_trading_modes(monkeypatch):
