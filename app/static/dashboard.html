@@ -188,6 +188,18 @@
         <div class="actions"><button id="opportunityBtn">Actualizar shadow opportunity 24h</button></div>
         <pre id="opportunityText">Sin cargar todavía.</pre>
       </div>
+      <div class="card full">
+        <h2>Edge Guard</h2>
+        <div class="actions"><button id="edgeGuardBtn">Actualizar edge guard 24h</button></div>
+        <pre id="edgeGuardText">Sin cargar todavía.</pre>
+        <table><thead><tr><th>group</th><th>type</th><th>labels</th><th>PF</th><th>TIME%</th><th>SL%</th><th>TP%</th><th>decision</th><th>reason</th></tr></thead><tbody id="edgeCandidateRows"></tbody></table>
+      </div>
+      <div class="card full">
+        <h2>TP/SL Horizon Lab</h2>
+        <div class="actions"><button id="tpSlBtn">Actualizar TP/SL Lab 24h</button></div>
+        <div id="scoreCalibration"></div>
+        <pre id="tpSlText">Sin cargar todavía.</pre>
+      </div>
     </section>
   </main>
   <script>
@@ -333,6 +345,36 @@
       if (!rows.length) { body.innerHTML = `<tr><td colspan="${keys.length}">none</td></tr>`; return; }
       body.innerHTML = rows.map((row) => `<tr>${keys.map((key) => `<td>${escapeHtml(value(row[key], ""))}</td>`).join("")}</tr>`).join("");
     }
+    function renderEdgeCandidates(rows) {
+      const body = byId("edgeCandidateRows");
+      if (!rows || !rows.length) { body.innerHTML = `<tr><td colspan="9">none</td></tr>`; return; }
+      body.innerHTML = rows.slice(0, 20).map((row) => `<tr>
+        <td>${escapeHtml(value(row.group_value, ""))}</td>
+        <td>${escapeHtml(value(row.group_type, ""))}</td>
+        <td>${escapeHtml(value(row.total_labels, 0))}</td>
+        <td>${Number(row.profit_factor || 0).toFixed(2)}</td>
+        <td>${pct(row.time_ratio)}</td>
+        <td>${pct(row.sl_ratio)}</td>
+        <td>${pct(row.tp_ratio)}</td>
+        <td>${escapeHtml(value(row.decision, ""))}</td>
+        <td>${escapeHtml(value(row.reason, ""))}</td>
+      </tr>`).join("");
+    }
+    function renderScoreCalibration(rows) {
+      if (!rows || !rows.length) {
+        byId("scoreCalibration").innerHTML = metric("score calibration", "insufficient data", "warn");
+        return;
+      }
+      const byBucket = {};
+      rows.forEach((row) => { byBucket[row.group_value] = row; });
+      const pf80 = Number((byBucket["80-89"] || {}).profit_factor || 0);
+      const pf90 = Number((byBucket["90-100"] || {}).profit_factor || 0);
+      const warning = pf80 > 0 && pf90 > 0 && pf80 > pf90 ? metric("warning", "score_not_monotonic: 80-89 mejor que 90-100", "warn") : "";
+      byId("scoreCalibration").innerHTML = ["70-79", "80-89", "90-100"].map((bucket) => {
+        const row = byBucket[bucket] || {};
+        return metric(bucket, `PF=${Number(row.profit_factor || 0).toFixed(2)} TP=${pct(row.tp_ratio)} TIME=${pct(row.time_ratio)} SL=${pct(row.sl_ratio)}`);
+      }).join("") + warning;
+    }
     async function refresh() {
       try { render(await fetchJson("/api/training/status")); }
       catch (err) { setOnline(false, `offline · ${err.message}`); }
@@ -352,9 +394,29 @@
       try { byId("opportunityText").textContent = (await fetchJson("/api/training/shadow-opportunity?hours=24")).text || "Sin datos."; }
       catch (err) { byId("opportunityText").textContent = `Error: ${err.message}`; }
     }
+    async function loadEdgeGuard() {
+      byId("edgeGuardText").textContent = "Cargando...";
+      try {
+        const data = await fetchJson("/api/training/edge-guard?hours=24");
+        byId("edgeGuardText").textContent = data.text || "Sin datos.";
+        renderEdgeCandidates(data.candidate_table || []);
+      }
+      catch (err) { byId("edgeGuardText").textContent = `Error: ${err.message}`; }
+    }
+    async function loadTpSl() {
+      byId("tpSlText").textContent = "Cargando...";
+      try {
+        const data = await fetchJson("/api/training/tp-sl-lab?hours=24");
+        byId("tpSlText").textContent = data.text || "Sin datos.";
+        renderScoreCalibration(data.by_score_bucket || []);
+      }
+      catch (err) { byId("tpSlText").textContent = `Error: ${err.message}`; }
+    }
     byId("summaryBtn").addEventListener("click", loadSummary);
     byId("planBtn").addEventListener("click", loadPlan);
     byId("opportunityBtn").addEventListener("click", loadOpportunity);
+    byId("edgeGuardBtn").addEventListener("click", loadEdgeGuard);
+    byId("tpSlBtn").addEventListener("click", loadTpSl);
     refresh();
     loadSummary();
     loadPlan();

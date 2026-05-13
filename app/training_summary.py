@@ -125,11 +125,24 @@ class TrainingSummary:
             min_score=self.config.min_score_to_trade,
             limit=5,
         )
-        biggest = _biggest_problem(self.config, labels, events, observations)
+        candidate_groups = []
+        for group_key in ("symbol", "market_regime", "score_bucket"):
+            candidate_groups.extend(
+                self.db.get_shadow_opportunity_group_summaries_since(
+                    window["since"],
+                    min_score=self.config.min_score_to_trade,
+                    group_key=group_key,
+                    limit=10,
+                )
+            )
+        score_groups = [row for row in candidate_groups if str(row.get("group_value")) in {"70-79", "80-89", "90-100"}]
+        score_not_monotonic = _score_not_monotonic(score_groups)
+        biggest = _biggest_problem(self.config, labels, events, observations, candidate_groups)
         lines = [
             PLAN_START,
             f"hours: {window['hours']}",
             f"biggest_problem: {biggest}",
+            f"score_not_monotonic: {str(score_not_monotonic).lower()}",
             "suggested_next_research:",
             *_plan_steps(biggest),
             "do_not_change:",
@@ -164,7 +177,13 @@ def _recommendation(labels: dict[str, Any], events: dict[str, int]) -> str:
     return "PAPER ONLY"
 
 
-def _biggest_problem(config: BotConfig, labels: dict[str, Any], events: dict[str, int], observations: dict[str, Any]) -> str:
+def _biggest_problem(
+    config: BotConfig,
+    labels: dict[str, Any],
+    events: dict[str, int],
+    observations: dict[str, Any],
+    candidate_groups: list[dict[str, Any]] | None = None,
+) -> str:
     if config.live_trading:
         return "safety_live"
     total = safe_float(labels.get("total_labels"))
@@ -172,6 +191,12 @@ def _biggest_problem(config: BotConfig, labels: dict[str, Any], events: dict[str
         return "no_data"
     metrics = _label_metrics(labels)
     if total > 0 and safe_float(labels.get("profit_factor")) < 1.0:
+        if any(
+            safe_int(row.get("total_labels")) >= config.edge_guard_min_sample
+            and safe_float(row.get("profit_factor")) > 1.2
+            for row in (candidate_groups or [])
+        ):
+            return "poor_edge_but_candidates_exist"
         return "poor_edge"
     if total > 0 and metrics["tp_ratio"] < 0.05:
         return "low_tp_rate"
@@ -201,12 +226,12 @@ def _plan_steps(problem: str) -> list[str]:
             "2. mantener backoff activo",
             "3. no lanzar research pesado en worker",
         ]
-    if problem in {"poor_edge", "low_tp_rate", "too_many_time", "too_many_sl"}:
+    if problem in {"poor_edge", "poor_edge_but_candidates_exist", "low_tp_rate", "too_many_time", "too_many_sl"}:
         return [
-            "1. ejecutar shadow-opportunity --hours 24",
-            "2. analizar por simbolo/regimen/score bucket",
-            "3. no ampliar slots hasta PF>1 y TP rate suficiente",
-            "4. revisar filtros de CHOPPY/RANGE/TREND_DOWN",
+            "1. ejecutar edge-guard --hours 24",
+            "2. ejecutar tp-sl-lab --hours 24",
+            "3. mantener paper slots igual; no ampliar slots hasta PF>1 y TP rate suficiente",
+            "4. habilitar edge guard paper filter solo despues de revisar dashboard y tests, no automaticamente",
             "5. revisar scoring high_score porque muchos score altos no llegan a TP",
         ]
     if problem in {"TIME", "SL"}:
@@ -232,6 +257,13 @@ def _label_metrics(labels: dict[str, Any]) -> dict[str, float]:
         "sl_ratio": sl / max(total, 1.0) if total else 0.0,
         "tp_ratio": tp / max(total, 1.0) if total else 0.0,
     }
+
+
+def _score_not_monotonic(rows: list[dict[str, Any]]) -> bool:
+    by_bucket = {str(row.get("group_value")): row for row in rows}
+    pf_80 = safe_float(by_bucket.get("80-89", {}).get("profit_factor"))
+    pf_90 = safe_float(by_bucket.get("90-100", {}).get("profit_factor"))
+    return bool(pf_80 > 0 and pf_90 > 0 and pf_80 > pf_90)
 
 
 def _rows_to_lines(rows: list[dict[str, Any]]) -> list[str]:

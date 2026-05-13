@@ -436,6 +436,16 @@ class ResearchLab:
 
         return ShadowOpportunityLab(self.config, self.db).to_text(hours=hours)
 
+    def edge_guard(self, hours: int = 24) -> str:
+        from .edge_guard import EdgeGuard
+
+        return EdgeGuard(self.config, self.db).to_text(hours=hours)
+
+    def tp_sl_lab(self, hours: int = 24) -> str:
+        from .tp_sl_horizon_lab import TpSlHorizonLab
+
+        return TpSlHorizonLab(self.config, self.db).to_text(hours=hours)
+
     def build_markdown_report(
         self,
         dataset: list[dict[str, Any]] | None = None,
@@ -945,6 +955,8 @@ def main() -> None:
             "training-summary",
             "acceleration-plan",
             "shadow-opportunity",
+            "edge-guard",
+            "tp-sl-lab",
         ],
     )
     parser.add_argument("--limit", type=int, default=None, help="Maximo de labels a procesar en phase2-persist.")
@@ -1020,6 +1032,10 @@ def main() -> None:
         print(lab.acceleration_plan(hours=args.hours))
     elif args.command == "shadow-opportunity":
         print(lab.shadow_opportunity(hours=args.hours))
+    elif args.command == "edge-guard":
+        print(lab.edge_guard(hours=args.hours))
+    elif args.command == "tp-sl-lab":
+        print(lab.tp_sl_lab(hours=args.hours))
 
 
 if __name__ == "__main__":

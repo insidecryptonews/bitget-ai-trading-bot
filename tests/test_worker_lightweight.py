@@ -138,6 +138,7 @@ def test_worker_lightweight_config_defaults_safe():
     assert config.label_log_individual is False
     assert config.enable_training_dashboard is True
     assert config.enable_telegram_notifier is False
+    assert config.enable_edge_guard_paper_filter is False
 
 
 def test_worker_lightweight_keeps_research_cli_commands_available():

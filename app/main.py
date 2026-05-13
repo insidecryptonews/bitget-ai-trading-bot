@@ -10,6 +10,7 @@ from .bitget_client import BitgetClient
 from .config import load_config
 from .database import Database
 from .daily_summary import DailyResearchSummary
+from .edge_guard import EdgeGuard
 from .execution_engine import ExecutionEngine
 from .feature_logger import FeatureLogger
 from .full_research_report import END_MARKER, START_MARKER, FullResearchReporter
@@ -430,6 +431,41 @@ def main() -> None:
                         risk_manager_approved=True,
                     )
                 if config.paper_trading and paper_trader:
+                    if config.enable_edge_guard_paper_filter:
+                        edge_decision = EdgeGuard(config, db).evaluate_signal(safe_signal, regime.regime, hours=24)
+                        if not edge_decision.allows_paper:
+                            reason = f"edge_guard_{edge_decision.decision}_{edge_decision.reason}"
+                            logger.info("EdgeGuard bloquea paper %s: %s", safe_signal.symbol, reason)
+                            db.record_event(
+                                "training_edge_guard_block",
+                                "edge guard paper block",
+                                payload={
+                                    "symbol": safe_signal.symbol,
+                                    "side": safe_signal.side,
+                                    "score": safe_signal.confidence_score,
+                                    "decision": edge_decision.decision,
+                                    "reason": edge_decision.reason,
+                                    "group": edge_decision.matched_group,
+                                    "group_type": edge_decision.group_type,
+                                },
+                            )
+                            _record_high_score_missed_event(
+                                db,
+                                training_pulse,
+                                safe_signal,
+                                regime.regime,
+                                reason,
+                                min_score_to_trade=config.min_score_to_trade,
+                                slot_available=True,
+                                risk_approved=True,
+                            )
+                            if feature_logger:
+                                feature_logger.update_observation(
+                                    observation_ids.get(selected_signal.symbol),
+                                    operated=False,
+                                    block_reason=reason,
+                                )
+                            continue
                     try:
                         paper_trader.open_position(safe_signal, risk.risk_amount, risk)
                         if training_pulse:

@@ -60,7 +60,15 @@ def start_health_server(
             if not _dashboard_enabled(config):
                 self._send_status(404, "not found")
                 return
-            if path in {"/dashboard", "/api/training/status", "/api/training/summary", "/api/training/acceleration-plan", "/api/training/shadow-opportunity"}:
+            if path in {
+                "/dashboard",
+                "/api/training/status",
+                "/api/training/summary",
+                "/api/training/acceleration-plan",
+                "/api/training/shadow-opportunity",
+                "/api/training/edge-guard",
+                "/api/training/tp-sl-lab",
+            }:
                 if not _authorized(config, query, self.headers):
                     self._send_json({"error": "unauthorized"}, status=401)
                     return
@@ -78,6 +86,12 @@ def start_health_server(
                 return
             if path == "/api/training/shadow-opportunity":
                 self._send_json(_shadow_opportunity(config, db, query))
+                return
+            if path == "/api/training/edge-guard":
+                self._send_json(_edge_guard(config, db, query))
+                return
+            if path == "/api/training/tp-sl-lab":
+                self._send_json(_tp_sl_lab(config, db, query))
                 return
             self._send_status(404, "not found")
 
@@ -238,6 +252,44 @@ def _shadow_opportunity(config: Any | None, db: Any | None, query: dict[str, lis
         "worst_candidates": payload.get("worst_candidates", []),
         "final_recommendation": "NO LIVE",
     }
+
+
+def _edge_guard(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
+    hours = _query_int(query, "hours", 24)
+    if config is None or db is None:
+        return {"error": "edge guard unavailable", "hours": hours, "final_recommendation": "NO LIVE"}
+    try:
+        from .edge_guard import EdgeGuard
+
+        guard = EdgeGuard(config, db)
+        payload = guard.build_edge_guard_report(hours=hours)
+        text = guard.to_text(hours=hours)
+    except Exception as exc:
+        return {"error": str(exc)[:300], "hours": hours, "final_recommendation": "NO LIVE"}
+    payload = dict(payload)
+    payload["text"] = text
+    payload["generated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    payload["final_recommendation"] = "NO LIVE"
+    return payload
+
+
+def _tp_sl_lab(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
+    hours = _query_int(query, "hours", 24)
+    if config is None or db is None:
+        return {"error": "tp/sl lab unavailable", "hours": hours, "final_recommendation": "NO LIVE"}
+    try:
+        from .tp_sl_horizon_lab import TpSlHorizonLab
+
+        lab = TpSlHorizonLab(config, db)
+        payload = lab.build(hours=hours)
+        text = lab.to_text(hours=hours)
+    except Exception as exc:
+        return {"error": str(exc)[:300], "hours": hours, "final_recommendation": "NO LIVE"}
+    payload = dict(payload)
+    payload["text"] = text
+    payload["generated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    payload["final_recommendation"] = "NO LIVE"
+    return payload
 
 
 def _open_paper_positions_detail(db: Any | None) -> list[dict[str, Any]]:

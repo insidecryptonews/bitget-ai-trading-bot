@@ -148,3 +148,27 @@ def test_shadow_opportunity_endpoint_returns_json():
     payload = json.loads(body)
     assert "SHADOW OPPORTUNITY START" in payload["text"]
     assert payload["final_recommendation"] == "NO LIVE"
+
+
+def test_edge_guard_and_tp_sl_endpoints_return_json():
+    class DummyDb:
+        def get_high_score_label_summary_since(self, *args, **kwargs):
+            return {"total_labels": 1000, "time_count": 900, "sl_count": 80, "tp1_count": 20, "tp2_count": 0, "profit_factor": 1.3}
+
+        def get_shadow_opportunity_group_summaries_since(self, *args, **kwargs):
+            return [{
+                "group_value": "ETHUSDT",
+                "total_labels": 1000,
+                "profit_factor": 1.3,
+                "time_ratio": 0.90,
+                "sl_ratio": 0.08,
+                "tp_ratio": 0.02,
+            }]
+
+    base = _start_server(BotConfig(), db=DummyDb())
+    status, body = _get(base + "/api/training/edge-guard?hours=24")
+    assert status == 200
+    assert "EDGE GUARD START" in json.loads(body)["text"]
+    status, body = _get(base + "/api/training/tp-sl-lab?hours=24")
+    assert status == 200
+    assert "TP SL HORIZON LAB START" in json.loads(body)["text"]
