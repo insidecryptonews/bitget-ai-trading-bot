@@ -150,6 +150,14 @@
         <div id="telegramMetrics"></div>
       </div>
       <div class="card wide">
+        <h2>Edge Warning</h2>
+        <div id="edgeWarning"></div>
+      </div>
+      <div class="card wide">
+        <h2>Open Paper Position</h2>
+        <div id="openPaperPosition"></div>
+      </div>
+      <div class="card wide">
         <h2>Market Regime</h2>
         <div id="regimeBars"></div>
       </div>
@@ -174,6 +182,11 @@
         <h2>Acceleration Plan</h2>
         <div class="actions"><button id="planBtn">Actualizar acceleration plan 24h</button></div>
         <pre id="planText">Sin cargar todavía.</pre>
+      </div>
+      <div class="card full">
+        <h2>Opportunity Lab</h2>
+        <div class="actions"><button id="opportunityBtn">Actualizar shadow opportunity 24h</button></div>
+        <pre id="opportunityText">Sin cargar todavía.</pre>
       </div>
     </section>
   </main>
@@ -220,7 +233,7 @@
       const h = data.health || {};
       byId("healthMetrics").innerHTML =
         metric("uptime min", h.uptime_min) +
-        metric("memory last/max", `${value(h.memory_mb_last)} / ${value(h.memory_mb_max)} MB`) +
+        metric("memory last/max", memoryText(h)) +
         metric("cycles ok/error", `${value(h.cycles_ok)} / ${value(h.cycles_error)}`, h.cycles_error ? "warn" : "good") +
         metric("API 429", h.api_429_count, h.api_429_count ? "warn" : "good") +
         metric("API errors", h.api_error_count, h.api_error_count ? "warn" : "good");
@@ -234,15 +247,21 @@
         metric("left open", p.reconcile_left_open) +
         metric("slot blocks", a.slot_blocks, a.slot_blocks ? "warn" : "good");
       const labels = data.labels || {};
+      const edge = data.edge || {};
+      const pf = edge.profit_factor === undefined ? "esperando summary" : Number(edge.profit_factor).toFixed(2);
+      const timeRatio = edge.time_ratio === undefined ? labels.time_ratio : edge.time_ratio;
+      const slRatio = edge.sl_ratio === undefined ? labels.sl_ratio : edge.sl_ratio;
+      const tpRatio = edge.tp_ratio === undefined ? labels.tp_ratio : edge.tp_ratio;
       byId("labelMetrics").innerHTML =
         metric("total", labels.total) +
         metric("TIME", labels.time) +
         metric("SL", labels.sl) +
         metric("TP1", labels.tp1) +
         metric("TP2", labels.tp2) +
-        metric("TIME ratio", pct(labels.time_ratio), labels.time_ratio > 0.8 ? "warn" : "good") +
-        metric("SL ratio", pct(labels.sl_ratio)) +
-        metric("TP ratio", pct(labels.tp_ratio));
+        metric("PF", pf, Number(edge.profit_factor || 0) < 1 ? "bad" : "good") +
+        metric("TIME ratio", pct(timeRatio), timeRatio > 0.6 ? "warn" : "good") +
+        metric("SL ratio", pct(slRatio), slRatio > tpRatio ? "bad" : "") +
+        metric("TP ratio", pct(tpRatio), tpRatio < 0.05 ? "bad" : "good");
       const s = data.signals || {};
       byId("signalMetrics").innerHTML =
         metric("LONG", s.long) +
@@ -258,6 +277,8 @@
         metric("last sent", t.last_sent_at || "never") +
         metric("sent count", t.sent_count) +
         metric("last error", t.last_error || "none", t.last_error ? "warn" : "good");
+      renderEdgeWarning(data);
+      renderOpenPaper(data.open_paper_positions_detail || [], data.paper || {});
       renderRegimes(data.regimes || {});
       byId("diagnosis").innerHTML = (data.diagnosis || []).map((x) => `<div class="metric"><span class="value info">${escapeHtml(x)}</span></div>`).join("") +
         metric("next action", data.next_action || "PAPER ONLY") +
@@ -265,6 +286,40 @@
       renderRows("topSignals", data.top_signals || [], ["symbol", "side", "score", "reason"]);
       renderRows("topBlocks", data.top_blocks || [], ["reason", "count"]);
       setOnline(true, `online · ${data.generated_at || new Date().toISOString()}`);
+    }
+    function memoryText(h) {
+      const last = Number(h.memory_mb_last || 0);
+      const max = Number(h.memory_mb_max || 0);
+      return last || max ? `${last.toFixed(2)} / ${max.toFixed(2)} MB` : "esperando medición";
+    }
+    function renderEdgeWarning(data) {
+      const edge = data.edge || {};
+      const warnings = [];
+      if (Number(edge.profit_factor || 0) < 1) warnings.push("NO AMPLIAR SLOTS: edge negativo");
+      if (Number(edge.tp_ratio || 0) < 0.05) warnings.push("Score alto no predice TP todavía");
+      if (Number(edge.time_ratio || 0) > 0.60) warnings.push("Demasiadas señales mueren por tiempo");
+      if (!warnings.length) warnings.push("PAPER ONLY: seguir observando sin ampliar slots");
+      byId("edgeWarning").innerHTML = warnings.map((x) => `<div class="metric"><span class="value ${x.includes("NO AMPLIAR") ? "bad" : "warn"}">${escapeHtml(x)}</span></div>`).join("") +
+        metric("PF 6h", edge.profit_factor === undefined ? "esperando summary" : Number(edge.profit_factor).toFixed(2));
+    }
+    function renderOpenPaper(rows, paper) {
+      if (!rows.length) {
+        byId("openPaperPosition").innerHTML = Number(paper.open_positions || 0) > 0
+          ? metric("status", "open_positions=1 pero detalle no disponible", "warn")
+          : metric("status", "sin posición paper abierta", "good");
+        return;
+      }
+      const row = rows[0] || {};
+      byId("openPaperPosition").innerHTML =
+        metric("symbol/side", `${value(row.symbol, "NA")} ${value(row.side, "")}`) +
+        metric("entry", row.entry_price) +
+        metric("SL", row.stop_loss) +
+        metric("TP1", row.take_profit_1) +
+        metric("TP2", row.take_profit_2) +
+        metric("score", row.score) +
+        metric("strategy", row.strategy || "NA") +
+        metric("opened_at", row.opened_at || "NA") +
+        metric("unrealized pnl", row.unrealized_pnl || 0);
     }
     function renderRegimes(regimes) {
       const entries = ["CHOPPY_MARKET", "RANGE", "TREND_UP", "TREND_DOWN", "RISK_OFF"].map((key) => [key, Number(regimes[key] || 0)]);
@@ -292,9 +347,17 @@
       try { byId("planText").textContent = (await fetchJson("/api/training/acceleration-plan?hours=24")).text || "Sin datos."; }
       catch (err) { byId("planText").textContent = `Error: ${err.message}`; }
     }
+    async function loadOpportunity() {
+      byId("opportunityText").textContent = "Cargando...";
+      try { byId("opportunityText").textContent = (await fetchJson("/api/training/shadow-opportunity?hours=24")).text || "Sin datos."; }
+      catch (err) { byId("opportunityText").textContent = `Error: ${err.message}`; }
+    }
     byId("summaryBtn").addEventListener("click", loadSummary);
     byId("planBtn").addEventListener("click", loadPlan);
+    byId("opportunityBtn").addEventListener("click", loadOpportunity);
     refresh();
+    loadSummary();
+    loadPlan();
     setInterval(refresh, REFRESH_SECONDS * 1000);
   </script>
 </body>

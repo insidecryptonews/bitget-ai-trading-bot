@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 from contextlib import contextmanager
 from dataclasses import asdict, is_dataclass
@@ -1202,6 +1203,136 @@ class Database:
         except Exception:
             return self._empty_signal_label_summary()
 
+    def get_high_score_label_summary_since(self, since_iso: str, min_score: int = 72) -> dict[str, float]:
+        sql = """
+            SELECT
+                COUNT(*) AS total_labels,
+                SUM(CASE WHEN sl.first_barrier_hit = 'TIME' THEN 1 ELSE 0 END) AS time_count,
+                SUM(CASE WHEN sl.first_barrier_hit = 'SL' THEN 1 ELSE 0 END) AS sl_count,
+                SUM(CASE WHEN sl.first_barrier_hit = 'TP1' THEN 1 ELSE 0 END) AS tp1_count,
+                SUM(CASE WHEN sl.first_barrier_hit = 'TP2' THEN 1 ELSE 0 END) AS tp2_count,
+                AVG(CASE WHEN sl.first_barrier_hit = 'TIME' THEN COALESCE(sl.realized_return_pct, 0) ELSE NULL END) AS avg_return_time,
+                AVG(CASE WHEN sl.first_barrier_hit = 'SL' THEN COALESCE(sl.realized_return_pct, 0) ELSE NULL END) AS avg_return_sl,
+                AVG(CASE WHEN sl.first_barrier_hit = 'TP1' THEN COALESCE(sl.realized_return_pct, 0) ELSE NULL END) AS avg_return_tp1,
+                AVG(CASE WHEN sl.first_barrier_hit = 'TP2' THEN COALESCE(sl.realized_return_pct, 0) ELSE NULL END) AS avg_return_tp2,
+                AVG(COALESCE(sl.realized_return_pct, 0)) AS avg_return_all,
+                SUM(CASE WHEN COALESCE(sl.realized_return_pct, 0) > 0 THEN COALESCE(sl.realized_return_pct, 0) ELSE 0 END) AS gains,
+                SUM(CASE WHEN COALESCE(sl.realized_return_pct, 0) < 0 THEN COALESCE(sl.realized_return_pct, 0) ELSE 0 END) AS losses,
+                SUM(CASE WHEN sl.first_barrier_hit IN ('TP1', 'TP2', 'SL') THEN 1 ELSE 0 END) AS decisive_count,
+                SUM(CASE WHEN sl.first_barrier_hit IN ('TP1', 'TP2', 'SL') AND COALESCE(sl.label, 0) = 1 THEN 1 ELSE 0 END) AS decisive_wins,
+                SUM(CASE WHEN COALESCE(so.shadow_strategy, 0) = 1 THEN 1 ELSE 0 END) AS shadow_labels_count
+            FROM signal_labels sl
+            JOIN signal_observations so ON so.id = sl.observation_id
+            WHERE sl.timestamp >= ?
+              AND COALESCE(so.confidence_score, 0) >= ?
+              AND so.side IN ('LONG', 'SHORT')
+        """
+        if self._use_postgres:
+            sql = sql.replace("?", "%s")
+        try:
+            with self._connect() as conn:
+                row = conn.execute(sql, (since_iso, int(min_score))).fetchone()
+                return self._signal_label_summary_from_row(row)
+        except Exception:
+            return self._empty_signal_label_summary()
+
+    def get_shadow_opportunity_group_summaries_since(
+        self,
+        since_iso: str,
+        *,
+        min_score: int = 72,
+        group_key: str = "symbol",
+        limit: int = 10,
+    ) -> list[dict[str, Any]]:
+        score_bucket_expr = """
+            CASE
+                WHEN COALESCE(so.confidence_score, 0) >= 90 THEN '90-100'
+                WHEN COALESCE(so.confidence_score, 0) >= 80 THEN '80-89'
+                WHEN COALESCE(so.confidence_score, 0) >= 70 THEN '70-79'
+                ELSE '<70'
+            END
+        """
+        allowed = {
+            "symbol": "COALESCE(so.symbol, 'NA')",
+            "market_regime": "COALESCE(so.market_regime, 'NA')",
+            "side": "COALESCE(so.side, 'NA')",
+            "score_bucket": score_bucket_expr,
+            "block_reason": "COALESCE(NULLIF(so.block_reason, ''), 'none')",
+        }
+        group_expr = allowed.get(group_key)
+        if not group_expr:
+            return []
+        sql = f"""
+            SELECT
+                {group_expr} AS group_value,
+                COUNT(*) AS total_labels,
+                SUM(CASE WHEN sl.first_barrier_hit = 'TIME' THEN 1 ELSE 0 END) AS time_count,
+                SUM(CASE WHEN sl.first_barrier_hit = 'SL' THEN 1 ELSE 0 END) AS sl_count,
+                SUM(CASE WHEN sl.first_barrier_hit = 'TP1' THEN 1 ELSE 0 END) AS tp1_count,
+                SUM(CASE WHEN sl.first_barrier_hit = 'TP2' THEN 1 ELSE 0 END) AS tp2_count,
+                AVG(COALESCE(sl.realized_return_pct, 0)) AS avg_return,
+                SUM(CASE WHEN COALESCE(sl.realized_return_pct, 0) > 0 THEN COALESCE(sl.realized_return_pct, 0) ELSE 0 END) AS gains,
+                SUM(CASE WHEN COALESCE(sl.realized_return_pct, 0) < 0 THEN COALESCE(sl.realized_return_pct, 0) ELSE 0 END) AS losses
+            FROM signal_labels sl
+            JOIN signal_observations so ON so.id = sl.observation_id
+            WHERE sl.timestamp >= ?
+              AND COALESCE(so.confidence_score, 0) >= ?
+              AND so.side IN ('LONG', 'SHORT')
+            GROUP BY {group_expr}
+            ORDER BY total_labels DESC
+            LIMIT ?
+        """
+        if self._use_postgres:
+            sql = sql.replace("?", "%s")
+        try:
+            with self._connect() as conn:
+                rows = self._fetchall_dicts(conn.execute(sql, (since_iso, int(min_score), int(limit))))
+            return [_with_edge_metrics(row) for row in rows]
+        except Exception:
+            return []
+
+    def get_missed_high_score_summary_since(self, since_iso: str, limit: int = 20) -> dict[str, Any]:
+        count_sql = """
+            SELECT COUNT(*) AS total
+            FROM events
+            WHERE timestamp >= ?
+              AND event_type = ?
+        """
+        sql = """
+            SELECT payload_json
+            FROM events
+            WHERE timestamp >= ?
+              AND event_type = ?
+            ORDER BY timestamp DESC
+            LIMIT ?
+        """
+        if self._use_postgres:
+            count_sql = count_sql.replace("?", "%s")
+            sql = sql.replace("?", "%s")
+        reason_counts: dict[str, int] = {}
+        total = 0
+        try:
+            with self._connect() as conn:
+                total_row = conn.execute(count_sql, (since_iso, "training_high_score_missed")).fetchone()
+                total = int(self._row_value(total_row, "total", 0, 0) or 0)
+                rows = self._fetchall_dicts(conn.execute(sql, (since_iso, "training_high_score_missed", int(limit))))
+            for row in rows:
+                try:
+                    payload = json.loads(row.get("payload_json") or "{}")
+                except (TypeError, ValueError):
+                    payload = {}
+                reason = str(payload.get("reason") or "unknown")[:120]
+                reason_counts[reason] = reason_counts.get(reason, 0) + 1
+        except Exception:
+            return {"total": 0, "by_reason": []}
+        return {
+            "total": total,
+            "by_reason": [
+                {"reason": reason, "count": count}
+                for reason, count in sorted(reason_counts.items(), key=lambda item: item[1], reverse=True)
+            ],
+        }
+
     def get_label_group_summaries(
         self,
         group_key: str,
@@ -1348,6 +1479,33 @@ class Database:
             sql = sql.replace("?", "%s")
         with self._connect() as conn:
             return self._fetchall_dicts(conn.execute(sql, ("paper",)))
+
+    def get_open_paper_positions_summary(self, limit: int = 5) -> list[dict[str, Any]]:
+        sql = """
+            SELECT
+                symbol,
+                side,
+                entry AS entry_price,
+                timestamp AS opened_at,
+                strategy_type AS strategy,
+                confidence_score AS score,
+                stop_loss,
+                take_profit_1,
+                take_profit_2,
+                status,
+                realized_pnl,
+                unrealized_pnl,
+                reason
+            FROM trades
+            WHERE mode = ?
+              AND status IN ('PAPER_OPEN', 'OPEN')
+            ORDER BY timestamp ASC
+            LIMIT ?
+        """
+        if self._use_postgres:
+            sql = sql.replace("?", "%s")
+        with self._connect() as conn:
+            return self._fetchall_dicts(conn.execute(sql, ("paper", int(limit))))
 
     def fetch_stale_open_paper_trades(self, *, older_than_iso: str, limit: int = 10) -> list[dict[str, Any]]:
         sql = """
@@ -1926,3 +2084,18 @@ class Database:
             sql = sql.replace("?", "%s")
         with self._connect() as conn:
             return self._fetchall_dicts(conn.execute(sql, (int(limit),)))
+
+
+def _with_edge_metrics(row: dict[str, Any]) -> dict[str, Any]:
+    total = float(row.get("total_labels") or 0.0)
+    tp = float(row.get("tp1_count") or 0.0) + float(row.get("tp2_count") or 0.0)
+    sl = float(row.get("sl_count") or 0.0)
+    time_count = float(row.get("time_count") or 0.0)
+    gains = float(row.get("gains") or 0.0)
+    losses = abs(float(row.get("losses") or 0.0))
+    row["profit_factor"] = gains / losses if losses > 0 else 999.0 if gains > 0 else 0.0
+    row["time_ratio"] = time_count / max(total, 1.0)
+    row["sl_ratio"] = sl / max(total, 1.0)
+    row["tp_ratio"] = tp / max(total, 1.0)
+    row["sample_warning"] = total < 50
+    return row

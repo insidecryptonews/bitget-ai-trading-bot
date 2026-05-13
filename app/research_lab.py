@@ -431,6 +431,11 @@ class ResearchLab:
 
         return TrainingSummary(self.config, self.db).acceleration_plan(hours=hours)
 
+    def shadow_opportunity(self, hours: int = 24) -> str:
+        from .shadow_opportunity_lab import ShadowOpportunityLab
+
+        return ShadowOpportunityLab(self.config, self.db).to_text(hours=hours)
+
     def build_markdown_report(
         self,
         dataset: list[dict[str, Any]] | None = None,
@@ -939,6 +944,7 @@ def main() -> None:
             "daily-summary",
             "training-summary",
             "acceleration-plan",
+            "shadow-opportunity",
         ],
     )
     parser.add_argument("--limit", type=int, default=None, help="Maximo de labels a procesar en phase2-persist.")
@@ -1012,6 +1018,8 @@ def main() -> None:
         print(lab.training_summary(hours=args.hours))
     elif args.command == "acceleration-plan":
         print(lab.acceleration_plan(hours=args.hours))
+    elif args.command == "shadow-opportunity":
+        print(lab.shadow_opportunity(hours=args.hours))
 
 
 if __name__ == "__main__":

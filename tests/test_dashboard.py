@@ -31,7 +31,7 @@ def _get(url: str) -> tuple[int, str]:
         return int(response.status), response.read().decode("utf-8")
 
 
-def _start_server(config: BotConfig, pulse: TrainingPulse | None = None) -> str:
+def _start_server(config: BotConfig, pulse: TrainingPulse | None = None, db=None) -> str:
     port = _free_port()
     pulse = pulse or TrainingPulse()
     notifier = TelegramNotifier(config, DummyLogger())
@@ -40,6 +40,7 @@ def _start_server(config: BotConfig, pulse: TrainingPulse | None = None) -> str:
         port,
         DummyLogger(),
         config=config,
+        db=db,
         training_pulse=pulse,
         telegram_notifier=notifier,
     )
@@ -81,6 +82,28 @@ def test_training_status_returns_safe_json():
     assert "PASSPHRASE" not in body
 
 
+def test_training_status_includes_open_paper_detail_without_secrets():
+    class DummyDb:
+        def get_open_paper_positions_summary(self, limit=5):
+            return [{
+                "symbol": "BTCUSDT",
+                "side": "LONG",
+                "entry_price": 100.0,
+                "reason": "API_KEY=must_not_exist",
+                "status": "PAPER_OPEN",
+            }]
+
+        def get_signal_label_summary_since(self, since):
+            return {"total_labels": 1, "time_count": 0, "sl_count": 1, "tp1_count": 0, "tp2_count": 0, "profit_factor": 0.0}
+
+    base = _start_server(BotConfig(), db=DummyDb())
+    status, body = _get(base + "/api/training/status")
+    assert status == 200
+    payload = json.loads(body)
+    assert payload["open_paper_positions_detail"][0]["symbol"] == "BTCUSDT"
+    assert "must_not_exist" not in body
+
+
 def test_dashboard_auth_blocks_without_token():
     base = _start_server(BotConfig(dashboard_auth_token="dash-secret"))
     try:
@@ -103,3 +126,25 @@ def test_health_still_works_with_dashboard_auth():
     status, body = _get(base + "/health")
     assert status == 200
     assert json.loads(body)["status"] == "ok"
+
+
+def test_shadow_opportunity_endpoint_returns_json():
+    class DummyDb:
+        def get_training_observation_summary_since(self, *args, **kwargs):
+            return {"total": 10, "high_score_count": 4, "regimes": [], "top_symbols": []}
+
+        def get_high_score_label_summary_since(self, *args, **kwargs):
+            return {"total_labels": 2, "time_count": 1, "sl_count": 1, "tp1_count": 0, "tp2_count": 0, "profit_factor": 0.0}
+
+        def get_shadow_opportunity_group_summaries_since(self, *args, **kwargs):
+            return [{"group_value": "BTCUSDT", "total_labels": 2, "time_ratio": 0.5, "sl_ratio": 0.5, "tp_ratio": 0.0, "profit_factor": 0.0}]
+
+        def get_missed_high_score_summary_since(self, *args, **kwargs):
+            return {"total": 1, "by_reason": [{"reason": "slot", "count": 1}]}
+
+    base = _start_server(BotConfig(), db=DummyDb())
+    status, body = _get(base + "/api/training/shadow-opportunity?hours=24")
+    assert status == 200
+    payload = json.loads(body)
+    assert "SHADOW OPPORTUNITY START" in payload["text"]
+    assert payload["final_recommendation"] == "NO LIVE"

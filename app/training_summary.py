@@ -31,7 +31,25 @@ class TrainingSummary:
         )
         paper = self.db.get_paper_trade_summary()
         events = self.db.get_event_type_counts_since(window["since"])
+        high_score_labels = self.db.get_high_score_label_summary_since(
+            window["since"],
+            self.config.min_score_to_trade,
+        )
+        by_symbol = self.db.get_shadow_opportunity_group_summaries_since(
+            window["since"],
+            min_score=self.config.min_score_to_trade,
+            group_key="symbol",
+            limit=3,
+        )
+        by_regime = self.db.get_shadow_opportunity_group_summaries_since(
+            window["since"],
+            min_score=self.config.min_score_to_trade,
+            group_key="market_regime",
+            limit=3,
+        )
         recommendation = _recommendation(labels, events)
+        metrics = _label_metrics(labels)
+        high_score_metrics = _label_metrics(high_score_labels)
         lines = [
             SUMMARY_START,
             f"now: {window['now']}",
@@ -57,7 +75,24 @@ class TrainingSummary:
                 f"SL={safe_int(labels.get('sl_count'))} "
                 f"TP1={safe_int(labels.get('tp1_count'))} "
                 f"TP2={safe_int(labels.get('tp2_count'))} "
-                f"PF={safe_float(labels.get('profit_factor')):.2f}"
+                f"PF={safe_float(labels.get('profit_factor')):.2f} "
+                f"TIME%={metrics['time_ratio'] * 100:.1f} "
+                f"SL%={metrics['sl_ratio'] * 100:.1f} "
+                f"TP%={metrics['tp_ratio'] * 100:.1f}"
+            ),
+            (
+                "win_loss_time_balance: "
+                f"TP={safe_int(labels.get('tp1_count')) + safe_int(labels.get('tp2_count'))} "
+                f"SL={safe_int(labels.get('sl_count'))} "
+                f"TIME={safe_int(labels.get('time_count'))}"
+            ),
+            (
+                "high_score_performance: "
+                f"labels={safe_int(high_score_labels.get('total_labels'))} "
+                f"PF={safe_float(high_score_labels.get('profit_factor')):.2f} "
+                f"TIME%={high_score_metrics['time_ratio'] * 100:.1f} "
+                f"SL%={high_score_metrics['sl_ratio'] * 100:.1f} "
+                f"TP%={high_score_metrics['tp_ratio'] * 100:.1f}"
             ),
             f"paper: open={safe_int(paper.get('open'))} closed={safe_int(paper.get('closed'))}",
             (
@@ -71,6 +106,10 @@ class TrainingSummary:
             *_rows_to_lines(observations.get("regimes", [])),
             "top_high_score_symbols:",
             *_rows_to_lines(observations.get("top_symbols", [])),
+            "by_symbol_edge:",
+            *_edge_rows_to_lines(by_symbol),
+            "by_regime_edge:",
+            *_edge_rows_to_lines(by_regime),
             f"recommendation: {recommendation}",
             "final_recommendation: NO LIVE",
             SUMMARY_END,
@@ -86,7 +125,7 @@ class TrainingSummary:
             min_score=self.config.min_score_to_trade,
             limit=5,
         )
-        biggest = _biggest_problem(labels, events, observations)
+        biggest = _biggest_problem(self.config, labels, events, observations)
         lines = [
             PLAN_START,
             f"hours: {window['hours']}",
@@ -111,30 +150,39 @@ class TrainingSummary:
 
 
 def _recommendation(labels: dict[str, Any], events: dict[str, int]) -> str:
+    total = safe_float(labels.get("total_labels"))
+    if total > 0:
+        metrics = _label_metrics(labels)
+        if safe_float(labels.get("profit_factor")) < 1.0 or metrics["tp_ratio"] < 0.05:
+            return "NEED_RESEARCH_POOR_EDGE"
+        if metrics["time_ratio"] > 0.80 or safe_float(labels.get("sl_count")) > safe_float(labels.get("tp1_count")) + safe_float(labels.get("tp2_count")):
+            return "NEED_RESEARCH"
     if events.get("training_api_429", 0) > 0:
         return "CHECK_RATE_LIMIT"
     if events.get("training_slot_block", 0) > 0:
         return "CHECK_SLOT"
-    total = safe_float(labels.get("total_labels"))
-    if total > 0:
-        time_ratio = safe_float(labels.get("time_count")) / max(total, 1.0)
-        if time_ratio > 0.80 or safe_float(labels.get("sl_count")) > safe_float(labels.get("tp1_count")) + safe_float(labels.get("tp2_count")):
-            return "NEED_RESEARCH"
     return "PAPER ONLY"
 
 
-def _biggest_problem(labels: dict[str, Any], events: dict[str, int], observations: dict[str, Any]) -> str:
+def _biggest_problem(config: BotConfig, labels: dict[str, Any], events: dict[str, int], observations: dict[str, Any]) -> str:
+    if config.live_trading:
+        return "safety_live"
+    total = safe_float(labels.get("total_labels"))
+    if total <= 0 and safe_int(observations.get("total")) == 0:
+        return "no_data"
+    metrics = _label_metrics(labels)
+    if total > 0 and safe_float(labels.get("profit_factor")) < 1.0:
+        return "poor_edge"
+    if total > 0 and metrics["tp_ratio"] < 0.05:
+        return "low_tp_rate"
+    if total > 0 and metrics["time_ratio"] > 0.60:
+        return "too_many_time"
+    if total > 0 and metrics["sl_ratio"] > metrics["tp_ratio"] * 2:
+        return "too_many_sl"
+    if events.get("training_slot_block", 0) > 0 and safe_float(labels.get("profit_factor")) >= 1.0 and metrics["tp_ratio"] >= 0.05:
+        return "slot"
     if events.get("training_api_429", 0) > 0:
         return "rate_limit"
-    if events.get("training_slot_block", 0) > 0:
-        return "slot"
-    total = safe_float(labels.get("total_labels"))
-    if total > 0 and safe_float(labels.get("time_count")) / max(total, 1.0) > 0.80:
-        return "TIME"
-    if safe_float(labels.get("sl_count")) > safe_float(labels.get("tp1_count")) + safe_float(labels.get("tp2_count")):
-        return "SL"
-    if safe_int(observations.get("total")) == 0:
-        return "no_data"
     if safe_int(observations.get("high_score_count")) == 0:
         return "no_strong_signals"
     return "paper_observation"
@@ -145,13 +193,21 @@ def _plan_steps(problem: str) -> list[str]:
         return [
             "1. revisar training-summary --hours 24 para high_score_missed",
             "2. ejecutar reconcile-paper si hay PAPER_OPEN antigua",
-            "3. mantener slots reales/paper sin ampliar hasta ver evidencia",
+            "3. mantener slots reales/paper sin ampliar hasta edge validado",
         ]
     if problem == "rate_limit":
         return [
             "1. revisar frecuencia de escaneo y 429",
             "2. mantener backoff activo",
             "3. no lanzar research pesado en worker",
+        ]
+    if problem in {"poor_edge", "low_tp_rate", "too_many_time", "too_many_sl"}:
+        return [
+            "1. ejecutar shadow-opportunity --hours 24",
+            "2. analizar por simbolo/regimen/score bucket",
+            "3. no ampliar slots hasta PF>1 y TP rate suficiente",
+            "4. revisar filtros de CHOPPY/RANGE/TREND_DOWN",
+            "5. revisar scoring high_score porque muchos score altos no llegan a TP",
         ]
     if problem in {"TIME", "SL"}:
         return [
@@ -166,6 +222,18 @@ def _plan_steps(problem: str) -> list[str]:
     ]
 
 
+def _label_metrics(labels: dict[str, Any]) -> dict[str, float]:
+    total = safe_float(labels.get("total_labels"))
+    tp = safe_float(labels.get("tp1_count")) + safe_float(labels.get("tp2_count"))
+    sl = safe_float(labels.get("sl_count"))
+    time_count = safe_float(labels.get("time_count"))
+    return {
+        "time_ratio": time_count / max(total, 1.0) if total else 0.0,
+        "sl_ratio": sl / max(total, 1.0) if total else 0.0,
+        "tp_ratio": tp / max(total, 1.0) if total else 0.0,
+    }
+
+
 def _rows_to_lines(rows: list[dict[str, Any]]) -> list[str]:
     if not rows:
         return ["- none"]
@@ -176,3 +244,18 @@ def _rows_to_lines(rows: list[dict[str, Any]]) -> list[str]:
         extra = f" max_score={safe_int(row.get('max_score'))}" if "max_score" in row else ""
         lines.append(f"- {key}: {safe_int(count)}{extra}")
     return lines
+
+
+def _edge_rows_to_lines(rows: list[dict[str, Any]]) -> list[str]:
+    if not rows:
+        return ["- none"]
+    return [
+        (
+            f"- {row.get('group_value') or 'NA'} labels={safe_int(row.get('total_labels'))} "
+            f"PF={safe_float(row.get('profit_factor')):.2f} "
+            f"TIME%={safe_float(row.get('time_ratio')) * 100:.1f} "
+            f"SL%={safe_float(row.get('sl_ratio')) * 100:.1f} "
+            f"TP%={safe_float(row.get('tp_ratio')) * 100:.1f}"
+        )
+        for row in rows[:3]
+    ]

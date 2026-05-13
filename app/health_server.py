@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+import re
 import threading
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -58,7 +60,7 @@ def start_health_server(
             if not _dashboard_enabled(config):
                 self._send_status(404, "not found")
                 return
-            if path in {"/dashboard", "/api/training/status", "/api/training/summary", "/api/training/acceleration-plan"}:
+            if path in {"/dashboard", "/api/training/status", "/api/training/summary", "/api/training/acceleration-plan", "/api/training/shadow-opportunity"}:
                 if not _authorized(config, query, self.headers):
                     self._send_json({"error": "unauthorized"}, status=401)
                     return
@@ -66,13 +68,16 @@ def start_health_server(
                 self._send_html(_dashboard_html(config))
                 return
             if path == "/api/training/status":
-                self._send_json(_training_status(config, training_pulse, telegram_notifier))
+                self._send_json(_training_status(config, db, training_pulse, telegram_notifier))
                 return
             if path == "/api/training/summary":
                 self._send_json(_training_summary(config, db, query))
                 return
             if path == "/api/training/acceleration-plan":
                 self._send_json(_acceleration_plan(config, db, query))
+                return
+            if path == "/api/training/shadow-opportunity":
+                self._send_json(_shadow_opportunity(config, db, query))
                 return
             self._send_status(404, "not found")
 
@@ -134,7 +139,7 @@ def _dashboard_html(config: Any | None) -> str:
     return html.replace("__DASHBOARD_REFRESH_SECONDS__", str(refresh))
 
 
-def _training_status(config: Any | None, training_pulse: Any | None, telegram_notifier: Any | None) -> dict[str, Any]:
+def _training_status(config: Any | None, db: Any | None, training_pulse: Any | None, telegram_notifier: Any | None) -> dict[str, Any]:
     if training_pulse is not None and config is not None:
         payload = training_pulse.to_dict(config)
     else:
@@ -164,6 +169,8 @@ def _training_status(config: Any | None, training_pulse: Any | None, telegram_no
         "last_error": "",
         "sent_count": 0,
     }
+    payload["open_paper_positions_detail"] = _open_paper_positions_detail(db)
+    payload["edge"] = _edge_summary(config, db)
     payload["generated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     return payload
 
@@ -210,8 +217,90 @@ def _acceleration_plan(config: Any | None, db: Any | None, query: dict[str, list
     }
 
 
+def _shadow_opportunity(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
+    hours = _query_int(query, "hours", 24)
+    if config is None or db is None:
+        return {"error": "shadow opportunity unavailable", "hours": hours, "final_recommendation": "NO LIVE"}
+    try:
+        from .shadow_opportunity_lab import ShadowOpportunityLab
+
+        lab = ShadowOpportunityLab(config, db)
+        payload = lab.build(hours=hours)
+        text = lab.to_text(hours=hours)
+    except Exception as exc:
+        return {"error": str(exc)[:300], "hours": hours, "final_recommendation": "NO LIVE"}
+    return {
+        "text": text,
+        "hours": hours,
+        "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "overall": payload.get("overall", {}),
+        "best_candidates": payload.get("best_candidates", []),
+        "worst_candidates": payload.get("worst_candidates", []),
+        "final_recommendation": "NO LIVE",
+    }
+
+
+def _open_paper_positions_detail(db: Any | None) -> list[dict[str, Any]]:
+    if db is None:
+        return []
+    try:
+        rows = db.get_open_paper_positions_summary(limit=5)
+    except Exception:
+        return []
+    allowed = {
+        "symbol",
+        "side",
+        "entry_price",
+        "opened_at",
+        "strategy",
+        "score",
+        "stop_loss",
+        "take_profit_1",
+        "take_profit_2",
+        "status",
+        "realized_pnl",
+        "unrealized_pnl",
+        "reason",
+    }
+    return [
+        {key: _public_value(row.get(key)) for key in allowed if key in row}
+        for row in rows
+    ]
+
+
+def _edge_summary(config: Any | None, db: Any | None) -> dict[str, Any]:
+    if config is None or db is None:
+        return {}
+    try:
+        since = (datetime.now(timezone.utc) - timedelta(hours=6)).isoformat()
+        labels = db.get_signal_label_summary_since(since)
+    except Exception:
+        return {}
+    total = float(labels.get("total_labels") or 0.0)
+    tp = float(labels.get("tp1_count") or 0.0) + float(labels.get("tp2_count") or 0.0)
+    sl = float(labels.get("sl_count") or 0.0)
+    time_count = float(labels.get("time_count") or 0.0)
+    return {
+        "profit_factor": float(labels.get("profit_factor") or 0.0),
+        "time_ratio": time_count / max(total, 1.0) if total else 0.0,
+        "sl_ratio": sl / max(total, 1.0) if total else 0.0,
+        "tp_ratio": tp / max(total, 1.0) if total else 0.0,
+        "total_labels": total,
+    }
+
+
 def _query_int(query: dict[str, list[str]], key: str, default: int) -> int:
     try:
         return max(1, int((query.get(key) or [default])[0]))
     except (TypeError, ValueError):
         return default
+
+
+def _public_value(value: Any) -> Any:
+    if not isinstance(value, str):
+        return value
+    return re.sub(
+        r"(?i)\b(API[_-]?KEY|SECRET|TOKEN|PASSWORD|PASSPHRASE|PRIVATE[_-]?KEY)\s*[:=]\s*([^\s,;]+)",
+        lambda match: f"{match.group(1)}=***",
+        value,
+    )
