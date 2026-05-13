@@ -421,6 +421,16 @@ class ResearchLab:
 
         return DailyResearchSummary(self.config, self.db, self.logger).build(hours=hours)
 
+    def training_summary(self, hours: int = 6) -> str:
+        from .training_summary import TrainingSummary
+
+        return TrainingSummary(self.config, self.db).build(hours=hours)
+
+    def acceleration_plan(self, hours: int = 24) -> str:
+        from .training_summary import TrainingSummary
+
+        return TrainingSummary(self.config, self.db).acceleration_plan(hours=hours)
+
     def build_markdown_report(
         self,
         dataset: list[dict[str, Any]] | None = None,
@@ -927,6 +937,8 @@ def main() -> None:
             "reconcile-paper",
             "strategy-lab",
             "daily-summary",
+            "training-summary",
+            "acceleration-plan",
         ],
     )
     parser.add_argument("--limit", type=int, default=None, help="Maximo de labels a procesar en phase2-persist.")
@@ -996,6 +1008,10 @@ def main() -> None:
         print(lab.strategy_lab(limit=limit, safe_mode=args.safe_mode))
     elif args.command == "daily-summary":
         print(lab.daily_summary(hours=args.hours))
+    elif args.command == "training-summary":
+        print(lab.training_summary(hours=args.hours))
+    elif args.command == "acceleration-plan":
+        print(lab.acceleration_plan(hours=args.hours))
 
 
 if __name__ == "__main__":

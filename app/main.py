@@ -31,6 +31,7 @@ from .risk_manager import RiskManager
 from .shadow_strategies import ShadowStrategyEngine
 from .signal_engine import Signal, SignalEngine
 from .telegram_alerts import TelegramAlerts
+from .training_pulse import TrainingPulse
 from .utils import iso_utc, safe_float
 
 
@@ -86,6 +87,7 @@ def main() -> None:
     full_research_reporter = FullResearchReporter(db, config, logger) if config.enable_full_research_auto_report else None
     research_autopilot = ResearchAutopilot(config, db, logger) if config.enable_research_autopilot else None
     daily_summary = DailyResearchSummary(config, db, logger) if config.enable_daily_research_summary else None
+    training_pulse = TrainingPulse() if config.enable_training_pulse else None
     last_research_report_at = 0.0
     last_full_research_report_at = 0.0
     last_research_autopilot_at = 0.0
@@ -99,7 +101,11 @@ def main() -> None:
     if paper_trader:
         if config.enable_paper_reconcile_on_start or config.lightweight_paper_reconcile_on_start:
             try:
-                logger.info("%s", PaperReconciler(config, db, logger).reconcile().to_text())
+                result = PaperReconciler(config, db, logger).reconcile()
+                logger.info("%s", result.to_text())
+                _record_paper_reconcile_event(db, result)
+                if training_pulse:
+                    training_pulse.record_paper_reconcile(result)
             except Exception as exc:
                 logger.warning("Paper reconcile on start fallo sin detener el bot: %s", exc)
         paper_trader.load_open_positions_from_db()
@@ -173,22 +179,39 @@ def main() -> None:
         )
     elif daily_summary:
         last_daily_summary_at = startup_monotonic
+    if training_pulse and config.training_pulse_log_on_start:
+        logger.info("%s", training_pulse.to_text(config))
+        db.record_event("training_pulse", "training pulse startup", payload={"startup": True})
+        if config.training_pulse_reset_after_emit:
+            training_pulse.reset_window()
 
     cycle_count = 0
     last_memory_log_at = startup_monotonic
+    last_lightweight_paper_reconcile_at = startup_monotonic
     while not STOP_REQUESTED:
         try:
             cycle_count += 1
+            if training_pulse:
+                training_pulse.record_cycle_start()
             cycle_start = time.time()
             news = news_intel.check()
             snapshots = market_data.fetch_all(valid_symbols)
             if not snapshots:
                 logger.warning("No se pudieron descargar snapshots; pausa de seguridad.")
+                if training_pulse:
+                    training_pulse.record_snapshots(0)
+                    training_pulse.record_cycle_ok()
+                    _emit_training_pulse_if_due(config, db, training_pulse, logger, time.monotonic())
                 time.sleep(config.scan_interval_seconds)
                 continue
+            if training_pulse:
+                training_pulse.record_snapshots(len(snapshots))
 
             regime = regime_detector.detect(snapshots)
             signals = [signal_engine.generate_signal(symbol, snapshot, regime) for symbol, snapshot in snapshots.items()]
+            if training_pulse:
+                training_pulse.record_regime(regime.regime)
+                training_pulse.record_signals(signals, config.min_score_to_trade)
             observation_ids: dict[str, int] = {}
             observation_payloads: dict[str, dict[str, Any]] = {}
             if feature_logger:
@@ -212,7 +235,9 @@ def main() -> None:
                             market_regime=regime,
                         )
             if labeler:
-                _label_matured_observations(config, db, labeler, snapshots, logger)
+                label_counts = _label_matured_observations(config, db, labeler, snapshots, logger)
+                if training_pulse:
+                    training_pulse.record_labels(label_counts)
             if _should_print_radar(config, cycle_count, signals):
                 _print_radar(signals, snapshots, regime.regime, logger)
 
@@ -234,6 +259,10 @@ def main() -> None:
                 allocation = allocator.allocate(signals, balance=balance, open_positions=open_positions, regime=regime)
                 selected = allocation.selected_signals
                 logger.info("Allocator: %s", allocation.reason)
+                if training_pulse:
+                    training_pulse.record_allocator(allocation.reason, len(selected))
+                if _is_slot_block_reason(allocation.reason):
+                    db.record_event("training_slot_block", "slot block", payload={"reason": str(allocation.reason)[:300]})
                 if feature_logger:
                     for signal_item in selected:
                         feature_logger.update_observation(
@@ -242,6 +271,19 @@ def main() -> None:
                             block_reason="",
                         )
                     for rejected_signal, reason in allocation.rejected_signals:
+                        if rejected_signal.confidence_score >= config.min_score_to_trade and rejected_signal.side in {"LONG", "SHORT"}:
+                            _record_high_score_missed_event(
+                                db,
+                                training_pulse,
+                                rejected_signal,
+                                regime.regime,
+                                reason,
+                                min_score_to_trade=config.min_score_to_trade,
+                                slot_available=not _is_slot_block_reason(reason),
+                                risk_approved=False,
+                            )
+                        if _is_slot_block_reason(reason):
+                            _record_slot_block_event(db, training_pulse, reason)
                         feature_logger.update_observation(
                             observation_ids.get(rejected_signal.symbol),
                             selected_by_allocator=False,
@@ -274,6 +316,16 @@ def main() -> None:
                         meta_decision.reason,
                     )
                     if meta_decision.blocks_trade:
+                        _record_high_score_missed_event(
+                            db,
+                            training_pulse,
+                            selected_signal,
+                            regime.regime,
+                            "meta_model_rejected",
+                            min_score_to_trade=config.min_score_to_trade,
+                            slot_available=True,
+                            risk_approved=True,
+                        )
                         if feature_logger:
                             feature_logger.update_observation(
                                 observation_ids.get(selected_signal.symbol),
@@ -284,6 +336,16 @@ def main() -> None:
                 rules = instruments.get(selected_signal.symbol)
                 if not rules:
                     logger.warning("%s sin reglas de instrumento. No opera.", selected_signal.symbol)
+                    _record_high_score_missed_event(
+                        db,
+                        training_pulse,
+                        selected_signal,
+                        regime.regime,
+                        "missing_instrument_rules",
+                        min_score_to_trade=config.min_score_to_trade,
+                        slot_available=True,
+                        risk_approved=False,
+                    )
                     if feature_logger:
                         feature_logger.update_observation(
                             observation_ids.get(selected_signal.symbol),
@@ -320,6 +382,18 @@ def main() -> None:
                 )
                 if not risk.approved:
                     logger.info("RiskManager bloquea %s: %s", selected_signal.symbol, risk.reason)
+                    if training_pulse:
+                        training_pulse.record_risk_block(risk.block_reason or risk.reason)
+                    _record_high_score_missed_event(
+                        db,
+                        training_pulse,
+                        selected_signal,
+                        regime.regime,
+                        risk.block_reason or risk.reason,
+                        min_score_to_trade=config.min_score_to_trade,
+                        slot_available=True,
+                        risk_approved=False,
+                    )
                     if feature_logger:
                         feature_logger.update_observation(
                             observation_ids.get(selected_signal.symbol),
@@ -334,7 +408,27 @@ def main() -> None:
                         risk_manager_approved=True,
                     )
                 if config.paper_trading and paper_trader:
-                    paper_trader.open_position(safe_signal, risk.risk_amount, risk)
+                    try:
+                        paper_trader.open_position(safe_signal, risk.risk_amount, risk)
+                        if training_pulse:
+                            training_pulse.record_paper_open_attempt(safe_signal.symbol, safe_signal.side, True, "")
+                        _record_paper_open_attempt_event(db, safe_signal, True, "")
+                    except Exception as exc:
+                        logger.warning("Paper open fallo %s %s: %s", safe_signal.symbol, safe_signal.side, exc)
+                        if training_pulse:
+                            training_pulse.record_paper_open_attempt(safe_signal.symbol, safe_signal.side, False, str(exc))
+                        _record_paper_open_attempt_event(db, safe_signal, False, str(exc))
+                        _record_high_score_missed_event(
+                            db,
+                            training_pulse,
+                            safe_signal,
+                            regime.regime,
+                            str(exc),
+                            min_score_to_trade=config.min_score_to_trade,
+                            slot_available=False,
+                            risk_approved=True,
+                        )
+                        continue
                     if feature_logger:
                         feature_logger.update_observation(
                             observation_ids.get(selected_signal.symbol),
@@ -354,6 +448,8 @@ def main() -> None:
             latest_prices = {symbol: snap.current_price for symbol, snap in snapshots.items() if snap.current_price}
             position_manager.monitor(latest_prices)
             open_positions = position_manager.sync_open_positions()
+            if training_pulse:
+                training_pulse.record_open_paper_positions(len(open_positions) if config.paper_trading else 0)
             health.open_positions = len(open_positions)
             health.daily_pnl = daily_pnl
             health.last_scan = iso_utc()
@@ -395,13 +491,34 @@ def main() -> None:
                 last_daily_summary_at,
                 time.monotonic(),
             )
-            last_memory_log_at = _log_memory_if_due(config, logger, last_memory_log_at, time.monotonic())
+            last_memory_log_at = _log_memory_if_due(config, logger, training_pulse, last_memory_log_at, time.monotonic())
+            last_lightweight_paper_reconcile_at = _reconcile_paper_if_due(
+                config,
+                db,
+                paper_trader,
+                logger,
+                training_pulse,
+                last_lightweight_paper_reconcile_at,
+                time.monotonic(),
+            )
+            if training_pulse:
+                training_pulse.record_cycle_ok()
+            _emit_training_pulse_if_due(config, db, training_pulse, logger, time.monotonic())
             elapsed = time.time() - cycle_start
             sleep_for = max(1, config.scan_interval_seconds - elapsed)
             time.sleep(sleep_for)
         except Exception as exc:
             logger.exception("Error en ciclo principal")
             db.record_event("main_loop_error", str(exc), level="ERROR")
+            if training_pulse:
+                training_pulse.record_cycle_error(str(exc))
+                logger.info("%s", training_pulse.to_text(config))
+                db.record_event("training_pulse", "training pulse after cycle error", level="ERROR", payload={"error": str(exc)[:300]})
+                if config.training_pulse_reset_after_emit:
+                    training_pulse.reset_window()
+            if _is_429_error(str(exc)):
+                db.record_event("training_api_429", "Bitget 429/rate limit", level="WARNING", payload={"error": str(exc)[:300]})
+                time.sleep(max(1, config.bitget_429_backoff_seconds))
             telegram.critical(f"Error en ciclo principal: {exc}")
             risk_manager.register_api_failure()
             time.sleep(config.fast_scan_interval_seconds)
@@ -516,6 +633,51 @@ def _emit_daily_research_summary_if_due(
     return now
 
 
+def _emit_training_pulse_if_due(config, db: Database, pulse: TrainingPulse | None, logger, now_monotonic: float) -> None:
+    if not config.enable_training_pulse or pulse is None:
+        return
+    now_dt = _monotonic_to_utc(now_monotonic)
+    if not pulse.should_emit(now_dt, config.training_pulse_interval_minutes):
+        return
+    logger.info("%s", pulse.to_text(config))
+    db.record_event("training_pulse", "training pulse periodic", payload={"mode": config.mode})
+    if config.training_pulse_reset_after_emit:
+        pulse.reset_window()
+
+
+def _reconcile_paper_if_due(
+    config,
+    db: Database,
+    paper_trader: PaperTrader | None,
+    logger,
+    pulse: TrainingPulse | None,
+    last_reconcile_at: float,
+    now: float,
+) -> float:
+    if not config.paper_trading or paper_trader is None or not config.lightweight_paper_reconcile_on_start:
+        return last_reconcile_at
+    interval_seconds = max(1, config.lightweight_paper_reconcile_interval_minutes) * 60
+    if last_reconcile_at > 0 and now - last_reconcile_at < interval_seconds:
+        return last_reconcile_at
+    try:
+        result = PaperReconciler(config, db, logger).reconcile()
+        logger.info("%s", result.to_text())
+        _record_paper_reconcile_event(db, result)
+        if pulse:
+            pulse.record_paper_reconcile(result)
+        if result.paper_trades_closed_by_label or result.paper_trades_closed_by_time:
+            paper_trader.positions.clear()
+            paper_trader.load_open_positions_from_db()
+            if pulse:
+                logger.info("%s", pulse.to_text(config))
+                db.record_event("training_pulse", "training pulse after paper reconcile", payload={"closed": True})
+                if config.training_pulse_reset_after_emit:
+                    pulse.reset_window()
+    except Exception as exc:
+        logger.warning("Paper reconcile periodico fallo sin detener el bot: %s", exc)
+    return now
+
+
 def _strip_full_report_markers(report: str) -> str:
     lines = []
     for line in report.splitlines():
@@ -526,6 +688,88 @@ def _strip_full_report_markers(report: str) -> str:
             continue
         lines.append(line)
     return "\n".join(lines)
+
+
+def _record_paper_reconcile_event(db: Database, result) -> None:
+    db.record_event(
+        "training_paper_reconcile",
+        "paper reconcile",
+        payload={
+            "paper_open_before": result.paper_open_before,
+            "closed_by_label": result.paper_trades_closed_by_label,
+            "closed_by_time": result.paper_trades_closed_by_time,
+            "left_open": result.paper_trades_left_open,
+            "paper_open_after": result.paper_open_after,
+            "errors": result.errors,
+        },
+    )
+
+
+def _record_slot_block_event(db: Database, pulse: TrainingPulse | None, reason: str) -> None:
+    if pulse:
+        pulse.record_slot_block(reason)
+    db.record_event("training_slot_block", "slot block", payload={"reason": str(reason)[:300]})
+
+
+def _record_high_score_missed_event(
+    db: Database,
+    pulse: TrainingPulse | None,
+    signal: Signal,
+    market_regime: str,
+    reason: str,
+    *,
+    min_score_to_trade: int,
+    slot_available: bool,
+    risk_approved: bool,
+) -> None:
+    if signal.confidence_score < min_score_to_trade or signal.side not in {"LONG", "SHORT"}:
+        return
+    if pulse:
+        pulse.record_high_score_missed(reason)
+    db.record_event(
+        "training_high_score_missed",
+        "high score signal missed",
+        payload={
+            "symbol": signal.symbol,
+            "side": signal.side,
+            "score": signal.confidence_score,
+            "market_regime": market_regime,
+            "reason": str(reason)[:300],
+            "slot_available": bool(slot_available),
+            "risk_approved": bool(risk_approved),
+            "timestamp": iso_utc(),
+        },
+    )
+
+
+def _record_paper_open_attempt_event(db: Database, signal: Signal, success: bool, reason: str) -> None:
+    db.record_event(
+        "training_paper_open_attempt",
+        "paper open attempt",
+        payload={
+            "symbol": signal.symbol,
+            "side": signal.side,
+            "score": signal.confidence_score,
+            "success": bool(success),
+            "reason": str(reason)[:300],
+        },
+    )
+
+
+def _is_slot_block_reason(reason: str) -> bool:
+    text = str(reason or "").lower()
+    return "slot" in text or "sin slots" in text or "posicion" in text or "posición" in text
+
+
+def _is_429_error(text: str) -> bool:
+    lowered = str(text or "").lower()
+    return "429" in lowered or "rate limit" in lowered
+
+
+def _monotonic_to_utc(_: float):
+    from datetime import datetime, timezone
+
+    return datetime.now(timezone.utc)
 
 
 def _full_research_report_mode(config, initial: bool) -> str:
@@ -546,19 +790,28 @@ def _should_print_radar(config, cycle_count: int, signals: list[Signal]) -> bool
     )
 
 
-def _log_memory_if_due(config, logger, last_log_at: float, now: float) -> float:
-    interval_seconds = max(1, int(config.memory_log_interval_minutes or 5)) * 60
-    if last_log_at > 0 and now - last_log_at < interval_seconds:
-        return last_log_at
+def _read_memory_mb() -> float:
     try:
         import resource  # type: ignore
 
         usage = resource.getrusage(resource.RUSAGE_SELF)
         rss = float(getattr(usage, "ru_maxrss", 0.0) or 0.0)
-        rss_mb = rss / 1024.0
-        logger.info("Worker memory lightweight check: max_rss_mb=%.2f", rss_mb)
+        if sys.platform == "darwin":
+            return rss / (1024.0 * 1024.0)
+        return rss / 1024.0
     except Exception:
-        return now
+        return 0.0
+
+
+def _log_memory_if_due(config, logger, pulse: TrainingPulse | None, last_log_at: float, now: float) -> float:
+    interval_seconds = max(1, int(config.memory_log_interval_minutes or 5)) * 60
+    if last_log_at > 0 and now - last_log_at < interval_seconds:
+        return last_log_at
+    rss_mb = _read_memory_mb()
+    if rss_mb > 0:
+        logger.info("Worker memory lightweight check: max_rss_mb=%.2f", rss_mb)
+        if pulse:
+            pulse.record_memory(rss_mb)
     return now
 
 
@@ -633,7 +886,8 @@ def _refresh_live_account_balance(config, client, symbol: str, logger, telegram,
         return fallback_balance, fallback_available, max(0.0, fallback_balance - fallback_available), False
 
 
-def _label_matured_observations(config, db: Database, labeler: TripleBarrierLabeler, snapshots: dict[str, MarketSnapshot], logger) -> None:
+def _label_matured_observations(config, db: Database, labeler: TripleBarrierLabeler, snapshots: dict[str, MarketSnapshot], logger) -> dict[str, int]:
+    counts = {"total": 0, "TIME": 0, "SL": 0, "TP1": 0, "TP2": 0}
     try:
         import pandas as pd
 
@@ -655,16 +909,32 @@ def _label_matured_observations(config, db: Database, labeler: TripleBarrierLabe
             if outcome.first_barrier_hit == "TIME" and len(future) < config.max_holding_bars:
                 continue
             labeler.save_label(outcome)
+            barrier = str(outcome.first_barrier_hit or "TIME").upper()
+            if barrier not in {"TIME", "SL", "TP1", "TP2"}:
+                barrier = "TIME"
+            counts["total"] += 1
+            counts[barrier] += 1
+            if config.label_log_individual:
+                logger.info(
+                    "Signal label %s obs=%s label=%s barrier=%s bars=%s",
+                    observation.get("symbol"),
+                    observation.get("id"),
+                    outcome.label,
+                    outcome.first_barrier_hit,
+                    outcome.bars_to_outcome,
+                )
+        if counts["total"] and not config.label_log_individual:
             logger.info(
-                "Signal label %s obs=%s label=%s barrier=%s bars=%s",
-                observation.get("symbol"),
-                observation.get("id"),
-                outcome.label,
-                outcome.first_barrier_hit,
-                outcome.bars_to_outcome,
+                "Signal labels summary: total=%s TIME=%s SL=%s TP1=%s TP2=%s",
+                counts["total"],
+                counts["TIME"],
+                counts["SL"],
+                counts["TP1"],
+                counts["TP2"],
             )
     except Exception as exc:
         logger.warning("No se pudieron etiquetar observaciones pendientes: %s", exc)
+    return counts
 
 
 def _print_radar(signals: list[Signal], snapshots: dict[str, MarketSnapshot], regime: str, logger) -> None:

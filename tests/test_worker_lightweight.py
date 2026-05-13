@@ -8,6 +8,8 @@ LIGHTWEIGHT_ENV_KEYS = [
     "DRY_RUN",
     "ENABLE_FEATURE_LOGGING",
     "ENABLE_SIGNAL_LABELING",
+    "ENABLE_TRAINING_PULSE",
+    "LABEL_LOG_INDIVIDUAL",
     "ENABLE_RESEARCH_AUTO_REPORT",
     "ENABLE_FULL_RESEARCH_AUTO_REPORT",
     "ENABLE_DAILY_RESEARCH_SUMMARY",
@@ -87,6 +89,15 @@ def test_worker_lightweight_forces_kronos_and_reconcile_off(monkeypatch):
     assert config.lightweight_paper_reconcile_on_start is True
 
 
+def test_worker_lightweight_keeps_training_pulse_enabled(monkeypatch):
+    config = load_without_env(
+        monkeypatch,
+        WORKER_LIGHTWEIGHT_MODE="true",
+        ENABLE_TRAINING_PULSE="true",
+    )
+    assert config.enable_training_pulse is True
+
+
 def test_lightweight_paper_reconcile_default_true():
     assert BotConfig().lightweight_paper_reconcile_on_start is True
 
@@ -117,9 +128,19 @@ def test_worker_lightweight_keeps_safe_trading_modes(monkeypatch):
     assert config.enable_signal_labeling is True
 
 
+def test_worker_lightweight_config_defaults_safe():
+    config = BotConfig()
+    assert config.paper_trading is True
+    assert config.live_trading is False
+    assert config.dry_run is True
+    assert config.worker_lightweight_mode is True
+    assert config.enable_training_pulse is True
+    assert config.label_log_individual is False
+
+
 def test_worker_lightweight_keeps_research_cli_commands_available():
     text = (PROJECT_ROOT / "app" / "research_lab.py").read_text(encoding="utf-8")
-    for command in ("daily-summary", "strategy-lab", "reconcile-paper", "virtual-portfolio"):
+    for command in ("daily-summary", "training-summary", "acceleration-plan", "strategy-lab", "reconcile-paper", "virtual-portfolio"):
         assert f'"{command}"' in text
     config = BotConfig(
         worker_lightweight_mode=True,

@@ -658,6 +658,9 @@ class Database:
             "CREATE INDEX IF NOT EXISTS idx_strategy_lab_walkforward_run ON strategy_lab_walkforward(run_id)",
             "CREATE INDEX IF NOT EXISTS idx_strategy_lab_recommendations_run ON strategy_lab_recommendations(run_id)",
             "CREATE INDEX IF NOT EXISTS idx_research_autopilot_runs_started ON research_autopilot_runs(started_at)",
+            "CREATE INDEX IF NOT EXISTS idx_events_timestamp_type ON events(timestamp, event_type)",
+            "CREATE INDEX IF NOT EXISTS idx_signal_observations_timestamp ON signal_observations(timestamp)",
+            "CREATE INDEX IF NOT EXISTS idx_signal_observations_score_time ON signal_observations(confidence_score, timestamp)",
         ]
         for sql in indexes:
             self._execute(conn, sql)
@@ -1003,6 +1006,73 @@ class Database:
                 "short_count": 0,
             }
 
+    def get_training_observation_summary_since(self, since_iso: str, min_score: int = 72, limit: int = 5) -> dict[str, Any]:
+        summary_sql = """
+            SELECT
+                COUNT(*) AS total,
+                SUM(CASE WHEN side = 'LONG' THEN 1 ELSE 0 END) AS long_count,
+                SUM(CASE WHEN side = 'SHORT' THEN 1 ELSE 0 END) AS short_count,
+                SUM(CASE WHEN side = 'NO_TRADE' THEN 1 ELSE 0 END) AS no_trade_count,
+                SUM(CASE WHEN COALESCE(confidence_score, 0) >= ? AND side IN ('LONG', 'SHORT') THEN 1 ELSE 0 END) AS high_score_count,
+                SUM(CASE WHEN COALESCE(operated, 0) = 1 THEN 1 ELSE 0 END) AS operated_count,
+                SUM(CASE WHEN COALESCE(selected_by_allocator, 0) = 1 THEN 1 ELSE 0 END) AS selected_count,
+                SUM(CASE WHEN COALESCE(risk_manager_approved, 0) = 1 THEN 1 ELSE 0 END) AS risk_approved_count
+            FROM signal_observations
+            WHERE timestamp >= ?
+        """
+        regime_sql = """
+            SELECT COALESCE(market_regime, 'NA') AS key, COUNT(*) AS count
+            FROM signal_observations
+            WHERE timestamp >= ?
+            GROUP BY COALESCE(market_regime, 'NA')
+            ORDER BY count DESC
+            LIMIT ?
+        """
+        symbol_sql = """
+            SELECT COALESCE(symbol, 'NA') AS key, COUNT(*) AS count, MAX(COALESCE(confidence_score, 0)) AS max_score
+            FROM signal_observations
+            WHERE timestamp >= ?
+              AND COALESCE(confidence_score, 0) >= ?
+              AND side IN ('LONG', 'SHORT')
+            GROUP BY COALESCE(symbol, 'NA')
+            ORDER BY count DESC, max_score DESC
+            LIMIT ?
+        """
+        if self._use_postgres:
+            summary_sql = summary_sql.replace("?", "%s")
+            regime_sql = regime_sql.replace("?", "%s")
+            symbol_sql = symbol_sql.replace("?", "%s")
+        try:
+            with self._connect() as conn:
+                row = conn.execute(summary_sql, (int(min_score), since_iso)).fetchone()
+                regimes = self._fetchall_dicts(conn.execute(regime_sql, (since_iso, int(limit))))
+                symbols = self._fetchall_dicts(conn.execute(symbol_sql, (since_iso, int(min_score), int(limit))))
+            return {
+                "total": int(self._row_value(row, "total", 0, 0) or 0),
+                "long_count": int(self._row_value(row, "long_count", 1, 0) or 0),
+                "short_count": int(self._row_value(row, "short_count", 2, 0) or 0),
+                "no_trade_count": int(self._row_value(row, "no_trade_count", 3, 0) or 0),
+                "high_score_count": int(self._row_value(row, "high_score_count", 4, 0) or 0),
+                "operated_count": int(self._row_value(row, "operated_count", 5, 0) or 0),
+                "selected_count": int(self._row_value(row, "selected_count", 6, 0) or 0),
+                "risk_approved_count": int(self._row_value(row, "risk_approved_count", 7, 0) or 0),
+                "regimes": regimes,
+                "top_symbols": symbols,
+            }
+        except Exception:
+            return {
+                "total": 0,
+                "long_count": 0,
+                "short_count": 0,
+                "no_trade_count": 0,
+                "high_score_count": 0,
+                "operated_count": 0,
+                "selected_count": 0,
+                "risk_approved_count": 0,
+                "regimes": [],
+                "top_symbols": [],
+            }
+
     def get_signal_label_summary(self) -> dict[str, float]:
         sql = """
             SELECT
@@ -1182,6 +1252,22 @@ class Database:
             reverse=best,
         )
         return rows[:limit]
+
+    def get_event_type_counts_since(self, since_iso: str) -> dict[str, int]:
+        sql = """
+            SELECT event_type, COUNT(*) AS count
+            FROM events
+            WHERE timestamp >= ?
+            GROUP BY event_type
+        """
+        if self._use_postgres:
+            sql = sql.replace("?", "%s")
+        try:
+            with self._connect() as conn:
+                rows = self._fetchall_dicts(conn.execute(sql, (since_iso,)))
+            return {str(row.get("event_type") or "NA"): int(row.get("count") or 0) for row in rows}
+        except Exception:
+            return {}
 
     def fetch_trades(self, limit: int | None = None) -> list[dict[str, Any]]:
         sql = "SELECT * FROM trades ORDER BY timestamp ASC"
