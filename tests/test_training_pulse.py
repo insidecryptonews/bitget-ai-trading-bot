@@ -15,6 +15,19 @@ def test_training_pulse_text_contains_markers():
     assert "final_recommendation: NO LIVE" in text
 
 
+def test_training_pulse_to_dict_contains_dashboard_sections():
+    pulse = TrainingPulse()
+    pulse.record_labels({"total": 3, "TIME": 1, "SL": 1, "TP1": 1, "TP2": 0})
+    pulse.record_signals([SimpleNamespace(symbol="BTCUSDT", side="LONG", confidence_score=88, reason="trend")], 72)
+    data = pulse.to_dict(BotConfig())
+    for key in ("safety", "health", "paper", "allocator", "signals", "labels", "regimes", "diagnosis"):
+        assert key in data
+    assert data["safety"]["paper_trading"] is True
+    assert data["labels"]["total"] == 3
+    assert data["signals"]["long"] == 1
+    assert data["final_recommendation"] == "NO LIVE"
+
+
 def test_training_pulse_text_respects_max_lines():
     pulse = TrainingPulse()
     for idx in range(20):
@@ -90,7 +103,7 @@ def test_reconcile_periodic_does_not_run_when_paper_disabled():
 
     config = BotConfig(paper_trading=False, lightweight_paper_reconcile_on_start=True)
     last = 123.0
-    assert _reconcile_paper_if_due(config, DummyDb(), DummyPaper(), DummyLogger(), TrainingPulse(), last, 999.0) == last
+    assert _reconcile_paper_if_due(config, DummyDb(), DummyPaper(), DummyLogger(), TrainingPulse(), None, last, 999.0) == last
 
 
 def test_training_summary_and_acceleration_plan_cli_exist():

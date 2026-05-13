@@ -5,6 +5,8 @@ import threading
 import time
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 from typing import Any
 
 
@@ -31,19 +33,69 @@ class HealthState:
         }
 
 
-def start_health_server(state: HealthState, port: int, logger) -> threading.Thread:
+STATIC_DIR = Path(__file__).resolve().parent / "static"
+DASHBOARD_PATH = STATIC_DIR / "dashboard.html"
+
+
+def start_health_server(
+    state: HealthState,
+    port: int,
+    logger,
+    *,
+    config: Any | None = None,
+    db: Any | None = None,
+    training_pulse: Any | None = None,
+    telegram_notifier: Any | None = None,
+) -> threading.Thread:
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:  # noqa: N802
-            if self.path != "/health":
-                self.send_response(404)
-                self.end_headers()
+            parsed = urlparse(self.path)
+            path = parsed.path
+            query = parse_qs(parsed.query)
+            if path == "/health":
+                self._send_json(state.payload())
                 return
-            body = json.dumps(state.payload()).encode("utf-8")
-            self.send_response(200)
+            if not _dashboard_enabled(config):
+                self._send_status(404, "not found")
+                return
+            if path in {"/dashboard", "/api/training/status", "/api/training/summary", "/api/training/acceleration-plan"}:
+                if not _authorized(config, query, self.headers):
+                    self._send_json({"error": "unauthorized"}, status=401)
+                    return
+            if path == "/dashboard":
+                self._send_html(_dashboard_html(config))
+                return
+            if path == "/api/training/status":
+                self._send_json(_training_status(config, training_pulse, telegram_notifier))
+                return
+            if path == "/api/training/summary":
+                self._send_json(_training_summary(config, db, query))
+                return
+            if path == "/api/training/acceleration-plan":
+                self._send_json(_acceleration_plan(config, db, query))
+                return
+            self._send_status(404, "not found")
+
+        def _send_json(self, payload: dict[str, Any], status: int = 200) -> None:
+            body = json.dumps(payload, ensure_ascii=True, default=str).encode("utf-8")
+            self.send_response(status)
             self.send_header("Content-Type", "application/json")
+            self.send_header("Cache-Control", "no-store")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
+
+        def _send_html(self, html: str, status: int = 200) -> None:
+            body = html.encode("utf-8")
+            self.send_response(status)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def _send_status(self, status: int, message: str) -> None:
+            self._send_json({"error": message}, status=status)
 
         def log_message(self, format: str, *args: Any) -> None:
             return
@@ -59,3 +111,107 @@ def start_health_server(state: HealthState, port: int, logger) -> threading.Thre
     logger.info("Health server listo en /health puerto %s", port)
     return thread
 
+
+def _dashboard_enabled(config: Any | None) -> bool:
+    return bool(config is not None and getattr(config, "enable_training_dashboard", False))
+
+
+def _authorized(config: Any | None, query: dict[str, list[str]], headers: Any) -> bool:
+    token = str(getattr(config, "dashboard_auth_token", "") or "")
+    if not token:
+        return True
+    query_token = (query.get("token") or [""])[0]
+    header_token = headers.get("X-Dashboard-Token", "")
+    return query_token == token or header_token == token
+
+
+def _dashboard_html(config: Any | None) -> str:
+    try:
+        html = DASHBOARD_PATH.read_text(encoding="utf-8")
+    except OSError:
+        html = "<!doctype html><title>Training Dashboard</title><h1>Training Dashboard</h1>"
+    refresh = max(2, int(getattr(config, "dashboard_refresh_seconds", 10) or 10))
+    return html.replace("__DASHBOARD_REFRESH_SECONDS__", str(refresh))
+
+
+def _training_status(config: Any | None, training_pulse: Any | None, telegram_notifier: Any | None) -> dict[str, Any]:
+    if training_pulse is not None and config is not None:
+        payload = training_pulse.to_dict(config)
+    else:
+        payload = {
+            "safety": {
+                "paper_trading": bool(getattr(config, "paper_trading", True)),
+                "live_trading": bool(getattr(config, "live_trading", False)),
+                "dry_run": bool(getattr(config, "dry_run", True)),
+                "worker_lightweight_mode": bool(getattr(config, "worker_lightweight_mode", True)),
+            },
+            "health": {},
+            "paper": {},
+            "allocator": {},
+            "signals": {},
+            "labels": {},
+            "regimes": {},
+            "top_signals": [],
+            "top_blocks": [],
+            "diagnosis": ["PAPER ONLY: waiting for training pulse"],
+            "next_action": "PAPER ONLY",
+            "final_recommendation": "NO LIVE",
+        }
+    payload["telegram"] = telegram_notifier.status_dict() if telegram_notifier is not None else {
+        "enabled": False,
+        "configured": False,
+        "last_sent_at": "",
+        "last_error": "",
+        "sent_count": 0,
+    }
+    payload["generated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    return payload
+
+
+def _training_summary(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
+    hours = _query_int(query, "hours", 6)
+    if config is None or db is None:
+        return {"error": "training summary unavailable", "hours": hours, "final_recommendation": "NO LIVE"}
+    try:
+        from .training_summary import TrainingSummary
+
+        text = TrainingSummary(config, db).build(hours=hours)
+    except Exception as exc:
+        return {"error": str(exc)[:300], "hours": hours, "final_recommendation": "NO LIVE"}
+    return {
+        "text": text,
+        "hours": hours,
+        "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "final_recommendation": "NO LIVE",
+    }
+
+
+def _acceleration_plan(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
+    hours = _query_int(query, "hours", 24)
+    if config is None or db is None:
+        return {"error": "acceleration plan unavailable", "hours": hours, "final_recommendation": "NO LIVE"}
+    try:
+        from .training_summary import TrainingSummary
+
+        text = TrainingSummary(config, db).acceleration_plan(hours=hours)
+    except Exception as exc:
+        return {"error": str(exc)[:300], "hours": hours, "final_recommendation": "NO LIVE"}
+    biggest_problem = ""
+    for line in text.splitlines():
+        if line.startswith("biggest_problem:"):
+            biggest_problem = line.split(":", 1)[1].strip()
+            break
+    return {
+        "text": text,
+        "hours": hours,
+        "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "biggest_problem": biggest_problem,
+        "final_recommendation": "NO LIVE",
+    }
+
+
+def _query_int(query: dict[str, list[str]], key: str, default: int) -> int:
+    try:
+        return max(1, int((query.get(key) or [default])[0]))
+    except (TypeError, ValueError):
+        return default

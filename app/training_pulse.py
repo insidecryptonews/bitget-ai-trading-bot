@@ -162,49 +162,119 @@ class TrainingPulse:
         elapsed = (now - self.last_pulse_at).total_seconds()
         return elapsed >= max(1, int(interval_minutes or 10)) * 60
 
-    def to_text(self, config) -> str:
+    def to_dict(self, config) -> dict[str, Any]:
         now = datetime.now(timezone.utc)
         uptime_min = (now - self.started_at).total_seconds() / 60.0
         window_min = (now - self.window_started_at).total_seconds() / 60.0
         diagnoses = self._diagnosis()
         recommendation = self._recommendation(diagnoses)
+        tp_count = self.labels_tp1 + self.labels_tp2
+        total_labels = max(self.labels_total, 1)
+        return {
+            "safety": {
+                "paper_trading": bool(config.paper_trading),
+                "live_trading": bool(config.live_trading),
+                "dry_run": bool(config.dry_run),
+                "worker_lightweight_mode": bool(config.worker_lightweight_mode),
+            },
+            "health": {
+                "uptime_min": round(uptime_min, 2),
+                "window_min": round(window_min, 2),
+                "memory_mb_last": round(self.memory_mb_last, 2),
+                "memory_mb_max": round(self.memory_mb_max, 2),
+                "cycles_ok": self.cycles_ok,
+                "cycles_error": self.cycles_error,
+                "api_429_count": self.api_429_count,
+                "api_error_count": self.api_error_count,
+            },
+            "paper": {
+                "open_positions": self.open_paper_positions_last,
+                "open_success": self.paper_open_success,
+                "open_fail": self.paper_open_fail,
+                "reconcile_runs": self.paper_reconcile_runs,
+                "reconcile_closed_label": self.paper_reconcile_closed_by_label,
+                "reconcile_closed_time": self.paper_reconcile_closed_by_time,
+                "reconcile_left_open": self.paper_reconcile_left_open,
+            },
+            "allocator": {
+                "selected": self.allocator_selected_count,
+                "no_trade": self.allocator_no_trade_count,
+                "slot_blocks": self.slot_block_count,
+                "risk_blocks": self.risk_block_count,
+            },
+            "signals": {
+                "long": self.signals_long,
+                "short": self.signals_short,
+                "no_trade": self.signals_no_trade,
+                "high_score": self.high_score_signals_total,
+                "missed_high_score": self.missed_high_score_signals,
+            },
+            "labels": {
+                "total": self.labels_total,
+                "time": self.labels_time,
+                "sl": self.labels_sl,
+                "tp1": self.labels_tp1,
+                "tp2": self.labels_tp2,
+                "time_ratio": self.labels_time / total_labels if self.labels_total else 0.0,
+                "sl_ratio": self.labels_sl / total_labels if self.labels_total else 0.0,
+                "tp_ratio": tp_count / total_labels if self.labels_total else 0.0,
+            },
+            "regimes": {
+                "CHOPPY_MARKET": self.market_regime_counts.get("CHOPPY_MARKET", 0),
+                "RANGE": self.market_regime_counts.get("RANGE", 0),
+                "TREND_UP": self.market_regime_counts.get("TREND_UP", 0),
+                "TREND_DOWN": self.market_regime_counts.get("TREND_DOWN", 0),
+                "RISK_OFF": self.market_regime_counts.get("RISK_OFF", 0),
+            },
+            "top_signals": [dict(item) for item in self.top_signal_scores[: max(1, int(config.training_pulse_top_n or 5))]],
+            "top_blocks": [
+                {"reason": reason, "count": count}
+                for reason, count in self.top_block_reasons.most_common(max(1, int(config.training_pulse_top_n or 5)))
+            ],
+            "diagnosis": diagnoses,
+            "next_action": recommendation,
+            "final_recommendation": "NO LIVE",
+        }
+
+    def to_text(self, config, *, update_timestamp: bool = True) -> str:
+        data = self.to_dict(config)
         lines = [
             START_MARKER,
-            f"uptime_min: {uptime_min:.1f}",
-            f"window_min: {window_min:.1f}",
+            f"uptime_min: {data['health']['uptime_min']:.1f}",
+            f"window_min: {data['health']['window_min']:.1f}",
             f"mode: {config.mode}",
             (
                 "safety: "
-                f"PAPER={config.paper_trading} LIVE={config.live_trading} "
-                f"DRY={config.dry_run} LIGHTWEIGHT={config.worker_lightweight_mode}"
+                f"PAPER={data['safety']['paper_trading']} LIVE={data['safety']['live_trading']} "
+                f"DRY={data['safety']['dry_run']} LIGHTWEIGHT={data['safety']['worker_lightweight_mode']}"
             ),
-            f"memory_mb: last={self.memory_mb_last:.2f} max={self.memory_mb_max:.2f}",
-            f"cycles: ok={self.cycles_ok} error={self.cycles_error}",
-            f"api: 429={self.api_429_count} errors={self.api_error_count}",
+            f"memory_mb: last={data['health']['memory_mb_last']:.2f} max={data['health']['memory_mb_max']:.2f}",
+            f"cycles: ok={data['health']['cycles_ok']} error={data['health']['cycles_error']}",
+            f"api: 429={data['health']['api_429_count']} errors={data['health']['api_error_count']}",
             (
                 "paper: "
-                f"open_positions={self.open_paper_positions_last} "
-                f"open_success={self.paper_open_success} open_fail={self.paper_open_fail}"
+                f"open_positions={data['paper']['open_positions']} "
+                f"open_success={data['paper']['open_success']} open_fail={data['paper']['open_fail']}"
             ),
             (
                 "paper_reconcile: "
-                f"runs={self.paper_reconcile_runs} closed_label={self.paper_reconcile_closed_by_label} "
-                f"closed_time={self.paper_reconcile_closed_by_time} left_open={self.paper_reconcile_left_open}"
+                f"runs={data['paper']['reconcile_runs']} closed_label={data['paper']['reconcile_closed_label']} "
+                f"closed_time={data['paper']['reconcile_closed_time']} left_open={data['paper']['reconcile_left_open']}"
             ),
             (
                 "allocator: "
-                f"selected={self.allocator_selected_count} no_trade={self.allocator_no_trade_count} "
-                f"slot_blocks={self.slot_block_count}"
+                f"selected={data['allocator']['selected']} no_trade={data['allocator']['no_trade']} "
+                f"slot_blocks={data['allocator']['slot_blocks']}"
             ),
             (
                 "signals: "
-                f"LONG={self.signals_long} SHORT={self.signals_short} NO_TRADE={self.signals_no_trade} "
-                f"high_score={self.high_score_signals_total} missed_high_score={self.missed_high_score_signals}"
+                f"LONG={data['signals']['long']} SHORT={data['signals']['short']} NO_TRADE={data['signals']['no_trade']} "
+                f"high_score={data['signals']['high_score']} missed_high_score={data['signals']['missed_high_score']}"
             ),
             (
                 "labels: "
-                f"total={self.labels_total} TIME={self.labels_time} SL={self.labels_sl} "
-                f"TP1={self.labels_tp1} TP2={self.labels_tp2}"
+                f"total={data['labels']['total']} TIME={data['labels']['time']} SL={data['labels']['sl']} "
+                f"TP1={data['labels']['tp1']} TP2={data['labels']['tp2']}"
             ),
             "regimes: " + _counter_inline(self.market_regime_counts, config.training_pulse_top_n),
             "top_signals:",
@@ -212,16 +282,17 @@ class TrainingPulse:
             "top_blocks:",
             *_counter_lines(self.top_block_reasons, config.training_pulse_top_n),
             "diagnosis:",
-            *[f"- {item}" for item in diagnoses],
+            *[f"- {item}" for item in data["diagnosis"]],
             "next_action:",
-            f"- {recommendation}",
-            "final_recommendation: NO LIVE",
+            f"- {data['next_action']}",
+            f"final_recommendation: {data['final_recommendation']}",
             END_MARKER,
         ]
         max_lines = max(10, int(config.training_pulse_max_lines or 80))
         if len(lines) > max_lines:
             lines = lines[: max_lines - 1] + [END_MARKER]
-        self.last_pulse_at = now
+        if update_timestamp:
+            self.last_pulse_at = datetime.now(timezone.utc)
         return "\n".join(lines)
 
     def reset_window(self) -> None:

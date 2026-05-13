@@ -1,0 +1,301 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Bitget AI Bot Training Dashboard</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #0d1117;
+      --panel: #151b23;
+      --panel-2: #1c2430;
+      --text: #edf2f7;
+      --muted: #9aa8b6;
+      --line: #2b3542;
+      --good: #2dd4bf;
+      --warn: #f59e0b;
+      --bad: #f43f5e;
+      --info: #60a5fa;
+      --violet: #a78bfa;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      line-height: 1.45;
+    }
+    header {
+      position: sticky;
+      top: 0;
+      z-index: 2;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      padding: 18px clamp(16px, 3vw, 34px);
+      border-bottom: 1px solid var(--line);
+      background: rgba(13, 17, 23, 0.94);
+      backdrop-filter: blur(10px);
+    }
+    h1 { margin: 0; font-size: clamp(21px, 3vw, 34px); letter-spacing: 0; }
+    .subtitle { color: var(--muted); font-size: 14px; margin-top: 2px; }
+    main { padding: 22px clamp(14px, 3vw, 34px) 40px; max-width: 1500px; margin: 0 auto; }
+    .status { display: flex; align-items: center; gap: 10px; color: var(--muted); font-size: 14px; }
+    .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--warn); box-shadow: 0 0 18px currentColor; }
+    .online .dot { background: var(--good); color: var(--good); }
+    .danger-banner {
+      display: none;
+      margin: 0 0 18px;
+      padding: 14px 16px;
+      border: 1px solid rgba(244, 63, 94, .5);
+      background: rgba(244, 63, 94, .12);
+      color: #fecdd3;
+      font-weight: 700;
+    }
+    .grid { display: grid; grid-template-columns: repeat(12, 1fr); gap: 14px; }
+    .card {
+      grid-column: span 3;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 16px;
+      min-width: 0;
+    }
+    .wide { grid-column: span 6; }
+    .full { grid-column: 1 / -1; }
+    .card h2 { margin: 0 0 12px; font-size: 15px; color: #d8e2ee; font-weight: 700; }
+    .metric { display: flex; justify-content: space-between; gap: 12px; padding: 7px 0; border-bottom: 1px solid rgba(255,255,255,.05); }
+    .metric:last-child { border-bottom: 0; }
+    .label { color: var(--muted); min-width: 0; overflow-wrap: anywhere; }
+    .value { font-weight: 700; text-align: right; overflow-wrap: anywhere; }
+    .pill-row { display: flex; flex-wrap: wrap; gap: 8px; }
+    .pill { padding: 7px 10px; border-radius: 999px; background: var(--panel-2); border: 1px solid var(--line); font-weight: 700; }
+    .good { color: var(--good); }
+    .warn { color: var(--warn); }
+    .bad { color: var(--bad); }
+    .info { color: var(--info); }
+    .bar { height: 9px; border-radius: 999px; background: #263241; overflow: hidden; margin: 6px 0 11px; }
+    .bar span { display: block; height: 100%; width: 0; background: linear-gradient(90deg, var(--good), var(--info)); }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th, td { text-align: left; padding: 9px 7px; border-bottom: 1px solid rgba(255,255,255,.06); vertical-align: top; }
+    th { color: var(--muted); font-weight: 600; }
+    td { overflow-wrap: anywhere; }
+    button {
+      border: 1px solid var(--line);
+      background: var(--panel-2);
+      color: var(--text);
+      border-radius: 8px;
+      padding: 9px 12px;
+      cursor: pointer;
+      font-weight: 700;
+    }
+    button:hover { border-color: var(--info); }
+    pre {
+      min-height: 100px;
+      max-height: 340px;
+      overflow: auto;
+      background: #0a0f16;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 12px;
+      white-space: pre-wrap;
+      color: #d6e1eb;
+    }
+    .actions { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 10px; }
+    @media (max-width: 1100px) { .card, .wide { grid-column: span 6; } }
+    @media (max-width: 700px) {
+      header { align-items: flex-start; flex-direction: column; }
+      .card, .wide { grid-column: 1 / -1; }
+      .metric { align-items: flex-start; flex-direction: column; gap: 2px; }
+      .value { text-align: left; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div>
+      <h1>Bitget AI Bot</h1>
+      <div class="subtitle">Training Dashboard</div>
+    </div>
+    <div id="onlineState" class="status"><span class="dot"></span><span>conectando</span></div>
+  </header>
+  <main>
+    <div id="liveDanger" class="danger-banner">PELIGRO LIVE ACTIVO</div>
+    <section class="grid">
+      <div class="card wide">
+        <h2>Safety</h2>
+        <div class="pill-row" id="safetyPills"></div>
+      </div>
+      <div class="card wide">
+        <h2>Worker Health</h2>
+        <div id="healthMetrics"></div>
+      </div>
+      <div class="card">
+        <h2>Paper</h2>
+        <div id="paperMetrics"></div>
+      </div>
+      <div class="card">
+        <h2>Training Quality</h2>
+        <div id="labelMetrics"></div>
+      </div>
+      <div class="card">
+        <h2>Signals</h2>
+        <div id="signalMetrics"></div>
+      </div>
+      <div class="card">
+        <h2>Telegram</h2>
+        <div id="telegramMetrics"></div>
+      </div>
+      <div class="card wide">
+        <h2>Market Regime</h2>
+        <div id="regimeBars"></div>
+      </div>
+      <div class="card wide">
+        <h2>Diagnosis</h2>
+        <div id="diagnosis"></div>
+      </div>
+      <div class="card wide">
+        <h2>Top Signals</h2>
+        <table><thead><tr><th>symbol</th><th>side</th><th>score</th><th>reason</th></tr></thead><tbody id="topSignals"></tbody></table>
+      </div>
+      <div class="card wide">
+        <h2>Top Blocks</h2>
+        <table><thead><tr><th>reason</th><th>count</th></tr></thead><tbody id="topBlocks"></tbody></table>
+      </div>
+      <div class="card full">
+        <h2>Training Summary</h2>
+        <div class="actions"><button id="summaryBtn">Actualizar summary 6h</button></div>
+        <pre id="summaryText">Sin cargar todavía.</pre>
+      </div>
+      <div class="card full">
+        <h2>Acceleration Plan</h2>
+        <div class="actions"><button id="planBtn">Actualizar acceleration plan 24h</button></div>
+        <pre id="planText">Sin cargar todavía.</pre>
+      </div>
+    </section>
+  </main>
+  <script>
+    const REFRESH_SECONDS = Number("__DASHBOARD_REFRESH_SECONDS__") || 10;
+    const params = new URLSearchParams(window.location.search);
+    const token = params.get("token") || "";
+    const byId = (id) => document.getElementById(id);
+    function apiUrl(path) {
+      const separator = path.includes("?") ? "&" : "?";
+      return token ? `${path}${separator}token=${encodeURIComponent(token)}` : path;
+    }
+    function value(x, fallback = "0") { return x === undefined || x === null || x === "" ? fallback : x; }
+    function pct(x) { return `${((Number(x) || 0) * 100).toFixed(1)}%`; }
+    function metric(label, val, cls = "") {
+      return `<div class="metric"><span class="label">${escapeHtml(label)}</span><span class="value ${cls}">${escapeHtml(String(value(val)))}</span></div>`;
+    }
+    function pill(label, ok, inverted = false) {
+      const good = inverted ? !ok : !!ok;
+      return `<span class="pill ${good ? "good" : "bad"}">${escapeHtml(label)}=${escapeHtml(String(!!ok))}</span>`;
+    }
+    function escapeHtml(text) {
+      return String(text).replace(/[&<>"']/g, (m) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[m]));
+    }
+    async function fetchJson(path) {
+      const response = await fetch(apiUrl(path), { cache: "no-store" });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      return response.json();
+    }
+    function setOnline(ok, text) {
+      const el = byId("onlineState");
+      el.className = ok ? "status online" : "status";
+      el.querySelector("span:last-child").textContent = text;
+    }
+    function render(data) {
+      const safety = data.safety || {};
+      byId("liveDanger").style.display = safety.live_trading ? "block" : "none";
+      byId("safetyPills").innerHTML = [
+        pill("PAPER", safety.paper_trading),
+        pill("LIVE", safety.live_trading, true),
+        pill("DRY_RUN", safety.dry_run),
+        pill("LIGHTWEIGHT", safety.worker_lightweight_mode),
+      ].join("");
+      const h = data.health || {};
+      byId("healthMetrics").innerHTML =
+        metric("uptime min", h.uptime_min) +
+        metric("memory last/max", `${value(h.memory_mb_last)} / ${value(h.memory_mb_max)} MB`) +
+        metric("cycles ok/error", `${value(h.cycles_ok)} / ${value(h.cycles_error)}`, h.cycles_error ? "warn" : "good") +
+        metric("API 429", h.api_429_count, h.api_429_count ? "warn" : "good") +
+        metric("API errors", h.api_error_count, h.api_error_count ? "warn" : "good");
+      const p = data.paper || {};
+      const a = data.allocator || {};
+      byId("paperMetrics").innerHTML =
+        metric("open positions", p.open_positions) +
+        metric("open success/fail", `${value(p.open_success)} / ${value(p.open_fail)}`) +
+        metric("reconcile runs", p.reconcile_runs) +
+        metric("closed label/time", `${value(p.reconcile_closed_label)} / ${value(p.reconcile_closed_time)}`) +
+        metric("left open", p.reconcile_left_open) +
+        metric("slot blocks", a.slot_blocks, a.slot_blocks ? "warn" : "good");
+      const labels = data.labels || {};
+      byId("labelMetrics").innerHTML =
+        metric("total", labels.total) +
+        metric("TIME", labels.time) +
+        metric("SL", labels.sl) +
+        metric("TP1", labels.tp1) +
+        metric("TP2", labels.tp2) +
+        metric("TIME ratio", pct(labels.time_ratio), labels.time_ratio > 0.8 ? "warn" : "good") +
+        metric("SL ratio", pct(labels.sl_ratio)) +
+        metric("TP ratio", pct(labels.tp_ratio));
+      const s = data.signals || {};
+      byId("signalMetrics").innerHTML =
+        metric("LONG", s.long) +
+        metric("SHORT", s.short) +
+        metric("NO_TRADE", s.no_trade) +
+        metric("high score", s.high_score) +
+        metric("missed high score", s.missed_high_score, s.missed_high_score ? "warn" : "good") +
+        metric("allocator selected/no_trade", `${value(a.selected)} / ${value(a.no_trade)}`);
+      const t = data.telegram || {};
+      byId("telegramMetrics").innerHTML =
+        metric("enabled", t.enabled) +
+        metric("configured", t.configured) +
+        metric("last sent", t.last_sent_at || "never") +
+        metric("sent count", t.sent_count) +
+        metric("last error", t.last_error || "none", t.last_error ? "warn" : "good");
+      renderRegimes(data.regimes || {});
+      byId("diagnosis").innerHTML = (data.diagnosis || []).map((x) => `<div class="metric"><span class="value info">${escapeHtml(x)}</span></div>`).join("") +
+        metric("next action", data.next_action || "PAPER ONLY") +
+        metric("final", data.final_recommendation || "NO LIVE", "good");
+      renderRows("topSignals", data.top_signals || [], ["symbol", "side", "score", "reason"]);
+      renderRows("topBlocks", data.top_blocks || [], ["reason", "count"]);
+      setOnline(true, `online · ${data.generated_at || new Date().toISOString()}`);
+    }
+    function renderRegimes(regimes) {
+      const entries = ["CHOPPY_MARKET", "RANGE", "TREND_UP", "TREND_DOWN", "RISK_OFF"].map((key) => [key, Number(regimes[key] || 0)]);
+      const max = Math.max(1, ...entries.map(([, v]) => v));
+      byId("regimeBars").innerHTML = entries.map(([key, val]) =>
+        `<div class="metric"><span class="label">${key}</span><span class="value">${val}</span></div><div class="bar"><span style="width:${Math.min(100, val / max * 100)}%"></span></div>`
+      ).join("");
+    }
+    function renderRows(id, rows, keys) {
+      const body = byId(id);
+      if (!rows.length) { body.innerHTML = `<tr><td colspan="${keys.length}">none</td></tr>`; return; }
+      body.innerHTML = rows.map((row) => `<tr>${keys.map((key) => `<td>${escapeHtml(value(row[key], ""))}</td>`).join("")}</tr>`).join("");
+    }
+    async function refresh() {
+      try { render(await fetchJson("/api/training/status")); }
+      catch (err) { setOnline(false, `offline · ${err.message}`); }
+    }
+    async function loadSummary() {
+      byId("summaryText").textContent = "Cargando...";
+      try { byId("summaryText").textContent = (await fetchJson("/api/training/summary?hours=6")).text || "Sin datos."; }
+      catch (err) { byId("summaryText").textContent = `Error: ${err.message}`; }
+    }
+    async function loadPlan() {
+      byId("planText").textContent = "Cargando...";
+      try { byId("planText").textContent = (await fetchJson("/api/training/acceleration-plan?hours=24")).text || "Sin datos."; }
+      catch (err) { byId("planText").textContent = `Error: ${err.message}`; }
+    }
+    byId("summaryBtn").addEventListener("click", loadSummary);
+    byId("planBtn").addEventListener("click", loadPlan);
+    refresh();
+    setInterval(refresh, REFRESH_SECONDS * 1000);
+  </script>
+</body>
+</html>

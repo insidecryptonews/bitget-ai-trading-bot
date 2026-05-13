@@ -31,6 +31,7 @@ from .risk_manager import RiskManager
 from .shadow_strategies import ShadowStrategyEngine
 from .signal_engine import Signal, SignalEngine
 from .telegram_alerts import TelegramAlerts
+from .telegram_notifier import TelegramNotifier
 from .training_pulse import TrainingPulse
 from .utils import iso_utc, safe_float
 
@@ -51,9 +52,19 @@ def main() -> None:
     logger = setup_logger()
     db = Database(config, logger)
     db.initialize()
+    training_pulse = TrainingPulse() if config.enable_training_pulse else None
+    telegram_notifier = TelegramNotifier(config, logger)
     telegram = TelegramAlerts(config, logger)
     health = HealthState(mode=config.mode)
-    start_health_server(health, config.port, logger)
+    start_health_server(
+        health,
+        config.port,
+        logger,
+        config=config,
+        db=db,
+        training_pulse=training_pulse,
+        telegram_notifier=telegram_notifier,
+    )
     if config.worker_lightweight_mode:
         logger.info("WORKER_LIGHTWEIGHT_MODE activo: research pesado desactivado en worker 24/7")
 
@@ -87,11 +98,11 @@ def main() -> None:
     full_research_reporter = FullResearchReporter(db, config, logger) if config.enable_full_research_auto_report else None
     research_autopilot = ResearchAutopilot(config, db, logger) if config.enable_research_autopilot else None
     daily_summary = DailyResearchSummary(config, db, logger) if config.enable_daily_research_summary else None
-    training_pulse = TrainingPulse() if config.enable_training_pulse else None
     last_research_report_at = 0.0
     last_full_research_report_at = 0.0
     last_research_autopilot_at = 0.0
     last_daily_summary_at = 0.0
+    last_telegram_pulse_at = 0.0
     meta_model = MetaModel(config, db, logger) if config.enable_meta_model and config.meta_model_mode != "off" else None
     if meta_model and config.meta_model_train_on_start and not config.worker_lightweight_mode:
         labeled_rows = db.fetch_labeled_signal_rows()
@@ -106,6 +117,17 @@ def main() -> None:
                 _record_paper_reconcile_event(db, result)
                 if training_pulse:
                     training_pulse.record_paper_reconcile(result)
+                if result.paper_trades_closed_by_label or result.paper_trades_closed_by_time:
+                    _send_telegram_alert_if_needed(
+                        config,
+                        telegram_notifier,
+                        "PAPER RECONCILE",
+                        (
+                            f"closed_label={result.paper_trades_closed_by_label} "
+                            f"closed_time={result.paper_trades_closed_by_time} "
+                            f"left_open={result.paper_trades_left_open}"
+                        ),
+                    )
             except Exception as exc:
                 logger.warning("Paper reconcile on start fallo sin detener el bot: %s", exc)
         paper_trader.load_open_positions_from_db()
@@ -412,11 +434,18 @@ def main() -> None:
                         paper_trader.open_position(safe_signal, risk.risk_amount, risk)
                         if training_pulse:
                             training_pulse.record_paper_open_attempt(safe_signal.symbol, safe_signal.side, True, "")
+                        _send_telegram_alert_if_needed(
+                            config,
+                            telegram_notifier,
+                            "PAPER OPEN",
+                            f"{safe_signal.symbol} {safe_signal.side} score={safe_signal.confidence_score}",
+                        )
                         _record_paper_open_attempt_event(db, safe_signal, True, "")
                     except Exception as exc:
                         logger.warning("Paper open fallo %s %s: %s", safe_signal.symbol, safe_signal.side, exc)
                         if training_pulse:
                             training_pulse.record_paper_open_attempt(safe_signal.symbol, safe_signal.side, False, str(exc))
+                        _send_telegram_alert_if_needed(config, telegram_notifier, "PAPER OPEN FAIL", f"{safe_signal.symbol} {safe_signal.side}: {exc}")
                         _record_paper_open_attempt_event(db, safe_signal, False, str(exc))
                         _record_high_score_missed_event(
                             db,
@@ -498,12 +527,20 @@ def main() -> None:
                 paper_trader,
                 logger,
                 training_pulse,
+                telegram_notifier,
                 last_lightweight_paper_reconcile_at,
                 time.monotonic(),
             )
             if training_pulse:
                 training_pulse.record_cycle_ok()
             _emit_training_pulse_if_due(config, db, training_pulse, logger, time.monotonic())
+            last_telegram_pulse_at = _send_telegram_pulse_if_due(
+                config,
+                telegram_notifier,
+                training_pulse,
+                last_telegram_pulse_at,
+                time.monotonic(),
+            )
             elapsed = time.time() - cycle_start
             sleep_for = max(1, config.scan_interval_seconds - elapsed)
             time.sleep(sleep_for)
@@ -514,10 +551,12 @@ def main() -> None:
                 training_pulse.record_cycle_error(str(exc))
                 logger.info("%s", training_pulse.to_text(config))
                 db.record_event("training_pulse", "training pulse after cycle error", level="ERROR", payload={"error": str(exc)[:300]})
+                _send_telegram_alert_if_needed(config, telegram_notifier, "CYCLE ERROR", str(exc))
                 if config.training_pulse_reset_after_emit:
                     training_pulse.reset_window()
             if _is_429_error(str(exc)):
                 db.record_event("training_api_429", "Bitget 429/rate limit", level="WARNING", payload={"error": str(exc)[:300]})
+                _send_telegram_alert_if_needed(config, telegram_notifier, "CHECK_RATE_LIMIT", str(exc))
                 time.sleep(max(1, config.bitget_429_backoff_seconds))
             telegram.critical(f"Error en ciclo principal: {exc}")
             risk_manager.register_api_failure()
@@ -645,12 +684,46 @@ def _emit_training_pulse_if_due(config, db: Database, pulse: TrainingPulse | Non
         pulse.reset_window()
 
 
+def _send_telegram_pulse_if_due(
+    config,
+    notifier: TelegramNotifier,
+    pulse: TrainingPulse | None,
+    last_sent_at: float,
+    now: float,
+) -> float:
+    if pulse is None or not notifier.enabled() or not notifier.configured():
+        return last_sent_at
+    interval_seconds = max(1, int(config.telegram_pulse_interval_minutes or 10)) * 60
+    if last_sent_at > 0 and now - last_sent_at < interval_seconds:
+        return last_sent_at
+    text = pulse.to_text(config, update_timestamp=False)
+    notifier.send_training_pulse(text)
+    data = pulse.to_dict(config)
+    diagnosis_text = " ".join(data.get("diagnosis", []))
+    if (
+        data.get("next_action") == "CHECK_RATE_LIMIT"
+        or "CHECK_SLOT" in diagnosis_text
+        or int(data.get("health", {}).get("api_429_count", 0) or 0) > 0
+        or int(data.get("health", {}).get("cycles_error", 0) or 0) > 0
+        or float(data.get("health", {}).get("memory_mb_max", 0.0) or 0.0) > 700
+        or bool(data.get("safety", {}).get("live_trading", False))
+    ):
+        notifier.send_alert("TRAINING ALERT", text)
+    return now
+
+
+def _send_telegram_alert_if_needed(config, notifier: TelegramNotifier, title: str, text: str) -> None:
+    if notifier.enabled() and notifier.configured() and config.telegram_alerts_enabled:
+        notifier.send_alert(title, text)
+
+
 def _reconcile_paper_if_due(
     config,
     db: Database,
     paper_trader: PaperTrader | None,
     logger,
     pulse: TrainingPulse | None,
+    notifier: TelegramNotifier | None,
     last_reconcile_at: float,
     now: float,
 ) -> float:
@@ -668,6 +741,17 @@ def _reconcile_paper_if_due(
         if result.paper_trades_closed_by_label or result.paper_trades_closed_by_time:
             paper_trader.positions.clear()
             paper_trader.load_open_positions_from_db()
+            if notifier is not None:
+                _send_telegram_alert_if_needed(
+                    config,
+                    notifier,
+                    "PAPER RECONCILE",
+                    (
+                        f"closed_label={result.paper_trades_closed_by_label} "
+                        f"closed_time={result.paper_trades_closed_by_time} "
+                        f"left_open={result.paper_trades_left_open}"
+                    ),
+                )
             if pulse:
                 logger.info("%s", pulse.to_text(config))
                 db.record_event("training_pulse", "training pulse after paper reconcile", payload={"closed": True})

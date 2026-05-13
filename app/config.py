@@ -23,6 +23,9 @@ class BotConfig:
     bitget_api_secret: str = ""
     bitget_passphrase: str = ""
     bitget_base_url: str = "https://api.bitget.com"
+    enable_training_dashboard: bool = True
+    dashboard_auth_token: str = ""
+    dashboard_refresh_seconds: int = 10
     product_type: str = "USDT-FUTURES"
     margin_coin: str = "USDT"
     margin_mode: str = "isolated"
@@ -84,6 +87,13 @@ class BotConfig:
 
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
+    enable_telegram_notifier: bool = False
+    telegram_pulse_interval_minutes: int = 10
+    telegram_alerts_enabled: bool = True
+    telegram_send_training_summary_every_hours: int = 6
+    telegram_send_files: bool = False
+    telegram_max_message_chars: int = 3500
+    telegram_min_alert_interval_seconds: int = 120
 
     enable_news_intel: bool = False
     news_api_key: str = ""
@@ -275,6 +285,9 @@ def load_config(load_dotenv_file: bool = True) -> BotConfig:
         bitget_api_secret=os.getenv("BITGET_API_SECRET", ""),
         bitget_passphrase=os.getenv("BITGET_PASSPHRASE", ""),
         bitget_base_url=os.getenv("BITGET_BASE_URL", "https://api.bitget.com").rstrip("/"),
+        enable_training_dashboard=env_bool(os.getenv("ENABLE_TRAINING_DASHBOARD"), True),
+        dashboard_auth_token=os.getenv("DASHBOARD_AUTH_TOKEN", ""),
+        dashboard_refresh_seconds=env_int(os.getenv("DASHBOARD_REFRESH_SECONDS"), 10),
         margin_mode=os.getenv("MARGIN_MODE", "isolated"),
         force_isolated_margin=env_bool(os.getenv("FORCE_ISOLATED_MARGIN"), True),
         disallow_crossed_margin=env_bool(os.getenv("DISALLOW_CROSSED_MARGIN"), True),
@@ -328,6 +341,13 @@ def load_config(load_dotenv_file: bool = True) -> BotConfig:
         port=env_int(os.getenv("PORT"), 8080),
         telegram_bot_token=os.getenv("TELEGRAM_BOT_TOKEN", ""),
         telegram_chat_id=os.getenv("TELEGRAM_CHAT_ID", ""),
+        enable_telegram_notifier=env_bool(os.getenv("ENABLE_TELEGRAM_NOTIFIER"), False),
+        telegram_pulse_interval_minutes=env_int(os.getenv("TELEGRAM_PULSE_INTERVAL_MINUTES"), 10),
+        telegram_alerts_enabled=env_bool(os.getenv("TELEGRAM_ALERTS_ENABLED"), True),
+        telegram_send_training_summary_every_hours=env_int(os.getenv("TELEGRAM_SEND_TRAINING_SUMMARY_EVERY_HOURS"), 6),
+        telegram_send_files=env_bool(os.getenv("TELEGRAM_SEND_FILES"), False),
+        telegram_max_message_chars=env_int(os.getenv("TELEGRAM_MAX_MESSAGE_CHARS"), 3500),
+        telegram_min_alert_interval_seconds=env_int(os.getenv("TELEGRAM_MIN_ALERT_INTERVAL_SECONDS"), 120),
         enable_news_intel=env_bool(os.getenv("ENABLE_NEWS_INTEL"), False),
         news_api_key=os.getenv("NEWS_API_KEY", ""),
         sentiment_api_key=os.getenv("SENTIMENT_API_KEY", ""),
