@@ -232,6 +232,31 @@
         <div id="evolutionScoreMetrics"></div>
         <pre id="evolutionScoreText">Sin cargar todavía.</pre>
       </div>
+      <div class="card full">
+        <h2>Catalyst Summary</h2>
+        <div class="actions"><button id="catalystSummaryBtn">Actualizar catalyst summary 24h</button></div>
+        <pre id="catalystSummaryText">Sin cargar todavía.</pre>
+      </div>
+      <div class="card full">
+        <h2>News Risk Gate</h2>
+        <div class="actions"><button id="newsRiskGateBtn">Actualizar news risk gate 24h</button></div>
+        <pre id="newsRiskGateText">Sin cargar todavía.</pre>
+      </div>
+      <div class="card full">
+        <h2>Paper Policy Lab</h2>
+        <div class="actions"><button id="paperPolicyLabBtn">Actualizar paper policy lab 24h</button></div>
+        <pre id="paperPolicyLabText">Sin cargar todavía.</pre>
+      </div>
+      <div class="card full">
+        <h2>Walk Forward Validation</h2>
+        <div class="actions"><button id="walkForwardBtn">Actualizar walk-forward 24h</button></div>
+        <pre id="walkForwardText">Sin cargar todavía.</pre>
+      </div>
+      <div class="card full">
+        <h2>Policy Backtest</h2>
+        <div class="actions"><button id="policyBacktestBtn">Actualizar policy backtest 24h</button></div>
+        <pre id="policyBacktestText">Sin cargar todavía.</pre>
+      </div>
     </section>
   </main>
   <script>
@@ -521,6 +546,11 @@
       }
       catch (err) { byId("evolutionScoreText").textContent = `Error: ${err.message}`; }
     }
+    async function loadGenericLab(path, elementId) {
+      byId(elementId).textContent = "Cargando...";
+      try { byId(elementId).textContent = (await fetchJson(path)).text || "Sin datos."; }
+      catch (err) { byId(elementId).textContent = `Error: ${err.message}`; }
+    }
     byId("summaryBtn").addEventListener("click", loadSummary);
     byId("planBtn").addEventListener("click", loadPlan);
     byId("opportunityBtn").addEventListener("click", loadOpportunity);
@@ -531,6 +561,11 @@
     byId("scoreCalibrationBtn").addEventListener("click", loadScoreCalibrationV2);
     byId("shadowExperimentsBtn").addEventListener("click", loadShadowExperiments);
     byId("evolutionScoreBtn").addEventListener("click", loadEvolutionScore);
+    byId("catalystSummaryBtn").addEventListener("click", () => loadGenericLab("/api/training/catalyst-summary?hours=24", "catalystSummaryText"));
+    byId("newsRiskGateBtn").addEventListener("click", () => loadGenericLab("/api/training/news-risk-gate?hours=24", "newsRiskGateText"));
+    byId("paperPolicyLabBtn").addEventListener("click", () => loadGenericLab("/api/training/paper-policy-lab?hours=24", "paperPolicyLabText"));
+    byId("walkForwardBtn").addEventListener("click", () => loadGenericLab("/api/training/walk-forward?hours=24", "walkForwardText"));
+    byId("policyBacktestBtn").addEventListener("click", () => loadGenericLab("/api/training/policy-backtest?hours=24", "policyBacktestText"));
     refresh();
     loadSummary();
     loadPlan();

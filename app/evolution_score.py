@@ -5,7 +5,7 @@ from typing import Any
 
 from .config import BotConfig
 from .database import Database
-from .utils import safe_float
+from .utils import safe_float, safe_int
 
 
 START = "EVOLUTION SCORE START"
@@ -30,11 +30,18 @@ class EvolutionScore:
         edge_quality = _edge_quality(labels, coverage)
         stability = _stability(labels, recent_labels)
         safety = _safety(self.config)
-        final_status = _final_status(data_quality, edge_quality, stability, coverage)
+        policy_context = _policy_context(self.config, self.db, hours)
+        final_status = _final_status(data_quality, edge_quality, stability, coverage, policy_context)
         return {
             "hours": hours,
             "data_quality": data_quality,
             "edge_quality": edge_quality,
+            "policy_quality": policy_context["policy_quality"],
+            "walk_forward_stability": policy_context["walk_forward_stability"],
+            "catalyst_dependency": policy_context["catalyst_dependency"],
+            "news_risk_score": policy_context["news_risk_score"],
+            "paper_candidate_count": policy_context["paper_candidate_count"],
+            "global_news_risk": policy_context["global_news_risk"],
             "stability": stability,
             "safety": safety,
             "market_probe_coverage": coverage["market_probe_coverage"],
@@ -57,6 +64,12 @@ class EvolutionScore:
             f"hours: {payload['hours']}",
             f"data_quality: {payload['data_quality']:.1f}",
             f"edge_quality: {payload['edge_quality']:.1f}",
+            f"policy_quality: {payload['policy_quality']:.1f}",
+            f"walk_forward_stability: {payload['walk_forward_stability']:.1f}",
+            f"catalyst_dependency: {payload['catalyst_dependency']:.2f}",
+            f"news_risk_score: {payload['news_risk_score']:.1f}",
+            f"paper_candidate_count: {payload['paper_candidate_count']}",
+            f"global_news_risk: {payload['global_news_risk']}",
             f"stability: {payload['stability']:.1f}",
             f"safety: {payload['safety']:.1f}",
             f"market_probe_coverage: {payload['market_probe_coverage'] * 100:.1f}%",
@@ -119,7 +132,15 @@ def _safety(config: BotConfig) -> float:
     return min(100.0, score)
 
 
-def _final_status(data_quality: float, edge_quality: float, stability: float, coverage: dict[str, Any]) -> str:
+def _final_status(data_quality: float, edge_quality: float, stability: float, coverage: dict[str, Any], policy_context: dict[str, Any]) -> str:
+    if policy_context.get("global_news_risk") in {"NEWS_BLOCK_ALL_PAPER", "NEWS_RISK_OFF"}:
+        return "NEWS_RISK_BLOCK"
+    if safe_float(policy_context.get("catalyst_dependency")) > 0.70 and safe_int(policy_context.get("paper_candidate_count")) > 0:
+        return "CATALYST_DEPENDENT_EDGE"
+    if safe_int(policy_context.get("paper_candidate_count")) > 0 and safe_float(policy_context.get("walk_forward_stability")) < 60:
+        return "NEED_WALK_FORWARD"
+    if safe_int(policy_context.get("paper_candidate_count")) > 0 and safe_float(policy_context.get("walk_forward_stability")) >= 60:
+        return "POLICY_CANDIDATES_FOUND"
     if safe_float(coverage.get("matured_probe_samples")) > 0 and safe_float(coverage.get("matured_signal_samples")) <= 0:
         return "COLLECTING_PROBES"
     if data_quality < 35:
@@ -132,6 +153,14 @@ def _final_status(data_quality: float, edge_quality: float, stability: float, co
 
 
 def _recommendations(status: str) -> list[str]:
+    if status == "NEWS_RISK_BLOCK":
+        return ["NO LIVE", "news risk activo; mantener solo research/paper", "no activar policies"]
+    if status == "CATALYST_DEPENDENT_EDGE":
+        return ["NO LIVE", "edge parece depender de catalyst", "validar walk-forward antes de tocar paper"]
+    if status == "NEED_WALK_FORWARD":
+        return ["NO LIVE", "validar policies con walk-forward y backtest", "mantener filtros desactivados por defecto"]
+    if status == "POLICY_CANDIDATES_FOUND":
+        return ["NO LIVE", "candidatos research encontrados", "revisar manualmente antes de cualquier cambio paper"]
     if status == "COLLECTING_PROBES":
         return ["NO LIVE", "probes calibran movimiento de mercado, no edge de entrada", "esperar muestras reales maduras"]
     if status == "NEED_MORE_DATA":
@@ -167,3 +196,35 @@ def _go_live_gates() -> dict[str, Any]:
             "Edge Guard y Exit Simulation estables",
         ],
     }
+
+
+def _policy_context(config: BotConfig, db: Database, hours: int) -> dict[str, Any]:
+    context = {
+        "policy_quality": 0.0,
+        "walk_forward_stability": 0.0,
+        "catalyst_dependency": 0.0,
+        "news_risk_score": 100.0,
+        "paper_candidate_count": 0,
+        "global_news_risk": "NEWS_ALLOW",
+    }
+    try:
+        from .paper_policy_lab import PaperPolicyLab
+        from .walk_forward_validation import WalkForwardValidation
+        from .news_risk_gate import NewsRiskGate
+
+        policies = PaperPolicyLab(config, db).build(hours=hours)
+        candidates = [row for row in policies.get("candidate_policies", []) if row.get("decision") in {"PAPER_CANDIDATE", "SHADOW_VALIDATE"}]
+        context["paper_candidate_count"] = len(candidates)
+        context["policy_quality"] = min(100.0, len(candidates) * 20.0)
+        walk = WalkForwardValidation(config, db).build(hours=hours)
+        walk_rows = walk.get("policies", [])
+        if walk_rows:
+            context["walk_forward_stability"] = max(0.0, min(100.0, max(safe_float(row.get("stability")) for row in walk_rows) * 100.0))
+            context["catalyst_dependency"] = max(safe_float(row.get("catalyst_dependency")) for row in walk_rows)
+        news = NewsRiskGate(config, db).build(hours=hours)
+        context["global_news_risk"] = news.get("global_decision", "NEWS_ALLOW")
+        if context["global_news_risk"] in {"NEWS_BLOCK_ALL_PAPER", "NEWS_RISK_OFF"}:
+            context["news_risk_score"] = 10.0
+    except Exception:
+        pass
+    return context

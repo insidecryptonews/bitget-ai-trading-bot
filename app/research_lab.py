@@ -476,6 +476,83 @@ class ResearchLab:
 
         return MfeMaeSmokeTest(self.config, self.db, self.logger).to_text()
 
+    def catalyst_add(
+        self,
+        *,
+        catalyst_id: str,
+        title: str,
+        symbols: str,
+        category: str,
+        direction: str,
+        severity: str,
+        confidence: float,
+        hours_back: int,
+        hours_forward: int,
+    ) -> str:
+        from .catalyst_registry import CatalystRegistry
+
+        saved = CatalystRegistry(self.config, self.db).add_manual(
+            catalyst_id=catalyst_id,
+            title=title,
+            symbols=[item.strip() for item in symbols.split(",") if item.strip()],
+            category=category,
+            direction=direction,
+            severity=severity,
+            confidence=confidence,
+            hours_back=hours_back,
+            hours_forward=hours_forward,
+        )
+        return f"CATALYST ADD OK\nid={saved}\ncatalyst_id={catalyst_id}\nfinal_recommendation: NO LIVE"
+
+    def catalyst_list(self, hours: int = 72) -> str:
+        from .catalyst_registry import CatalystRegistry
+
+        rows = CatalystRegistry(self.config, self.db).list(hours=hours)
+        lines = ["CATALYST LIST START", f"hours: {hours}"]
+        lines.extend(
+            f"- catalyst_id={row.get('catalyst_id')} category={row.get('category')} direction={row.get('direction')} symbols={row.get('symbols')}"
+            for row in rows[:50]
+        )
+        if not rows:
+            lines.append("- none")
+        lines.extend(["final_recommendation: NO LIVE", "CATALYST LIST END"])
+        return "\n".join(lines)
+
+    def catalyst_summary(self, hours: int = 24) -> str:
+        from .catalyst_registry import CatalystRegistry
+
+        return CatalystRegistry(self.config, self.db).to_summary_text(hours=hours)
+
+    def catalyst_ingest(self, hours: int = 48) -> str:
+        from .news_catalyst_ingestor import NewsCatalystIngestor
+
+        return NewsCatalystIngestor(self.config, self.db, self.logger).run(hours=hours).to_text()
+
+    def news_risk_gate(self, hours: int = 24) -> str:
+        from .news_risk_gate import NewsRiskGate
+
+        return NewsRiskGate(self.config, self.db).to_text(hours=hours)
+
+    def paper_policy_lab(self, hours: int = 24) -> str:
+        from .paper_policy_lab import PaperPolicyLab
+
+        return PaperPolicyLab(self.config, self.db).to_text(hours=hours)
+
+    def walk_forward(self, hours: int = 24) -> str:
+        from .walk_forward_validation import WalkForwardValidation
+
+        return WalkForwardValidation(self.config, self.db).to_text(hours=hours)
+
+    def policy_backtest(self, hours: int = 24) -> str:
+        from .policy_backtest import PolicyBacktest
+
+        return PolicyBacktest(self.config, self.db).to_text(hours=hours)
+
+    def policy_news_smoke_test(self) -> str:
+        from .policy_news_smoke_test import PolicyNewsSmokeTest
+
+        return PolicyNewsSmokeTest(self.config, self.db, self.logger).to_text()
+
     def build_markdown_report(
         self,
         dataset: list[dict[str, Any]] | None = None,
@@ -993,6 +1070,15 @@ def main() -> None:
             "evolution-score",
             "mfe-mae-diagnostic",
             "mfe-mae-smoke-test",
+            "catalyst-add",
+            "catalyst-list",
+            "catalyst-summary",
+            "catalyst-ingest",
+            "news-risk-gate",
+            "paper-policy-lab",
+            "walk-forward",
+            "policy-backtest",
+            "policy-news-smoke-test",
         ],
     )
     parser.add_argument("--limit", type=int, default=None, help="Maximo de labels a procesar en phase2-persist.")
@@ -1001,6 +1087,15 @@ def main() -> None:
     parser.add_argument("--hours", type=int, default=24, help="Ventana de horas para daily-summary.")
     parser.add_argument("--safe-mode", action="store_true", default=True, help="Limita memoria y filas para Strategy Lab.")
     parser.add_argument("--unsafe-mode", action="store_false", dest="safe_mode", help="Desactiva el limite seguro de Strategy Lab.")
+    parser.add_argument("--id", default="", help="Catalyst id manual.")
+    parser.add_argument("--title", default="", help="Titulo del catalyst manual.")
+    parser.add_argument("--symbols", default="", help="Simbolos afectados, separados por coma.")
+    parser.add_argument("--category", default="other", help="Categoria catalyst.")
+    parser.add_argument("--direction", default="unknown", help="Direccion catalyst.")
+    parser.add_argument("--severity", default="low", help="Severidad catalyst.")
+    parser.add_argument("--confidence", type=float, default=0.5, help="Confianza catalyst 0-1.")
+    parser.add_argument("--hours-back", type=int, default=0, help="Horas hacia atras para ventana catalyst.")
+    parser.add_argument("--hours-forward", type=int, default=24, help="Horas hacia delante para ventana catalyst.")
     args = parser.parse_args()
     config = load_config()
     logger = setup_logger()
@@ -1084,6 +1179,34 @@ def main() -> None:
         print(lab.mfe_mae_diagnostic(hours=args.hours))
     elif args.command == "mfe-mae-smoke-test":
         print(lab.mfe_mae_smoke_test())
+    elif args.command == "catalyst-add":
+        print(lab.catalyst_add(
+            catalyst_id=args.id,
+            title=args.title,
+            symbols=args.symbols,
+            category=args.category,
+            direction=args.direction,
+            severity=args.severity,
+            confidence=args.confidence,
+            hours_back=args.hours_back,
+            hours_forward=args.hours_forward,
+        ))
+    elif args.command == "catalyst-list":
+        print(lab.catalyst_list(hours=args.hours))
+    elif args.command == "catalyst-summary":
+        print(lab.catalyst_summary(hours=args.hours))
+    elif args.command == "catalyst-ingest":
+        print(lab.catalyst_ingest(hours=args.hours))
+    elif args.command == "news-risk-gate":
+        print(lab.news_risk_gate(hours=args.hours))
+    elif args.command == "paper-policy-lab":
+        print(lab.paper_policy_lab(hours=args.hours))
+    elif args.command == "walk-forward":
+        print(lab.walk_forward(hours=args.hours))
+    elif args.command == "policy-backtest":
+        print(lab.policy_backtest(hours=args.hours))
+    elif args.command == "policy-news-smoke-test":
+        print(lab.policy_news_smoke_test())
 
 
 if __name__ == "__main__":

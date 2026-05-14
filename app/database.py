@@ -559,6 +559,31 @@ class Database:
         self._execute(
             conn,
             """
+            CREATE TABLE IF NOT EXISTS market_catalysts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                catalyst_id TEXT UNIQUE,
+                title TEXT,
+                category TEXT,
+                symbols TEXT,
+                regimes TEXT,
+                direction TEXT,
+                severity TEXT,
+                confidence REAL,
+                source TEXT,
+                source_url_hash TEXT,
+                published_at TEXT,
+                start_at TEXT,
+                end_at TEXT,
+                summary TEXT,
+                raw_ref TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """,
+        )
+        self._execute(
+            conn,
+            """
             CREATE TABLE IF NOT EXISTS strategy_lab_candidates (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 run_id TEXT,
@@ -676,6 +701,11 @@ class Database:
                 "probe_key": "TEXT",
                 "reject_reason": "TEXT",
                 "priority": "INTEGER DEFAULT 0",
+                "catalyst_active": "INTEGER DEFAULT 0",
+                "catalyst_id": "TEXT",
+                "catalyst_category": "TEXT",
+                "catalyst_direction": "TEXT",
+                "catalyst_severity": "TEXT",
             }.items():
                 self._execute(conn, f"ALTER TABLE signal_path_metrics ADD COLUMN IF NOT EXISTS {name} {spec}")
             return
@@ -695,6 +725,11 @@ class Database:
             "probe_key": "TEXT",
             "reject_reason": "TEXT",
             "priority": "INTEGER DEFAULT 0",
+            "catalyst_active": "INTEGER DEFAULT 0",
+            "catalyst_id": "TEXT",
+            "catalyst_category": "TEXT",
+            "catalyst_direction": "TEXT",
+            "catalyst_severity": "TEXT",
         }.items():
             if name not in existing_path_metrics:
                 conn.execute(f"ALTER TABLE signal_path_metrics ADD COLUMN {name} {spec}")
@@ -711,6 +746,7 @@ class Database:
             "CREATE INDEX IF NOT EXISTS idx_signal_path_metrics_status ON signal_path_metrics(status)",
             "CREATE INDEX IF NOT EXISTS idx_signal_path_metrics_source ON signal_path_metrics(source)",
             "CREATE INDEX IF NOT EXISTS idx_signal_path_metrics_probe_key ON signal_path_metrics(probe_key)",
+            "CREATE INDEX IF NOT EXISTS idx_signal_path_metrics_catalyst ON signal_path_metrics(catalyst_active, catalyst_id)",
             "CREATE INDEX IF NOT EXISTS idx_signal_explanations_observation_label ON signal_explanations(observation_id, label_id)",
             "CREATE INDEX IF NOT EXISTS idx_signal_price_paths_observation_label ON signal_price_paths(observation_id, label_id)",
             "CREATE INDEX IF NOT EXISTS idx_signal_counterfactuals_observation_label_scenario ON signal_counterfactuals(observation_id, label_id, scenario_name)",
@@ -725,6 +761,10 @@ class Database:
             "CREATE INDEX IF NOT EXISTS idx_strategy_lab_walkforward_run ON strategy_lab_walkforward(run_id)",
             "CREATE INDEX IF NOT EXISTS idx_strategy_lab_recommendations_run ON strategy_lab_recommendations(run_id)",
             "CREATE INDEX IF NOT EXISTS idx_research_autopilot_runs_started ON research_autopilot_runs(started_at)",
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_market_catalysts_catalyst_id ON market_catalysts(catalyst_id)",
+            "CREATE INDEX IF NOT EXISTS idx_market_catalysts_window ON market_catalysts(start_at, end_at)",
+            "CREATE INDEX IF NOT EXISTS idx_market_catalysts_category ON market_catalysts(category)",
+            "CREATE INDEX IF NOT EXISTS idx_market_catalysts_direction ON market_catalysts(direction)",
             "CREATE INDEX IF NOT EXISTS idx_events_timestamp_type ON events(timestamp, event_type)",
             "CREATE INDEX IF NOT EXISTS idx_signal_observations_timestamp ON signal_observations(timestamp)",
             "CREATE INDEX IF NOT EXISTS idx_signal_observations_score_time ON signal_observations(confidence_score, timestamp)",
@@ -1496,6 +1536,30 @@ class Database:
             cur = conn.execute(sql, params)
             return self._fetchall_dicts(cur)
 
+    def fetch_labeled_signal_rows_since(self, since_iso: str, limit: int = 50000) -> list[dict[str, Any]]:
+        sql = """
+            SELECT so.*, so.id AS observation_id,
+                   sl.id AS label_id,
+                   sl.timestamp AS label_timestamp,
+                   sl.label,
+                   sl.first_barrier_hit,
+                   sl.bars_to_outcome,
+                   sl.max_favorable_excursion,
+                   sl.max_adverse_excursion,
+                   sl.realized_return_pct,
+                   sl.simulated_pnl,
+                   sl.would_have_won
+            FROM signal_labels sl
+            JOIN signal_observations so ON sl.observation_id = so.id
+            WHERE sl.timestamp >= ?
+            ORDER BY sl.timestamp ASC, sl.id ASC
+            LIMIT ?
+        """
+        if self._use_postgres:
+            sql = sql.replace("?", "%s")
+        with self._connect() as conn:
+            return self._fetchall_dicts(conn.execute(sql, (since_iso, max(1, int(limit or 50000)))))
+
     def fetch_signal_labels(self, limit: int | None = None) -> list[dict[str, Any]]:
         sql = "SELECT * FROM signal_labels ORDER BY timestamp ASC"
         params: tuple[Any, ...] = ()
@@ -1640,6 +1704,7 @@ class Database:
             "virtual_strategy_summary",
             "kronos_predictions",
             "market_context_events",
+            "market_catalysts",
             "strategy_lab_candidates",
             "strategy_lab_walkforward",
             "strategy_lab_recommendations",
@@ -1869,6 +1934,11 @@ class Database:
             "created_at",
             "updated_at",
             "matured_at",
+            "catalyst_active",
+            "catalyst_id",
+            "catalyst_category",
+            "catalyst_direction",
+            "catalyst_severity",
         }
         payload = {key: value for key, value in payload.items() if key in allowed}
         with self._connect() as conn:
@@ -1945,6 +2015,11 @@ class Database:
             "status",
             "updated_at",
             "matured_at",
+            "catalyst_active",
+            "catalyst_id",
+            "catalyst_category",
+            "catalyst_direction",
+            "catalyst_severity",
         }
         payload = {key: value for key, value in updates.items() if key in allowed}
         if not observation_id or not payload:
@@ -2349,6 +2424,101 @@ class Database:
 
     def fetch_market_context_events(self, limit: int | None = None) -> list[dict[str, Any]]:
         return self._fetch_table("market_context_events", limit)
+
+    def upsert_market_catalyst(self, payload: dict[str, Any]) -> int:
+        payload = dict(payload)
+        catalyst_id = str(payload.get("catalyst_id") or "").strip()
+        if not catalyst_id:
+            return 0
+        now = iso_utc()
+        payload.setdefault("created_at", now)
+        payload["updated_at"] = now
+        allowed = {
+            "catalyst_id",
+            "title",
+            "category",
+            "symbols",
+            "regimes",
+            "direction",
+            "severity",
+            "confidence",
+            "source",
+            "source_url_hash",
+            "published_at",
+            "start_at",
+            "end_at",
+            "summary",
+            "raw_ref",
+            "created_at",
+            "updated_at",
+        }
+        clean = {key: sanitize(value) if isinstance(value, str) else value for key, value in payload.items() if key in allowed}
+        clean["catalyst_id"] = catalyst_id
+        with self._connect() as conn:
+            select_sql = "SELECT id FROM market_catalysts WHERE catalyst_id=?"
+            if self._use_postgres:
+                select_sql = select_sql.replace("?", "%s")
+            row = conn.execute(select_sql, (catalyst_id,)).fetchone()
+            existing_id = int(self._row_value(row, "id", 0, 0) or 0)
+            if existing_id:
+                updates = {key: value for key, value in clean.items() if key not in {"catalyst_id", "created_at"}}
+                assignments = ", ".join(f"{key}=?" for key in updates)
+                sql = f"UPDATE market_catalysts SET {assignments} WHERE catalyst_id=?"
+                params = tuple(updates.values()) + (catalyst_id,)
+                if self._use_postgres:
+                    sql = sql.replace("?", "%s")
+                conn.execute(sql, params)
+                return existing_id
+            columns = list(clean.keys())
+            placeholders = ", ".join(["?"] * len(columns))
+            sql = f"INSERT INTO market_catalysts({', '.join(columns)}) VALUES ({placeholders})"
+            if self._use_postgres:
+                sql = sql.replace("?", "%s") + " RETURNING id"
+            cur = conn.execute(sql, tuple(clean[col] for col in columns))
+            return self._inserted_id(cur)
+
+    def fetch_market_catalysts(self, *, since_iso: str | None = None, until_iso: str | None = None, limit: int = 500) -> list[dict[str, Any]]:
+        clauses: list[str] = []
+        params: list[Any] = []
+        if since_iso:
+            clauses.append("COALESCE(end_at, start_at, published_at, created_at) >= ?")
+            params.append(since_iso)
+        if until_iso:
+            clauses.append("COALESCE(start_at, published_at, created_at) <= ?")
+            params.append(until_iso)
+        where = " WHERE " + " AND ".join(clauses) if clauses else ""
+        sql = f"""
+            SELECT *
+            FROM market_catalysts
+            {where}
+            ORDER BY COALESCE(published_at, start_at, created_at) DESC, id DESC
+            LIMIT ?
+        """
+        params.append(max(1, int(limit or 500)))
+        if self._use_postgres:
+            sql = sql.replace("?", "%s")
+        try:
+            with self._connect() as conn:
+                return self._fetchall_dicts(conn.execute(sql, tuple(params)))
+        except Exception:
+            return []
+
+    def fetch_active_market_catalysts(self, at_iso: str, *, limit: int = 500) -> list[dict[str, Any]]:
+        sql = """
+            SELECT *
+            FROM market_catalysts
+            WHERE COALESCE(start_at, published_at, created_at) <= ?
+              AND COALESCE(end_at, start_at, published_at, created_at) >= ?
+            ORDER BY severity DESC, confidence DESC, id DESC
+            LIMIT ?
+        """
+        if self._use_postgres:
+            sql = sql.replace("?", "%s")
+        try:
+            with self._connect() as conn:
+                return self._fetchall_dicts(conn.execute(sql, (at_iso, at_iso, max(1, int(limit or 500)))))
+        except Exception:
+            return []
 
     def record_strategy_lab_candidate(self, payload: dict[str, Any]) -> int:
         return self._insert_payload("strategy_lab_candidates", payload)

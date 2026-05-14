@@ -145,13 +145,17 @@ class TrainingSummary:
             )
         score_groups = [row for row in candidate_groups if str(row.get("group_value")) in {"70-79", "80-89", "90-100"}]
         score_not_monotonic = _score_not_monotonic(score_groups)
-        biggest = _biggest_problem(self.config, labels, events, observations, candidate_groups, path_metrics, score_not_monotonic, path_sources)
+        policy_context = _policy_context(self.config, self.db, hours)
+        biggest = _biggest_problem(self.config, labels, events, observations, candidate_groups, path_metrics, score_not_monotonic, path_sources, policy_context)
         lines = [
             PLAN_START,
             f"hours: {window['hours']}",
             f"biggest_problem: {biggest}",
             f"score_not_monotonic: {str(score_not_monotonic).lower()}",
             f"mfe_mae_coverage: {safe_float(path_metrics.get('coverage_pct')) * 100:.1f}%",
+            f"policy_candidates: {safe_int(policy_context.get('paper_candidate_count'))}",
+            f"global_news_risk: {policy_context.get('global_news_risk')}",
+            f"catalyst_dependency: {safe_float(policy_context.get('catalyst_dependency')):.2f}",
             "GO_LIVE_GATES:",
             "- live_allowed=false",
             "- reason=paper/research only",
@@ -198,9 +202,17 @@ def _biggest_problem(
     path_metrics: dict[str, Any] | None = None,
     score_not_monotonic: bool = False,
     path_sources: list[dict[str, Any]] | None = None,
+    policy_context: dict[str, Any] | None = None,
 ) -> str:
+    policy_context = policy_context or {}
     if config.live_trading:
         return "safety_live"
+    if policy_context.get("global_news_risk") in {"NEWS_BLOCK_ALL_PAPER", "NEWS_RISK_OFF"}:
+        return "news_risk_block"
+    if safe_int(policy_context.get("paper_candidate_count")) > 0 and safe_float(policy_context.get("catalyst_dependency")) > 0.70:
+        return "catalyst_dependency_unclear"
+    if safe_int(policy_context.get("paper_candidate_count")) > 0 and safe_float(policy_context.get("walk_forward_stability")) < 60:
+        return "need_walk_forward_validation"
     total = safe_float(labels.get("total_labels"))
     if total <= 0 and safe_int(observations.get("total")) == 0:
         return "no_data"
@@ -247,6 +259,15 @@ def _biggest_problem(
 
 
 def _plan_steps(problem: str, path_metrics: dict[str, Any] | None = None) -> list[str]:
+    if problem in {"catalyst_dependency_unclear", "news_risk_block", "need_walk_forward_validation"}:
+        return [
+            "1. catalyst-summary --hours 24",
+            "2. news-risk-gate --hours 24",
+            "3. paper-policy-lab --hours 24",
+            "4. walk-forward --hours 24",
+            "5. policy-backtest --hours 24",
+            "6. no live y no ampliar slots",
+        ]
     if problem == "mfe_mae_filtered_by_low_score":
         return [
             "1. activar market probes research-only",
@@ -330,6 +351,34 @@ def _score_not_monotonic(rows: list[dict[str, Any]]) -> bool:
     pf_80 = safe_float(by_bucket.get("80-89", {}).get("profit_factor"))
     pf_90 = safe_float(by_bucket.get("90-100", {}).get("profit_factor"))
     return bool(pf_80 > 0 and pf_90 > 0 and pf_80 > pf_90)
+
+
+def _policy_context(config: BotConfig, db: Database, hours: int) -> dict[str, Any]:
+    context = {
+        "paper_candidate_count": 0,
+        "walk_forward_stability": 0.0,
+        "catalyst_dependency": 0.0,
+        "global_news_risk": "NEWS_ALLOW",
+    }
+    try:
+        from .paper_policy_lab import PaperPolicyLab
+        from .walk_forward_validation import WalkForwardValidation
+        from .news_risk_gate import NewsRiskGate
+
+        policies = PaperPolicyLab(config, db).build(hours=hours)
+        context["paper_candidate_count"] = len([
+            row for row in policies.get("candidate_policies", [])
+            if row.get("decision") in {"PAPER_CANDIDATE", "SHADOW_VALIDATE"}
+        ])
+        walk = WalkForwardValidation(config, db).build(hours=hours)
+        if walk.get("policies"):
+            context["walk_forward_stability"] = max(safe_float(row.get("stability")) for row in walk["policies"]) * 100.0
+            context["catalyst_dependency"] = max(safe_float(row.get("catalyst_dependency")) for row in walk["policies"])
+        news = NewsRiskGate(config, db).build(hours=hours)
+        context["global_news_risk"] = news.get("global_decision", "NEWS_ALLOW")
+    except Exception:
+        pass
+    return context
 
 
 def _rows_to_lines(rows: list[dict[str, Any]]) -> list[str]:

@@ -73,6 +73,11 @@ def start_health_server(
                 "/api/training/shadow-experiments",
                 "/api/training/evolution-score",
                 "/api/training/mfe-mae-diagnostic",
+                "/api/training/catalyst-summary",
+                "/api/training/news-risk-gate",
+                "/api/training/paper-policy-lab",
+                "/api/training/walk-forward",
+                "/api/training/policy-backtest",
             }:
                 if not _authorized(config, query, self.headers):
                     self._send_json({"error": "unauthorized"}, status=401)
@@ -112,6 +117,21 @@ def start_health_server(
                 return
             if path == "/api/training/mfe-mae-diagnostic":
                 self._send_json(_mfe_mae_diagnostic(config, db, query))
+                return
+            if path == "/api/training/catalyst-summary":
+                self._send_json(_catalyst_summary(config, db, query))
+                return
+            if path == "/api/training/news-risk-gate":
+                self._send_json(_news_risk_gate(config, db, query))
+                return
+            if path == "/api/training/paper-policy-lab":
+                self._send_json(_paper_policy_lab(config, db, query))
+                return
+            if path == "/api/training/walk-forward":
+                self._send_json(_walk_forward(config, db, query))
+                return
+            if path == "/api/training/policy-backtest":
+                self._send_json(_policy_backtest(config, db, query))
                 return
             self._send_status(404, "not found")
 
@@ -334,6 +354,26 @@ def _mfe_mae_diagnostic(config: Any | None, db: Any | None, query: dict[str, lis
     return _lab_payload(config, db, query, "mfe/mae diagnostic unavailable", ".mfe_mae_diagnostic", "MfeMaeDiagnostic")
 
 
+def _catalyst_summary(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
+    return _lab_payload(config, db, query, "catalyst summary unavailable", ".catalyst_registry", "CatalystRegistry")
+
+
+def _news_risk_gate(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
+    return _lab_payload(config, db, query, "news risk gate unavailable", ".news_risk_gate", "NewsRiskGate")
+
+
+def _paper_policy_lab(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
+    return _lab_payload(config, db, query, "paper policy lab unavailable", ".paper_policy_lab", "PaperPolicyLab")
+
+
+def _walk_forward(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
+    return _lab_payload(config, db, query, "walk-forward unavailable", ".walk_forward_validation", "WalkForwardValidation")
+
+
+def _policy_backtest(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
+    return _lab_payload(config, db, query, "policy backtest unavailable", ".policy_backtest", "PolicyBacktest")
+
+
 def _lab_payload(
     config: Any | None,
     db: Any | None,
@@ -350,8 +390,14 @@ def _lab_payload(
 
         module = importlib.import_module(module_name, package=__package__)
         lab = getattr(module, class_name)(config, db)
-        payload = lab.build(hours=hours)
-        text = lab.to_text(hours=hours)
+        if hasattr(lab, "build"):
+            payload = lab.build(hours=hours)
+        else:
+            payload = lab.build_summary(hours=hours)
+        if hasattr(lab, "to_text"):
+            text = lab.to_text(hours=hours)
+        else:
+            text = lab.to_summary_text(hours=hours)
     except Exception as exc:
         return {"error": str(exc)[:300], "hours": hours, "final_recommendation": "NO LIVE"}
     payload = dict(payload)
