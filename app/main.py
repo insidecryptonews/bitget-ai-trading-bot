@@ -213,6 +213,7 @@ def main() -> None:
     cycle_count = 0
     last_memory_log_at = startup_monotonic
     last_lightweight_paper_reconcile_at = startup_monotonic
+    last_mfe_mae_debug_at = startup_monotonic
     while not STOP_REQUESTED:
         try:
             cycle_count += 1
@@ -259,6 +260,7 @@ def main() -> None:
                             signal=signal_item,
                             snapshot=snapshots.get(signal_item.symbol),
                             market_regime=regime.regime,
+                            source="trade_signal",
                         )
                     if shadow_engine:
                         shadow_engine.log_variants(
@@ -266,6 +268,8 @@ def main() -> None:
                             base_observation=observation,
                             market_regime=regime,
                         )
+                if mfe_mae_tracker and training_pulse:
+                    training_pulse.record_mfe_mae(mfe_mae_tracker.debug_result())
             if labeler:
                 label_counts = _label_matured_observations(config, db, labeler, snapshots, logger)
                 if training_pulse:
@@ -322,6 +326,16 @@ def main() -> None:
                                 slot_available=not _is_slot_block_reason(reason),
                                 risk_approved=False,
                             )
+                        _track_mfe_mae_candidate(
+                            mfe_mae_tracker,
+                            training_pulse,
+                            observation_ids.get(rejected_signal.symbol),
+                            rejected_signal,
+                            snapshots,
+                            regime.regime,
+                            "allocator_reject",
+                            reason,
+                        )
                         if _is_slot_block_reason(reason):
                             _record_slot_block_event(db, training_pulse, reason)
                         feature_logger.update_observation(
@@ -366,6 +380,16 @@ def main() -> None:
                             slot_available=True,
                             risk_approved=True,
                         )
+                        _track_mfe_mae_candidate(
+                            mfe_mae_tracker,
+                            training_pulse,
+                            observation_ids.get(selected_signal.symbol),
+                            selected_signal,
+                            snapshots,
+                            regime.regime,
+                            "high_score_missed",
+                            "meta_model_rejected",
+                        )
                         if feature_logger:
                             feature_logger.update_observation(
                                 observation_ids.get(selected_signal.symbol),
@@ -385,6 +409,16 @@ def main() -> None:
                         min_score_to_trade=config.min_score_to_trade,
                         slot_available=True,
                         risk_approved=False,
+                    )
+                    _track_mfe_mae_candidate(
+                        mfe_mae_tracker,
+                        training_pulse,
+                        observation_ids.get(selected_signal.symbol),
+                        selected_signal,
+                        snapshots,
+                        regime.regime,
+                        "high_score_missed",
+                        "missing_instrument_rules",
                     )
                     if feature_logger:
                         feature_logger.update_observation(
@@ -434,6 +468,16 @@ def main() -> None:
                         slot_available=True,
                         risk_approved=False,
                     )
+                    _track_mfe_mae_candidate(
+                        mfe_mae_tracker,
+                        training_pulse,
+                        observation_ids.get(selected_signal.symbol),
+                        selected_signal,
+                        snapshots,
+                        regime.regime,
+                        "risk_block",
+                        risk.block_reason or risk.reason,
+                    )
                     if feature_logger:
                         feature_logger.update_observation(
                             observation_ids.get(selected_signal.symbol),
@@ -476,6 +520,16 @@ def main() -> None:
                                 slot_available=True,
                                 risk_approved=True,
                             )
+                            _track_mfe_mae_candidate(
+                                mfe_mae_tracker,
+                                training_pulse,
+                                observation_ids.get(selected_signal.symbol),
+                                safe_signal,
+                                snapshots,
+                                regime.regime,
+                                "edge_guard_block",
+                                reason,
+                            )
                             if feature_logger:
                                 feature_logger.update_observation(
                                     observation_ids.get(selected_signal.symbol),
@@ -509,6 +563,16 @@ def main() -> None:
                             min_score_to_trade=config.min_score_to_trade,
                             slot_available=False,
                             risk_approved=True,
+                        )
+                        _track_mfe_mae_candidate(
+                            mfe_mae_tracker,
+                            training_pulse,
+                            observation_ids.get(selected_signal.symbol),
+                            safe_signal,
+                            snapshots,
+                            regime.regime,
+                            "paper_open_fail",
+                            str(exc),
                         )
                         continue
                     if feature_logger:
@@ -574,6 +638,14 @@ def main() -> None:
                 time.monotonic(),
             )
             last_memory_log_at = _log_memory_if_due(config, logger, training_pulse, last_memory_log_at, time.monotonic())
+            last_mfe_mae_debug_at = _emit_mfe_mae_debug_if_due(
+                config,
+                mfe_mae_tracker,
+                training_pulse,
+                logger,
+                last_mfe_mae_debug_at,
+                time.monotonic(),
+            )
             last_lightweight_paper_reconcile_at = _reconcile_paper_if_due(
                 config,
                 db,
@@ -893,6 +965,30 @@ def _record_paper_open_attempt_event(db: Database, signal: Signal, success: bool
     )
 
 
+def _track_mfe_mae_candidate(
+    tracker: MfeMaeTracker | None,
+    pulse: TrainingPulse | None,
+    observation_id: int | None,
+    signal: Signal,
+    snapshots: dict[str, MarketSnapshot],
+    market_regime: str,
+    source: str,
+    reason: str,
+) -> None:
+    if tracker is None:
+        return
+    tracker.register_signal(
+        observation_id=observation_id,
+        signal=signal,
+        snapshot=snapshots.get(signal.symbol),
+        market_regime=market_regime,
+        source=source,
+        reject_reason=reason,
+    )
+    if pulse:
+        pulse.record_mfe_mae(tracker.debug_result())
+
+
 def _is_slot_block_reason(reason: str) -> bool:
     text = str(reason or "").lower()
     return "slot" in text or "sin slots" in text or "posicion" in text or "posición" in text
@@ -949,6 +1045,26 @@ def _log_memory_if_due(config, logger, pulse: TrainingPulse | None, last_log_at:
         logger.info("Worker memory lightweight check: max_rss_mb=%.2f", rss_mb)
         if pulse:
             pulse.record_memory(rss_mb)
+    return now
+
+
+def _emit_mfe_mae_debug_if_due(
+    config,
+    tracker: MfeMaeTracker | None,
+    pulse: TrainingPulse | None,
+    logger,
+    last_log_at: float,
+    now: float,
+) -> float:
+    if tracker is None or not config.enable_mfe_mae_capture:
+        return last_log_at
+    interval_seconds = max(1, int(config.mfe_mae_debug_log_every_minutes or 10)) * 60
+    if last_log_at > 0 and now - last_log_at < interval_seconds:
+        return last_log_at
+    result = tracker.debug_result()
+    if pulse:
+        pulse.record_mfe_mae(result)
+    logger.info("%s", tracker.debug_text())
     return now
 
 

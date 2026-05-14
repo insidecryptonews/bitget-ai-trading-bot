@@ -140,6 +140,11 @@ def test_worker_lightweight_config_defaults_safe():
     assert config.enable_telegram_notifier is False
     assert config.enable_edge_guard_paper_filter is False
     assert config.enable_mfe_mae_capture is True
+    assert config.mfe_mae_track_rejected_signals is True
+    assert config.mfe_mae_track_edge_guard_blocks is True
+    assert config.mfe_mae_track_high_score_missed is True
+    assert config.mfe_mae_track_regime_blocks is True
+    assert config.mfe_mae_min_rejected_score == 60
     assert config.enable_exit_simulation_lab is True
     assert config.enable_score_calibration_lab is True
     assert config.enable_shadow_experiments is True

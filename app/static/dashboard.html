@@ -302,11 +302,22 @@
         metric("SL ratio", pct(slRatio), slRatio > tpRatio ? "bad" : "") +
         metric("TP ratio", pct(tpRatio), tpRatio < 0.05 ? "bad" : "good");
       const mfe = data.mfe_mae || {};
+      const noMfeText = Number(mfe.coverage_pct || 0) === 0
+        ? metric("status", "Sin muestras MFE/MAE todavía: no hubo señales elegibles desde el deploy o todas fueron score bajo.", "warn")
+        : "";
       byId("mfeMaeMetrics").innerHTML =
         metric("active", mfe.active || 0) +
         metric("matured", mfe.matured || 0) +
         metric("insufficient", mfe.insufficient || 0, Number(mfe.insufficient || 0) ? "warn" : "good") +
-        metric("coverage", pct(mfe.coverage_pct || 0), Number(mfe.coverage_pct || 0) < 0.3 ? "warn" : "good");
+        metric("coverage", pct(mfe.coverage_pct || 0), Number(mfe.coverage_pct || 0) < 0.3 ? "warn" : "good") +
+        metric("candidates seen", mfe.candidates_seen || 0) +
+        metric("candidates tracked", mfe.candidates_tracked || 0) +
+        metric("skipped low score", mfe.skipped_low_score || 0) +
+        metric("skipped no price", mfe.skipped_no_price || 0) +
+        metric("skipped duplicate", mfe.skipped_duplicate || 0) +
+        metric("skipped max active", mfe.skipped_max_active || 0) +
+        metric("by source", (mfe.by_source || []).map((x) => `${x.source}=${x.count}`).join(" ") || "none") +
+        noMfeText;
       const s = data.signals || {};
       byId("signalMetrics").innerHTML =
         metric("LONG", s.long) +

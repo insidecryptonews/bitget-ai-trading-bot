@@ -104,13 +104,80 @@ def test_mfe_mae_tracker_creates_compact_metrics(tmp_path):
     assert "forecast_json" not in row
 
 
+def test_mfe_tracker_registers_rejected_signal_with_sufficient_score(tmp_path):
+    db = make_db(tmp_path)
+    obs_id = db.record_signal_observation({"timestamp": datetime.now(timezone.utc).isoformat(), "symbol": "ETHUSDT", "side": "LONG", "confidence_score": 65, "entry_price": 100.0})
+    tracker = MfeMaeTracker(BotConfig(mfe_mae_track_min_score=70, mfe_mae_min_rejected_score=60), db, DummyLogger())
+    metric_id = tracker.register_signal(
+        observation_id=obs_id,
+        signal=make_signal(symbol="ETHUSDT", score=65),
+        snapshot=Snapshot(100.0),
+        market_regime="CHOPPY_MARKET",
+        source="allocator_reject",
+        reject_reason="sin slots",
+    )
+    assert metric_id > 0
+    assert tracker.debug_result().candidates_tracked == 1
+
+
+def test_mfe_tracker_does_not_register_no_trade_score_zero_when_disabled(tmp_path):
+    db = make_db(tmp_path)
+    obs_id = db.record_signal_observation({"timestamp": datetime.now(timezone.utc).isoformat(), "symbol": "ETHUSDT", "side": "NO_TRADE", "confidence_score": 0, "entry_price": 0.0})
+    signal = make_signal(symbol="ETHUSDT", side="NO_TRADE", score=0, entry=0.0)
+    tracker = MfeMaeTracker(BotConfig(mfe_mae_track_no_trade=False), db, DummyLogger())
+    assert tracker.register_signal(observation_id=obs_id, signal=signal, snapshot=Snapshot(100.0), market_regime="RANGE", source="regime_block") == 0
+    assert tracker.debug_result().candidates_tracked == 0
+
+
+def test_mfe_tracker_registers_high_score_missed_below_track_min(tmp_path):
+    db = make_db(tmp_path)
+    obs_id = db.record_signal_observation({"timestamp": datetime.now(timezone.utc).isoformat(), "symbol": "SOLUSDT", "side": "LONG", "confidence_score": 65, "entry_price": 100.0})
+    tracker = MfeMaeTracker(BotConfig(mfe_mae_track_min_score=70, mfe_mae_min_rejected_score=60), db, DummyLogger())
+    assert tracker.register_signal(observation_id=obs_id, signal=make_signal(symbol="SOLUSDT", score=65), snapshot=Snapshot(100.0), market_regime="TREND_DOWN", source="high_score_missed") > 0
+    assert tracker.debug_result().by_source["high_score_missed"] == 1
+
+
+def test_mfe_tracker_registers_edge_guard_block(tmp_path):
+    db = make_db(tmp_path)
+    obs_id = db.record_signal_observation({"timestamp": datetime.now(timezone.utc).isoformat(), "symbol": "ADAUSDT", "side": "SHORT", "confidence_score": 62, "entry_price": 100.0})
+    tracker = MfeMaeTracker(BotConfig(mfe_mae_min_rejected_score=60), db, DummyLogger())
+    assert tracker.register_signal(observation_id=obs_id, signal=make_signal(symbol="ADAUSDT", side="SHORT", score=62), snapshot=Snapshot(100.0), market_regime="RISK_OFF", source="edge_guard_block") > 0
+    assert tracker.debug_result().by_source["edge_guard_block"] == 1
+
+
+def test_mfe_tracker_no_duplicates_by_observation_id(tmp_path):
+    db = make_db(tmp_path)
+    obs_id = db.record_signal_observation({"timestamp": datetime.now(timezone.utc).isoformat(), "symbol": "BTCUSDT", "side": "LONG", "confidence_score": 88, "entry_price": 100.0})
+    tracker = MfeMaeTracker(BotConfig(), db, DummyLogger())
+    assert tracker.register_signal(observation_id=obs_id, signal=make_signal(), snapshot=Snapshot(100.0), market_regime="TREND_DOWN") > 0
+    assert tracker.register_signal(observation_id=obs_id, signal=make_signal(), snapshot=Snapshot(100.0), market_regime="TREND_DOWN") == 0
+    assert tracker.debug_result().skipped_duplicate == 1
+
+
+def test_mfe_tracker_respects_max_active(tmp_path):
+    db = make_db(tmp_path)
+    obs_id = db.record_signal_observation({"timestamp": datetime.now(timezone.utc).isoformat(), "symbol": "BTCUSDT", "side": "LONG", "confidence_score": 88, "entry_price": 100.0})
+    tracker = MfeMaeTracker(BotConfig(mfe_mae_max_active=0), db, DummyLogger())
+    assert tracker.register_signal(observation_id=obs_id, signal=make_signal(), snapshot=Snapshot(100.0), market_regime="TREND_DOWN") == 0
+    assert tracker.debug_result().skipped_max_active == 1
+
+
 def test_exit_simulation_cli_exists_and_handles_insufficient_data(tmp_path):
     db = make_db(tmp_path)
     text = ExitSimulationLab(BotConfig(), db).to_text(hours=24)
     assert "EXIT SIMULATION START" in text
-    assert "insufficient_mfe_mae_data" in text
+    assert "table_exists_but_empty" in text
     assert "EXIT SIMULATION END" in text
     assert '"exit-simulation"' in (PROJECT_ROOT / "app" / "research_lab.py").read_text(encoding="utf-8")
+
+
+def test_exit_simulation_distinguishes_active_not_matured(tmp_path):
+    db = make_db(tmp_path)
+    obs_id = db.record_signal_observation({"timestamp": datetime.now(timezone.utc).isoformat(), "symbol": "BTCUSDT", "side": "LONG", "confidence_score": 88, "entry_price": 100.0})
+    tracker = MfeMaeTracker(BotConfig(mfe_mae_max_bars=30), db, DummyLogger())
+    tracker.register_signal(observation_id=obs_id, signal=make_signal(), snapshot=Snapshot(100.0), market_regime="TREND_DOWN")
+    payload = ExitSimulationLab(BotConfig(), db).build(hours=24)
+    assert payload["status"] == "only_active_not_matured"
 
 
 def test_score_calibration_detects_non_monotonic(tmp_path):

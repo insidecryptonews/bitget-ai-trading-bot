@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass
 from typing import Any
 
@@ -32,6 +33,13 @@ class MfeMaeUpdateResult:
     insufficient: int = 0
     created: int = 0
     coverage_pct: float = 0.0
+    candidates_seen: int = 0
+    candidates_tracked: int = 0
+    skipped_low_score: int = 0
+    skipped_no_price: int = 0
+    skipped_duplicate: int = 0
+    skipped_max_active: int = 0
+    by_source: dict[str, int] | None = None
 
 
 class MfeMaeTracker:
@@ -41,6 +49,13 @@ class MfeMaeTracker:
         self.config = config
         self.db = db
         self.logger = logger
+        self.candidates_seen = 0
+        self.candidates_tracked = 0
+        self.skipped_low_score = 0
+        self.skipped_no_price = 0
+        self.skipped_duplicate = 0
+        self.skipped_max_active = 0
+        self.by_source: Counter[str] = Counter()
 
     def register_signal(
         self,
@@ -49,20 +64,44 @@ class MfeMaeTracker:
         signal: Signal,
         snapshot: MarketSnapshot | None,
         market_regime: str,
+        source: str = "trade_signal",
+        reject_reason: str = "",
+        force: bool = False,
     ) -> int:
         if not self.config.enable_mfe_mae_capture or not observation_id:
             return 0
+        source = _source(source)
+        if not self._source_enabled(source):
+            return 0
+        self.candidates_seen += 1
         score = safe_int(getattr(signal, "confidence_score", 0))
         side = str(getattr(signal, "side", "") or "").upper()
-        if score < self.config.mfe_mae_track_min_score:
+        threshold = self._threshold_for_source(source)
+        if not force and score < threshold:
+            self.skipped_low_score += 1
             return 0
         if side == "NO_TRADE" and not self.config.mfe_mae_track_no_trade:
+            self.skipped_low_score += 1
             return 0
         if side not in {"LONG", "SHORT"}:
+            self.skipped_low_score += 1
             return 0
+        try:
+            if self.db.signal_path_metric_exists(int(observation_id)):
+                self.skipped_duplicate += 1
+                return 0
+            if self.db.count_active_signal_path_metrics() >= self.config.mfe_mae_max_active:
+                self.skipped_max_active += 1
+                return 0
+        except Exception as exc:
+            if self.logger:
+                self.logger.warning("MFE/MAE precheck fallo sin detener worker: %s", exc)
         entry = safe_float(getattr(signal, "entry_price", 0.0))
         current = safe_float(getattr(snapshot, "current_price", 0.0) if snapshot else 0.0, entry)
+        if entry <= 0 and current > 0:
+            entry = current
         if entry <= 0:
+            self.skipped_no_price += 1
             return 0
         payload = {
             "observation_id": int(observation_id),
@@ -71,6 +110,9 @@ class MfeMaeTracker:
             "score": score,
             "score_bucket": score_bucket(score),
             "market_regime": str(market_regime or ""),
+            "source": source,
+            "reject_reason": str(reject_reason or "")[:300],
+            "priority": _priority(source),
             "entry_price": entry,
             "current_price": current or entry,
             "max_favorable_pct": 0.0,
@@ -85,7 +127,11 @@ class MfeMaeTracker:
             "updated_at": iso_utc(),
         }
         try:
-            return self.db.upsert_signal_path_metric(payload)
+            metric_id = self.db.upsert_signal_path_metric(payload)
+            if metric_id:
+                self.candidates_tracked += 1
+                self.by_source[source] += 1
+            return metric_id
         except Exception as exc:
             if self.logger:
                 self.logger.warning("MFE/MAE register fallo sin detener worker: %s", exc)
@@ -128,9 +174,63 @@ class MfeMaeTracker:
             else:
                 active += 1
             self._safe_update(observation_id, **update)
-        total_done = matured + insufficient + active
-        coverage = (matured + active) / max(total_done, 1) if total_done else 0.0
-        return MfeMaeUpdateResult(active=active, matured=matured, insufficient=insufficient, coverage_pct=coverage)
+        return self.debug_result()
+
+    def debug_result(self) -> MfeMaeUpdateResult:
+        try:
+            summary = self.db.get_signal_path_metrics_summary_since("1970-01-01T00:00:00+00:00")
+        except Exception:
+            summary = {}
+        return MfeMaeUpdateResult(
+            active=safe_int(summary.get("active_count")),
+            matured=safe_int(summary.get("matured_count")),
+            insufficient=safe_int(summary.get("insufficient_count")),
+            created=0,
+            coverage_pct=safe_float(summary.get("coverage_pct")),
+            candidates_seen=self.candidates_seen,
+            candidates_tracked=self.candidates_tracked,
+            skipped_low_score=self.skipped_low_score,
+            skipped_no_price=self.skipped_no_price,
+            skipped_duplicate=self.skipped_duplicate,
+            skipped_max_active=self.skipped_max_active,
+            by_source=dict(self.by_source),
+        )
+
+    def debug_text(self) -> str:
+        result = self.debug_result()
+        by_source = result.by_source or {}
+        source_text = ", ".join(f"{key}={value}" for key, value in sorted(by_source.items())) or "none"
+        return "\n".join([
+            "MFE_MAE DEBUG",
+            f"- enabled={self.config.enable_mfe_mae_capture}",
+            f"- active={result.active}",
+            f"- matured={result.matured}",
+            f"- insufficient={result.insufficient}",
+            f"- coverage_pct={result.coverage_pct * 100:.1f}",
+            f"- candidates_seen={result.candidates_seen}",
+            f"- candidates_tracked={result.candidates_tracked}",
+            f"- skipped_low_score={result.skipped_low_score}",
+            f"- skipped_no_price={result.skipped_no_price}",
+            f"- skipped_duplicate={result.skipped_duplicate}",
+            f"- skipped_max_active={result.skipped_max_active}",
+            f"- by_source: {source_text}",
+        ])
+
+    def _threshold_for_source(self, source: str) -> int:
+        if source == "trade_signal":
+            return int(self.config.mfe_mae_track_min_score)
+        return int(self.config.mfe_mae_min_rejected_score)
+
+    def _source_enabled(self, source: str) -> bool:
+        if source == "trade_signal":
+            return True
+        if source == "edge_guard_block":
+            return bool(self.config.mfe_mae_track_edge_guard_blocks)
+        if source == "high_score_missed":
+            return bool(self.config.mfe_mae_track_high_score_missed)
+        if source == "regime_block":
+            return bool(self.config.mfe_mae_track_regime_blocks)
+        return bool(self.config.mfe_mae_track_rejected_signals)
 
     def _build_update(self, row: dict[str, Any], current_price: float) -> dict[str, Any]:
         entry = safe_float(row.get("entry_price"))
@@ -207,3 +307,20 @@ def _first_hit(max_favorable: float, max_adverse: float) -> str:
     if max_adverse >= 0.25:
         return "SL_025"
     return ""
+
+
+def _source(source: str) -> str:
+    text = str(source or "trade_signal").strip().lower()
+    return text or "trade_signal"
+
+
+def _priority(source: str) -> int:
+    return {
+        "high_score_missed": 100,
+        "edge_guard_block": 90,
+        "allocator_reject": 80,
+        "regime_block": 70,
+        "risk_block": 60,
+        "paper_open_fail": 50,
+        "trade_signal": 10,
+    }.get(source, 20)

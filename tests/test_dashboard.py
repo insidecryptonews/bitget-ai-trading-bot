@@ -74,6 +74,8 @@ def test_training_status_returns_safe_json():
     payload = json.loads(body)
     for key in ("safety", "health", "paper", "labels", "signals", "diagnosis", "telegram"):
         assert key in payload
+    assert "mfe_mae" in payload
+    assert "candidates_seen" in payload["mfe_mae"]
     assert payload["safety"]["live_trading"] is False
     assert "real-token-that-must-not-leak" not in body
     assert "BITGET_API_KEY" not in body

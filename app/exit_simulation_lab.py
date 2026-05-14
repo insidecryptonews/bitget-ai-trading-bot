@@ -26,15 +26,24 @@ class ExitSimulationLab:
     def build(self, *, hours: int = 24) -> dict[str, Any]:
         hours = max(1, int(hours or 24))
         since = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
-        summary = self.db.get_signal_path_metrics_summary_since(since)
-        rows = self.db.fetch_signal_path_metrics_since(since, limit=50000)
-        usable = [row for row in rows if str(row.get("status") or "") in {"active", "matured"}]
-        if len(usable) < 25:
+        try:
+            summary = self.db.get_signal_path_metrics_summary_since(since)
+            rows = self.db.fetch_signal_path_metrics_since(since, limit=50000)
+        except Exception:
+            summary = {"total": 0, "active_count": 0, "matured_count": 0, "insufficient_count": 0, "coverage_pct": 0.0}
+            rows = []
+            status = "no_mfe_mae_table"
+        else:
+            status = _data_status(summary, rows)
+        usable = [row for row in rows if str(row.get("status") or "") == "matured"]
+        if status != "ok" or len(usable) < 25:
+            if status == "ok":
+                status = "insufficient_matured_samples"
             return {
                 "hours": hours,
                 "samples": len(usable),
                 "coverage": summary,
-                "status": "insufficient_mfe_mae_data",
+                "status": status,
                 "current": _empty_metrics(),
                 "best_exit_candidates": [],
                 "worst_exit_candidates": [],
@@ -70,9 +79,12 @@ class ExitSimulationLab:
             START,
             f"hours: {payload['hours']}",
             f"samples: {payload['samples']}",
+            f"status: {payload['status']}",
             "coverage:",
             (
                 f"- path_metrics={safe_int(payload['coverage'].get('total'))} "
+                f"active={safe_int(payload['coverage'].get('active_count'))} "
+                f"matured={safe_int(payload['coverage'].get('matured_count'))} "
                 f"insufficient={safe_int(payload['coverage'].get('insufficient_count'))} "
                 f"coverage={safe_float(payload['coverage'].get('coverage_pct')) * 100:.1f}%"
             ),
@@ -86,9 +98,8 @@ class ExitSimulationLab:
         ]
         if payload["status"] != "ok":
             lines.extend([
-                f"status: {payload['status']}",
                 "recommendation:",
-                "- seguir capturando MFE/MAE antes de ajustar TP/SL",
+                *_recommendation_for_status(payload["status"]),
                 "final_recommendation: NO LIVE",
                 END,
             ])
@@ -136,6 +147,38 @@ def _simulate_combo(rows: list[dict[str, Any]], tp_pct: float, sl_pct: float, ho
     metrics = _metrics_from_returns(returns, tp_count, sl_count, time_count)
     metrics.update({"tp_pct": tp_pct, "sl_pct": sl_pct, "holding_bars": holding, "name": f"TP={tp_pct:.2f}% SL={sl_pct:.2f}% HOLD={holding}"})
     return metrics
+
+
+def _data_status(summary: dict[str, Any], rows: list[dict[str, Any]]) -> str:
+    total = safe_int(summary.get("total"))
+    active = safe_int(summary.get("active_count"))
+    matured = safe_int(summary.get("matured_count"))
+    insufficient = safe_int(summary.get("insufficient_count"))
+    if total <= 0:
+        return "table_exists_but_empty"
+    if active > 0 and matured <= 0:
+        return "only_active_not_matured"
+    if insufficient >= total and total > 0:
+        return "no_price_path_metrics"
+    if matured < 25:
+        return "insufficient_matured_samples"
+    if not rows:
+        return "no_price_path_metrics"
+    return "ok"
+
+
+def _recommendation_for_status(status: str) -> list[str]:
+    if status == "only_active_not_matured":
+        return ["- seguir capturando hasta que maduren las ventanas MFE/MAE"]
+    if status == "table_exists_but_empty":
+        return ["- no hubo señales elegibles desde el deploy o todas fueron score bajo"]
+    if status == "no_price_path_metrics":
+        return ["- revisar que llegan precios por simbolo para actualizar MFE/MAE"]
+    if status == "insufficient_matured_samples":
+        return ["- esperar mas muestras maduras antes de optimizar salidas"]
+    if status == "no_mfe_mae_table":
+        return ["- inicializar base de datos con la tabla signal_path_metrics"]
+    return ["- seguir capturando MFE/MAE antes de ajustar TP/SL"]
 
 
 def _best_by(rows: list[dict[str, Any]], key: str) -> list[dict[str, Any]]:

@@ -254,6 +254,9 @@ class Database:
                 score INTEGER,
                 score_bucket TEXT,
                 market_regime TEXT,
+                source TEXT,
+                reject_reason TEXT,
+                priority INTEGER DEFAULT 0,
                 entry_price REAL,
                 current_price REAL,
                 max_favorable_pct REAL DEFAULT 0,
@@ -667,6 +670,12 @@ class Database:
             for name, spec in columns.items():
                 self._execute(conn, f"ALTER TABLE signal_observations ADD COLUMN IF NOT EXISTS {name} {spec}")
             self._execute(conn, "ALTER TABLE virtual_strategy_summary ADD COLUMN IF NOT EXISTS created_at TEXT")
+            for name, spec in {
+                "source": "TEXT",
+                "reject_reason": "TEXT",
+                "priority": "INTEGER DEFAULT 0",
+            }.items():
+                self._execute(conn, f"ALTER TABLE signal_path_metrics ADD COLUMN IF NOT EXISTS {name} {spec}")
             return
         cur = conn.execute("PRAGMA table_info(signal_observations)")
         existing = {row["name"] if isinstance(row, sqlite3.Row) else row[1] for row in cur.fetchall()}
@@ -677,6 +686,15 @@ class Database:
         existing_summary = {row["name"] if isinstance(row, sqlite3.Row) else row[1] for row in cur.fetchall()}
         if "created_at" not in existing_summary:
             conn.execute("ALTER TABLE virtual_strategy_summary ADD COLUMN created_at TEXT")
+        cur = conn.execute("PRAGMA table_info(signal_path_metrics)")
+        existing_path_metrics = {row["name"] if isinstance(row, sqlite3.Row) else row[1] for row in cur.fetchall()}
+        for name, spec in {
+            "source": "TEXT",
+            "reject_reason": "TEXT",
+            "priority": "INTEGER DEFAULT 0",
+        }.items():
+            if name not in existing_path_metrics:
+                conn.execute(f"ALTER TABLE signal_path_metrics ADD COLUMN {name} {spec}")
 
     def _create_indexes(self, conn: Any) -> None:
         indexes = [
@@ -688,6 +706,7 @@ class Database:
             "CREATE INDEX IF NOT EXISTS idx_signal_path_metrics_score_bucket ON signal_path_metrics(score_bucket)",
             "CREATE INDEX IF NOT EXISTS idx_signal_path_metrics_side ON signal_path_metrics(side)",
             "CREATE INDEX IF NOT EXISTS idx_signal_path_metrics_status ON signal_path_metrics(status)",
+            "CREATE INDEX IF NOT EXISTS idx_signal_path_metrics_source ON signal_path_metrics(source)",
             "CREATE INDEX IF NOT EXISTS idx_signal_explanations_observation_label ON signal_explanations(observation_id, label_id)",
             "CREATE INDEX IF NOT EXISTS idx_signal_price_paths_observation_label ON signal_price_paths(observation_id, label_id)",
             "CREATE INDEX IF NOT EXISTS idx_signal_counterfactuals_observation_label_scenario ON signal_counterfactuals(observation_id, label_id, scenario_name)",
@@ -1820,6 +1839,9 @@ class Database:
             "score",
             "score_bucket",
             "market_regime",
+            "source",
+            "reject_reason",
+            "priority",
             "entry_price",
             "current_price",
             "max_favorable_pct",
@@ -1880,6 +1902,21 @@ class Database:
             sql = sql.replace("?", "%s")
         with self._connect() as conn:
             return self._fetchall_dicts(conn.execute(sql, (max(1, int(limit or 250)),)))
+
+    def signal_path_metric_exists(self, observation_id: int) -> bool:
+        if not observation_id:
+            return False
+        sql = "SELECT 1 FROM signal_path_metrics WHERE observation_id=? LIMIT 1"
+        if self._use_postgres:
+            sql = sql.replace("?", "%s")
+        with self._connect() as conn:
+            return conn.execute(sql, (int(observation_id),)).fetchone() is not None
+
+    def count_active_signal_path_metrics(self) -> int:
+        sql = "SELECT COUNT(*) AS count FROM signal_path_metrics WHERE status = 'active'"
+        with self._connect() as conn:
+            row = conn.execute(sql).fetchone()
+            return int(self._row_value(row, "count", 0, 0) or 0)
 
     def update_signal_path_metric(self, observation_id: int, **updates: Any) -> None:
         allowed = {
