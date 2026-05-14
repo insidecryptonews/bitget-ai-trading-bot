@@ -42,6 +42,7 @@ class EdgeGuard:
         now = datetime.now(timezone.utc)
         since = now - timedelta(hours=hours)
         since_iso = since.isoformat()
+        recent_since_iso = (now - timedelta(hours=max(1, int(self.config.edge_guard_recent_hours or 6)))).isoformat()
         overall = self.db.get_high_score_label_summary_since(since_iso, self.config.min_score_to_trade)
         groups: list[dict[str, Any]] = []
         for group_key, group_type in (
@@ -50,6 +51,13 @@ class EdgeGuard:
             ("side", "side"),
             ("score_bucket", "score_bucket"),
         ):
+            recent_rows = self.db.get_shadow_opportunity_group_summaries_since(
+                recent_since_iso,
+                min_score=self.config.min_score_to_trade,
+                group_key=group_key,
+                limit=50,
+            )
+            recent_by_value = {str(row.get("group_value") or "").upper(): row for row in recent_rows}
             rows = self.db.get_shadow_opportunity_group_summaries_since(
                 since_iso,
                 min_score=self.config.min_score_to_trade,
@@ -59,6 +67,13 @@ class EdgeGuard:
             for row in rows:
                 enriched = dict(row)
                 enriched["group_type"] = group_type
+                recent = recent_by_value.get(str(enriched.get("group_value") or "").upper(), {})
+                enriched["recent_total_labels"] = safe_int(recent.get("total_labels"))
+                enriched["recent_profit_factor"] = safe_float(recent.get("profit_factor"))
+                enriched["recent_tp_ratio"] = safe_float(recent.get("tp_ratio"))
+                enriched["recent_sl_ratio"] = safe_float(recent.get("sl_ratio"))
+                enriched["stability_score"] = self._stability_score(enriched)
+                enriched["sample_quality"] = min(safe_float(enriched.get("total_labels")) / max(1.0, float(self.config.edge_guard_min_sample)), 1.0)
                 enriched["decision"], enriched["reason"] = self.classify_metrics(enriched)
                 groups.append(enriched)
         return {
@@ -104,6 +119,8 @@ class EdgeGuard:
         time_ratio = safe_float(row.get("time_ratio"))
         if sample < self.config.edge_guard_min_sample:
             return WATCH_ONLY, "sample_too_small"
+        if self._recent_deteriorating(row):
+            return WATCH_ONLY, "recent_deterioration"
         if sl_ratio > 0.15 and tp_ratio < 0.03:
             return BLOCK_PAPER, "sl_high_tp_low"
         if pf < 1.0:
@@ -122,6 +139,28 @@ class EdgeGuard:
         if pf >= 1.1:
             return WATCH_ONLY, "pf_promising_but_quality_mixed"
         return SHADOW_ONLY, "edge_not_confirmed"
+
+    def _recent_deteriorating(self, row: dict[str, Any]) -> bool:
+        if not self.config.edge_guard_require_recent_stability:
+            return False
+        sample = safe_int(row.get("total_labels"))
+        recent_sample = safe_int(row.get("recent_total_labels"))
+        if sample < self.config.edge_guard_min_sample or recent_sample < max(25, self.config.edge_guard_min_sample // 10):
+            return False
+        pf = safe_float(row.get("profit_factor"))
+        recent_pf = safe_float(row.get("recent_profit_factor"))
+        if pf < self.config.edge_guard_min_pf or recent_pf <= 0:
+            return False
+        drop = (pf - recent_pf) / max(pf, 1.0)
+        return drop > self.config.edge_guard_max_recent_pf_drop
+
+    def _stability_score(self, row: dict[str, Any]) -> float:
+        pf = safe_float(row.get("profit_factor"))
+        recent_pf = safe_float(row.get("recent_profit_factor"))
+        if pf <= 0 or recent_pf <= 0:
+            return 0.0
+        drop = abs(pf - recent_pf) / max(pf, 1.0)
+        return max(0.0, min(1.0, 1.0 - drop))
 
     def evaluate_signal(self, signal: Signal, market_regime: str, *, hours: int = 24) -> EdgeDecision:
         if not self.config.enable_edge_guard_paper_filter:
@@ -204,6 +243,8 @@ def _candidate_lines(rows: list[dict[str, Any]]) -> list[str]:
             f"TIME%={safe_float(row.get('time_ratio')) * 100:.1f} "
             f"SL%={safe_float(row.get('sl_ratio')) * 100:.1f} "
             f"TP%={safe_float(row.get('tp_ratio')) * 100:.1f} "
+            f"recentPF={safe_float(row.get('recent_profit_factor')):.2f} "
+            f"stability={safe_float(row.get('stability_score')):.2f} "
             f"reason={row.get('reason')}"
         )
         for row in rows[:10]

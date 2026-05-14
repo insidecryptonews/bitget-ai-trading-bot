@@ -125,6 +125,10 @@ class TrainingSummary:
             min_score=self.config.min_score_to_trade,
             limit=5,
         )
+        if hasattr(self.db, "get_signal_path_metrics_summary_since"):
+            path_metrics = self.db.get_signal_path_metrics_summary_since(window["since"])
+        else:
+            path_metrics = {"total": 0, "coverage_pct": 0.0}
         candidate_groups = []
         for group_key in ("symbol", "market_regime", "score_bucket"):
             candidate_groups.extend(
@@ -137,14 +141,15 @@ class TrainingSummary:
             )
         score_groups = [row for row in candidate_groups if str(row.get("group_value")) in {"70-79", "80-89", "90-100"}]
         score_not_monotonic = _score_not_monotonic(score_groups)
-        biggest = _biggest_problem(self.config, labels, events, observations, candidate_groups)
+        biggest = _biggest_problem(self.config, labels, events, observations, candidate_groups, path_metrics, score_not_monotonic)
         lines = [
             PLAN_START,
             f"hours: {window['hours']}",
             f"biggest_problem: {biggest}",
             f"score_not_monotonic: {str(score_not_monotonic).lower()}",
+            f"mfe_mae_coverage: {safe_float(path_metrics.get('coverage_pct')) * 100:.1f}%",
             "suggested_next_research:",
-            *_plan_steps(biggest),
+            *_plan_steps(biggest, path_metrics),
             "do_not_change:",
             "- LIVE_TRADING=false",
             "- DRY_RUN=true",
@@ -183,6 +188,8 @@ def _biggest_problem(
     events: dict[str, int],
     observations: dict[str, Any],
     candidate_groups: list[dict[str, Any]] | None = None,
+    path_metrics: dict[str, Any] | None = None,
+    score_not_monotonic: bool = False,
 ) -> str:
     if config.live_trading:
         return "safety_live"
@@ -190,6 +197,7 @@ def _biggest_problem(
     if total <= 0 and safe_int(observations.get("total")) == 0:
         return "no_data"
     metrics = _label_metrics(labels)
+    path_metrics = path_metrics or {}
     if total > 0 and safe_float(labels.get("profit_factor")) < 1.0:
         if any(
             safe_int(row.get("total_labels")) >= config.edge_guard_min_sample
@@ -200,10 +208,15 @@ def _biggest_problem(
         return "poor_edge"
     if total > 0 and metrics["tp_ratio"] < 0.05:
         return "low_tp_rate"
+    if score_not_monotonic:
+        return "score_not_monotonic"
     if total > 0 and metrics["time_ratio"] > 0.60:
         return "too_many_time"
     if total > 0 and metrics["sl_ratio"] > metrics["tp_ratio"] * 2:
         return "too_many_sl"
+    if safe_float(path_metrics.get("total")) <= 0 or safe_float(path_metrics.get("coverage_pct")) < 0.30:
+        if total > 0:
+            return "insufficient_price_path_data"
     if events.get("training_slot_block", 0) > 0 and safe_float(labels.get("profit_factor")) >= 1.0 and metrics["tp_ratio"] >= 0.05:
         return "slot"
     if events.get("training_api_429", 0) > 0:
@@ -213,7 +226,15 @@ def _biggest_problem(
     return "paper_observation"
 
 
-def _plan_steps(problem: str) -> list[str]:
+def _plan_steps(problem: str, path_metrics: dict[str, Any] | None = None) -> list[str]:
+    if problem in {"insufficient_price_path_data", "need_exit_simulation"}:
+        return [
+            "1. collect_mfe_mae_data",
+            "2. ejecutar exit-simulation --hours 24 cuando haya cobertura suficiente",
+            "3. ejecutar score-calibration --hours 24",
+            "4. ejecutar shadow-experiments --hours 24",
+            "5. mantener NO LIVE",
+        ]
     if problem == "slot":
         return [
             "1. revisar training-summary --hours 24 para high_score_missed",
@@ -228,11 +249,21 @@ def _plan_steps(problem: str) -> list[str]:
         ]
     if problem in {"poor_edge", "poor_edge_but_candidates_exist", "low_tp_rate", "too_many_time", "too_many_sl"}:
         return [
-            "1. ejecutar edge-guard --hours 24",
-            "2. ejecutar tp-sl-lab --hours 24",
+            "1. ejecutar exit-simulation --hours 24",
+            "2. ejecutar score-calibration --hours 24",
+            "3. ejecutar shadow-experiments --hours 24",
+            "4. ejecutar evolution-score --hours 24",
+            "5. ejecutar edge-guard --hours 24",
             "3. mantener paper slots igual; no ampliar slots hasta PF>1 y TP rate suficiente",
             "4. habilitar edge guard paper filter solo despues de revisar dashboard y tests, no automaticamente",
             "5. revisar scoring high_score porque muchos score altos no llegan a TP",
+        ]
+    if problem == "score_not_monotonic":
+        return [
+            "1. ejecutar score-calibration --hours 24",
+            "2. no confiar ciegamente en score 90-100",
+            "3. cruzar score con Edge Guard y regimen",
+            "4. mantener NO LIVE",
         ]
     if problem in {"TIME", "SL"}:
         return [

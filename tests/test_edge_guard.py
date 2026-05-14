@@ -39,6 +39,22 @@ def test_edge_guard_classifies_good_sample_as_allow_paper():
     assert reason == "edge_thresholds_met"
 
 
+def test_edge_guard_v2_blocks_recent_deterioration():
+    row = {
+        "group_value": "ETHUSDT",
+        "total_labels": 5704,
+        "profit_factor": 1.93,
+        "tp_ratio": 0.035,
+        "sl_ratio": 0.018,
+        "time_ratio": 0.90,
+        "recent_total_labels": 500,
+        "recent_profit_factor": 0.7,
+    }
+    decision, reason = EdgeGuard(BotConfig(), EdgeDb()).classify_metrics(row)
+    assert decision == "WATCH_ONLY"
+    assert reason == "recent_deterioration"
+
+
 def test_edge_guard_disabled_filter_allows_paper():
     signal = SimpleNamespace(symbol="DOGEUSDT", side="LONG", confidence_score=90)
     decision = EdgeGuard(BotConfig(enable_edge_guard_paper_filter=False), EdgeDb()).evaluate_signal(signal, "RANGE")

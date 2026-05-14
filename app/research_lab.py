@@ -446,6 +446,26 @@ class ResearchLab:
 
         return TpSlHorizonLab(self.config, self.db).to_text(hours=hours)
 
+    def exit_simulation(self, hours: int = 24) -> str:
+        from .exit_simulation_lab import ExitSimulationLab
+
+        return ExitSimulationLab(self.config, self.db).to_text(hours=hours)
+
+    def score_calibration(self, hours: int = 24) -> str:
+        from .score_calibration_lab import ScoreCalibrationLab
+
+        return ScoreCalibrationLab(self.config, self.db).to_text(hours=hours)
+
+    def shadow_experiments(self, hours: int = 24) -> str:
+        from .shadow_experiments import ShadowExperimentsLab
+
+        return ShadowExperimentsLab(self.config, self.db).to_text(hours=hours)
+
+    def evolution_score(self, hours: int = 24) -> str:
+        from .evolution_score import EvolutionScore
+
+        return EvolutionScore(self.config, self.db).to_text(hours=hours)
+
     def build_markdown_report(
         self,
         dataset: list[dict[str, Any]] | None = None,
@@ -957,6 +977,10 @@ def main() -> None:
             "shadow-opportunity",
             "edge-guard",
             "tp-sl-lab",
+            "exit-simulation",
+            "score-calibration",
+            "shadow-experiments",
+            "evolution-score",
         ],
     )
     parser.add_argument("--limit", type=int, default=None, help="Maximo de labels a procesar en phase2-persist.")
@@ -1036,6 +1060,14 @@ def main() -> None:
         print(lab.edge_guard(hours=args.hours))
     elif args.command == "tp-sl-lab":
         print(lab.tp_sl_lab(hours=args.hours))
+    elif args.command == "exit-simulation":
+        print(lab.exit_simulation(hours=args.hours))
+    elif args.command == "score-calibration":
+        print(lab.score_calibration(hours=args.hours))
+    elif args.command == "shadow-experiments":
+        print(lab.shadow_experiments(hours=args.hours))
+    elif args.command == "evolution-score":
+        print(lab.evolution_score(hours=args.hours))
 
 
 if __name__ == "__main__":

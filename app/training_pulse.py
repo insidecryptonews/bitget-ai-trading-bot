@@ -49,6 +49,10 @@ class TrainingPulse:
     signals_no_trade: int = 0
     high_score_signals_total: int = 0
     missed_high_score_signals: int = 0
+    mfe_mae_active: int = 0
+    mfe_mae_matured: int = 0
+    mfe_mae_insufficient: int = 0
+    mfe_mae_coverage_pct: float = 0.0
     market_regime_counts: Counter[str] = field(default_factory=Counter)
     no_trade_reason_counts: Counter[str] = field(default_factory=Counter)
     top_signal_scores: list[dict[str, Any]] = field(default_factory=list)
@@ -156,6 +160,14 @@ class TrainingPulse:
         self.paper_reconcile_closed_by_time += safe_int(getattr(result, "paper_trades_closed_by_time", 0))
         self.paper_reconcile_left_open = safe_int(getattr(result, "paper_trades_left_open", 0))
 
+    def record_mfe_mae(self, result: Any) -> None:
+        if result is None:
+            return
+        self.mfe_mae_active = safe_int(getattr(result, "active", 0))
+        self.mfe_mae_matured += safe_int(getattr(result, "matured", 0))
+        self.mfe_mae_insufficient += safe_int(getattr(result, "insufficient", 0))
+        self.mfe_mae_coverage_pct = safe_float(getattr(result, "coverage_pct", 0.0))
+
     def should_emit(self, now: datetime, interval_minutes: int) -> bool:
         if self.last_pulse_at is None:
             return True
@@ -226,6 +238,12 @@ class TrainingPulse:
                 "TREND_DOWN": self.market_regime_counts.get("TREND_DOWN", 0),
                 "RISK_OFF": self.market_regime_counts.get("RISK_OFF", 0),
             },
+            "mfe_mae": {
+                "active": self.mfe_mae_active,
+                "matured": self.mfe_mae_matured,
+                "insufficient": self.mfe_mae_insufficient,
+                "coverage_pct": self.mfe_mae_coverage_pct,
+            },
             "top_signals": [dict(item) for item in self.top_signal_scores[: max(1, int(config.training_pulse_top_n or 5))]],
             "top_blocks": [
                 {"reason": reason, "count": count}
@@ -275,6 +293,11 @@ class TrainingPulse:
                 "labels: "
                 f"total={data['labels']['total']} TIME={data['labels']['time']} SL={data['labels']['sl']} "
                 f"TP1={data['labels']['tp1']} TP2={data['labels']['tp2']}"
+            ),
+            (
+                "mfe_mae: "
+                f"active={data['mfe_mae']['active']} matured={data['mfe_mae']['matured']} "
+                f"insufficient={data['mfe_mae']['insufficient']} coverage={data['mfe_mae']['coverage_pct'] * 100:.1f}%"
             ),
             "regimes: " + _counter_inline(self.market_regime_counts, config.training_pulse_top_n),
             "top_signals:",

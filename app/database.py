@@ -246,6 +246,42 @@ class Database:
         self._execute(
             conn,
             """
+            CREATE TABLE IF NOT EXISTS signal_path_metrics (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                observation_id INTEGER UNIQUE,
+                symbol TEXT,
+                side TEXT,
+                score INTEGER,
+                score_bucket TEXT,
+                market_regime TEXT,
+                entry_price REAL,
+                current_price REAL,
+                max_favorable_pct REAL DEFAULT 0,
+                max_adverse_pct REAL DEFAULT 0,
+                final_return_pct REAL DEFAULT 0,
+                bars_tracked INTEGER DEFAULT 0,
+                bars_to_mfe INTEGER DEFAULT 0,
+                bars_to_mae INTEGER DEFAULT 0,
+                first_barrier_hit TEXT,
+                would_hit_tp_025 INTEGER DEFAULT 0,
+                would_hit_tp_050 INTEGER DEFAULT 0,
+                would_hit_tp_075 INTEGER DEFAULT 0,
+                would_hit_tp_100 INTEGER DEFAULT 0,
+                would_hit_tp_150 INTEGER DEFAULT 0,
+                would_hit_sl_025 INTEGER DEFAULT 0,
+                would_hit_sl_050 INTEGER DEFAULT 0,
+                would_hit_sl_075 INTEGER DEFAULT 0,
+                would_hit_sl_100 INTEGER DEFAULT 0,
+                status TEXT DEFAULT 'active',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                matured_at TEXT
+            )
+            """,
+        )
+        self._execute(
+            conn,
+            """
             CREATE TABLE IF NOT EXISTS strategy_variants (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT UNIQUE,
@@ -645,6 +681,13 @@ class Database:
     def _create_indexes(self, conn: Any) -> None:
         indexes = [
             "CREATE INDEX IF NOT EXISTS idx_signal_labels_observation_id ON signal_labels(observation_id)",
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_signal_path_metrics_observation ON signal_path_metrics(observation_id)",
+            "CREATE INDEX IF NOT EXISTS idx_signal_path_metrics_created ON signal_path_metrics(created_at)",
+            "CREATE INDEX IF NOT EXISTS idx_signal_path_metrics_symbol ON signal_path_metrics(symbol)",
+            "CREATE INDEX IF NOT EXISTS idx_signal_path_metrics_regime ON signal_path_metrics(market_regime)",
+            "CREATE INDEX IF NOT EXISTS idx_signal_path_metrics_score_bucket ON signal_path_metrics(score_bucket)",
+            "CREATE INDEX IF NOT EXISTS idx_signal_path_metrics_side ON signal_path_metrics(side)",
+            "CREATE INDEX IF NOT EXISTS idx_signal_path_metrics_status ON signal_path_metrics(status)",
             "CREATE INDEX IF NOT EXISTS idx_signal_explanations_observation_label ON signal_explanations(observation_id, label_id)",
             "CREATE INDEX IF NOT EXISTS idx_signal_price_paths_observation_label ON signal_price_paths(observation_id, label_id)",
             "CREATE INDEX IF NOT EXISTS idx_signal_counterfactuals_observation_label_scenario ON signal_counterfactuals(observation_id, label_id, scenario_name)",
@@ -1761,6 +1804,213 @@ class Database:
                 )
             )
         """
+
+    def upsert_signal_path_metric(self, payload: dict[str, Any]) -> int:
+        payload = dict(payload)
+        observation_id = int(payload.get("observation_id") or 0)
+        if observation_id <= 0:
+            return 0
+        now = iso_utc()
+        payload.setdefault("created_at", now)
+        payload.setdefault("updated_at", now)
+        allowed = {
+            "observation_id",
+            "symbol",
+            "side",
+            "score",
+            "score_bucket",
+            "market_regime",
+            "entry_price",
+            "current_price",
+            "max_favorable_pct",
+            "max_adverse_pct",
+            "final_return_pct",
+            "bars_tracked",
+            "bars_to_mfe",
+            "bars_to_mae",
+            "first_barrier_hit",
+            "would_hit_tp_025",
+            "would_hit_tp_050",
+            "would_hit_tp_075",
+            "would_hit_tp_100",
+            "would_hit_tp_150",
+            "would_hit_sl_025",
+            "would_hit_sl_050",
+            "would_hit_sl_075",
+            "would_hit_sl_100",
+            "status",
+            "created_at",
+            "updated_at",
+            "matured_at",
+        }
+        payload = {key: value for key, value in payload.items() if key in allowed}
+        with self._connect() as conn:
+            select_sql = "SELECT id FROM signal_path_metrics WHERE observation_id=?"
+            if self._use_postgres:
+                select_sql = select_sql.replace("?", "%s")
+            row = conn.execute(select_sql, (observation_id,)).fetchone()
+            existing_id = int(self._row_value(row, "id", 0, 0) or 0)
+            if existing_id:
+                updates = {key: value for key, value in payload.items() if key not in {"observation_id", "created_at"}}
+                updates["updated_at"] = now
+                assignments = ", ".join(f"{key}=?" for key in updates)
+                sql = f"UPDATE signal_path_metrics SET {assignments} WHERE observation_id=?"
+                params = tuple(updates.values()) + (observation_id,)
+                if self._use_postgres:
+                    sql = sql.replace("?", "%s")
+                conn.execute(sql, params)
+                return existing_id
+            columns = list(payload.keys())
+            placeholders = ", ".join(["?"] * len(columns))
+            sql = f"INSERT INTO signal_path_metrics({', '.join(columns)}) VALUES ({placeholders})"
+            if self._use_postgres:
+                sql = sql.replace("?", "%s") + " RETURNING id"
+            cur = conn.execute(sql, tuple(payload[col] for col in columns))
+            return self._inserted_id(cur)
+
+    def fetch_active_signal_path_metrics(self, limit: int = 250) -> list[dict[str, Any]]:
+        sql = """
+            SELECT *
+            FROM signal_path_metrics
+            WHERE status = 'active'
+            ORDER BY created_at ASC, id ASC
+            LIMIT ?
+        """
+        if self._use_postgres:
+            sql = sql.replace("?", "%s")
+        with self._connect() as conn:
+            return self._fetchall_dicts(conn.execute(sql, (max(1, int(limit or 250)),)))
+
+    def update_signal_path_metric(self, observation_id: int, **updates: Any) -> None:
+        allowed = {
+            "current_price",
+            "max_favorable_pct",
+            "max_adverse_pct",
+            "final_return_pct",
+            "bars_tracked",
+            "bars_to_mfe",
+            "bars_to_mae",
+            "first_barrier_hit",
+            "would_hit_tp_025",
+            "would_hit_tp_050",
+            "would_hit_tp_075",
+            "would_hit_tp_100",
+            "would_hit_tp_150",
+            "would_hit_sl_025",
+            "would_hit_sl_050",
+            "would_hit_sl_075",
+            "would_hit_sl_100",
+            "status",
+            "updated_at",
+            "matured_at",
+        }
+        payload = {key: value for key, value in updates.items() if key in allowed}
+        if not observation_id or not payload:
+            return
+        payload.setdefault("updated_at", iso_utc())
+        assignments = ", ".join(f"{key}=?" for key in payload)
+        sql = f"UPDATE signal_path_metrics SET {assignments} WHERE observation_id=?"
+        params = tuple(payload.values()) + (int(observation_id),)
+        if self._use_postgres:
+            sql = sql.replace("?", "%s")
+        with self._connect() as conn:
+            conn.execute(sql, params)
+
+    def get_signal_path_metrics_summary_since(self, since_iso: str) -> dict[str, Any]:
+        sql = """
+            SELECT
+                COUNT(*) AS total,
+                SUM(CASE WHEN status = 'active' THEN 1 ELSE 0 END) AS active_count,
+                SUM(CASE WHEN status = 'matured' THEN 1 ELSE 0 END) AS matured_count,
+                SUM(CASE WHEN status = 'insufficient_price_path_data' THEN 1 ELSE 0 END) AS insufficient_count,
+                AVG(COALESCE(max_favorable_pct, 0)) AS avg_mfe,
+                AVG(COALESCE(max_adverse_pct, 0)) AS avg_mae,
+                AVG(COALESCE(final_return_pct, 0)) AS avg_final_return,
+                AVG(COALESCE(bars_tracked, 0)) AS avg_bars_tracked
+            FROM signal_path_metrics
+            WHERE created_at >= ?
+        """
+        if self._use_postgres:
+            sql = sql.replace("?", "%s")
+        try:
+            with self._connect() as conn:
+                row = conn.execute(sql, (since_iso,)).fetchone()
+            total = float(self._row_value(row, "total", 0, 0) or 0)
+            insufficient = float(self._row_value(row, "insufficient_count", 3, 0) or 0)
+            return {
+                "total": total,
+                "active_count": float(self._row_value(row, "active_count", 1, 0) or 0),
+                "matured_count": float(self._row_value(row, "matured_count", 2, 0) or 0),
+                "insufficient_count": insufficient,
+                "avg_mfe": float(self._row_value(row, "avg_mfe", 4, 0.0) or 0.0),
+                "avg_mae": float(self._row_value(row, "avg_mae", 5, 0.0) or 0.0),
+                "avg_final_return": float(self._row_value(row, "avg_final_return", 6, 0.0) or 0.0),
+                "avg_bars_tracked": float(self._row_value(row, "avg_bars_tracked", 7, 0.0) or 0.0),
+                "coverage_pct": ((total - insufficient) / max(total, 1.0)) if total else 0.0,
+            }
+        except Exception:
+            return {
+                "total": 0.0,
+                "active_count": 0.0,
+                "matured_count": 0.0,
+                "insufficient_count": 0.0,
+                "avg_mfe": 0.0,
+                "avg_mae": 0.0,
+                "avg_final_return": 0.0,
+                "avg_bars_tracked": 0.0,
+                "coverage_pct": 0.0,
+            }
+
+    def fetch_signal_path_metrics_since(self, since_iso: str, limit: int = 50000) -> list[dict[str, Any]]:
+        sql = """
+            SELECT *
+            FROM signal_path_metrics
+            WHERE created_at >= ?
+            ORDER BY created_at ASC, id ASC
+            LIMIT ?
+        """
+        if self._use_postgres:
+            sql = sql.replace("?", "%s")
+        with self._connect() as conn:
+            return self._fetchall_dicts(conn.execute(sql, (since_iso, max(1, int(limit or 50000)))))
+
+    def get_score_calibration_summaries_since(self, since_iso: str, min_score: int = 70) -> list[dict[str, Any]]:
+        score_bucket_expr = """
+            CASE
+                WHEN COALESCE(so.confidence_score, 0) >= 95 THEN '95-100'
+                WHEN COALESCE(so.confidence_score, 0) >= 90 THEN '90-94'
+                WHEN COALESCE(so.confidence_score, 0) >= 80 THEN '80-89'
+                WHEN COALESCE(so.confidence_score, 0) >= 70 THEN '70-79'
+                ELSE '<70'
+            END
+        """
+        sql = f"""
+            SELECT
+                {score_bucket_expr} AS group_value,
+                COUNT(*) AS total_labels,
+                SUM(CASE WHEN sl.first_barrier_hit = 'TIME' THEN 1 ELSE 0 END) AS time_count,
+                SUM(CASE WHEN sl.first_barrier_hit = 'SL' THEN 1 ELSE 0 END) AS sl_count,
+                SUM(CASE WHEN sl.first_barrier_hit = 'TP1' THEN 1 ELSE 0 END) AS tp1_count,
+                SUM(CASE WHEN sl.first_barrier_hit = 'TP2' THEN 1 ELSE 0 END) AS tp2_count,
+                AVG(COALESCE(sl.realized_return_pct, 0)) AS avg_return,
+                SUM(CASE WHEN COALESCE(sl.realized_return_pct, 0) > 0 THEN COALESCE(sl.realized_return_pct, 0) ELSE 0 END) AS gains,
+                SUM(CASE WHEN COALESCE(sl.realized_return_pct, 0) < 0 THEN COALESCE(sl.realized_return_pct, 0) ELSE 0 END) AS losses
+            FROM signal_labels sl
+            JOIN signal_observations so ON so.id = sl.observation_id
+            WHERE sl.timestamp >= ?
+              AND COALESCE(so.confidence_score, 0) >= ?
+              AND so.side IN ('LONG', 'SHORT')
+            GROUP BY {score_bucket_expr}
+            ORDER BY group_value ASC
+        """
+        if self._use_postgres:
+            sql = sql.replace("?", "%s")
+        try:
+            with self._connect() as conn:
+                rows = self._fetchall_dicts(conn.execute(sql, (since_iso, int(min_score))))
+            return [_with_edge_metrics(row) for row in rows]
+        except Exception:
+            return []
 
     def update_trade_status(
         self,

@@ -139,11 +139,26 @@ def test_worker_lightweight_config_defaults_safe():
     assert config.enable_training_dashboard is True
     assert config.enable_telegram_notifier is False
     assert config.enable_edge_guard_paper_filter is False
+    assert config.enable_mfe_mae_capture is True
+    assert config.enable_exit_simulation_lab is True
+    assert config.enable_score_calibration_lab is True
+    assert config.enable_shadow_experiments is True
 
 
 def test_worker_lightweight_keeps_research_cli_commands_available():
     text = (PROJECT_ROOT / "app" / "research_lab.py").read_text(encoding="utf-8")
-    for command in ("daily-summary", "training-summary", "acceleration-plan", "strategy-lab", "reconcile-paper", "virtual-portfolio"):
+    for command in (
+        "daily-summary",
+        "training-summary",
+        "acceleration-plan",
+        "strategy-lab",
+        "reconcile-paper",
+        "virtual-portfolio",
+        "exit-simulation",
+        "score-calibration",
+        "shadow-experiments",
+        "evolution-score",
+    ):
         assert f'"{command}"' in text
     config = BotConfig(
         worker_lightweight_mode=True,

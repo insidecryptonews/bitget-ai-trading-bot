@@ -165,6 +165,31 @@ def test_edge_guard_and_tp_sl_endpoints_return_json():
                 "tp_ratio": 0.02,
             }]
 
+        def get_signal_path_metrics_summary_since(self, *args, **kwargs):
+            return {"total": 1, "active_count": 0, "matured_count": 1, "insufficient_count": 0, "coverage_pct": 1.0}
+
+        def fetch_signal_path_metrics_since(self, *args, **kwargs):
+            return [{
+                "symbol": "ETHUSDT",
+                "market_regime": "TREND_DOWN",
+                "score_bucket": "80-89",
+                "max_favorable_pct": 1.0,
+                "max_adverse_pct": 0.2,
+                "final_return_pct": 0.4,
+                "bars_tracked": 20,
+                "status": "matured",
+            }] * 30
+
+        def get_score_calibration_summaries_since(self, *args, **kwargs):
+            return [{
+                "group_value": "80-89",
+                "total_labels": 1000,
+                "profit_factor": 1.3,
+                "time_ratio": 0.90,
+                "sl_ratio": 0.08,
+                "tp_ratio": 0.02,
+            }]
+
     base = _start_server(BotConfig(), db=DummyDb())
     status, body = _get(base + "/api/training/edge-guard?hours=24")
     assert status == 200
@@ -172,3 +197,12 @@ def test_edge_guard_and_tp_sl_endpoints_return_json():
     status, body = _get(base + "/api/training/tp-sl-lab?hours=24")
     assert status == 200
     assert "TP SL HORIZON LAB START" in json.loads(body)["text"]
+    for path, marker in (
+        ("/api/training/exit-simulation?hours=24", "EXIT SIMULATION START"),
+        ("/api/training/score-calibration?hours=24", "SCORE CALIBRATION START"),
+        ("/api/training/shadow-experiments?hours=24", "SHADOW EXPERIMENTS START"),
+        ("/api/training/evolution-score?hours=24", "EVOLUTION SCORE START"),
+    ):
+        status, body = _get(base + path)
+        assert status == 200
+        assert marker in json.loads(body)["text"]

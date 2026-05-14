@@ -45,6 +45,15 @@ def test_training_pulse_counts_labels():
     assert "labels: total=5 TIME=2 SL=1 TP1=1 TP2=1" in text
 
 
+def test_training_pulse_counts_mfe_mae():
+    pulse = TrainingPulse()
+    pulse.record_mfe_mae(SimpleNamespace(active=2, matured=3, insufficient=1, coverage_pct=0.8))
+    data = pulse.to_dict(BotConfig())
+    assert data["mfe_mae"]["active"] == 2
+    assert data["mfe_mae"]["matured"] == 3
+    assert "mfe_mae: active=2 matured=3 insufficient=1 coverage=80.0%" in pulse.to_text(BotConfig())
+
+
 def test_training_pulse_counts_signal_sides_and_high_scores():
     pulse = TrainingPulse()
     signals = [

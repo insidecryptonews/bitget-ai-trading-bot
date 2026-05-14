@@ -19,6 +19,7 @@ from .labeler import TripleBarrierLabeler
 from .logger import setup_logger
 from .market_data import MarketDataProvider, MarketSnapshot
 from .meta_model import MetaModel
+from .mfe_mae_tracker import MfeMaeTracker
 from .news_intel import NewsIntel
 from .order_manager import InstrumentRules, OrderManager
 from .paper_trader import PaperTrader
@@ -95,6 +96,7 @@ def main() -> None:
     feature_logger = FeatureLogger(db, logger) if config.enable_feature_logging else None
     shadow_engine = ShadowStrategyEngine(db, feature_logger, logger) if feature_logger else None
     labeler = TripleBarrierLabeler(config, db, logger) if config.enable_signal_labeling else None
+    mfe_mae_tracker = MfeMaeTracker(config, db, logger) if config.enable_mfe_mae_capture else None
     research_engine = ResearchEngine(db, logger) if config.enable_research_auto_report else None
     full_research_reporter = FullResearchReporter(db, config, logger) if config.enable_full_research_auto_report else None
     research_autopilot = ResearchAutopilot(config, db, logger) if config.enable_research_autopilot else None
@@ -251,6 +253,13 @@ def main() -> None:
                     )
                     observation_payloads[signal_item.symbol] = observation
                     observation_ids[signal_item.symbol] = feature_logger.record_observation(observation)
+                    if mfe_mae_tracker:
+                        mfe_mae_tracker.register_signal(
+                            observation_id=observation_ids.get(signal_item.symbol),
+                            signal=signal_item,
+                            snapshot=snapshots.get(signal_item.symbol),
+                            market_regime=regime.regime,
+                        )
                     if shadow_engine:
                         shadow_engine.log_variants(
                             signal=signal_item,
@@ -261,6 +270,14 @@ def main() -> None:
                 label_counts = _label_matured_observations(config, db, labeler, snapshots, logger)
                 if training_pulse:
                     training_pulse.record_labels(label_counts)
+            if (
+                mfe_mae_tracker
+                and config.mfe_mae_update_every_n_cycles > 0
+                and cycle_count % max(1, int(config.mfe_mae_update_every_n_cycles or 1)) == 0
+            ):
+                mfe_result = mfe_mae_tracker.update_active(snapshots)
+                if training_pulse:
+                    training_pulse.record_mfe_mae(mfe_result)
             if _should_print_radar(config, cycle_count, signals):
                 _print_radar(signals, snapshots, regime.regime, logger)
 

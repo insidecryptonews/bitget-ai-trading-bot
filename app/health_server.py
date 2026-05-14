@@ -68,6 +68,10 @@ def start_health_server(
                 "/api/training/shadow-opportunity",
                 "/api/training/edge-guard",
                 "/api/training/tp-sl-lab",
+                "/api/training/exit-simulation",
+                "/api/training/score-calibration",
+                "/api/training/shadow-experiments",
+                "/api/training/evolution-score",
             }:
                 if not _authorized(config, query, self.headers):
                     self._send_json({"error": "unauthorized"}, status=401)
@@ -92,6 +96,18 @@ def start_health_server(
                 return
             if path == "/api/training/tp-sl-lab":
                 self._send_json(_tp_sl_lab(config, db, query))
+                return
+            if path == "/api/training/exit-simulation":
+                self._send_json(_exit_simulation(config, db, query))
+                return
+            if path == "/api/training/score-calibration":
+                self._send_json(_score_calibration(config, db, query))
+                return
+            if path == "/api/training/shadow-experiments":
+                self._send_json(_shadow_experiments(config, db, query))
+                return
+            if path == "/api/training/evolution-score":
+                self._send_json(_evolution_score(config, db, query))
                 return
             self._send_status(404, "not found")
 
@@ -185,6 +201,8 @@ def _training_status(config: Any | None, db: Any | None, training_pulse: Any | N
     }
     payload["open_paper_positions_detail"] = _open_paper_positions_detail(db)
     payload["edge"] = _edge_summary(config, db)
+    if "mfe_mae" not in payload:
+        payload["mfe_mae"] = {}
     payload["generated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     return payload
 
@@ -281,6 +299,49 @@ def _tp_sl_lab(config: Any | None, db: Any | None, query: dict[str, list[str]]) 
         from .tp_sl_horizon_lab import TpSlHorizonLab
 
         lab = TpSlHorizonLab(config, db)
+        payload = lab.build(hours=hours)
+        text = lab.to_text(hours=hours)
+    except Exception as exc:
+        return {"error": str(exc)[:300], "hours": hours, "final_recommendation": "NO LIVE"}
+    payload = dict(payload)
+    payload["text"] = text
+    payload["generated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    payload["final_recommendation"] = "NO LIVE"
+    return payload
+
+
+def _exit_simulation(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
+    return _lab_payload(config, db, query, "exit simulation unavailable", ".exit_simulation_lab", "ExitSimulationLab")
+
+
+def _score_calibration(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
+    return _lab_payload(config, db, query, "score calibration unavailable", ".score_calibration_lab", "ScoreCalibrationLab")
+
+
+def _shadow_experiments(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
+    return _lab_payload(config, db, query, "shadow experiments unavailable", ".shadow_experiments", "ShadowExperimentsLab")
+
+
+def _evolution_score(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
+    return _lab_payload(config, db, query, "evolution score unavailable", ".evolution_score", "EvolutionScore")
+
+
+def _lab_payload(
+    config: Any | None,
+    db: Any | None,
+    query: dict[str, list[str]],
+    error_message: str,
+    module_name: str,
+    class_name: str,
+) -> dict[str, Any]:
+    hours = _query_int(query, "hours", 24)
+    if config is None or db is None:
+        return {"error": error_message, "hours": hours, "final_recommendation": "NO LIVE"}
+    try:
+        import importlib
+
+        module = importlib.import_module(module_name, package=__package__)
+        lab = getattr(module, class_name)(config, db)
         payload = lab.build(hours=hours)
         text = lab.to_text(hours=hours)
     except Exception as exc:

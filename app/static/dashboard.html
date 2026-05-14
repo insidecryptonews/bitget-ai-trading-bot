@@ -142,6 +142,10 @@
         <div id="labelMetrics"></div>
       </div>
       <div class="card">
+        <h2>MFE/MAE Health</h2>
+        <div id="mfeMaeMetrics"></div>
+      </div>
+      <div class="card">
         <h2>Signals</h2>
         <div id="signalMetrics"></div>
       </div>
@@ -199,6 +203,29 @@
         <div class="actions"><button id="tpSlBtn">Actualizar TP/SL Lab 24h</button></div>
         <div id="scoreCalibration"></div>
         <pre id="tpSlText">Sin cargar todavía.</pre>
+      </div>
+      <div class="card full">
+        <h2>Exit Simulation</h2>
+        <div class="actions"><button id="exitSimulationBtn">Actualizar exit simulation 24h</button></div>
+        <div id="exitSimulationMetrics"></div>
+        <pre id="exitSimulationText">Sin cargar todavía.</pre>
+      </div>
+      <div class="card full">
+        <h2>Score Calibration</h2>
+        <div class="actions"><button id="scoreCalibrationBtn">Actualizar score calibration 24h</button></div>
+        <div id="scoreCalibrationV2"></div>
+        <pre id="scoreCalibrationText">Sin cargar todavía.</pre>
+      </div>
+      <div class="card full">
+        <h2>Shadow Experiments</h2>
+        <div class="actions"><button id="shadowExperimentsBtn">Actualizar shadow experiments 24h</button></div>
+        <pre id="shadowExperimentsText">Sin cargar todavía.</pre>
+      </div>
+      <div class="card full">
+        <h2>Evolution Score</h2>
+        <div class="actions"><button id="evolutionScoreBtn">Actualizar evolution score 24h</button></div>
+        <div id="evolutionScoreMetrics"></div>
+        <pre id="evolutionScoreText">Sin cargar todavía.</pre>
       </div>
     </section>
   </main>
@@ -274,6 +301,12 @@
         metric("TIME ratio", pct(timeRatio), timeRatio > 0.6 ? "warn" : "good") +
         metric("SL ratio", pct(slRatio), slRatio > tpRatio ? "bad" : "") +
         metric("TP ratio", pct(tpRatio), tpRatio < 0.05 ? "bad" : "good");
+      const mfe = data.mfe_mae || {};
+      byId("mfeMaeMetrics").innerHTML =
+        metric("active", mfe.active || 0) +
+        metric("matured", mfe.matured || 0) +
+        metric("insufficient", mfe.insufficient || 0, Number(mfe.insufficient || 0) ? "warn" : "good") +
+        metric("coverage", pct(mfe.coverage_pct || 0), Number(mfe.coverage_pct || 0) < 0.3 ? "warn" : "good");
       const s = data.signals || {};
       byId("signalMetrics").innerHTML =
         metric("LONG", s.long) +
@@ -412,11 +445,67 @@
       }
       catch (err) { byId("tpSlText").textContent = `Error: ${err.message}`; }
     }
+    async function loadExitSimulation() {
+      byId("exitSimulationText").textContent = "Cargando...";
+      try {
+        const data = await fetchJson("/api/training/exit-simulation?hours=24");
+        const best = (data.best_exit_candidates || [])[0] || {};
+        byId("exitSimulationText").textContent = data.text || "Sin datos.";
+        byId("exitSimulationMetrics").innerHTML =
+          metric("best TP/SL", best.name || data.status || "none") +
+          metric("best PF", Number(best.profit_factor || 0).toFixed(2), Number(best.profit_factor || 0) < 1 ? "bad" : "good") +
+          metric("TP ratio", pct(best.tp_ratio || 0)) +
+          metric("SL ratio", pct(best.sl_ratio || 0)) +
+          metric("TIME ratio", pct(best.time_ratio || 0));
+      }
+      catch (err) { byId("exitSimulationText").textContent = `Error: ${err.message}`; }
+    }
+    async function loadScoreCalibrationV2() {
+      byId("scoreCalibrationText").textContent = "Cargando...";
+      try {
+        const data = await fetchJson("/api/training/score-calibration?hours=24");
+        byId("scoreCalibrationText").textContent = data.text || "Sin datos.";
+        renderScoreCalibrationTo("scoreCalibrationV2", data.score_buckets || []);
+      }
+      catch (err) { byId("scoreCalibrationText").textContent = `Error: ${err.message}`; }
+    }
+    function renderScoreCalibrationTo(id, rows) {
+      if (!rows || !rows.length) { byId(id).innerHTML = metric("score calibration", "insufficient data", "warn"); return; }
+      const byBucket = {};
+      rows.forEach((row) => { byBucket[row.group_value] = row; });
+      byId(id).innerHTML = ["70-79", "80-89", "90-94", "95-100"].map((bucket) => {
+        const row = byBucket[bucket] || {};
+        return metric(bucket, `PF=${Number(row.profit_factor || 0).toFixed(2)} TP=${pct(row.tp_ratio)} SL=${pct(row.sl_ratio)} TIME=${pct(row.time_ratio)}`);
+      }).join("");
+    }
+    async function loadShadowExperiments() {
+      byId("shadowExperimentsText").textContent = "Cargando...";
+      try { byId("shadowExperimentsText").textContent = (await fetchJson("/api/training/shadow-experiments?hours=24")).text || "Sin datos."; }
+      catch (err) { byId("shadowExperimentsText").textContent = `Error: ${err.message}`; }
+    }
+    async function loadEvolutionScore() {
+      byId("evolutionScoreText").textContent = "Cargando...";
+      try {
+        const data = await fetchJson("/api/training/evolution-score?hours=24");
+        byId("evolutionScoreText").textContent = data.text || "Sin datos.";
+        byId("evolutionScoreMetrics").innerHTML =
+          metric("data_quality", Number(data.data_quality || 0).toFixed(1)) +
+          metric("edge_quality", Number(data.edge_quality || 0).toFixed(1), Number(data.edge_quality || 0) < 45 ? "bad" : "good") +
+          metric("stability", Number(data.stability || 0).toFixed(1)) +
+          metric("safety", Number(data.safety || 0).toFixed(1), "good") +
+          metric("final_status", data.final_status || "NO_LIVE", "warn");
+      }
+      catch (err) { byId("evolutionScoreText").textContent = `Error: ${err.message}`; }
+    }
     byId("summaryBtn").addEventListener("click", loadSummary);
     byId("planBtn").addEventListener("click", loadPlan);
     byId("opportunityBtn").addEventListener("click", loadOpportunity);
     byId("edgeGuardBtn").addEventListener("click", loadEdgeGuard);
     byId("tpSlBtn").addEventListener("click", loadTpSl);
+    byId("exitSimulationBtn").addEventListener("click", loadExitSimulation);
+    byId("scoreCalibrationBtn").addEventListener("click", loadScoreCalibrationV2);
+    byId("shadowExperimentsBtn").addEventListener("click", loadShadowExperiments);
+    byId("evolutionScoreBtn").addEventListener("click", loadEvolutionScore);
     refresh();
     loadSummary();
     loadPlan();
