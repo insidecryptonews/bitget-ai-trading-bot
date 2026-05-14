@@ -255,6 +255,7 @@ class Database:
                 score_bucket TEXT,
                 market_regime TEXT,
                 source TEXT,
+                probe_key TEXT,
                 reject_reason TEXT,
                 priority INTEGER DEFAULT 0,
                 entry_price REAL,
@@ -672,6 +673,7 @@ class Database:
             self._execute(conn, "ALTER TABLE virtual_strategy_summary ADD COLUMN IF NOT EXISTS created_at TEXT")
             for name, spec in {
                 "source": "TEXT",
+                "probe_key": "TEXT",
                 "reject_reason": "TEXT",
                 "priority": "INTEGER DEFAULT 0",
             }.items():
@@ -690,6 +692,7 @@ class Database:
         existing_path_metrics = {row["name"] if isinstance(row, sqlite3.Row) else row[1] for row in cur.fetchall()}
         for name, spec in {
             "source": "TEXT",
+            "probe_key": "TEXT",
             "reject_reason": "TEXT",
             "priority": "INTEGER DEFAULT 0",
         }.items():
@@ -707,6 +710,7 @@ class Database:
             "CREATE INDEX IF NOT EXISTS idx_signal_path_metrics_side ON signal_path_metrics(side)",
             "CREATE INDEX IF NOT EXISTS idx_signal_path_metrics_status ON signal_path_metrics(status)",
             "CREATE INDEX IF NOT EXISTS idx_signal_path_metrics_source ON signal_path_metrics(source)",
+            "CREATE INDEX IF NOT EXISTS idx_signal_path_metrics_probe_key ON signal_path_metrics(probe_key)",
             "CREATE INDEX IF NOT EXISTS idx_signal_explanations_observation_label ON signal_explanations(observation_id, label_id)",
             "CREATE INDEX IF NOT EXISTS idx_signal_price_paths_observation_label ON signal_price_paths(observation_id, label_id)",
             "CREATE INDEX IF NOT EXISTS idx_signal_counterfactuals_observation_label_scenario ON signal_counterfactuals(observation_id, label_id, scenario_name)",
@@ -1840,6 +1844,7 @@ class Database:
             "score_bucket",
             "market_regime",
             "source",
+            "probe_key",
             "reject_reason",
             "priority",
             "entry_price",
@@ -1959,7 +1964,7 @@ class Database:
                 COUNT(*) AS total,
                 SUM(CASE WHEN status = 'active' THEN 1 ELSE 0 END) AS active_count,
                 SUM(CASE WHEN status = 'matured' THEN 1 ELSE 0 END) AS matured_count,
-                SUM(CASE WHEN status = 'insufficient_price_path_data' THEN 1 ELSE 0 END) AS insufficient_count,
+                SUM(CASE WHEN status IN ('insufficient_price', 'insufficient_price_path_data') THEN 1 ELSE 0 END) AS insufficient_count,
                 AVG(COALESCE(max_favorable_pct, 0)) AS avg_mfe,
                 AVG(COALESCE(max_adverse_pct, 0)) AS avg_mae,
                 AVG(COALESCE(final_return_pct, 0)) AS avg_final_return,
@@ -1997,6 +2002,32 @@ class Database:
                 "avg_bars_tracked": 0.0,
                 "coverage_pct": 0.0,
             }
+
+    def get_signal_path_metrics_source_summary_since(self, since_iso: str) -> list[dict[str, Any]]:
+        sql = """
+            SELECT
+                COALESCE(source, 'unknown') AS source,
+                COUNT(*) AS total,
+                SUM(CASE WHEN status = 'active' THEN 1 ELSE 0 END) AS active_count,
+                SUM(CASE WHEN status = 'matured' THEN 1 ELSE 0 END) AS matured_count,
+                SUM(CASE WHEN status IN ('insufficient_price', 'insufficient_price_path_data') THEN 1 ELSE 0 END) AS insufficient_count,
+                SUM(CASE WHEN status = 'expired' THEN 1 ELSE 0 END) AS expired_count,
+                AVG(COALESCE(max_favorable_pct, 0)) AS avg_mfe,
+                AVG(COALESCE(max_adverse_pct, 0)) AS avg_mae,
+                AVG(COALESCE(final_return_pct, 0)) AS avg_final_return
+            FROM signal_path_metrics
+            WHERE created_at >= ?
+            GROUP BY COALESCE(source, 'unknown')
+            ORDER BY total DESC, source ASC
+        """
+        if self._use_postgres:
+            sql = sql.replace("?", "%s")
+        try:
+            with self._connect() as conn:
+                rows = self._fetchall_dicts(conn.execute(sql, (since_iso,)))
+            return rows
+        except Exception:
+            return []
 
     def fetch_signal_path_metrics_since(self, since_iso: str, limit: int = 50000) -> list[dict[str, Any]]:
         sql = """

@@ -268,8 +268,20 @@ def main() -> None:
                             base_observation=observation,
                             market_regime=regime,
                         )
-                if mfe_mae_tracker and training_pulse:
-                    training_pulse.record_mfe_mae(mfe_mae_tracker.debug_result())
+            if mfe_mae_tracker:
+                low_score_result = mfe_mae_tracker.register_low_score_samples(
+                    signals=signals,
+                    snapshots=snapshots,
+                    observation_ids=observation_ids,
+                    market_regime=regime.regime,
+                )
+                probe_result = mfe_mae_tracker.register_market_probes(
+                    snapshots=snapshots,
+                    market_regime=regime.regime,
+                    cycle_count=cycle_count,
+                )
+                if training_pulse:
+                    training_pulse.record_mfe_mae(probe_result if probe_result.candidates_tracked or probe_result.market_probes_created else low_score_result)
             if labeler:
                 label_counts = _label_matured_observations(config, db, labeler, snapshots, logger)
                 if training_pulse:
@@ -333,7 +345,7 @@ def main() -> None:
                             rejected_signal,
                             snapshots,
                             regime.regime,
-                            "allocator_reject",
+                            _mfe_source_for_reject(reason),
                             reason,
                         )
                         if _is_slot_block_reason(reason):
@@ -527,7 +539,7 @@ def main() -> None:
                                 safe_signal,
                                 snapshots,
                                 regime.regime,
-                                "edge_guard_block",
+                                _mfe_source_for_edge_decision(edge_decision.decision),
                                 reason,
                             )
                             if feature_logger:
@@ -992,6 +1004,30 @@ def _track_mfe_mae_candidate(
 def _is_slot_block_reason(reason: str) -> bool:
     text = str(reason or "").lower()
     return "slot" in text or "sin slots" in text or "posicion" in text or "posición" in text
+
+
+def _mfe_source_for_reject(reason: str) -> str:
+    text = str(reason or "").lower()
+    if "notional_deviation" in text or "notional" in text:
+        return "notional_deviation"
+    if "mÃ¡ximo de posiciones" in text or "maximo de posiciones" in text or "maximum positions" in text:
+        return "max_positions"
+    if "concentraci" in text or "mejor seÃ±al" in text or "mejor señal" in text:
+        return "best_signal_concentration"
+    if _is_slot_block_reason(text):
+        return "max_positions"
+    if "regime" in text or "rÃ©gimen" in text or "regimen" in text or "choppy" in text or "range" in text:
+        return "regime_block"
+    return "allocator_reject"
+
+
+def _mfe_source_for_edge_decision(decision: str) -> str:
+    text = str(decision or "").upper()
+    if text == "SHADOW_ONLY":
+        return "edge_guard_shadow"
+    if text == "WATCH_ONLY":
+        return "edge_guard_watch"
+    return "edge_guard_block"
 
 
 def _is_429_error(text: str) -> bool:

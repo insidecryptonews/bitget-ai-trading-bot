@@ -28,24 +28,28 @@ class ExitSimulationLab:
         since = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
         try:
             summary = self.db.get_signal_path_metrics_summary_since(since)
+            source_summary = self.db.get_signal_path_metrics_source_summary_since(since)
             rows = self.db.fetch_signal_path_metrics_since(since, limit=50000)
         except Exception:
             summary = {"total": 0, "active_count": 0, "matured_count": 0, "insufficient_count": 0, "coverage_pct": 0.0}
+            source_summary = []
             rows = []
             status = "no_mfe_mae_table"
         else:
-            status = _data_status(summary, rows)
+            status = _data_status(summary, rows, source_summary)
         usable = [row for row in rows if str(row.get("status") or "") == "matured"]
-        if status != "ok" or len(usable) < 25:
-            if status == "ok":
+        if status not in {"ready", "probe_data_only_not_signal_edge"} or len(usable) < 25:
+            if status in {"ok", "ready"}:
                 status = "insufficient_matured_samples"
             return {
                 "hours": hours,
                 "samples": len(usable),
                 "coverage": summary,
+                "sources": source_summary,
                 "status": status,
                 "current": _empty_metrics(),
                 "best_exit_candidates": [],
+                "by_source_best": [],
                 "worst_exit_candidates": [],
                 "by_symbol_best": [],
                 "by_regime_best": [],
@@ -61,10 +65,12 @@ class ExitSimulationLab:
             "hours": hours,
             "samples": len(usable),
             "coverage": summary,
-            "status": "ok",
+            "sources": source_summary,
+            "status": "probe_data_only_not_signal_edge" if _only_probe_matured(source_summary) else "ready",
             "current": _current_from_rows(usable),
             "best_exit_candidates": best,
             "worst_exit_candidates": worst,
+            "by_source_best": _best_by(usable, "source", min_group_samples=5),
             "by_symbol_best": _best_by(usable, "symbol"),
             "by_regime_best": _best_by(usable, "market_regime"),
             "score_bucket_best": _best_by(usable, "score_bucket"),
@@ -88,6 +94,8 @@ class ExitSimulationLab:
                 f"insufficient={safe_int(payload['coverage'].get('insufficient_count'))} "
                 f"coverage={safe_float(payload['coverage'].get('coverage_pct')) * 100:.1f}%"
             ),
+            "sources:",
+            *_source_lines(payload.get("sources", [])),
             "current:",
             (
                 f"- PF={current['profit_factor']:.2f} "
@@ -96,7 +104,7 @@ class ExitSimulationLab:
                 f"TIME%={current['time_ratio'] * 100:.1f}"
             ),
         ]
-        if payload["status"] != "ok":
+        if payload["status"] not in {"ready", "probe_data_only_not_signal_edge"}:
             lines.extend([
                 "recommendation:",
                 *_recommendation_for_status(payload["status"]),
@@ -107,6 +115,8 @@ class ExitSimulationLab:
         lines.extend([
             "best_exit_candidates:",
             *_candidate_lines(payload["best_exit_candidates"]),
+            "by_source_best:",
+            *_candidate_lines(payload["by_source_best"]),
             "worst_exit_candidates:",
             *_candidate_lines(payload["worst_exit_candidates"]),
             "by_symbol_best:",
@@ -116,6 +126,7 @@ class ExitSimulationLab:
             "score_bucket_best:",
             *_candidate_lines(payload["score_bucket_best"]),
             "recommendation:",
+            *_recommendation_for_status(payload["status"]),
             f"- suggested_shadow_exit={payload['suggested_shadow_exit']}",
             "- NO LIVE",
             END,
@@ -149,7 +160,7 @@ def _simulate_combo(rows: list[dict[str, Any]], tp_pct: float, sl_pct: float, ho
     return metrics
 
 
-def _data_status(summary: dict[str, Any], rows: list[dict[str, Any]]) -> str:
+def _data_status(summary: dict[str, Any], rows: list[dict[str, Any]], source_summary: list[dict[str, Any]]) -> str:
     total = safe_int(summary.get("total"))
     active = safe_int(summary.get("active_count"))
     matured = safe_int(summary.get("matured_count"))
@@ -160,11 +171,13 @@ def _data_status(summary: dict[str, Any], rows: list[dict[str, Any]]) -> str:
         return "only_active_not_matured"
     if insufficient >= total and total > 0:
         return "no_price_path_metrics"
+    if matured > 0 and _only_probe_matured(source_summary):
+        return "probe_data_only_not_signal_edge"
     if matured < 25:
         return "insufficient_matured_samples"
     if not rows:
         return "no_price_path_metrics"
-    return "ok"
+    return "ready"
 
 
 def _recommendation_for_status(status: str) -> list[str]:
@@ -176,18 +189,20 @@ def _recommendation_for_status(status: str) -> list[str]:
         return ["- revisar que llegan precios por simbolo para actualizar MFE/MAE"]
     if status == "insufficient_matured_samples":
         return ["- esperar mas muestras maduras antes de optimizar salidas"]
+    if status == "probe_data_only_not_signal_edge":
+        return ["- estos datos calibran TP/SL de mercado, no validan edge de entrada"]
     if status == "no_mfe_mae_table":
         return ["- inicializar base de datos con la tabla signal_path_metrics"]
     return ["- seguir capturando MFE/MAE antes de ajustar TP/SL"]
 
 
-def _best_by(rows: list[dict[str, Any]], key: str) -> list[dict[str, Any]]:
+def _best_by(rows: list[dict[str, Any]], key: str, min_group_samples: int = 25) -> list[dict[str, Any]]:
     groups: dict[str, list[dict[str, Any]]] = {}
     for row in rows:
         groups.setdefault(str(row.get(key) or "NA"), []).append(row)
     best: list[dict[str, Any]] = []
     for value, group_rows in groups.items():
-        if len(group_rows) < 25:
+        if len(group_rows) < min_group_samples:
             continue
         candidates = [_simulate_combo(group_rows, tp, sl, 20) for tp, sl in product(TP_VALUES, SL_VALUES)]
         candidates.sort(key=lambda item: safe_float(item.get("profit_factor")), reverse=True)
@@ -244,3 +259,24 @@ def _candidate_lines(rows: list[dict[str, Any]]) -> list[str]:
             f"SL%={safe_float(row.get('sl_ratio')) * 100:.1f} TIME%={safe_float(row.get('time_ratio')) * 100:.1f}"
         )
     return lines
+
+
+def _source_lines(rows: list[dict[str, Any]]) -> list[str]:
+    if not rows:
+        return ["- none"]
+    return [
+        (
+            f"- {row.get('source')}: active={safe_int(row.get('active_count'))} "
+            f"matured={safe_int(row.get('matured_count'))} total={safe_int(row.get('total'))}"
+        )
+        for row in rows[:12]
+    ]
+
+
+def _only_probe_matured(source_summary: list[dict[str, Any]]) -> bool:
+    matured_by_source = {
+        str(row.get("source") or "unknown"): safe_int(row.get("matured_count"))
+        for row in source_summary
+        if safe_int(row.get("matured_count")) > 0
+    }
+    return bool(matured_by_source) and set(matured_by_source) == {"market_probe"}

@@ -72,6 +72,7 @@ def start_health_server(
                 "/api/training/score-calibration",
                 "/api/training/shadow-experiments",
                 "/api/training/evolution-score",
+                "/api/training/mfe-mae-diagnostic",
             }:
                 if not _authorized(config, query, self.headers):
                     self._send_json({"error": "unauthorized"}, status=401)
@@ -108,6 +109,9 @@ def start_health_server(
                 return
             if path == "/api/training/evolution-score":
                 self._send_json(_evolution_score(config, db, query))
+                return
+            if path == "/api/training/mfe-mae-diagnostic":
+                self._send_json(_mfe_mae_diagnostic(config, db, query))
                 return
             self._send_status(404, "not found")
 
@@ -324,6 +328,10 @@ def _shadow_experiments(config: Any | None, db: Any | None, query: dict[str, lis
 
 def _evolution_score(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
     return _lab_payload(config, db, query, "evolution score unavailable", ".evolution_score", "EvolutionScore")
+
+
+def _mfe_mae_diagnostic(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
+    return _lab_payload(config, db, query, "mfe/mae diagnostic unavailable", ".mfe_mae_diagnostic", "MfeMaeDiagnostic")
 
 
 def _lab_payload(

@@ -47,10 +47,12 @@ def test_training_pulse_counts_labels():
 
 def test_training_pulse_counts_mfe_mae():
     pulse = TrainingPulse()
-    pulse.record_mfe_mae(SimpleNamespace(active=2, matured=3, insufficient=1, coverage_pct=0.8))
+    pulse.record_mfe_mae(SimpleNamespace(active=2, matured=3, insufficient=1, coverage_pct=0.8, market_probes_created=4, low_score_samples_tracked=1, by_source={"market_probe": 4}))
     data = pulse.to_dict(BotConfig())
     assert data["mfe_mae"]["active"] == 2
     assert data["mfe_mae"]["matured"] == 3
+    assert data["mfe_mae"]["market_probes_created"] == 4
+    assert data["mfe_mae"]["low_score_samples_tracked"] == 1
     assert "mfe_mae: active=2 matured=3 insufficient=1 coverage=80.0%" in pulse.to_text(BotConfig())
 
 

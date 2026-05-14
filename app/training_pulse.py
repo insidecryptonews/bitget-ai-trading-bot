@@ -59,6 +59,8 @@ class TrainingPulse:
     mfe_mae_skipped_no_price: int = 0
     mfe_mae_skipped_duplicate: int = 0
     mfe_mae_skipped_max_active: int = 0
+    mfe_mae_market_probes_created: int = 0
+    mfe_mae_low_score_samples_tracked: int = 0
     mfe_mae_by_source: Counter[str] = field(default_factory=Counter)
     market_regime_counts: Counter[str] = field(default_factory=Counter)
     no_trade_reason_counts: Counter[str] = field(default_factory=Counter)
@@ -180,6 +182,8 @@ class TrainingPulse:
         self.mfe_mae_skipped_no_price = safe_int(getattr(result, "skipped_no_price", 0))
         self.mfe_mae_skipped_duplicate = safe_int(getattr(result, "skipped_duplicate", 0))
         self.mfe_mae_skipped_max_active = safe_int(getattr(result, "skipped_max_active", 0))
+        self.mfe_mae_market_probes_created = safe_int(getattr(result, "market_probes_created", 0))
+        self.mfe_mae_low_score_samples_tracked = safe_int(getattr(result, "low_score_samples_tracked", 0))
         by_source = getattr(result, "by_source", None) or {}
         self.mfe_mae_by_source = Counter({str(key): safe_int(value) for key, value in by_source.items()})
 
@@ -264,6 +268,8 @@ class TrainingPulse:
                 "skipped_no_price": self.mfe_mae_skipped_no_price,
                 "skipped_duplicate": self.mfe_mae_skipped_duplicate,
                 "skipped_max_active": self.mfe_mae_skipped_max_active,
+                "market_probes_created": self.mfe_mae_market_probes_created,
+                "low_score_samples_tracked": self.mfe_mae_low_score_samples_tracked,
                 "by_source": [
                     {"source": key, "count": value}
                     for key, value in self.mfe_mae_by_source.most_common(max(1, int(config.training_pulse_top_n or 5)))
@@ -323,7 +329,8 @@ class TrainingPulse:
                 "mfe_mae: "
                 f"active={data['mfe_mae']['active']} matured={data['mfe_mae']['matured']} "
                 f"insufficient={data['mfe_mae']['insufficient']} coverage={data['mfe_mae']['coverage_pct'] * 100:.1f}% "
-                f"seen={data['mfe_mae']['candidates_seen']} tracked={data['mfe_mae']['candidates_tracked']}"
+                f"seen={data['mfe_mae']['candidates_seen']} tracked={data['mfe_mae']['candidates_tracked']} "
+                f"probes={data['mfe_mae']['market_probes_created']} low_score={data['mfe_mae']['low_score_samples_tracked']}"
             ),
             "regimes: " + _counter_inline(self.market_regime_counts, config.training_pulse_top_n),
             "top_signals:",

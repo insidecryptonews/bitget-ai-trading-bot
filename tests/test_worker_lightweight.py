@@ -145,6 +145,9 @@ def test_worker_lightweight_config_defaults_safe():
     assert config.mfe_mae_track_high_score_missed is True
     assert config.mfe_mae_track_regime_blocks is True
     assert config.mfe_mae_min_rejected_score == 60
+    assert config.enable_mfe_mae_market_probes is True
+    assert config.mfe_mae_track_low_score_sample is True
+    assert config.mfe_mae_low_score_min == 20
     assert config.enable_exit_simulation_lab is True
     assert config.enable_score_calibration_lab is True
     assert config.enable_shadow_experiments is True
@@ -163,6 +166,8 @@ def test_worker_lightweight_keeps_research_cli_commands_available():
         "score-calibration",
         "shadow-experiments",
         "evolution-score",
+        "mfe-mae-diagnostic",
+        "mfe-mae-smoke-test",
     ):
         assert f'"{command}"' in text
     config = BotConfig(

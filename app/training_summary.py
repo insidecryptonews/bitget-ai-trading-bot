@@ -129,6 +129,10 @@ class TrainingSummary:
             path_metrics = self.db.get_signal_path_metrics_summary_since(window["since"])
         else:
             path_metrics = {"total": 0, "coverage_pct": 0.0}
+        if hasattr(self.db, "get_signal_path_metrics_source_summary_since"):
+            path_sources = self.db.get_signal_path_metrics_source_summary_since(window["since"])
+        else:
+            path_sources = []
         candidate_groups = []
         for group_key in ("symbol", "market_regime", "score_bucket"):
             candidate_groups.extend(
@@ -141,13 +145,16 @@ class TrainingSummary:
             )
         score_groups = [row for row in candidate_groups if str(row.get("group_value")) in {"70-79", "80-89", "90-100"}]
         score_not_monotonic = _score_not_monotonic(score_groups)
-        biggest = _biggest_problem(self.config, labels, events, observations, candidate_groups, path_metrics, score_not_monotonic)
+        biggest = _biggest_problem(self.config, labels, events, observations, candidate_groups, path_metrics, score_not_monotonic, path_sources)
         lines = [
             PLAN_START,
             f"hours: {window['hours']}",
             f"biggest_problem: {biggest}",
             f"score_not_monotonic: {str(score_not_monotonic).lower()}",
             f"mfe_mae_coverage: {safe_float(path_metrics.get('coverage_pct')) * 100:.1f}%",
+            "GO_LIVE_GATES:",
+            "- live_allowed=false",
+            "- reason=paper/research only",
             "suggested_next_research:",
             *_plan_steps(biggest, path_metrics),
             "do_not_change:",
@@ -190,6 +197,7 @@ def _biggest_problem(
     candidate_groups: list[dict[str, Any]] | None = None,
     path_metrics: dict[str, Any] | None = None,
     score_not_monotonic: bool = False,
+    path_sources: list[dict[str, Any]] | None = None,
 ) -> str:
     if config.live_trading:
         return "safety_live"
@@ -198,6 +206,12 @@ def _biggest_problem(
         return "no_data"
     metrics = _label_metrics(labels)
     path_metrics = path_metrics or {}
+    path_sources = path_sources or []
+    path_total = safe_float(path_metrics.get("total"))
+    path_active = safe_float(path_metrics.get("active_count"))
+    path_matured = safe_float(path_metrics.get("matured_count"))
+    observations_total = safe_int(observations.get("total"))
+    market_probe_active = sum(safe_int(row.get("active_count")) for row in path_sources if str(row.get("source")) == "market_probe")
     if total > 0 and safe_float(labels.get("profit_factor")) < 1.0:
         if any(
             safe_int(row.get("total_labels")) >= config.edge_guard_min_sample
@@ -214,6 +228,12 @@ def _biggest_problem(
         return "too_many_time"
     if total > 0 and metrics["sl_ratio"] > metrics["tp_ratio"] * 2:
         return "too_many_sl"
+    if observations_total > 0 and path_total <= 0:
+        return "mfe_mae_filtered_by_low_score"
+    if market_probe_active > 0 and path_matured <= 0:
+        return "mfe_mae_collecting_wait_maturity"
+    if path_active > 0 and path_matured <= 0:
+        return "mfe_mae_collecting_wait_maturity"
     if safe_float(path_metrics.get("total")) <= 0 or safe_float(path_metrics.get("coverage_pct")) < 0.30:
         if total > 0:
             return "insufficient_price_path_data"
@@ -227,6 +247,21 @@ def _biggest_problem(
 
 
 def _plan_steps(problem: str, path_metrics: dict[str, Any] | None = None) -> list[str]:
+    if problem == "mfe_mae_filtered_by_low_score":
+        return [
+            "1. activar market probes research-only",
+            "2. mantener low score sampling controlado",
+            "3. esperar maduracion MFE/MAE",
+            "4. revisar exit-simulation por source",
+            "5. no ampliar slots y NO LIVE",
+        ]
+    if problem == "mfe_mae_collecting_wait_maturity":
+        return [
+            "1. esperar a que las muestras active alcancen MFE_MAE_MAX_BARS",
+            "2. revisar mfe-mae-diagnostic --hours 24",
+            "3. ejecutar exit-simulation --hours 24 cuando haya matured > 0",
+            "4. no ampliar slots y NO LIVE",
+        ]
     if problem in {"insufficient_price_path_data", "need_exit_simulation"}:
         return [
             "1. collect_mfe_mae_data",

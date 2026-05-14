@@ -466,6 +466,16 @@ class ResearchLab:
 
         return EvolutionScore(self.config, self.db).to_text(hours=hours)
 
+    def mfe_mae_diagnostic(self, hours: int = 24) -> str:
+        from .mfe_mae_diagnostic import MfeMaeDiagnostic
+
+        return MfeMaeDiagnostic(self.config, self.db).to_text(hours=hours)
+
+    def mfe_mae_smoke_test(self) -> str:
+        from .mfe_mae_smoke_test import MfeMaeSmokeTest
+
+        return MfeMaeSmokeTest(self.config, self.db, self.logger).to_text()
+
     def build_markdown_report(
         self,
         dataset: list[dict[str, Any]] | None = None,
@@ -981,6 +991,8 @@ def main() -> None:
             "score-calibration",
             "shadow-experiments",
             "evolution-score",
+            "mfe-mae-diagnostic",
+            "mfe-mae-smoke-test",
         ],
     )
     parser.add_argument("--limit", type=int, default=None, help="Maximo de labels a procesar en phase2-persist.")
@@ -1068,6 +1080,10 @@ def main() -> None:
         print(lab.shadow_experiments(hours=args.hours))
     elif args.command == "evolution-score":
         print(lab.evolution_score(hours=args.hours))
+    elif args.command == "mfe-mae-diagnostic":
+        print(lab.mfe_mae_diagnostic(hours=args.hours))
+    elif args.command == "mfe-mae-smoke-test":
+        print(lab.mfe_mae_smoke_test())
 
 
 if __name__ == "__main__":

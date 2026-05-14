@@ -170,9 +170,13 @@ def test_edge_guard_and_tp_sl_endpoints_return_json():
         def get_signal_path_metrics_summary_since(self, *args, **kwargs):
             return {"total": 1, "active_count": 0, "matured_count": 1, "insufficient_count": 0, "coverage_pct": 1.0}
 
+        def get_signal_path_metrics_source_summary_since(self, *args, **kwargs):
+            return [{"source": "market_probe", "total": 1, "active_count": 0, "matured_count": 1, "insufficient_count": 0}]
+
         def fetch_signal_path_metrics_since(self, *args, **kwargs):
             return [{
                 "symbol": "ETHUSDT",
+                "source": "market_probe",
                 "market_regime": "TREND_DOWN",
                 "score_bucket": "80-89",
                 "max_favorable_pct": 1.0,
@@ -204,6 +208,7 @@ def test_edge_guard_and_tp_sl_endpoints_return_json():
         ("/api/training/score-calibration?hours=24", "SCORE CALIBRATION START"),
         ("/api/training/shadow-experiments?hours=24", "SHADOW EXPERIMENTS START"),
         ("/api/training/evolution-score?hours=24", "EVOLUTION SCORE START"),
+        ("/api/training/mfe-mae-diagnostic?hours=24", "MFE MAE DIAGNOSTIC START"),
     ):
         status, body = _get(base + path)
         assert status == 200

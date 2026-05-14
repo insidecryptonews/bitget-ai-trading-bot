@@ -211,6 +211,11 @@
         <pre id="exitSimulationText">Sin cargar todavía.</pre>
       </div>
       <div class="card full">
+        <h2>MFE/MAE Diagnostic</h2>
+        <div class="actions"><button id="mfeMaeDiagnosticBtn">Actualizar MFE/MAE Diagnostic 24h</button></div>
+        <pre id="mfeMaeDiagnosticText">Sin cargar todavía.</pre>
+      </div>
+      <div class="card full">
         <h2>Score Calibration</h2>
         <div class="actions"><button id="scoreCalibrationBtn">Actualizar score calibration 24h</button></div>
         <div id="scoreCalibrationV2"></div>
@@ -302,6 +307,7 @@
         metric("SL ratio", pct(slRatio), slRatio > tpRatio ? "bad" : "") +
         metric("TP ratio", pct(tpRatio), tpRatio < 0.05 ? "bad" : "good");
       const mfe = data.mfe_mae || {};
+      const bySourceText = (mfe.by_source || []).map((x) => `${x.source}=${x.count}`).join(" ") || "none";
       const noMfeText = Number(mfe.coverage_pct || 0) === 0
         ? metric("status", "Sin muestras MFE/MAE todavía: no hubo señales elegibles desde el deploy o todas fueron score bajo.", "warn")
         : "";
@@ -316,7 +322,9 @@
         metric("skipped no price", mfe.skipped_no_price || 0) +
         metric("skipped duplicate", mfe.skipped_duplicate || 0) +
         metric("skipped max active", mfe.skipped_max_active || 0) +
-        metric("by source", (mfe.by_source || []).map((x) => `${x.source}=${x.count}`).join(" ") || "none") +
+        metric("market probes created", mfe.market_probes_created || 0) +
+        metric("low score samples", mfe.low_score_samples_tracked || 0) +
+        metric("by source", bySourceText) +
         noMfeText;
       const s = data.signals || {};
       byId("signalMetrics").innerHTML =
@@ -471,6 +479,11 @@
       }
       catch (err) { byId("exitSimulationText").textContent = `Error: ${err.message}`; }
     }
+    async function loadMfeMaeDiagnostic() {
+      byId("mfeMaeDiagnosticText").textContent = "Cargando...";
+      try { byId("mfeMaeDiagnosticText").textContent = (await fetchJson("/api/training/mfe-mae-diagnostic?hours=24")).text || "Sin datos."; }
+      catch (err) { byId("mfeMaeDiagnosticText").textContent = `Error: ${err.message}`; }
+    }
     async function loadScoreCalibrationV2() {
       byId("scoreCalibrationText").textContent = "Cargando...";
       try {
@@ -514,6 +527,7 @@
     byId("edgeGuardBtn").addEventListener("click", loadEdgeGuard);
     byId("tpSlBtn").addEventListener("click", loadTpSl);
     byId("exitSimulationBtn").addEventListener("click", loadExitSimulation);
+    byId("mfeMaeDiagnosticBtn").addEventListener("click", loadMfeMaeDiagnostic);
     byId("scoreCalibrationBtn").addEventListener("click", loadScoreCalibrationV2);
     byId("shadowExperimentsBtn").addEventListener("click", loadShadowExperiments);
     byId("evolutionScoreBtn").addEventListener("click", loadEvolutionScore);
