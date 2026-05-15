@@ -84,6 +84,8 @@ def start_health_server(
                 "/api/training/fast-execution-readiness",
                 "/api/training/data-vault-status",
                 "/api/training/data-export",
+                "/api/training/data-upload-latest",
+                "/api/training/data-vault-prune",
                 "/api/training/migration-readiness",
             }:
                 if not _authorized(config, query, self.headers):
@@ -157,6 +159,12 @@ def start_health_server(
                 return
             if path == "/api/training/data-export":
                 self._send_json(_data_export(config, db, query))
+                return
+            if path == "/api/training/data-upload-latest":
+                self._send_json(_data_upload_latest(config, db, query))
+                return
+            if path == "/api/training/data-vault-prune":
+                self._send_json(_data_vault_prune(config, db, query))
                 return
             if path == "/api/training/migration-readiness":
                 self._send_json(_migration_readiness(config, db, query))
@@ -442,18 +450,48 @@ def _data_export(config: Any | None, db: Any | None, query: dict[str, list[str]]
     try:
         from .data_vault import DataVault
 
-        payload = DataVault(config, db).export(hours=hours, upload=False)
-        text = "\n".join([
-            "DATA EXPORT START",
-            f"hours: {payload.get('hours')}",
-            f"file: {payload.get('file')}",
-            f"manifest_valid: {str(payload.get('manifest_valid')).lower()}",
-            f"checksums_created: {str(payload.get('checksums_created')).lower()}",
-            f"secrets_excluded: {str(payload.get('secrets_excluded')).lower()}",
-            "DATA EXPORT END",
-        ])
+        vault = DataVault(config, db)
+        payload = vault.export(hours=hours, upload=True)
+        text = _data_export_text(payload, config)
     except Exception as exc:
         return {"error": str(exc)[:300], "hours": hours, "final_recommendation": "NO LIVE"}
+    payload = dict(payload)
+    payload["text"] = text
+    payload["generated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    payload["final_recommendation"] = "NO LIVE"
+    return payload
+
+
+def _data_upload_latest(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
+    if config is None or db is None:
+        return {"error": "data upload unavailable", "final_recommendation": "NO LIVE"}
+    try:
+        from .data_vault import DataVault
+
+        vault = DataVault(config, db)
+        payload = vault.upload_latest()
+        text = _data_upload_latest_text(payload)
+    except Exception as exc:
+        return {"error": str(exc)[:300], "final_recommendation": "NO LIVE"}
+    payload = dict(payload)
+    payload["text"] = text
+    payload["generated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    payload["final_recommendation"] = "NO LIVE"
+    return payload
+
+
+def _data_vault_prune(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
+    if config is None or db is None:
+        return {"error": "data vault prune unavailable", "final_recommendation": "NO LIVE"}
+    apply = str((query.get("apply") or ["false"])[0]).lower() in {"1", "true", "yes"}
+    try:
+        from .data_vault import DataVault
+
+        vault = DataVault(config, db)
+        payload = vault.prune_local_backups(apply=apply)
+        text = _data_vault_prune_text(payload)
+    except Exception as exc:
+        return {"error": str(exc)[:300], "final_recommendation": "NO LIVE"}
     payload = dict(payload)
     payload["text"] = text
     payload["generated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
@@ -476,6 +514,70 @@ def _migration_readiness(config: Any | None, db: Any | None, query: dict[str, li
     payload["generated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     payload["final_recommendation"] = "NO LIVE"
     return payload
+
+
+def _data_export_text(payload: dict[str, Any], config: Any | None) -> str:
+    external = payload.get("external_upload", {}) or {}
+    provider = getattr(config, "data_vault_external_provider", "s3_compatible")
+    return "\n".join([
+        "DATA EXPORT START",
+        f"hours: {payload.get('hours')}",
+        f"file: {payload.get('file')}",
+        f"manifest_valid: {str(payload.get('manifest_valid')).lower()}",
+        f"checksums_created: {str(payload.get('checksums_created')).lower()}",
+        f"secrets_excluded: {str(payload.get('secrets_excluded')).lower()}",
+        f"streaming_export: {str(payload.get('streaming_export', True)).lower()}",
+        f"memory_safe_export: {str(payload.get('memory_safe_export', True)).lower()}",
+        "external_upload:",
+        f"- enabled: {str(external.get('enabled', False)).lower()}",
+        f"- provider: {external.get('provider', provider)}",
+        f"- configured: {str(external.get('configured', False)).lower()}",
+        f"- attempted: {str(external.get('attempted', False)).lower()}",
+        f"- uploaded: {str(external.get('uploaded', False)).lower()}",
+        f"- remote_key: {external.get('remote_key', '')}",
+        f"- remote_size_bytes: {external.get('remote_size_bytes', 0)}",
+        f"- local_size_bytes: {external.get('local_size_bytes', payload.get('local_size_bytes', 0))}",
+        f"- checksum_sha256: {external.get('checksum_sha256', payload.get('checksum_sha256', ''))}",
+        f"- verified: {str(external.get('verified', False)).lower()}",
+        f"- sanitized_error: {external.get('sanitized_error', 'none') or 'none'}",
+        "final_recommendation: NO LIVE",
+        "DATA EXPORT END",
+    ])
+
+
+def _data_upload_latest_text(payload: dict[str, Any]) -> str:
+    return "\n".join([
+        "DATA UPLOAD LATEST START",
+        f"latest_local_backup: {payload.get('latest_local_backup') or 'none'}",
+        f"manifest_valid: {str(payload.get('manifest_valid')).lower()}",
+        f"checksum_valid: {str(payload.get('checksum_valid')).lower()}",
+        f"external_enabled: {str(payload.get('external_enabled')).lower()}",
+        f"external_configured: {str(payload.get('external_configured')).lower()}",
+        f"uploaded: {str(payload.get('uploaded')).lower()}",
+        f"remote_key: {payload.get('remote_key', '')}",
+        f"verified: {str(payload.get('verified')).lower()}",
+        f"sanitized_error: {payload.get('sanitized_error') or 'none'}",
+        "DATA UPLOAD LATEST END",
+    ])
+
+
+def _data_vault_prune_text(payload: dict[str, Any]) -> str:
+    deleted = payload.get("deleted") or []
+    kept = payload.get("kept") or []
+    deleted_lines = [f"- {item}" for item in deleted[:20]] if deleted else ["- none"]
+    kept_lines = [f"- {item}" for item in kept[:20]] if kept else ["- none"]
+    return "\n".join([
+        "DATA VAULT PRUNE START",
+        f"mode: {payload.get('mode')}",
+        f"local_before: {payload.get('local_before')}",
+        f"local_after: {payload.get('local_after')}",
+        "deleted:",
+        *deleted_lines,
+        "kept:",
+        *kept_lines,
+        f"never_deleted_latest_valid: {str(payload.get('never_deleted_latest_valid')).lower()}",
+        "DATA VAULT PRUNE END",
+    ])
 
 
 def _lab_payload(

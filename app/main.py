@@ -217,6 +217,14 @@ def main() -> None:
     last_mfe_mae_debug_at = startup_monotonic
     last_data_vault_backup_at = startup_monotonic
     data_vault_backup_running = {"running": False}
+    last_data_vault_backup_at = _data_vault_startup_backup_if_needed(
+        config,
+        db,
+        logger,
+        last_data_vault_backup_at,
+        startup_monotonic,
+        data_vault_backup_running,
+    )
     while not STOP_REQUESTED:
         try:
             cycle_count += 1
@@ -1143,8 +1151,18 @@ def _data_vault_backup_if_due(
         state["running"] = True
         try:
             vault = DataVault(config, db, logger)
-            result = vault.export(hours=config.data_vault_backup_lookback_hours, upload=False)
-            logger.info("Data vault backup creado: %s", result.get("file"))
+            logger.info("DATA VAULT BACKUP START")
+            result = vault.export(hours=config.data_vault_backup_lookback_hours, upload=True)
+            external = result.get("external_upload", {}) or {}
+            logger.info(
+                "DATA VAULT BACKUP END uploaded=%s verified=%s size_mb=%.2f file=%s",
+                str(bool(external.get("uploaded"))).lower(),
+                str(bool(external.get("verified"))).lower(),
+                float(result.get("local_size_bytes") or 0.0) / (1024.0 * 1024.0),
+                result.get("file"),
+            )
+            if external.get("attempted") and not external.get("uploaded"):
+                logger.warning("DATA VAULT BACKUP WARNING sanitized_error=%s", external.get("sanitized_error", "unknown"))
         except Exception as exc:
             logger.warning("Data vault backup fallo sin detener worker: %s", exc)
         finally:
@@ -1152,6 +1170,31 @@ def _data_vault_backup_if_due(
 
     Thread(target=run_backup, name="data-vault-backup", daemon=True).start()
     return now
+
+
+def _data_vault_startup_backup_if_needed(
+    config,
+    db: Database,
+    logger,
+    last_backup_at: float,
+    now: float,
+    state: dict[str, bool],
+) -> float:
+    if not getattr(config, "enable_data_vault_backup", False):
+        return last_backup_at
+    if not getattr(config, "data_vault_auto_backup_on_start", True):
+        return last_backup_at
+    try:
+        status = DataVault(config, db, logger).status()
+        age = status.get("latest_backup_age_hours")
+        min_age = max(0, int(getattr(config, "data_vault_auto_backup_on_start_min_age_hours", 12) or 12))
+        if age is not None and float(age) < min_age:
+            return last_backup_at
+        logger.info("DATA VAULT BACKUP START startup=true")
+        return _data_vault_backup_if_due(config, db, logger, 0.0, now, state)
+    except Exception as exc:
+        logger.warning("Data vault startup backup check fallo sin detener worker: %s", exc)
+        return last_backup_at
 
 
 def _emit_mfe_mae_debug_if_due(

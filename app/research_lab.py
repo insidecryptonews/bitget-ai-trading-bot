@@ -593,6 +593,21 @@ class ResearchLab:
 
         return DataVault(self.config, self.db, self.logger).migration_readiness_text()
 
+    def data_upload_latest(self) -> str:
+        from .data_vault import DataVault
+
+        return DataVault(self.config, self.db, self.logger).upload_latest_text()
+
+    def data_vault_prune(self, apply: bool = False) -> str:
+        from .data_vault import DataVault
+
+        return DataVault(self.config, self.db, self.logger).prune_text(apply=apply)
+
+    def data_vault_smoke_test(self) -> str:
+        from .data_vault_smoke_test import DataVaultSmokeTest
+
+        return DataVaultSmokeTest(self.config, self.db, self.logger).to_text()
+
     def exit_latency_vault_smoke_test(self) -> str:
         from .exit_latency_vault_smoke_test import ExitLatencyVaultSmokeTest
 
@@ -1131,6 +1146,9 @@ def main() -> None:
             "data-vault-status",
             "data-export",
             "data-import",
+            "data-upload-latest",
+            "data-vault-prune",
+            "data-vault-smoke-test",
             "migration-readiness",
             "exit-latency-vault-smoke-test",
         ],
@@ -1281,6 +1299,12 @@ def main() -> None:
         if not args.file:
             raise SystemExit("--file es obligatorio para data-import")
         print(lab.data_import(file=args.file, apply=args.apply and not args.dry_run))
+    elif args.command == "data-upload-latest":
+        print(lab.data_upload_latest())
+    elif args.command == "data-vault-prune":
+        print(lab.data_vault_prune(apply=args.apply and not args.dry_run))
+    elif args.command == "data-vault-smoke-test":
+        print(lab.data_vault_smoke_test())
     elif args.command == "migration-readiness":
         print(lab.migration_readiness())
     elif args.command == "exit-latency-vault-smoke-test":

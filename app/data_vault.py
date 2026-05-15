@@ -3,9 +3,10 @@ from __future__ import annotations
 import gzip
 import hashlib
 import json
-import os
 import re
 import shutil
+import threading
+import time
 import zipfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -47,6 +48,8 @@ EXPORT_TABLES: dict[str, str | None] = {
 }
 
 SENSITIVE_KEY_RE = re.compile(r"(?i)(api[_-]?key|secret|token|password|passphrase|private[_-]?key|dashboard[_-]?auth)")
+EXPORT_CHUNK_SIZE = 5000
+_BACKUP_LOCK = threading.Lock()
 
 
 class DataVault:
@@ -59,14 +62,31 @@ class DataVault:
     def status(self) -> dict[str, Any]:
         backups = self.list_backups()
         latest = backups[-1] if backups else None
+        latest_size = latest.stat().st_size if latest and latest.exists() else 0
+        external = DataVaultExternalStorage(self.config, self.logger)
+        remote = external.list_backups() if self.config.data_vault_external_enabled else _empty_remote_status()
+        state = self._read_state()
         return {
             "export_dir": str(self.export_dir),
+            "local_backup_count": len(backups),
             "backup_count": len(backups),
+            "latest_local_backup": str(latest) if latest else "",
             "latest_backup": str(latest) if latest else "",
+            "latest_local_backup_size_mb": latest_size / (1024 * 1024) if latest_size else 0.0,
             "latest_backup_age_hours": _age_hours(latest) if latest else None,
             "external_enabled": bool(self.config.data_vault_external_enabled),
             "external_provider": self.config.data_vault_external_provider,
             "external_configured": _external_configured(self.config),
+            "remote_list_ok": bool(remote.get("remote_list_ok", False)),
+            "remote_backup_count": int(remote.get("remote_backup_count", 0) or 0),
+            "latest_remote_backup": remote.get("latest_remote_backup", ""),
+            "last_upload_status": state.get("last_upload_status") or remote.get("last_upload_status") or "none",
+            "last_upload_remote_key": state.get("last_upload_remote_key") or remote.get("latest_remote_backup") or "",
+            "last_upload_verified": bool(state.get("last_upload_verified", False)),
+            "last_upload_error": state.get("last_upload_error") or remote.get("sanitized_error") or "none",
+            "streaming_export": True,
+            "memory_safe_export": True,
+            "backup_in_progress": _BACKUP_LOCK.locked(),
             "secrets_excluded": True,
             "final_recommendation": "NO LIVE",
         }
@@ -76,18 +96,44 @@ class DataVault:
         return "\n".join([
             STATUS_START,
             f"export_dir: {payload['export_dir']}",
-            f"backup_count: {payload['backup_count']}",
-            f"latest_backup: {payload['latest_backup'] or 'none'}",
+            f"local_backup_count: {payload['local_backup_count']}",
+            f"latest_local_backup: {payload['latest_local_backup'] or 'none'}",
+            f"latest_local_backup_size_mb: {payload['latest_local_backup_size_mb']:.2f}",
             f"external_enabled: {str(payload['external_enabled']).lower()}",
             f"external_provider: {payload['external_provider']}",
             f"external_configured: {str(payload['external_configured']).lower()}",
+            f"remote_list_ok: {str(payload['remote_list_ok']).lower()}",
+            f"remote_backup_count: {payload['remote_backup_count']}",
+            f"latest_remote_backup: {payload['latest_remote_backup'] or 'none'}",
+            f"last_upload_status: {payload['last_upload_status']}",
+            f"last_upload_verified: {str(payload['last_upload_verified']).lower()}",
+            f"last_upload_error: {payload['last_upload_error']}",
+            f"streaming_export: {str(payload['streaming_export']).lower()}",
+            f"memory_safe_export: {str(payload['memory_safe_export']).lower()}",
+            f"backup_in_progress: {str(payload['backup_in_progress']).lower()}",
             "secrets_excluded: true",
             "final_recommendation: NO LIVE",
             STATUS_END,
         ])
 
     def export(self, *, hours: int = 168, upload: bool = False) -> dict[str, Any]:
+        if not _BACKUP_LOCK.acquire(blocking=False):
+            return {
+                "hours": hours,
+                "file": "",
+                "manifest_valid": False,
+                "tables": [],
+                "checksums_created": False,
+                "secrets_excluded": True,
+                "backup_in_progress": True,
+                "streaming_export": True,
+                "memory_safe_export": True,
+                "external_upload": {"enabled": bool(self.config.data_vault_external_enabled), "attempted": False, "uploaded": False, "sanitized_error": "backup_in_progress"},
+                "final_recommendation": "NO LIVE",
+            }
         hours = max(1, int(hours or 168))
+        started = time.time()
+        export_started_at = datetime.now(timezone.utc).isoformat()
         since = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
         export_id = datetime.now(timezone.utc).strftime("training_vault_%Y%m%d_%H%M%S")
         self.export_dir.mkdir(parents=True, exist_ok=True)
@@ -101,23 +147,28 @@ class DataVault:
                 if not self.db.table_exists(table):
                     tables_summary.append({"table": table, "rows": 0, "exported": False, "reason": "missing"})
                     continue
-                rows = self.db.fetch_table_rows(table, since_iso=since, timestamp_column=ts_col, limit=200000)
-                clean_rows = [_sanitize_row(row) for row in rows]
                 path = tables_dir / f"{table}.jsonl.gz"
-                _write_jsonl_gz(path, clean_rows)
+                row_count = _write_table_jsonl_gz_streaming(self.db, table, path, since_iso=since, timestamp_column=ts_col)
                 checksum = _sha256_file(path)
                 rel = f"tables/{path.name}"
-                files.append({"path": rel, "sha256": checksum, "bytes": path.stat().st_size, "rows": len(clean_rows), "table": table})
-                tables_summary.append({"table": table, "rows": len(clean_rows), "exported": True, "file": rel})
+                files.append({"path": rel, "sha256": checksum, "bytes": path.stat().st_size, "rows": row_count, "table": table})
+                tables_summary.append({"table": table, "rows": row_count, "exported": True, "file": rel})
+            export_finished_at = datetime.now(timezone.utc).isoformat()
             manifest = {
                 "export_id": export_id,
                 "created_at": datetime.now(timezone.utc).isoformat(),
+                "export_started_at": export_started_at,
+                "export_finished_at": export_finished_at,
+                "duration_seconds": round(time.time() - started, 3),
                 "git_commit": _git_commit(),
                 "schema_version": "training_vault_v1",
                 "hours": hours,
+                "memory_safe": True,
+                "streaming_export": True,
                 "tables": tables_summary,
                 "files": files,
                 "excluded_sensitive_fields": ["api_key", "secret", "token", "password", "passphrase", "private_key", "dashboard_auth_token"],
+                "secrets_excluded": True,
                 "LIVE_TRADING": bool(self.config.live_trading),
                 "DRY_RUN": bool(self.config.dry_run),
                 "PAPER_TRADING": bool(self.config.paper_trading),
@@ -128,19 +179,42 @@ class DataVault:
             backup_path = self.export_dir / f"{export_id}.zip"
             _zip_dir(work_dir, backup_path)
             manifest["total_compressed_size"] = backup_path.stat().st_size
+            manifest["backup_sha256"] = _sha256_file(backup_path)
             # Refresh manifest inside zip with final size.
             _write_json(work_dir / "manifest.json", manifest)
             _zip_dir(work_dir, backup_path)
+            manifest["total_compressed_size"] = backup_path.stat().st_size
+            manifest["backup_sha256"] = _sha256_file(backup_path)
         finally:
             shutil.rmtree(work_dir, ignore_errors=True)
-        self.prune_local_backups()
-        external = DataVaultExternalStorage(self.config, self.logger).upload(backup_path, manifest) if upload else {"enabled": False, "uploaded": False}
+            _BACKUP_LOCK.release()
+        local_size = backup_path.stat().st_size
+        max_bytes = max(1, int(self.config.data_vault_max_backup_mb or 1500)) * 1024 * 1024
+        warn_bytes = max(1, int(self.config.data_vault_warn_backup_mb or 500)) * 1024 * 1024
+        size_warning = "too_large" if local_size > max_bytes else "warn_large" if local_size > warn_bytes else "none"
+        external = DataVaultExternalStorage(self.config, self.logger).upload(backup_path, manifest) if upload else _upload_skipped(self.config)
+        if external.get("uploaded"):
+            self.prune_local_backups(apply=True)
+        self._write_state({
+            "last_export_file": str(backup_path),
+            "last_upload_status": "uploaded" if external.get("uploaded") else "failed" if external.get("attempted") else "none",
+            "last_upload_remote_key": external.get("remote_key", ""),
+            "last_upload_verified": bool(external.get("verified", False)),
+            "last_upload_error": external.get("sanitized_error") or external.get("error") or "none",
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        })
         return {
             "hours": hours,
             "file": str(backup_path),
             "manifest_valid": True,
             "tables": tables_summary,
             "checksums_created": True,
+            "checksum_sha256": manifest.get("backup_sha256", ""),
+            "local_size_bytes": local_size,
+            "size_warning": size_warning,
+            "streaming_export": True,
+            "memory_safe_export": True,
+            "backup_in_progress": False,
             "secrets_excluded": True,
             "external_upload": external,
             "final_recommendation": "NO LIVE",
@@ -148,6 +222,7 @@ class DataVault:
 
     def export_text(self, *, hours: int = 168, upload: bool = False) -> str:
         payload = self.export(hours=hours, upload=upload)
+        external = payload["external_upload"]
         return "\n".join([
             EXPORT_START,
             f"hours: {payload['hours']}",
@@ -157,10 +232,20 @@ class DataVault:
             *[f"- {row['table']} rows={row.get('rows', 0)} exported={str(row.get('exported', False)).lower()}" for row in payload["tables"]],
             f"checksums_created: {str(payload['checksums_created']).lower()}",
             f"secrets_excluded: {str(payload['secrets_excluded']).lower()}",
+            f"streaming_export: {str(payload.get('streaming_export', True)).lower()}",
+            f"memory_safe_export: {str(payload.get('memory_safe_export', True)).lower()}",
             "external_upload:",
-            f"- enabled={str(payload['external_upload'].get('enabled', False)).lower()}",
-            f"- uploaded={str(payload['external_upload'].get('uploaded', False)).lower()}",
-            f"- remote_key={payload['external_upload'].get('remote_key', '')}",
+            f"- enabled: {str(external.get('enabled', False)).lower()}",
+            f"- provider: {external.get('provider', self.config.data_vault_external_provider)}",
+            f"- configured: {str(external.get('configured', _external_configured(self.config))).lower()}",
+            f"- attempted: {str(external.get('attempted', False)).lower()}",
+            f"- uploaded: {str(external.get('uploaded', False)).lower()}",
+            f"- remote_key: {external.get('remote_key', '')}",
+            f"- remote_size_bytes: {external.get('remote_size_bytes', 0)}",
+            f"- local_size_bytes: {external.get('local_size_bytes', payload.get('local_size_bytes', 0))}",
+            f"- checksum_sha256: {external.get('checksum_sha256', payload.get('checksum_sha256', ''))}",
+            f"- verified: {str(external.get('verified', False)).lower()}",
+            f"- sanitized_error: {external.get('sanitized_error', external.get('error', 'none')) or 'none'}",
             "final_recommendation: NO LIVE",
             EXPORT_END,
         ])
@@ -214,6 +299,74 @@ class DataVault:
             IMPORT_END,
         ])
 
+    def upload_latest(self) -> dict[str, Any]:
+        latest = self.latest_valid_backup()
+        if latest is None:
+            return {
+                "latest_local_backup": "",
+                "manifest_valid": False,
+                "checksum_valid": False,
+                "external_enabled": bool(self.config.data_vault_external_enabled),
+                "external_configured": _external_configured(self.config),
+                "uploaded": False,
+                "verified": False,
+                "remote_key": "",
+                "sanitized_error": "no_local_backup",
+            }
+        try:
+            manifest, _ = self.validate_backup(latest)
+            manifest_valid = checksum_valid = True
+        except Exception as exc:
+            return {
+                "latest_local_backup": str(latest),
+                "manifest_valid": False,
+                "checksum_valid": False,
+                "external_enabled": bool(self.config.data_vault_external_enabled),
+                "external_configured": _external_configured(self.config),
+                "uploaded": False,
+                "verified": False,
+                "remote_key": "",
+                "sanitized_error": _sanitize_text(str(exc))[:300],
+            }
+        result = DataVaultExternalStorage(self.config, self.logger).upload(latest, manifest)
+        self._write_state({
+            "last_export_file": str(latest),
+            "last_upload_status": "uploaded" if result.get("uploaded") else "failed" if result.get("attempted") else "none",
+            "last_upload_remote_key": result.get("remote_key", ""),
+            "last_upload_verified": bool(result.get("verified", False)),
+            "last_upload_error": result.get("sanitized_error") or result.get("error") or "none",
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        })
+        return {
+            "latest_local_backup": str(latest),
+            "manifest_valid": manifest_valid,
+            "checksum_valid": checksum_valid,
+            "external_enabled": bool(result.get("enabled", False)),
+            "external_configured": bool(result.get("configured", False)),
+            "uploaded": bool(result.get("uploaded", False)),
+            "remote_key": result.get("remote_key", ""),
+            "verified": bool(result.get("verified", False)),
+            "remote_size_bytes": result.get("remote_size_bytes", 0),
+            "local_size_bytes": result.get("local_size_bytes", latest.stat().st_size),
+            "sanitized_error": result.get("sanitized_error") or result.get("error") or "none",
+        }
+
+    def upload_latest_text(self) -> str:
+        payload = self.upload_latest()
+        return "\n".join([
+            "DATA UPLOAD LATEST START",
+            f"latest_local_backup: {payload['latest_local_backup'] or 'none'}",
+            f"manifest_valid: {str(payload['manifest_valid']).lower()}",
+            f"checksum_valid: {str(payload['checksum_valid']).lower()}",
+            f"external_enabled: {str(payload['external_enabled']).lower()}",
+            f"external_configured: {str(payload['external_configured']).lower()}",
+            f"uploaded: {str(payload['uploaded']).lower()}",
+            f"remote_key: {payload['remote_key']}",
+            f"verified: {str(payload['verified']).lower()}",
+            f"sanitized_error: {payload['sanitized_error']}",
+            "DATA UPLOAD LATEST END",
+        ])
+
     def validate_backup(self, path: Path) -> tuple[dict[str, Any], list[str]]:
         if not path.exists():
             raise FileNotFoundError(str(path))
@@ -230,10 +383,20 @@ class DataVault:
                     raise ValueError(f"Checksum mismatch: {rel}")
         return manifest, names
 
+    def latest_valid_backup(self) -> Path | None:
+        for path in reversed(self.list_backups()):
+            try:
+                self.validate_backup(path)
+                return path
+            except Exception:
+                continue
+        return None
+
     def migration_readiness(self) -> dict[str, Any]:
         backups = self.list_backups()
         latest = backups[-1] if backups else None
         manifest_valid = checksum_valid = import_dry_run_ok = False
+        remote = DataVaultExternalStorage(self.config, self.logger).list_backups() if self.config.data_vault_external_enabled else _empty_remote_status()
         if latest:
             try:
                 self.validate_backup(latest)
@@ -243,14 +406,21 @@ class DataVault:
             except Exception as exc:
                 if self.logger:
                     self.logger.warning("Data vault readiness fallo: %s", _sanitize_text(str(exc)))
-        ready = bool(latest and manifest_valid and checksum_valid and import_dry_run_ok)
+        remote_verified = bool(remote.get("remote_list_ok") and safe_int(remote.get("remote_backup_count")) > 0)
+        ready = bool((latest or remote_verified) and manifest_valid and checksum_valid and import_dry_run_ok)
+        source = "both" if latest and remote_verified else "local" if latest else "remote" if remote_verified else "none"
         return {
             "backup_exists": bool(latest),
+            "latest_backup_source": source,
             "latest_backup": str(latest) if latest else "",
+            "latest_local_backup": str(latest) if latest else "",
+            "latest_remote_backup": remote.get("latest_remote_backup", ""),
             "manifest_valid": manifest_valid,
             "checksum_valid": checksum_valid,
             "import_dry_run_ok": import_dry_run_ok,
             "external_backup_configured": _external_configured(self.config),
+            "remote_backup_count": safe_int(remote.get("remote_backup_count")),
+            "remote_verified": remote_verified,
             "secrets_excluded": True,
             "ready_for_vps_migration": ready,
             "final_recommendation": "NO LIVE",
@@ -261,11 +431,15 @@ class DataVault:
         return "\n".join([
             MIGRATION_START,
             f"backup_exists: {str(payload['backup_exists']).lower()}",
-            f"latest_backup: {payload['latest_backup'] or 'none'}",
+            f"latest_backup_source: {payload['latest_backup_source']}",
+            f"latest_local_backup: {payload['latest_local_backup'] or 'none'}",
+            f"latest_remote_backup: {payload['latest_remote_backup'] or 'none'}",
             f"manifest_valid: {str(payload['manifest_valid']).lower()}",
             f"checksum_valid: {str(payload['checksum_valid']).lower()}",
             f"import_dry_run_ok: {str(payload['import_dry_run_ok']).lower()}",
             f"external_backup_configured: {str(payload['external_backup_configured']).lower()}",
+            f"remote_backup_count: {payload['remote_backup_count']}",
+            f"remote_verified: {str(payload['remote_verified']).lower()}",
             "secrets_excluded: true",
             f"ready_for_vps_migration: {str(payload['ready_for_vps_migration']).lower()}",
             "next_steps:",
@@ -285,14 +459,64 @@ class DataVault:
             return []
         return sorted(self.export_dir.glob("training_vault_*.zip"), key=lambda path: path.stat().st_mtime)
 
-    def prune_local_backups(self) -> None:
+    def prune_local_backups(self, *, apply: bool = True) -> dict[str, Any]:
         backups = self.list_backups()
-        keep = max(1, int(self.config.data_vault_max_backups_local or 10))
-        for path in backups[:-keep]:
-            try:
-                path.unlink()
-            except OSError:
-                pass
+        keep = max(1, int(self.config.data_vault_max_backups_local or 2))
+        valid_latest = self.latest_valid_backup()
+        keep_set = set(backups[-keep:])
+        if valid_latest:
+            keep_set.add(valid_latest)
+        delete = [path for path in backups if path not in keep_set]
+        deleted: list[str] = []
+        if apply and not _BACKUP_LOCK.locked():
+            for path in delete:
+                try:
+                    path.unlink()
+                    deleted.append(str(path))
+                except OSError:
+                    pass
+        kept = [str(path) for path in self.list_backups()] if apply else [str(path) for path in backups if path not in delete]
+        return {
+            "mode": "apply" if apply else "dry-run",
+            "local_before": len(backups),
+            "local_after": len(kept),
+            "deleted": deleted if apply else [str(path) for path in delete],
+            "kept": kept,
+            "never_deleted_latest_valid": bool(valid_latest is None or str(valid_latest) in kept),
+        }
+
+    def prune_text(self, *, apply: bool = False) -> str:
+        payload = self.prune_local_backups(apply=apply)
+        deleted_lines = [f"- {item}" for item in payload["deleted"][:20]] if payload["deleted"] else ["- none"]
+        kept_lines = [f"- {item}" for item in payload["kept"][:20]] if payload["kept"] else ["- none"]
+        return "\n".join([
+            "DATA VAULT PRUNE START",
+            f"mode: {payload['mode']}",
+            f"local_before: {payload['local_before']}",
+            f"local_after: {payload['local_after']}",
+            "deleted:",
+            *deleted_lines,
+            "kept:",
+            *kept_lines,
+            f"never_deleted_latest_valid: {str(payload['never_deleted_latest_valid']).lower()}",
+            "DATA VAULT PRUNE END",
+        ])
+
+    def _state_path(self) -> Path:
+        return self.export_dir / "data_vault_state.json"
+
+    def _read_state(self) -> dict[str, Any]:
+        try:
+            return json.loads(self._state_path().read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+
+    def _write_state(self, payload: dict[str, Any]) -> None:
+        try:
+            self.export_dir.mkdir(parents=True, exist_ok=True)
+            self._state_path().write_text(json.dumps(_sanitize_value(payload), indent=2, ensure_ascii=True), encoding="utf-8")
+        except OSError:
+            pass
 
 
 class DataVaultExternalStorage:
@@ -301,30 +525,93 @@ class DataVaultExternalStorage:
         self.logger = logger
 
     def upload(self, path: Path, manifest: dict[str, Any]) -> dict[str, Any]:
+        local_size = path.stat().st_size if path.exists() else 0
+        checksum = _sha256_file(path) if path.exists() else ""
         if not self.config.data_vault_external_enabled:
-            return {"enabled": False, "uploaded": False}
+            return {"enabled": False, "provider": self.config.data_vault_external_provider, "configured": False, "attempted": False, "uploaded": False, "verified": False, "local_size_bytes": local_size, "checksum_sha256": checksum, "sanitized_error": "none"}
         provider = self.config.data_vault_external_provider or "s3_compatible"
         if provider != "s3_compatible":
-            return {"enabled": True, "provider": provider, "uploaded": False, "error": "provider_not_implemented"}
+            return {"enabled": True, "provider": provider, "configured": False, "attempted": False, "uploaded": False, "verified": False, "local_size_bytes": local_size, "checksum_sha256": checksum, "sanitized_error": "provider_not_implemented"}
         if not _external_configured(self.config):
-            return {"enabled": True, "provider": provider, "uploaded": False, "error": "missing_s3_configuration"}
+            return {"enabled": True, "provider": provider, "configured": False, "attempted": False, "uploaded": False, "verified": False, "local_size_bytes": local_size, "checksum_sha256": checksum, "sanitized_error": "missing_s3_configuration"}
         try:
             import boto3  # type: ignore
         except Exception:
-            return {"enabled": True, "provider": provider, "uploaded": False, "error": "boto3_unavailable_external_upload_skipped"}
+            return {"enabled": True, "provider": provider, "configured": True, "attempted": False, "uploaded": False, "verified": False, "local_size_bytes": local_size, "checksum_sha256": checksum, "sanitized_error": "boto3_unavailable_external_upload_skipped"}
         remote_key = f"{self.config.data_vault_external_prefix.strip('/')}/{path.name}"
         try:
-            client = boto3.client(
-                "s3",
-                endpoint_url=self.config.data_vault_s3_endpoint_url or None,
-                region_name=None if self.config.data_vault_s3_region == "auto" else self.config.data_vault_s3_region,
-                aws_access_key_id=self.config.data_vault_s3_access_key_id,
-                aws_secret_access_key=self.config.data_vault_s3_secret_access_key,
-            )
+            client = self._client(boto3)
             client.upload_file(str(path), self.config.data_vault_external_bucket, remote_key)
-            return {"enabled": True, "provider": provider, "uploaded": True, "remote_key": remote_key}
+            remote_size = 0
+            verified = False
+            try:
+                head = client.head_object(Bucket=self.config.data_vault_external_bucket, Key=remote_key)
+                remote_size = int(head.get("ContentLength") or 0)
+                verified = remote_size == local_size
+            except Exception:
+                verified = False
+            return {
+                "enabled": True,
+                "provider": provider,
+                "configured": True,
+                "attempted": True,
+                "uploaded": True,
+                "remote_key": remote_key,
+                "remote_size_bytes": remote_size,
+                "local_size_bytes": local_size,
+                "checksum_sha256": checksum,
+                "verified": verified,
+                "sanitized_error": "none" if verified else "head_object_failed_or_size_mismatch",
+            }
         except Exception as exc:
-            return {"enabled": True, "provider": provider, "uploaded": False, "remote_key": remote_key, "error": _sanitize_text(str(exc))[:300]}
+            return {
+                "enabled": True,
+                "provider": provider,
+                "configured": True,
+                "attempted": True,
+                "uploaded": False,
+                "remote_key": remote_key,
+                "remote_size_bytes": 0,
+                "local_size_bytes": local_size,
+                "checksum_sha256": checksum,
+                "verified": False,
+                "sanitized_error": _sanitize_text(str(exc))[:300],
+            }
+
+    def list_backups(self) -> dict[str, Any]:
+        if not self.config.data_vault_external_enabled:
+            return _empty_remote_status()
+        if not _external_configured(self.config):
+            return {**_empty_remote_status(), "remote_list_ok": False, "sanitized_error": "missing_s3_configuration"}
+        try:
+            import boto3  # type: ignore
+        except Exception:
+            return {**_empty_remote_status(), "remote_list_ok": False, "sanitized_error": "boto3_unavailable"}
+        try:
+            client = self._client(boto3)
+            prefix = self.config.data_vault_external_prefix.strip("/") + "/"
+            response = client.list_objects_v2(Bucket=self.config.data_vault_external_bucket, Prefix=prefix, MaxKeys=1000)
+            objects = [item for item in response.get("Contents", []) if str(item.get("Key", "")).endswith(".zip")]
+            objects.sort(key=lambda item: str(item.get("LastModified", "")))
+            latest = objects[-1] if objects else {}
+            return {
+                "remote_list_ok": True,
+                "remote_backup_count": len(objects),
+                "latest_remote_backup": latest.get("Key", ""),
+                "last_upload_status": "uploaded" if objects else "none",
+                "sanitized_error": "none",
+            }
+        except Exception as exc:
+            return {**_empty_remote_status(), "remote_list_ok": False, "sanitized_error": _sanitize_text(str(exc))[:300]}
+
+    def _client(self, boto3_module: Any) -> Any:
+        return boto3_module.client(
+            "s3",
+            endpoint_url=self.config.data_vault_s3_endpoint_url or None,
+            region_name=self.config.data_vault_s3_region or "auto",
+            aws_access_key_id=self.config.data_vault_s3_access_key_id,
+            aws_secret_access_key=self.config.data_vault_s3_secret_access_key,
+        )
 
 
 def _write_jsonl_gz(path: Path, rows: list[dict[str, Any]]) -> None:
@@ -332,6 +619,30 @@ def _write_jsonl_gz(path: Path, rows: list[dict[str, Any]]) -> None:
         for row in rows:
             handle.write(json.dumps(row, ensure_ascii=True, default=str))
             handle.write("\n")
+
+
+def _write_table_jsonl_gz_streaming(db: Database, table: str, path: Path, *, since_iso: str, timestamp_column: str | None) -> int:
+    count = 0
+    offset = 0
+    with gzip.open(path, "wt", encoding="utf-8") as handle:
+        while True:
+            rows = db.fetch_table_rows_chunk(
+                table,
+                since_iso=since_iso,
+                timestamp_column=timestamp_column,
+                limit=EXPORT_CHUNK_SIZE,
+                offset=offset,
+            )
+            if not rows:
+                break
+            for row in rows:
+                handle.write(json.dumps(_sanitize_row(row), ensure_ascii=True, default=str))
+                handle.write("\n")
+                count += 1
+            if len(rows) < EXPORT_CHUNK_SIZE:
+                break
+            offset += EXPORT_CHUNK_SIZE
+    return count
 
 
 def _read_jsonl_gz_from_zip(zip_path: Path, rel: str) -> list[dict[str, Any]]:
@@ -415,6 +726,32 @@ def _external_configured(config: BotConfig) -> bool:
         and config.data_vault_s3_access_key_id
         and config.data_vault_s3_secret_access_key
     )
+
+
+def _upload_skipped(config: BotConfig) -> dict[str, Any]:
+    return {
+        "enabled": bool(config.data_vault_external_enabled),
+        "provider": config.data_vault_external_provider,
+        "configured": _external_configured(config),
+        "attempted": False,
+        "uploaded": False,
+        "remote_key": "",
+        "remote_size_bytes": 0,
+        "local_size_bytes": 0,
+        "checksum_sha256": "",
+        "verified": False,
+        "sanitized_error": "none",
+    }
+
+
+def _empty_remote_status() -> dict[str, Any]:
+    return {
+        "remote_list_ok": False,
+        "remote_backup_count": 0,
+        "latest_remote_backup": "",
+        "last_upload_status": "none",
+        "sanitized_error": "none",
+    }
 
 
 def _age_hours(path: Path | None) -> float | None:

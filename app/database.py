@@ -1828,6 +1828,32 @@ class Database:
         with self._connect() as conn:
             return self._fetchall_dicts(conn.execute(sql, params))
 
+    def fetch_table_rows_chunk(
+        self,
+        table: str,
+        *,
+        since_iso: str | None = None,
+        timestamp_column: str | None = None,
+        limit: int = 5000,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        table = _safe_identifier(table)
+        columns = set(self.get_table_columns(table))
+        if not columns:
+            return []
+        params: tuple[Any, ...] = ()
+        where = ""
+        if since_iso and timestamp_column and timestamp_column in columns:
+            where = f" WHERE {timestamp_column} >= ?"
+            params = (since_iso,)
+        order_column = "id" if "id" in columns else (timestamp_column if timestamp_column in columns else sorted(columns)[0])
+        sql = f"SELECT * FROM {table}{where} ORDER BY {order_column} ASC LIMIT ? OFFSET ?"
+        params = params + (max(1, int(limit or 5000)), max(0, int(offset or 0)))
+        if self._use_postgres:
+            sql = sql.replace("?", "%s")
+        with self._connect() as conn:
+            return self._fetchall_dicts(conn.execute(sql, params))
+
     def insert_table_row_if_missing(self, table: str, row: dict[str, Any]) -> str:
         table = _safe_identifier(table)
         if not row:

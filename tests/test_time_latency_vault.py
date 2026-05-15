@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import socket
+import sys
 import time
 import urllib.request
 import zipfile
@@ -25,6 +26,61 @@ class DummyLogger:
 
     def warning(self, *args, **kwargs):
         pass
+
+
+class FakeS3Client:
+    def __init__(self):
+        self.objects = {}
+        self.calls = []
+        self.endpoint_url = ""
+        self.bucket = ""
+        self.prefix = ""
+
+    def upload_file(self, filename, bucket, key):
+        self.calls.append(("upload_file", filename, bucket, key))
+        self.bucket = bucket
+        self.prefix = key.rsplit("/", 1)[0]
+        self.objects[key] = {"size": int(__import__("pathlib").Path(filename).stat().st_size), "last_modified": "2026-01-01"}
+
+    def head_object(self, Bucket, Key):  # noqa: N803
+        return {"ContentLength": self.objects.get(Key, {}).get("size", 0)}
+
+    def list_objects_v2(self, Bucket, Prefix, MaxKeys=1000):  # noqa: N803
+        return {
+            "Contents": [
+                {"Key": key, "Size": value["size"], "LastModified": value["last_modified"]}
+                for key, value in self.objects.items()
+                if key.startswith(Prefix)
+            ]
+        }
+
+
+class FakeBoto3:
+    def __init__(self, client):
+        self.fake_client = client
+        self.kwargs = {}
+
+    def client(self, service, **kwargs):
+        self.kwargs = kwargs
+        self.fake_client.endpoint_url = kwargs.get("endpoint_url", "")
+        return self.fake_client
+
+
+class Boto3Patch:
+    def __init__(self, fake):
+        self.fake = fake
+        self.old = None
+
+    def __enter__(self):
+        self.old = sys.modules.get("boto3")
+        sys.modules["boto3"] = self.fake
+        return self.fake
+
+    def __exit__(self, exc_type, exc, tb):
+        if self.old is None:
+            sys.modules.pop("boto3", None)
+        else:
+            sys.modules["boto3"] = self.old
 
 
 def cfg(tmp_path, **kwargs):
@@ -189,7 +245,93 @@ def test_external_upload_disabled_and_missing_credentials_do_not_fail(tmp_path):
     assert disabled["enabled"] is False
     missing = DataVaultExternalStorage(cfg(tmp_path, data_vault_external_enabled=True), DummyLogger()).upload(tmp_path / "missing.zip", {})
     assert missing["uploaded"] is False
-    assert "missing" in missing["error"]
+    assert "missing" in missing["sanitized_error"]
+
+
+def test_external_upload_uses_s3_endpoint_bucket_and_prefix(tmp_path):
+    config = cfg(
+        tmp_path,
+        data_vault_external_enabled=True,
+        data_vault_external_bucket="training-bucket",
+        data_vault_external_prefix="bitget-ai-trading-bot/training",
+        data_vault_s3_endpoint_url="https://r2.example",
+        data_vault_s3_access_key_id="access-key",
+        data_vault_s3_secret_access_key="secret-key",
+    )
+    db = make_db(tmp_path, config)
+    obs_id, _ = seed_label(db, barrier="TP1", ret=1.0)
+    seed_path(db, obs_id)
+    fake_client = FakeS3Client()
+    fake = FakeBoto3(fake_client)
+    with Boto3Patch(fake):
+        result = DataVault(config, db, DummyLogger()).export(hours=168, upload=True)
+    upload = result["external_upload"]
+    assert upload["uploaded"] is True
+    assert upload["verified"] is True
+    assert upload["remote_key"].startswith("bitget-ai-trading-bot/training/training_vault_")
+    assert fake.kwargs["endpoint_url"] == "https://r2.example"
+    assert fake.kwargs["region_name"] == "auto"
+    assert fake_client.bucket == "training-bucket"
+    assert fake_client.prefix == "bitget-ai-trading-bot/training"
+    assert "access-key" not in json.dumps(upload)
+    assert "secret-key" not in json.dumps(upload)
+
+
+def test_data_export_upload_text_and_upload_latest_with_mock(tmp_path):
+    config = cfg(
+        tmp_path,
+        data_vault_external_enabled=True,
+        data_vault_external_bucket="training-bucket",
+        data_vault_external_prefix="bitget-ai-trading-bot/training",
+        data_vault_s3_endpoint_url="https://r2.example",
+        data_vault_s3_access_key_id="access-key",
+        data_vault_s3_secret_access_key="secret-key",
+    )
+    db = make_db(tmp_path, config)
+    seed_label(db, barrier="TP1", ret=1.0)
+    fake = FakeBoto3(FakeS3Client())
+    vault = DataVault(config, db, DummyLogger())
+    with Boto3Patch(fake):
+        text = vault.export_text(hours=168, upload=True)
+        upload_latest_text = vault.upload_latest_text()
+        status = vault.status()
+    assert "uploaded: true" in text
+    assert "verified: true" in text
+    assert "DATA UPLOAD LATEST START" in upload_latest_text
+    assert "uploaded: true" in upload_latest_text
+    assert status["remote_list_ok"] is True
+    assert status["remote_backup_count"] >= 1
+
+
+def test_dashboard_data_export_endpoint_uploads_when_external_enabled(tmp_path):
+    config = cfg(
+        tmp_path,
+        data_vault_external_enabled=True,
+        data_vault_external_bucket="training-bucket",
+        data_vault_external_prefix="bitget-ai-trading-bot/training",
+        data_vault_s3_endpoint_url="https://r2.example",
+        data_vault_s3_access_key_id="access-key",
+        data_vault_s3_secret_access_key="secret-key",
+    )
+    db = make_db(tmp_path, config)
+    seed_label(db, barrier="TP1", ret=1.0)
+    port = _free_port()
+    fake_client = FakeS3Client()
+    with Boto3Patch(FakeBoto3(fake_client)):
+        start_health_server(HealthState(mode=config.mode), port, DummyLogger(), config=config, db=db)
+        base = f"http://127.0.0.1:{port}"
+        for _ in range(30):
+            try:
+                _get(base + "/health")
+                break
+            except Exception:
+                time.sleep(0.05)
+        status, body = _get(base + "/api/training/data-export?hours=168")
+    payload = json.loads(body)
+    assert status == 200
+    assert payload["external_upload"]["uploaded"] is True
+    assert payload["external_upload"]["verified"] is True
+    assert fake_client.calls
 
 
 def test_automatic_backup_prunes_old_files(tmp_path):
@@ -256,6 +398,8 @@ def test_dashboard_new_endpoints_do_not_expose_secrets(tmp_path):
         ("/api/training/latency-audit?hours=24", "LATENCY AUDIT START"),
         ("/api/training/fast-execution-readiness", "FAST EXECUTION READINESS START"),
         ("/api/training/data-vault-status", "DATA VAULT STATUS START"),
+        ("/api/training/data-upload-latest", "DATA UPLOAD LATEST START"),
+        ("/api/training/data-vault-prune", "DATA VAULT PRUNE START"),
         ("/api/training/migration-readiness", "MIGRATION READINESS START"),
     ):
         status, body = _get(base + path + ("&" if "?" in path else "?") + "token=safe-token")
