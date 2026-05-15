@@ -613,6 +613,16 @@ class ResearchLab:
 
         return DataVault(self.config, self.db, self.logger).upload_latest_text()
 
+    def data_download_latest(self) -> str:
+        from .data_vault import DataVault
+
+        return DataVault(self.config, self.db, self.logger).download_latest_text()
+
+    def data_restore_latest(self, apply: bool = False) -> str:
+        from .data_vault import DataVault
+
+        return DataVault(self.config, self.db, self.logger).restore_latest_text(apply=apply)
+
     def data_vault_prune(self, apply: bool = False) -> str:
         from .data_vault import DataVault
 
@@ -632,6 +642,26 @@ class ResearchLab:
         from .phase_readiness_smoke_test import PhaseReadinessSmokeTest
 
         return PhaseReadinessSmokeTest(self.config, self.db, self.logger).to_text()
+
+    def vps_migration_guide(self) -> str:
+        from .vps_migration import build_vps_migration_guide
+
+        return build_vps_migration_guide(self.config)
+
+    def vps_preflight(self) -> str:
+        from .vps_migration import VpsPreflight
+
+        return VpsPreflight(self.config, self.db, self.logger).to_text()
+
+    def fast_runtime_plan(self, hours: int = 24) -> str:
+        from .fast_runtime_plan import FastRuntimePlan
+
+        return FastRuntimePlan(self.config, self.db).to_text(hours=hours)
+
+    def vps_migration_smoke_test(self) -> str:
+        from .vps_migration_smoke_test import VpsMigrationSmokeTest
+
+        return VpsMigrationSmokeTest(self.config, self.db, self.logger).to_text()
 
     def build_markdown_report(
         self,
@@ -1169,12 +1199,18 @@ def main() -> None:
             "data-export",
             "data-import",
             "data-upload-latest",
+            "data-download-latest",
+            "data-restore-latest",
             "data-vault-prune",
             "data-vault-smoke-test",
             "migration-readiness",
             "migration-readiness-deep-check",
             "exit-latency-vault-smoke-test",
             "phase-readiness-smoke-test",
+            "vps-migration-guide",
+            "vps-preflight",
+            "fast-runtime-plan",
+            "vps-migration-smoke-test",
         ],
     )
     parser.add_argument("--limit", type=int, default=None, help="Maximo de labels a procesar en phase2-persist.")
@@ -1329,6 +1365,10 @@ def main() -> None:
         print(lab.data_import(file=args.file, apply=args.apply and not args.dry_run))
     elif args.command == "data-upload-latest":
         print(lab.data_upload_latest())
+    elif args.command == "data-download-latest":
+        print(lab.data_download_latest())
+    elif args.command == "data-restore-latest":
+        print(lab.data_restore_latest(apply=args.apply and not args.dry_run))
     elif args.command == "data-vault-prune":
         print(lab.data_vault_prune(apply=args.apply and not args.dry_run))
     elif args.command == "data-vault-smoke-test":
@@ -1341,6 +1381,14 @@ def main() -> None:
         print(lab.exit_latency_vault_smoke_test())
     elif args.command == "phase-readiness-smoke-test":
         print(lab.phase_readiness_smoke_test())
+    elif args.command == "vps-migration-guide":
+        print(lab.vps_migration_guide())
+    elif args.command == "vps-preflight":
+        print(lab.vps_preflight())
+    elif args.command == "fast-runtime-plan":
+        print(lab.fast_runtime_plan(hours=args.hours))
+    elif args.command == "vps-migration-smoke-test":
+        print(lab.vps_migration_smoke_test())
 
 
 if __name__ == "__main__":

@@ -306,6 +306,19 @@
         </div>
         <pre id="migrationReadinessText">Sin cargar todavía.</pre>
       </div>
+      <div class="card full">
+        <h2>VPS / Migration</h2>
+        <div id="vpsMigrationMetrics"></div>
+        <div class="actions">
+          <button id="vpsPreflightBtn">VPS preflight</button>
+          <button id="vpsGuideBtn">Guia migracion VPS</button>
+          <button id="fastRuntimePlanBtn">Fast runtime plan</button>
+          <button id="workerLockStatusBtn">Worker lock status</button>
+          <button id="dataDownloadLatestBtn">Descargar ultimo R2</button>
+          <button id="dataRestoreDryRunBtn">Restore latest dry-run</button>
+        </div>
+        <pre id="vpsMigrationText">Sin cargar todavia.</pre>
+      </div>
     </section>
   </main>
   <script>
@@ -423,6 +436,7 @@
         metric("final", data.final_recommendation || "NO LIVE", "good");
       renderRows("topSignals", data.top_signals || [], ["symbol", "side", "score", "reason"]);
       renderRows("topBlocks", data.top_blocks || [], ["reason", "count"]);
+      renderVpsMigration(data.vps_migration || {}, data.worker_lock || {});
       setOnline(true, `online · ${data.generated_at || new Date().toISOString()}`);
     }
     function memoryText(h) {
@@ -470,6 +484,21 @@
       const body = byId(id);
       if (!rows.length) { body.innerHTML = `<tr><td colspan="${keys.length}">none</td></tr>`; return; }
       body.innerHTML = rows.map((row) => `<tr>${keys.map((key) => `<td>${escapeHtml(value(row[key], ""))}</td>`).join("")}</tr>`).join("");
+    }
+    function renderVpsMigration(vps, lock) {
+      const el = byId("vpsMigrationMetrics");
+      if (!el) return;
+      el.innerHTML =
+        metric("migration_readiness", vps.migration_readiness || "unknown") +
+        metric("latest_remote_backup", vps.latest_remote_backup || "none") +
+        metric("latest_local_backup", vps.latest_local_backup || "none") +
+        metric("r2_configured", vps.r2_configured, vps.r2_configured ? "good" : "warn") +
+        metric("r2_last_upload_verified", vps.r2_last_upload_verified, vps.r2_last_upload_verified ? "good" : "warn") +
+        metric("worker_lock_status", vps.worker_lock_status || lock.lock_status || "unknown") +
+        metric("active_instance_id", vps.active_instance_id || lock.active_worker_instance || "none") +
+        metric("current_runtime_profile", vps.current_runtime_profile || "railway_lightweight") +
+        metric("fast_runtime_readiness", vps.fast_runtime_readiness || "NOT_HFT") +
+        metric("final", vps.final_recommendation || "NO LIVE", "good");
     }
     function renderEdgeCandidates(rows) {
       const body = byId("edgeCandidateRows");
@@ -628,6 +657,12 @@
     byId("dataVaultPruneBtn").addEventListener("click", () => loadGenericLab("/api/training/data-vault-prune", "dataVaultText"));
     byId("migrationReadinessBtn").addEventListener("click", () => loadGenericLab("/api/training/migration-readiness", "migrationReadinessText"));
     byId("migrationDeepCheckBtn").addEventListener("click", () => loadGenericLab("/api/training/migration-readiness-deep-check", "migrationReadinessText"));
+    byId("vpsPreflightBtn").addEventListener("click", () => loadGenericLab("/api/training/vps-preflight", "vpsMigrationText"));
+    byId("vpsGuideBtn").addEventListener("click", () => loadGenericLab("/api/training/vps-migration-guide", "vpsMigrationText"));
+    byId("fastRuntimePlanBtn").addEventListener("click", () => loadGenericLab("/api/training/fast-runtime-plan?hours=24", "vpsMigrationText"));
+    byId("workerLockStatusBtn").addEventListener("click", () => loadGenericLab("/api/training/worker-lock-status", "vpsMigrationText"));
+    byId("dataDownloadLatestBtn").addEventListener("click", () => loadGenericLab("/api/training/data-download-latest", "vpsMigrationText"));
+    byId("dataRestoreDryRunBtn").addEventListener("click", () => loadGenericLab("/api/training/data-restore-latest", "vpsMigrationText"));
     refresh();
     loadSummary();
     loadPlan();

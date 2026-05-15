@@ -87,9 +87,15 @@ def start_health_server(
                 "/api/training/data-vault-status",
                 "/api/training/data-export",
                 "/api/training/data-upload-latest",
+                "/api/training/data-download-latest",
+                "/api/training/data-restore-latest",
                 "/api/training/data-vault-prune",
                 "/api/training/migration-readiness",
                 "/api/training/migration-readiness-deep-check",
+                "/api/training/vps-migration-guide",
+                "/api/training/vps-preflight",
+                "/api/training/fast-runtime-plan",
+                "/api/training/worker-lock-status",
             }:
                 if not _authorized(config, query, self.headers):
                     self._send_json({"error": "unauthorized"}, status=401)
@@ -172,6 +178,12 @@ def start_health_server(
             if path == "/api/training/data-upload-latest":
                 self._send_json(_data_upload_latest(config, db, query))
                 return
+            if path == "/api/training/data-download-latest":
+                self._send_json(_data_download_latest(config, db, query))
+                return
+            if path == "/api/training/data-restore-latest":
+                self._send_json(_data_restore_latest(config, db, query))
+                return
             if path == "/api/training/data-vault-prune":
                 self._send_json(_data_vault_prune(config, db, query))
                 return
@@ -180,6 +192,18 @@ def start_health_server(
                 return
             if path == "/api/training/migration-readiness-deep-check":
                 self._send_json(_migration_readiness_deep_check(config, db, query))
+                return
+            if path == "/api/training/vps-migration-guide":
+                self._send_json(_vps_migration_guide(config, db, query))
+                return
+            if path == "/api/training/vps-preflight":
+                self._send_json(_vps_preflight(config, db, query))
+                return
+            if path == "/api/training/fast-runtime-plan":
+                self._send_json(_fast_runtime_plan(config, db, query))
+                return
+            if path == "/api/training/worker-lock-status":
+                self._send_json(_worker_lock_status(config, db, query))
                 return
             self._send_status(404, "not found")
 
@@ -273,6 +297,8 @@ def _training_status(config: Any | None, db: Any | None, training_pulse: Any | N
     }
     payload["open_paper_positions_detail"] = _open_paper_positions_detail(db)
     payload["edge"] = _edge_summary(config, db)
+    payload["worker_lock"] = _worker_lock_status_payload(config, db)
+    payload["vps_migration"] = _vps_dashboard_summary(config, db, payload["worker_lock"])
     if "mfe_mae" not in payload:
         payload["mfe_mae"] = {}
     payload["generated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
@@ -500,6 +526,43 @@ def _data_upload_latest(config: Any | None, db: Any | None, query: dict[str, lis
     return payload
 
 
+def _data_download_latest(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
+    if config is None or db is None:
+        return {"error": "data download unavailable", "final_recommendation": "NO LIVE"}
+    try:
+        from .data_vault import DataVault
+
+        vault = DataVault(config, db)
+        payload = vault.download_latest()
+        text = _data_download_latest_text(payload)
+    except Exception as exc:
+        return {"error": str(exc)[:300], "final_recommendation": "NO LIVE"}
+    payload = dict(payload)
+    payload["text"] = text
+    payload["generated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    payload["final_recommendation"] = "NO LIVE"
+    return payload
+
+
+def _data_restore_latest(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
+    if config is None or db is None:
+        return {"error": "data restore unavailable", "final_recommendation": "NO LIVE"}
+    apply = str((query.get("apply") or ["false"])[0]).lower() in {"1", "true", "yes"}
+    try:
+        from .data_vault import DataVault
+
+        vault = DataVault(config, db)
+        payload = vault.restore_latest(apply=apply)
+        text = _data_restore_latest_text(payload)
+    except Exception as exc:
+        return {"error": str(exc)[:300], "final_recommendation": "NO LIVE"}
+    payload = dict(payload)
+    payload["text"] = text
+    payload["generated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    payload["final_recommendation"] = "NO LIVE"
+    return payload
+
+
 def _data_vault_prune(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
     if config is None or db is None:
         return {"error": "data vault prune unavailable", "final_recommendation": "NO LIVE"}
@@ -513,6 +576,74 @@ def _data_vault_prune(config: Any | None, db: Any | None, query: dict[str, list[
     except Exception as exc:
         return {"error": str(exc)[:300], "final_recommendation": "NO LIVE"}
     payload = dict(payload)
+    payload["text"] = text
+    payload["generated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    payload["final_recommendation"] = "NO LIVE"
+    return payload
+
+
+def _vps_migration_guide(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
+    if config is None:
+        return {"error": "vps migration guide unavailable", "final_recommendation": "NO LIVE"}
+    try:
+        from .vps_migration import build_vps_migration_guide
+
+        text = build_vps_migration_guide(config)
+    except Exception as exc:
+        return {"error": str(exc)[:300], "final_recommendation": "NO LIVE"}
+    return {"text": text, "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "final_recommendation": "NO LIVE"}
+
+
+def _vps_preflight(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
+    if config is None or db is None:
+        return {"error": "vps preflight unavailable", "final_recommendation": "NO LIVE"}
+    try:
+        from .vps_migration import VpsPreflight
+
+        lab = VpsPreflight(config, db)
+        payload = lab.build()
+        text = lab.to_text()
+    except Exception as exc:
+        return {"error": str(exc)[:300], "final_recommendation": "NO LIVE"}
+    payload = dict(payload)
+    payload["text"] = text
+    payload["generated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    payload["final_recommendation"] = "NO LIVE"
+    return payload
+
+
+def _fast_runtime_plan(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
+    hours = _query_int(query, "hours", 24)
+    if config is None:
+        return {"error": "fast runtime plan unavailable", "final_recommendation": "NO LIVE"}
+    try:
+        from .fast_runtime_plan import FastRuntimePlan
+
+        lab = FastRuntimePlan(config, db)
+        payload = lab.build(hours=hours)
+        text = lab.to_text(hours=hours)
+    except Exception as exc:
+        return {"error": str(exc)[:300], "final_recommendation": "NO LIVE"}
+    payload = dict(payload)
+    payload["text"] = text
+    payload["generated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    payload["final_recommendation"] = "NO LIVE"
+    return payload
+
+
+def _worker_lock_status(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
+    payload = _worker_lock_status_payload(config, db)
+    text = "\n".join([
+        "WORKER LOCK STATUS START",
+        f"enabled: {str(payload.get('enabled')).lower()}",
+        f"current_instance_id: {payload.get('current_instance_id', '')}",
+        f"lock_status: {payload.get('lock_status', '')}",
+        f"active_worker_instance: {payload.get('active_worker_instance', '')}",
+        f"lock_age_seconds: {payload.get('lock_age_seconds', 0)}",
+        f"warning_if_duplicate_worker: {payload.get('warning_if_duplicate_worker', '') or 'none'}",
+        "final_recommendation: NO LIVE",
+        "WORKER LOCK STATUS END",
+    ])
     payload["text"] = text
     payload["generated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     payload["final_recommendation"] = "NO LIVE"
@@ -631,6 +762,44 @@ def _data_upload_latest_text(payload: dict[str, Any]) -> str:
     ])
 
 
+def _data_download_latest_text(payload: dict[str, Any]) -> str:
+    return "\n".join([
+        "DATA DOWNLOAD LATEST START",
+        f"external_enabled: {str(payload.get('external_enabled')).lower()}",
+        f"external_configured: {str(payload.get('external_configured')).lower()}",
+        f"latest_remote_backup: {payload.get('latest_remote_backup') or 'none'}",
+        f"downloaded: {str(payload.get('downloaded')).lower()}",
+        f"already_exists: {str(payload.get('already_exists', False)).lower()}",
+        f"local_newer_warning: {str(payload.get('local_newer_warning', False)).lower()}",
+        f"local_file: {payload.get('local_file') or 'none'}",
+        f"manifest_valid: {str(payload.get('manifest_valid')).lower()}",
+        f"checksum_valid: {str(payload.get('checksum_valid')).lower()}",
+        "secrets_excluded: true",
+        f"sanitized_error: {payload.get('sanitized_error') or 'none'}",
+        "final_recommendation: NO LIVE",
+        "DATA DOWNLOAD LATEST END",
+    ])
+
+
+def _data_restore_latest_text(payload: dict[str, Any]) -> str:
+    return "\n".join([
+        "DATA RESTORE LATEST START",
+        f"mode: {payload.get('mode')}",
+        f"latest_backup: {payload.get('latest_backup') or 'none'}",
+        f"download_attempted: {str(payload.get('download_attempted')).lower()}",
+        f"manifest_valid: {str(payload.get('manifest_valid')).lower()}",
+        f"checksum_valid: {str(payload.get('checksum_valid')).lower()}",
+        f"duplicates_skipped: {payload.get('duplicates_skipped', 0)}",
+        f"rows_inserted: {payload.get('rows_inserted', 0)}",
+        f"rows_updated: {payload.get('rows_updated', 0)}",
+        "secrets_excluded: true",
+        f"result: {payload.get('result')}",
+        f"sanitized_error: {payload.get('sanitized_error') or 'none'}",
+        "final_recommendation: NO LIVE",
+        "DATA RESTORE LATEST END",
+    ])
+
+
 def _data_vault_prune_text(payload: dict[str, Any]) -> str:
     deleted = payload.get("deleted") or []
     kept = payload.get("kept") or []
@@ -729,6 +898,60 @@ def _edge_summary(config: Any | None, db: Any | None) -> dict[str, Any]:
         "sl_ratio": sl / max(total, 1.0) if total else 0.0,
         "tp_ratio": tp / max(total, 1.0) if total else 0.0,
         "total_labels": total,
+    }
+
+
+def _worker_lock_status_payload(config: Any | None, db: Any | None) -> dict[str, Any]:
+    if config is None or db is None:
+        return {
+            "enabled": False,
+            "acquired": False,
+            "current_instance_id": "",
+            "active_worker_instance": "",
+            "lock_status": "unavailable",
+            "lock_age_seconds": 0.0,
+            "warning_if_duplicate_worker": "",
+        }
+    try:
+        from .worker_lock import WorkerLockManager
+
+        return WorkerLockManager(config, db).status().to_dict()
+    except Exception:
+        return {
+            "enabled": bool(getattr(config, "require_single_worker_lock", False)),
+            "acquired": False,
+            "current_instance_id": "",
+            "active_worker_instance": "",
+            "lock_status": "error",
+            "lock_age_seconds": 0.0,
+            "warning_if_duplicate_worker": "worker_lock_status_error",
+        }
+
+
+def _vps_dashboard_summary(config: Any | None, db: Any | None, worker_lock: dict[str, Any]) -> dict[str, Any]:
+    if config is None or db is None:
+        return {}
+    try:
+        from .data_vault import DataVault
+
+        vault = DataVault(config, db)
+        status = vault.status()
+        readiness = vault.migration_readiness()
+    except Exception:
+        status = {}
+        readiness = {}
+    return {
+        "migration_readiness": readiness.get("readiness_status", "unknown"),
+        "latest_remote_backup": status.get("latest_remote_backup", ""),
+        "latest_local_backup": status.get("latest_local_backup", ""),
+        "r2_configured": bool(status.get("external_configured", False)),
+        "r2_last_upload_verified": bool(status.get("last_upload_verified", False)),
+        "vps_preflight_status": "not_run",
+        "worker_lock_status": worker_lock.get("lock_status", "unknown"),
+        "active_instance_id": worker_lock.get("active_worker_instance", ""),
+        "current_runtime_profile": getattr(config, "training_runtime_profile", "railway_lightweight"),
+        "fast_runtime_readiness": "NOT_HFT / RESEARCH_MODE_ONLY",
+        "final_recommendation": "NO LIVE",
     }
 
 

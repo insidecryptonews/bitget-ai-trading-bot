@@ -287,11 +287,12 @@ class DataVault:
         for file_info in manifest.get("files", []):
             table = str(file_info.get("table") or "")
             rel = str(file_info.get("path") or "")
-            rows = _read_jsonl_gz_from_zip(path, rel)
             if not apply:
-                table_rows.append({"table": table, "rows": len(rows), "mode": "dry-run"})
+                table_rows.append({"table": table, "rows": safe_int(file_info.get("rows")), "mode": "dry-run"})
                 continue
-            for row in rows:
+            row_count = 0
+            for row in _iter_jsonl_gz_from_zip(path, rel):
+                row_count += 1
                 status = self.db.insert_table_row_if_missing(table, row)
                 if status == "inserted":
                     inserted += 1
@@ -299,7 +300,7 @@ class DataVault:
                     duplicates += 1
                 else:
                     skipped += 1
-            table_rows.append({"table": table, "rows": len(rows), "mode": "apply"})
+            table_rows.append({"table": table, "rows": row_count, "mode": "apply"})
         if not apply:
             self._update_cache({
                 "latest_local_backup": str(path),
@@ -418,6 +419,190 @@ class DataVault:
             "DATA UPLOAD LATEST END",
         ])
 
+    def download_latest(self) -> dict[str, Any]:
+        external = DataVaultExternalStorage(self.config, self.logger)
+        remote = external.list_backups() if self.config.data_vault_external_enabled else _empty_remote_status()
+        latest_key = str(remote.get("latest_remote_backup") or "")
+        if not self.config.data_vault_external_enabled:
+            return {
+                "external_enabled": False,
+                "external_configured": False,
+                "downloaded": False,
+                "latest_remote_backup": "",
+                "local_file": "",
+                "manifest_valid": False,
+                "checksum_valid": False,
+                "secrets_excluded": True,
+                "sanitized_error": "external_disabled",
+            }
+        if not _external_configured(self.config):
+            return {
+                "external_enabled": True,
+                "external_configured": False,
+                "downloaded": False,
+                "latest_remote_backup": "",
+                "local_file": "",
+                "manifest_valid": False,
+                "checksum_valid": False,
+                "secrets_excluded": True,
+                "sanitized_error": "missing_s3_configuration",
+            }
+        if not latest_key:
+            return {
+                "external_enabled": True,
+                "external_configured": True,
+                "downloaded": False,
+                "latest_remote_backup": "",
+                "local_file": "",
+                "manifest_valid": False,
+                "checksum_valid": False,
+                "secrets_excluded": True,
+                "sanitized_error": remote.get("sanitized_error") or "no_remote_backup",
+            }
+        self.export_dir.mkdir(parents=True, exist_ok=True)
+        target = self.export_dir / Path(latest_key).name
+        latest_local = self.list_backups()[-1] if self.list_backups() else None
+        local_newer_warning = bool(latest_local and latest_local.name > target.name)
+        if target.exists():
+            try:
+                manifest, _ = self.validate_backup(target)
+                manifest_valid = checksum_valid = True
+                error = "already_exists"
+                sha = manifest.get("backup_sha256") or _sha256_file(target)
+            except Exception as exc:
+                manifest_valid = checksum_valid = False
+                error = _sanitize_text(str(exc))[:300]
+                sha = _sha256_file(target)
+            self._update_cache({
+                "latest_local_backup": str(target),
+                "latest_remote_backup": latest_key,
+                "latest_remote_key": latest_key,
+                "latest_sha256": sha,
+                "manifest_valid": manifest_valid,
+                "checksum_valid": checksum_valid,
+                "source": "remote_download_existing",
+                "secrets_excluded": True,
+                "error_sanitized": error,
+            })
+            return {
+                "external_enabled": True,
+                "external_configured": True,
+                "downloaded": False,
+                "already_exists": True,
+                "local_newer_warning": local_newer_warning,
+                "latest_remote_backup": latest_key,
+                "local_file": str(target),
+                "manifest_valid": manifest_valid,
+                "checksum_valid": checksum_valid,
+                "checksum_sha256": sha,
+                "secrets_excluded": True,
+                "sanitized_error": error,
+            }
+        result = external.download(latest_key, target)
+        manifest_valid = checksum_valid = False
+        sha = ""
+        if result.get("downloaded"):
+            try:
+                manifest, _ = self.validate_backup(target)
+                manifest_valid = checksum_valid = True
+                sha = manifest.get("backup_sha256") or _sha256_file(target)
+            except Exception as exc:
+                result["sanitized_error"] = _sanitize_text(str(exc))[:300]
+                sha = _sha256_file(target) if target.exists() else ""
+        self._update_cache({
+            "latest_local_backup": str(target) if target.exists() else "",
+            "latest_remote_backup": latest_key,
+            "latest_remote_key": latest_key,
+            "latest_backup_size": target.stat().st_size if target.exists() else 0,
+            "latest_sha256": sha,
+            "manifest_valid": manifest_valid,
+            "checksum_valid": checksum_valid,
+            "source": "remote_download",
+            "secrets_excluded": True,
+            "error_sanitized": result.get("sanitized_error") or "none",
+        })
+        return {
+            "external_enabled": True,
+            "external_configured": True,
+            "downloaded": bool(result.get("downloaded", False)),
+            "already_exists": False,
+            "local_newer_warning": local_newer_warning,
+            "latest_remote_backup": latest_key,
+            "local_file": str(target) if target.exists() else "",
+            "remote_size_bytes": result.get("remote_size_bytes", 0),
+            "local_size_bytes": result.get("local_size_bytes", 0),
+            "manifest_valid": manifest_valid,
+            "checksum_valid": checksum_valid,
+            "checksum_sha256": sha,
+            "secrets_excluded": True,
+            "sanitized_error": result.get("sanitized_error") or "none",
+        }
+
+    def download_latest_text(self) -> str:
+        payload = self.download_latest()
+        return "\n".join([
+            "DATA DOWNLOAD LATEST START",
+            f"external_enabled: {str(payload.get('external_enabled')).lower()}",
+            f"external_configured: {str(payload.get('external_configured')).lower()}",
+            f"latest_remote_backup: {payload.get('latest_remote_backup') or 'none'}",
+            f"downloaded: {str(payload.get('downloaded')).lower()}",
+            f"already_exists: {str(payload.get('already_exists', False)).lower()}",
+            f"local_newer_warning: {str(payload.get('local_newer_warning', False)).lower()}",
+            f"local_file: {payload.get('local_file') or 'none'}",
+            f"manifest_valid: {str(payload.get('manifest_valid')).lower()}",
+            f"checksum_valid: {str(payload.get('checksum_valid')).lower()}",
+            "secrets_excluded: true",
+            f"sanitized_error: {payload.get('sanitized_error') or 'none'}",
+            "final_recommendation: NO LIVE",
+            "DATA DOWNLOAD LATEST END",
+        ])
+
+    def restore_latest(self, *, apply: bool = False) -> dict[str, Any]:
+        latest = self.latest_valid_backup()
+        download = None
+        if latest is None:
+            download = self.download_latest()
+            local_file = str(download.get("local_file") or "")
+            latest = Path(local_file) if local_file else None
+        if latest is None or not latest.exists():
+            return {
+                "mode": "apply" if apply else "dry-run",
+                "latest_backup": "",
+                "download_attempted": download is not None,
+                "manifest_valid": False,
+                "checksum_valid": False,
+                "secrets_excluded": True,
+                "result": "BLOCKED",
+                "sanitized_error": (download or {}).get("sanitized_error") or "no_backup_available",
+            }
+        imported = self.import_backup(file=latest, apply=apply)
+        imported.update({
+            "latest_backup": str(latest),
+            "download_attempted": download is not None,
+            "secrets_excluded": True,
+            "sanitized_error": "none",
+        })
+        return imported
+
+    def restore_latest_text(self, *, apply: bool = False) -> str:
+        payload = self.restore_latest(apply=apply)
+        return "\n".join([
+            "DATA RESTORE LATEST START",
+            f"mode: {payload.get('mode')}",
+            f"latest_backup: {payload.get('latest_backup') or 'none'}",
+            f"download_attempted: {str(payload.get('download_attempted')).lower()}",
+            f"manifest_valid: {str(payload.get('manifest_valid')).lower()}",
+            f"checksum_valid: {str(payload.get('checksum_valid')).lower()}",
+            f"duplicates_skipped: {payload.get('duplicates_skipped', 0)}",
+            f"rows_inserted: {payload.get('rows_inserted', 0)}",
+            f"rows_updated: {payload.get('rows_updated', 0)}",
+            "secrets_excluded: true",
+            f"result: {payload.get('result')}",
+            f"sanitized_error: {payload.get('sanitized_error') or 'none'}",
+            "final_recommendation: NO LIVE",
+            "DATA RESTORE LATEST END",
+        ])
+
     def validate_backup(self, path: Path) -> tuple[dict[str, Any], list[str]]:
         if not path.exists():
             raise FileNotFoundError(str(path))
@@ -428,8 +613,11 @@ class DataVault:
                 rel = str(info.get("path") or "")
                 if rel not in names:
                     raise ValueError(f"Missing backup file: {rel}")
-                data = zf.read(rel)
-                checksum = hashlib.sha256(data).hexdigest()
+                digest = hashlib.sha256()
+                with zf.open(rel, "r") as handle:
+                    for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                        digest.update(chunk)
+                checksum = digest.hexdigest()
                 if checksum != info.get("sha256"):
                     raise ValueError(f"Checksum mismatch: {rel}")
         return manifest, names
@@ -762,6 +950,50 @@ class DataVaultExternalStorage:
         except Exception as exc:
             return {**_empty_remote_status(), "remote_list_ok": False, "sanitized_error": _sanitize_text(str(exc))[:300]}
 
+    def download(self, remote_key: str, target: Path) -> dict[str, Any]:
+        if not self.config.data_vault_external_enabled:
+            return {"downloaded": False, "remote_key": remote_key, "local_file": str(target), "sanitized_error": "external_disabled"}
+        if not _external_configured(self.config):
+            return {"downloaded": False, "remote_key": remote_key, "local_file": str(target), "sanitized_error": "missing_s3_configuration"}
+        try:
+            import boto3  # type: ignore
+        except Exception:
+            return {"downloaded": False, "remote_key": remote_key, "local_file": str(target), "sanitized_error": "boto3_unavailable"}
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            temp = target.with_suffix(target.suffix + ".download")
+            if temp.exists():
+                temp.unlink()
+            client = self._client(boto3)
+            client.download_file(self.config.data_vault_external_bucket, remote_key, str(temp))
+            remote_size = 0
+            try:
+                head = client.head_object(Bucket=self.config.data_vault_external_bucket, Key=remote_key)
+                remote_size = int(head.get("ContentLength") or 0)
+            except Exception:
+                remote_size = 0
+            temp.replace(target)
+            local_size = target.stat().st_size
+            return {
+                "downloaded": True,
+                "remote_key": remote_key,
+                "local_file": str(target),
+                "remote_size_bytes": remote_size,
+                "local_size_bytes": local_size,
+                "verified": bool(remote_size == 0 or remote_size == local_size),
+                "sanitized_error": "none",
+            }
+        except Exception as exc:
+            return {
+                "downloaded": False,
+                "remote_key": remote_key,
+                "local_file": str(target),
+                "remote_size_bytes": 0,
+                "local_size_bytes": target.stat().st_size if target.exists() else 0,
+                "verified": False,
+                "sanitized_error": _sanitize_text(str(exc))[:300],
+            }
+
     def _client(self, boto3_module: Any) -> Any:
         return boto3_module.client(
             "s3",
@@ -808,6 +1040,15 @@ def _read_jsonl_gz_from_zip(zip_path: Path, rel: str) -> list[dict[str, Any]]:
         with zf.open(rel) as raw:
             with gzip.GzipFile(fileobj=raw) as gz:
                 return [json.loads(line.decode("utf-8")) for line in gz if line.strip()]
+
+
+def _iter_jsonl_gz_from_zip(zip_path: Path, rel: str):
+    with zipfile.ZipFile(zip_path, "r") as zf:
+        with zf.open(rel) as raw:
+            with gzip.GzipFile(fileobj=raw) as gz:
+                for line in gz:
+                    if line.strip():
+                        yield json.loads(line.decode("utf-8"))
 
 
 def _write_json(path: Path, payload: Any) -> None:

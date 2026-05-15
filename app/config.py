@@ -238,6 +238,15 @@ class BotConfig:
     data_vault_s3_region: str = "auto"
     data_vault_s3_access_key_id: str = ""
     data_vault_s3_secret_access_key: str = ""
+    bot_instance_id: str = ""
+    require_single_worker_lock: bool = True
+    worker_lock_ttl_seconds: int = 120
+    worker_lock_backend: str = "database"
+    training_runtime_profile: str = "railway_lightweight"
+    vps_research_profile_enabled: bool = False
+    vps_research_max_memory_mb: int = 6000
+    vps_research_max_cpu_pct: int = 85
+    vps_research_auto_throttle: bool = True
 
     symbols: list[str] = field(default_factory=lambda: [
         "BTCUSDT",
@@ -258,6 +267,8 @@ class BotConfig:
         object.__setattr__(self, "margin_mode", margin_mode)
         object.__setattr__(self, "meta_model_mode", meta_model_mode)
         object.__setattr__(self, "paper_policy_filter_mode", self.paper_policy_filter_mode.lower().strip())
+        object.__setattr__(self, "worker_lock_backend", self.worker_lock_backend.lower().strip())
+        object.__setattr__(self, "training_runtime_profile", self.training_runtime_profile.lower().strip())
         object.__setattr__(self, "full_research_report_mode", self.full_research_report_mode.lower().strip())
         object.__setattr__(self, "full_research_startup_mode", self.full_research_startup_mode.lower().strip())
         object.__setattr__(self, "margin_coin", self.margin_coin.upper().strip())
@@ -290,6 +301,10 @@ class BotConfig:
             raise ValueError("META_MIN_PROBABILITY debe estar entre 0 y 1.")
         if self.kronos_lookback <= 0 or self.kronos_pred_len <= 0:
             raise ValueError("KRONOS_LOOKBACK y KRONOS_PRED_LEN deben ser positivos.")
+        if self.worker_lock_backend not in {"database"}:
+            raise ValueError("WORKER_LOCK_BACKEND debe ser database.")
+        if self.training_runtime_profile not in {"railway_lightweight", "vps_balanced", "vps_research_aggressive"}:
+            raise ValueError("TRAINING_RUNTIME_PROFILE debe ser railway_lightweight, vps_balanced o vps_research_aggressive.")
 
     @property
     def mode(self) -> str:
@@ -340,6 +355,7 @@ def load_config(load_dotenv_file: bool = True) -> BotConfig:
     meta_model_train_on_start = env_bool(os.getenv("META_MODEL_TRAIN_ON_START"), False)
     full_research_startup_enabled = env_bool(os.getenv("FULL_RESEARCH_STARTUP_ENABLED"), False)
     daily_research_summary_on_start = env_bool(os.getenv("DAILY_RESEARCH_SUMMARY_ON_START"), False)
+    vps_research_profile_enabled = env_bool(os.getenv("VPS_RESEARCH_PROFILE_ENABLED"), False)
 
     if worker_lightweight_mode:
         paper_trading = True
@@ -359,6 +375,10 @@ def load_config(load_dotenv_file: bool = True) -> BotConfig:
         meta_model_train_on_start = False
         full_research_startup_enabled = False
         daily_research_summary_on_start = False
+    if vps_research_profile_enabled:
+        paper_trading = True
+        live_trading = False
+        dry_run = True
 
     return BotConfig(
         bitget_api_key=os.getenv("BITGET_API_KEY", ""),
@@ -570,6 +590,15 @@ def load_config(load_dotenv_file: bool = True) -> BotConfig:
         data_vault_s3_region=os.getenv("DATA_VAULT_S3_REGION", "auto"),
         data_vault_s3_access_key_id=os.getenv("DATA_VAULT_S3_ACCESS_KEY_ID", ""),
         data_vault_s3_secret_access_key=os.getenv("DATA_VAULT_S3_SECRET_ACCESS_KEY", ""),
+        bot_instance_id=os.getenv("BOT_INSTANCE_ID", ""),
+        require_single_worker_lock=env_bool(os.getenv("REQUIRE_SINGLE_WORKER_LOCK"), True),
+        worker_lock_ttl_seconds=env_int(os.getenv("WORKER_LOCK_TTL_SECONDS"), 120),
+        worker_lock_backend=os.getenv("WORKER_LOCK_BACKEND", "database"),
+        training_runtime_profile=os.getenv("TRAINING_RUNTIME_PROFILE", "railway_lightweight"),
+        vps_research_profile_enabled=vps_research_profile_enabled,
+        vps_research_max_memory_mb=env_int(os.getenv("VPS_RESEARCH_MAX_MEMORY_MB"), 6000),
+        vps_research_max_cpu_pct=env_int(os.getenv("VPS_RESEARCH_MAX_CPU_PCT"), 85),
+        vps_research_auto_throttle=env_bool(os.getenv("VPS_RESEARCH_AUTO_THROTTLE"), True),
         symbols=parse_csv_symbols(
             os.getenv(
                 "SYMBOLS",

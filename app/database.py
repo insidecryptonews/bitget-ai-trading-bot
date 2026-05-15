@@ -2374,6 +2374,28 @@ class Database:
                     (key, json_dumps(value), iso_utc()),
                 )
 
+    def get_state(self, key: str, default: Any | None = None) -> Any:
+        with self._connect() as conn:
+            sql = "SELECT value FROM bot_state WHERE key=? LIMIT 1"
+            if self._use_postgres:
+                sql = sql.replace("?", "%s")
+            cur = conn.execute(sql, (key,))
+            row = cur.fetchone()
+            if row is None:
+                return default
+            raw = self._row_value(row, "value", 0, None)
+            try:
+                return json.loads(raw) if raw is not None else default
+            except Exception:
+                return default
+
+    def delete_state(self, key: str) -> None:
+        with self._connect() as conn:
+            sql = "DELETE FROM bot_state WHERE key=?"
+            if self._use_postgres:
+                sql = sql.replace("?", "%s")
+            conn.execute(sql, (key,))
+
     def list_open_trades(self) -> list[dict[str, Any]]:
         with self._connect() as conn:
             cur = conn.execute("SELECT * FROM trades WHERE status IN ('OPEN', 'PAPER_OPEN', 'LIVE_OPEN')")

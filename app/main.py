@@ -37,6 +37,7 @@ from .telegram_alerts import TelegramAlerts
 from .telegram_notifier import TelegramNotifier
 from .training_pulse import TrainingPulse
 from .utils import iso_utc, safe_float
+from .worker_lock import WorkerLockManager
 
 
 STOP_REQUESTED = False
@@ -70,6 +71,21 @@ def main() -> None:
     )
     if config.worker_lightweight_mode:
         logger.info("WORKER_LIGHTWEIGHT_MODE activo: research pesado desactivado en worker 24/7")
+
+    worker_lock = WorkerLockManager(config, db, logger)
+    lock_status = worker_lock.acquire()
+    health.extra["worker_lock"] = lock_status.to_dict()
+    if config.require_single_worker_lock and not lock_status.acquired:
+        logger.warning(
+            "Single worker lock activo: instancia %s bloqueada por %s; dashboard sigue disponible.",
+            lock_status.current_instance_id,
+            lock_status.active_worker_instance,
+        )
+        while not STOP_REQUESTED:
+            health.extra["worker_lock"] = worker_lock.status().to_dict()
+            time.sleep(min(30, max(5, config.worker_lock_ttl_seconds // 3)))
+        logger.info("Apagado solicitado mientras la instancia estaba en standby por single worker lock.")
+        return
 
     if config.live_trading and config.dry_run:
         logger.warning("LIVE_TRADING activo pero DRY_RUN=true: no se enviarán órdenes reales.")
@@ -637,6 +653,7 @@ def main() -> None:
             health.daily_pnl = daily_pnl
             health.last_scan = iso_utc()
             health.circuit_breaker = bool(risk_manager.cooldown_until)
+            health.extra["worker_lock"] = worker_lock.heartbeat().to_dict()
             db.set_state(
                 "last_cycle",
                 {
@@ -738,6 +755,7 @@ def main() -> None:
             risk_manager.register_api_failure()
             time.sleep(config.fast_scan_interval_seconds)
 
+    worker_lock.release()
     logger.info("Apagado solicitado. Cerrando limpio.")
     telegram.send("Bot detenido limpiamente.")
 
