@@ -146,7 +146,8 @@ class TrainingSummary:
         score_groups = [row for row in candidate_groups if str(row.get("group_value")) in {"70-79", "80-89", "90-100"}]
         score_not_monotonic = _score_not_monotonic(score_groups)
         policy_context = _policy_context(self.config, self.db, hours)
-        biggest = _biggest_problem(self.config, labels, events, observations, candidate_groups, path_metrics, score_not_monotonic, path_sources, policy_context)
+        operational_context = _operational_context(self.config, self.db, hours, labels)
+        biggest = _biggest_problem(self.config, labels, events, observations, candidate_groups, path_metrics, score_not_monotonic, path_sources, policy_context, operational_context)
         lines = [
             PLAN_START,
             f"hours: {window['hours']}",
@@ -156,6 +157,9 @@ class TrainingSummary:
             f"policy_candidates: {safe_int(policy_context.get('paper_candidate_count'))}",
             f"global_news_risk: {policy_context.get('global_news_risk')}",
             f"catalyst_dependency: {safe_float(policy_context.get('catalyst_dependency')):.2f}",
+            f"data_vault_status: {operational_context.get('data_vault_status')}",
+            f"latency_readiness: {safe_float(operational_context.get('latency_readiness')):.1f}",
+            f"time_death_risk: {safe_float(operational_context.get('time_death_risk')):.1f}",
             "GO_LIVE_GATES:",
             "- live_allowed=false",
             "- reason=paper/research only",
@@ -203,8 +207,10 @@ def _biggest_problem(
     score_not_monotonic: bool = False,
     path_sources: list[dict[str, Any]] | None = None,
     policy_context: dict[str, Any] | None = None,
+    operational_context: dict[str, Any] | None = None,
 ) -> str:
     policy_context = policy_context or {}
+    operational_context = operational_context or {}
     if config.live_trading:
         return "safety_live"
     if policy_context.get("global_news_risk") in {"NEWS_BLOCK_ALL_PAPER", "NEWS_RISK_OFF"}:
@@ -240,6 +246,10 @@ def _biggest_problem(
         return "too_many_time"
     if total > 0 and metrics["sl_ratio"] > metrics["tp_ratio"] * 2:
         return "too_many_sl"
+    if safe_float(operational_context.get("time_death_risk")) >= 70.0:
+        return "too_many_time_deaths"
+    if safe_float(operational_context.get("latency_readiness")) < 40.0:
+        return "latency_bottleneck"
     if observations_total > 0 and path_total <= 0:
         return "mfe_mae_filtered_by_low_score"
     if market_probe_active > 0 and path_matured <= 0:
@@ -249,6 +259,8 @@ def _biggest_problem(
     if safe_float(path_metrics.get("total")) <= 0 or safe_float(path_metrics.get("coverage_pct")) < 0.30:
         if total > 0:
             return "insufficient_price_path_data"
+    if operational_context.get("data_vault_status") == "no_recent_backup":
+        return "no_recent_training_backup"
     if events.get("training_slot_block", 0) > 0 and safe_float(labels.get("profit_factor")) >= 1.0 and metrics["tp_ratio"] >= 0.05:
         return "slot"
     if events.get("training_api_429", 0) > 0:
@@ -259,6 +271,36 @@ def _biggest_problem(
 
 
 def _plan_steps(problem: str, path_metrics: dict[str, Any] | None = None) -> list[str]:
+    if problem == "no_recent_training_backup":
+        return [
+            "1. ejecutar data-export --hours 168",
+            "2. comprobar migration-readiness",
+            "3. mantener backups fuera de git",
+            "4. no live",
+        ]
+    if problem == "too_many_time_deaths":
+        return [
+            "1. ejecutar time-death-lab --hours 24",
+            "2. ejecutar adaptive-exit-policy --hours 24",
+            "3. revisar exit-simulation --hours 24",
+            "4. no activar salidas reales automaticamente",
+            "5. NO LIVE",
+        ]
+    if problem == "latency_bottleneck":
+        return [
+            "1. ejecutar latency-audit --hours 24",
+            "2. mantener Railway solo para research/paper",
+            "3. preparar VPS/WebSocket solo si edge queda validado",
+            "4. NO LIVE",
+        ]
+    if problem == "need_policy_validation":
+        return [
+            "1. ejecutar paper-policy-lab --hours 24",
+            "2. ejecutar walk-forward --hours 24",
+            "3. ejecutar policy-backtest --hours 24",
+            "4. no ampliar slots",
+            "5. NO LIVE",
+        ]
     if problem in {"catalyst_dependency_unclear", "news_risk_block", "need_walk_forward_validation"}:
         return [
             "1. catalyst-summary --hours 24",
@@ -376,6 +418,33 @@ def _policy_context(config: BotConfig, db: Database, hours: int) -> dict[str, An
             context["catalyst_dependency"] = max(safe_float(row.get("catalyst_dependency")) for row in walk["policies"])
         news = NewsRiskGate(config, db).build(hours=hours)
         context["global_news_risk"] = news.get("global_decision", "NEWS_ALLOW")
+    except Exception:
+        pass
+    return context
+
+
+def _operational_context(config: BotConfig, db: Database, hours: int, labels: dict[str, Any]) -> dict[str, Any]:
+    metrics = _label_metrics(labels)
+    context = {
+        "data_vault_status": "unknown",
+        "latency_readiness": 100.0,
+        "time_death_risk": metrics["time_ratio"] * 100.0,
+    }
+    try:
+        from .data_vault import DataVault
+
+        readiness = DataVault(config, db).migration_readiness()
+        context["data_vault_status"] = "backup_exists" if readiness.get("backup_exists") else "no_recent_backup"
+    except Exception:
+        pass
+    try:
+        from .latency_audit import LatencyAudit
+
+        latency = LatencyAudit(config, db).build(hours=hours)
+        cycle = latency.get("metrics", {}).get("cycle_total_ms", {})
+        p95 = safe_float(cycle.get("p95_ms"))
+        if p95 > 0:
+            context["latency_readiness"] = max(0.0, 100.0 - min(p95 / 1000.0, 100.0))
     except Exception:
         pass
     return context

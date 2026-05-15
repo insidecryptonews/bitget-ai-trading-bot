@@ -8,6 +8,7 @@ from typing import Any
 
 from .bitget_client import BitgetClient
 from .config import load_config
+from .data_vault import DataVault
 from .database import Database
 from .daily_summary import DailyResearchSummary
 from .edge_guard import EdgeGuard
@@ -214,15 +215,27 @@ def main() -> None:
     last_memory_log_at = startup_monotonic
     last_lightweight_paper_reconcile_at = startup_monotonic
     last_mfe_mae_debug_at = startup_monotonic
+    last_data_vault_backup_at = startup_monotonic
+    data_vault_backup_running = {"running": False}
     while not STOP_REQUESTED:
         try:
             cycle_count += 1
             if training_pulse:
                 training_pulse.record_cycle_start()
             cycle_start = time.time()
+            cycle_timer_start = time.monotonic()
+            market_fetch_ms = 0.0
+            signal_generation_ms = 0.0
+            decision_ms = 0.0
             news = news_intel.check()
+            market_fetch_start = time.monotonic()
             snapshots = market_data.fetch_all(valid_symbols)
+            market_fetch_ms = (time.monotonic() - market_fetch_start) * 1000.0
             if not snapshots:
+                _record_latency_metrics(db, {
+                    "cycle_total_ms": (time.monotonic() - cycle_timer_start) * 1000.0,
+                    "market_fetch_ms": market_fetch_ms,
+                })
                 logger.warning("No se pudieron descargar snapshots; pausa de seguridad.")
                 if training_pulse:
                     training_pulse.record_snapshots(0)
@@ -234,7 +247,9 @@ def main() -> None:
                 training_pulse.record_snapshots(len(snapshots))
 
             regime = regime_detector.detect(snapshots)
+            signal_generation_start = time.monotonic()
             signals = [signal_engine.generate_signal(symbol, snapshot, regime) for symbol, snapshot in snapshots.items()]
+            signal_generation_ms = (time.monotonic() - signal_generation_start) * 1000.0
             if training_pulse:
                 training_pulse.record_regime(regime.regime)
                 training_pulse.record_signals(signals, config.min_score_to_trade)
@@ -308,6 +323,7 @@ def main() -> None:
                     )
 
             open_positions = position_manager.sync_open_positions()
+            decision_start = time.monotonic()
             if news.block_trading:
                 logger.warning("News intel bloquea trading: %s", "; ".join(news.warnings))
                 selected: list[Signal] = []
@@ -603,6 +619,7 @@ def main() -> None:
                             block_reason="" if result.executed else result.reason,
                         )
 
+            decision_ms = (time.monotonic() - decision_start) * 1000.0
             latest_prices = {symbol: snap.current_price for symbol, snap in snapshots.items() if snap.current_price}
             position_manager.monitor(latest_prices)
             open_positions = position_manager.sync_open_positions()
@@ -668,6 +685,14 @@ def main() -> None:
                 last_lightweight_paper_reconcile_at,
                 time.monotonic(),
             )
+            last_data_vault_backup_at = _data_vault_backup_if_due(
+                config,
+                db,
+                logger,
+                last_data_vault_backup_at,
+                time.monotonic(),
+                data_vault_backup_running,
+            )
             if training_pulse:
                 training_pulse.record_cycle_ok()
             _emit_training_pulse_if_due(config, db, training_pulse, logger, time.monotonic())
@@ -678,6 +703,12 @@ def main() -> None:
                 last_telegram_pulse_at,
                 time.monotonic(),
             )
+            _record_latency_metrics(db, {
+                "cycle_total_ms": (time.monotonic() - cycle_timer_start) * 1000.0,
+                "market_fetch_ms": market_fetch_ms,
+                "signal_generation_ms": signal_generation_ms,
+                "decision_ms": decision_ms,
+            })
             elapsed = time.time() - cycle_start
             sleep_for = max(1, config.scan_interval_seconds - elapsed)
             time.sleep(sleep_for)
@@ -1081,6 +1112,45 @@ def _log_memory_if_due(config, logger, pulse: TrainingPulse | None, last_log_at:
         logger.info("Worker memory lightweight check: max_rss_mb=%.2f", rss_mb)
         if pulse:
             pulse.record_memory(rss_mb)
+    return now
+
+
+def _record_latency_metrics(db: Database, metrics: dict[str, float]) -> None:
+    for name, value in metrics.items():
+        try:
+            db.record_latency_metric(name, float(value or 0.0), component="main_loop")
+        except Exception:
+            return
+
+
+def _data_vault_backup_if_due(
+    config,
+    db: Database,
+    logger,
+    last_backup_at: float,
+    now: float,
+    state: dict[str, bool],
+) -> float:
+    if not getattr(config, "enable_data_vault_backup", False):
+        return last_backup_at
+    interval_seconds = max(1, int(getattr(config, "data_vault_backup_interval_hours", 24) or 24)) * 3600
+    if last_backup_at > 0 and now - last_backup_at < interval_seconds:
+        return last_backup_at
+    if state.get("running"):
+        return last_backup_at
+
+    def run_backup() -> None:
+        state["running"] = True
+        try:
+            vault = DataVault(config, db, logger)
+            result = vault.export(hours=config.data_vault_backup_lookback_hours, upload=False)
+            logger.info("Data vault backup creado: %s", result.get("file"))
+        except Exception as exc:
+            logger.warning("Data vault backup fallo sin detener worker: %s", exc)
+        finally:
+            state["running"] = False
+
+    Thread(target=run_backup, name="data-vault-backup", daemon=True).start()
     return now
 
 

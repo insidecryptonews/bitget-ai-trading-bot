@@ -146,6 +146,20 @@ class Database:
         self._execute(
             conn,
             """
+            CREATE TABLE IF NOT EXISTS latency_metrics (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT NOT NULL,
+                metric_name TEXT,
+                component TEXT,
+                duration_ms REAL,
+                payload_json TEXT,
+                created_at TEXT NOT NULL
+            )
+            """,
+        )
+        self._execute(
+            conn,
+            """
             CREATE TABLE IF NOT EXISTS bot_state (
                 key TEXT PRIMARY KEY,
                 value TEXT,
@@ -765,6 +779,7 @@ class Database:
             "CREATE INDEX IF NOT EXISTS idx_market_catalysts_window ON market_catalysts(start_at, end_at)",
             "CREATE INDEX IF NOT EXISTS idx_market_catalysts_category ON market_catalysts(category)",
             "CREATE INDEX IF NOT EXISTS idx_market_catalysts_direction ON market_catalysts(direction)",
+            "CREATE INDEX IF NOT EXISTS idx_latency_metrics_time_name ON latency_metrics(timestamp, metric_name)",
             "CREATE INDEX IF NOT EXISTS idx_events_timestamp_type ON events(timestamp, event_type)",
             "CREATE INDEX IF NOT EXISTS idx_signal_observations_timestamp ON signal_observations(timestamp)",
             "CREATE INDEX IF NOT EXISTS idx_signal_observations_score_time ON signal_observations(confidence_score, timestamp)",
@@ -779,6 +794,41 @@ class Database:
                 "INSERT INTO events(timestamp, level, event_type, message, payload_json) VALUES (?, ?, ?, ?, ?)",
                 (iso_utc(), level, event_type, message, json_dumps(payload or {})),
             )
+
+    def record_latency_metric(
+        self,
+        metric_name: str,
+        duration_ms: float,
+        *,
+        component: str = "",
+        payload: Any | None = None,
+    ) -> None:
+        sql = """
+            INSERT INTO latency_metrics(timestamp, metric_name, component, duration_ms, payload_json, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """
+        with self._connect() as conn:
+            self._execute(
+                conn,
+                sql,
+                (iso_utc(), str(metric_name or "unknown")[:120], str(component or "")[:120], float(duration_ms or 0.0), json_dumps(payload or {}), iso_utc()),
+            )
+
+    def fetch_latency_metrics_since(self, since_iso: str, limit: int = 50000) -> list[dict[str, Any]]:
+        sql = """
+            SELECT *
+            FROM latency_metrics
+            WHERE timestamp >= ?
+            ORDER BY timestamp ASC, id ASC
+            LIMIT ?
+        """
+        if self._use_postgres:
+            sql = sql.replace("?", "%s")
+        try:
+            with self._connect() as conn:
+                return self._fetchall_dicts(conn.execute(sql, (since_iso, max(1, int(limit or 50000)))))
+        except Exception:
+            return []
 
     def record_trade(
         self,
@@ -1705,6 +1755,7 @@ class Database:
             "kronos_predictions",
             "market_context_events",
             "market_catalysts",
+            "latency_metrics",
             "strategy_lab_candidates",
             "strategy_lab_walkforward",
             "strategy_lab_recommendations",
@@ -1719,6 +1770,93 @@ class Database:
                 except Exception:
                     counts[table] = 0
         return counts
+
+    def table_exists(self, table: str) -> bool:
+        table = _safe_identifier(table)
+        try:
+            with self._connect() as conn:
+                if self._use_postgres:
+                    row = conn.execute("SELECT to_regclass(%s) AS name", (table,)).fetchone()
+                    return bool(self._row_value(row, "name", 0, None))
+                row = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone()
+                return row is not None
+        except Exception:
+            return False
+
+    def get_table_columns(self, table: str) -> list[str]:
+        table = _safe_identifier(table)
+        try:
+            with self._connect() as conn:
+                if self._use_postgres:
+                    rows = conn.execute(
+                        """
+                        SELECT column_name
+                        FROM information_schema.columns
+                        WHERE table_name = %s
+                        ORDER BY ordinal_position
+                        """,
+                        (table,),
+                    ).fetchall()
+                    return [self._row_value(row, "column_name", 0, "") for row in rows]
+                rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+                return [self._row_value(row, "name", 1, "") for row in rows]
+        except Exception:
+            return []
+
+    def fetch_table_rows(
+        self,
+        table: str,
+        *,
+        since_iso: str | None = None,
+        timestamp_column: str | None = None,
+        limit: int = 200000,
+    ) -> list[dict[str, Any]]:
+        table = _safe_identifier(table)
+        columns = set(self.get_table_columns(table))
+        if not columns:
+            return []
+        params: tuple[Any, ...] = ()
+        where = ""
+        if since_iso and timestamp_column and timestamp_column in columns:
+            where = f" WHERE {timestamp_column} >= ?"
+            params = (since_iso,)
+        order_column = "id" if "id" in columns else (timestamp_column if timestamp_column in columns else sorted(columns)[0])
+        sql = f"SELECT * FROM {table}{where} ORDER BY {order_column} ASC LIMIT ?"
+        params = params + (max(1, int(limit or 200000)),)
+        if self._use_postgres:
+            sql = sql.replace("?", "%s")
+        with self._connect() as conn:
+            return self._fetchall_dicts(conn.execute(sql, params))
+
+    def insert_table_row_if_missing(self, table: str, row: dict[str, Any]) -> str:
+        table = _safe_identifier(table)
+        if not row:
+            return "skipped"
+        columns = [col for col in self.get_table_columns(table) if col in row]
+        if not columns:
+            return "skipped"
+        with self._connect() as conn:
+            if "id" in columns:
+                select_sql = f"SELECT 1 FROM {table} WHERE id=? LIMIT 1"
+                if self._use_postgres:
+                    select_sql = select_sql.replace("?", "%s")
+                if conn.execute(select_sql, (row.get("id"),)).fetchone() is not None:
+                    return "duplicate"
+            elif table == "bot_state" and "key" in columns:
+                select_sql = "SELECT 1 FROM bot_state WHERE key=? LIMIT 1"
+                if self._use_postgres:
+                    select_sql = select_sql.replace("?", "%s")
+                if conn.execute(select_sql, (row.get("key"),)).fetchone() is not None:
+                    return "duplicate"
+            placeholders = ", ".join(["?"] * len(columns))
+            sql = f"INSERT INTO {table}({', '.join(columns)}) VALUES ({placeholders})"
+            if self._use_postgres:
+                sql = sql.replace("?", "%s")
+            try:
+                conn.execute(sql, tuple(row.get(col) for col in columns))
+                return "inserted"
+            except Exception:
+                return "skipped"
 
     def latest_trades(self, limit: int = 5) -> list[dict[str, Any]]:
         sql = "SELECT * FROM trades ORDER BY timestamp DESC LIMIT ?"
@@ -2587,3 +2725,10 @@ def _with_edge_metrics(row: dict[str, Any]) -> dict[str, Any]:
     row["tp_ratio"] = tp / max(total, 1.0)
     row["sample_warning"] = total < 50
     return row
+
+
+def _safe_identifier(value: str) -> str:
+    text = str(value or "").strip()
+    if not text or any(not (char.isalnum() or char == "_") for char in text):
+        raise ValueError(f"Identificador SQL no valido: {value!r}")
+    return text

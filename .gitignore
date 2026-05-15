@@ -9,6 +9,7 @@ logs/
 .env.production
 .manual_test_tmp/
 exports/
+training_exports/
 railway_logs_export/
 reports/
 bot_state.db

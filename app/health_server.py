@@ -78,6 +78,13 @@ def start_health_server(
                 "/api/training/paper-policy-lab",
                 "/api/training/walk-forward",
                 "/api/training/policy-backtest",
+                "/api/training/time-death-lab",
+                "/api/training/adaptive-exit-policy",
+                "/api/training/latency-audit",
+                "/api/training/fast-execution-readiness",
+                "/api/training/data-vault-status",
+                "/api/training/data-export",
+                "/api/training/migration-readiness",
             }:
                 if not _authorized(config, query, self.headers):
                     self._send_json({"error": "unauthorized"}, status=401)
@@ -132,6 +139,27 @@ def start_health_server(
                 return
             if path == "/api/training/policy-backtest":
                 self._send_json(_policy_backtest(config, db, query))
+                return
+            if path == "/api/training/time-death-lab":
+                self._send_json(_time_death_lab(config, db, query))
+                return
+            if path == "/api/training/adaptive-exit-policy":
+                self._send_json(_adaptive_exit_policy(config, db, query))
+                return
+            if path == "/api/training/latency-audit":
+                self._send_json(_latency_audit(config, db, query))
+                return
+            if path == "/api/training/fast-execution-readiness":
+                self._send_json(_fast_execution_readiness(config, db, query))
+                return
+            if path == "/api/training/data-vault-status":
+                self._send_json(_data_vault_status(config, db, query))
+                return
+            if path == "/api/training/data-export":
+                self._send_json(_data_export(config, db, query))
+                return
+            if path == "/api/training/migration-readiness":
+                self._send_json(_migration_readiness(config, db, query))
                 return
             self._send_status(404, "not found")
 
@@ -372,6 +400,82 @@ def _walk_forward(config: Any | None, db: Any | None, query: dict[str, list[str]
 
 def _policy_backtest(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
     return _lab_payload(config, db, query, "policy backtest unavailable", ".policy_backtest", "PolicyBacktest")
+
+
+def _time_death_lab(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
+    return _lab_payload(config, db, query, "time death lab unavailable", ".time_death_lab", "TimeDeathLab")
+
+
+def _adaptive_exit_policy(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
+    return _lab_payload(config, db, query, "adaptive exit policy unavailable", ".adaptive_exit_policy_lab", "AdaptiveExitPolicyLab")
+
+
+def _latency_audit(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
+    return _lab_payload(config, db, query, "latency audit unavailable", ".latency_audit", "LatencyAudit")
+
+
+def _fast_execution_readiness(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
+    return _lab_payload(config, db, query, "fast execution readiness unavailable", ".fast_execution_readiness", "FastExecutionReadiness")
+
+
+def _data_vault_status(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
+    if config is None or db is None:
+        return {"error": "data vault unavailable", "final_recommendation": "NO LIVE"}
+    try:
+        from .data_vault import DataVault
+
+        payload = DataVault(config, db).status()
+        text = DataVault(config, db).status_text()
+    except Exception as exc:
+        return {"error": str(exc)[:300], "final_recommendation": "NO LIVE"}
+    payload = dict(payload)
+    payload["text"] = text
+    payload["generated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    payload["final_recommendation"] = "NO LIVE"
+    return payload
+
+
+def _data_export(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
+    hours = _query_int(query, "hours", 168)
+    if config is None or db is None:
+        return {"error": "data export unavailable", "hours": hours, "final_recommendation": "NO LIVE"}
+    try:
+        from .data_vault import DataVault
+
+        payload = DataVault(config, db).export(hours=hours, upload=False)
+        text = "\n".join([
+            "DATA EXPORT START",
+            f"hours: {payload.get('hours')}",
+            f"file: {payload.get('file')}",
+            f"manifest_valid: {str(payload.get('manifest_valid')).lower()}",
+            f"checksums_created: {str(payload.get('checksums_created')).lower()}",
+            f"secrets_excluded: {str(payload.get('secrets_excluded')).lower()}",
+            "DATA EXPORT END",
+        ])
+    except Exception as exc:
+        return {"error": str(exc)[:300], "hours": hours, "final_recommendation": "NO LIVE"}
+    payload = dict(payload)
+    payload["text"] = text
+    payload["generated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    payload["final_recommendation"] = "NO LIVE"
+    return payload
+
+
+def _migration_readiness(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
+    if config is None or db is None:
+        return {"error": "migration readiness unavailable", "final_recommendation": "NO LIVE"}
+    try:
+        from .data_vault import DataVault
+
+        payload = DataVault(config, db).migration_readiness()
+        text = DataVault(config, db).migration_readiness_text()
+    except Exception as exc:
+        return {"error": str(exc)[:300], "final_recommendation": "NO LIVE"}
+    payload = dict(payload)
+    payload["text"] = text
+    payload["generated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    payload["final_recommendation"] = "NO LIVE"
+    return payload
 
 
 def _lab_payload(

@@ -210,6 +210,21 @@ class BotConfig:
     label_use_tp2: bool = False
     radar_log_every_n_cycles: int = 3
     memory_log_interval_minutes: int = 5
+    enable_data_vault_backup: bool = True
+    data_vault_backup_interval_hours: int = 24
+    data_vault_backup_lookback_hours: int = 168
+    data_vault_max_backups_local: int = 10
+    data_vault_export_dir: str = "training_exports"
+    data_vault_compress: bool = True
+    data_vault_include_raw_logs: bool = False
+    data_vault_external_enabled: bool = False
+    data_vault_external_provider: str = "s3_compatible"
+    data_vault_external_bucket: str = ""
+    data_vault_external_prefix: str = "bitget-ai-trading-bot/training"
+    data_vault_s3_endpoint_url: str = ""
+    data_vault_s3_region: str = "auto"
+    data_vault_s3_access_key_id: str = ""
+    data_vault_s3_secret_access_key: str = ""
 
     symbols: list[str] = field(default_factory=lambda: [
         "BTCUSDT",
@@ -513,6 +528,21 @@ def load_config(load_dotenv_file: bool = True) -> BotConfig:
         label_use_tp2=env_bool(os.getenv("LABEL_USE_TP2"), False),
         radar_log_every_n_cycles=env_int(os.getenv("RADAR_LOG_EVERY_N_CYCLES"), 3),
         memory_log_interval_minutes=env_int(os.getenv("MEMORY_LOG_INTERVAL_MINUTES"), 5),
+        enable_data_vault_backup=env_bool(os.getenv("ENABLE_DATA_VAULT_BACKUP"), True),
+        data_vault_backup_interval_hours=env_int(os.getenv("DATA_VAULT_BACKUP_INTERVAL_HOURS"), 24),
+        data_vault_backup_lookback_hours=env_int(os.getenv("DATA_VAULT_BACKUP_LOOKBACK_HOURS"), 168),
+        data_vault_max_backups_local=env_int(os.getenv("DATA_VAULT_MAX_BACKUPS_LOCAL"), 10),
+        data_vault_export_dir=os.getenv("DATA_VAULT_EXPORT_DIR", "training_exports"),
+        data_vault_compress=env_bool(os.getenv("DATA_VAULT_COMPRESS"), True),
+        data_vault_include_raw_logs=env_bool(os.getenv("DATA_VAULT_INCLUDE_RAW_LOGS"), False),
+        data_vault_external_enabled=env_bool(os.getenv("DATA_VAULT_EXTERNAL_ENABLED"), False),
+        data_vault_external_provider=os.getenv("DATA_VAULT_EXTERNAL_PROVIDER", "s3_compatible"),
+        data_vault_external_bucket=os.getenv("DATA_VAULT_EXTERNAL_BUCKET", ""),
+        data_vault_external_prefix=os.getenv("DATA_VAULT_EXTERNAL_PREFIX", "bitget-ai-trading-bot/training"),
+        data_vault_s3_endpoint_url=os.getenv("DATA_VAULT_S3_ENDPOINT_URL", ""),
+        data_vault_s3_region=os.getenv("DATA_VAULT_S3_REGION", "auto"),
+        data_vault_s3_access_key_id=os.getenv("DATA_VAULT_S3_ACCESS_KEY_ID", ""),
+        data_vault_s3_secret_access_key=os.getenv("DATA_VAULT_S3_SECRET_ACCESS_KEY", ""),
         symbols=parse_csv_symbols(
             os.getenv(
                 "SYMBOLS",

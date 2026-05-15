@@ -553,6 +553,51 @@ class ResearchLab:
 
         return PolicyNewsSmokeTest(self.config, self.db, self.logger).to_text()
 
+    def time_death_lab(self, hours: int = 24) -> str:
+        from .time_death_lab import TimeDeathLab
+
+        return TimeDeathLab(self.config, self.db).to_text(hours=hours)
+
+    def adaptive_exit_policy(self, hours: int = 24) -> str:
+        from .adaptive_exit_policy_lab import AdaptiveExitPolicyLab
+
+        return AdaptiveExitPolicyLab(self.config, self.db).to_text(hours=hours)
+
+    def latency_audit(self, hours: int = 24) -> str:
+        from .latency_audit import LatencyAudit
+
+        return LatencyAudit(self.config, self.db).to_text(hours=hours)
+
+    def fast_execution_readiness(self) -> str:
+        from .fast_execution_readiness import FastExecutionReadiness
+
+        return FastExecutionReadiness(self.config, self.db).to_text()
+
+    def data_vault_status(self) -> str:
+        from .data_vault import DataVault
+
+        return DataVault(self.config, self.db, self.logger).status_text()
+
+    def data_export(self, hours: int = 168, upload: bool = False) -> str:
+        from .data_vault import DataVault
+
+        return DataVault(self.config, self.db, self.logger).export_text(hours=hours, upload=upload)
+
+    def data_import(self, file: str, apply: bool = False) -> str:
+        from .data_vault import DataVault
+
+        return DataVault(self.config, self.db, self.logger).import_text(file=file, apply=apply)
+
+    def migration_readiness(self) -> str:
+        from .data_vault import DataVault
+
+        return DataVault(self.config, self.db, self.logger).migration_readiness_text()
+
+    def exit_latency_vault_smoke_test(self) -> str:
+        from .exit_latency_vault_smoke_test import ExitLatencyVaultSmokeTest
+
+        return ExitLatencyVaultSmokeTest(self.config, self.db, self.logger).to_text()
+
     def build_markdown_report(
         self,
         dataset: list[dict[str, Any]] | None = None,
@@ -1079,6 +1124,15 @@ def main() -> None:
             "walk-forward",
             "policy-backtest",
             "policy-news-smoke-test",
+            "time-death-lab",
+            "adaptive-exit-policy",
+            "latency-audit",
+            "fast-execution-readiness",
+            "data-vault-status",
+            "data-export",
+            "data-import",
+            "migration-readiness",
+            "exit-latency-vault-smoke-test",
         ],
     )
     parser.add_argument("--limit", type=int, default=None, help="Maximo de labels a procesar en phase2-persist.")
@@ -1096,6 +1150,10 @@ def main() -> None:
     parser.add_argument("--confidence", type=float, default=0.5, help="Confianza catalyst 0-1.")
     parser.add_argument("--hours-back", type=int, default=0, help="Horas hacia atras para ventana catalyst.")
     parser.add_argument("--hours-forward", type=int, default=24, help="Horas hacia delante para ventana catalyst.")
+    parser.add_argument("--file", default="", help="Backup data-vault para importar.")
+    parser.add_argument("--apply", action="store_true", help="Aplica data-import. Sin esto, import es dry-run.")
+    parser.add_argument("--dry-run", action="store_true", help="Fuerza data-import dry-run.")
+    parser.add_argument("--upload", action="store_true", help="Sube data-export si external storage esta configurado.")
     args = parser.parse_args()
     config = load_config()
     logger = setup_logger()
@@ -1207,6 +1265,26 @@ def main() -> None:
         print(lab.policy_backtest(hours=args.hours))
     elif args.command == "policy-news-smoke-test":
         print(lab.policy_news_smoke_test())
+    elif args.command == "time-death-lab":
+        print(lab.time_death_lab(hours=args.hours))
+    elif args.command == "adaptive-exit-policy":
+        print(lab.adaptive_exit_policy(hours=args.hours))
+    elif args.command == "latency-audit":
+        print(lab.latency_audit(hours=args.hours))
+    elif args.command == "fast-execution-readiness":
+        print(lab.fast_execution_readiness())
+    elif args.command == "data-vault-status":
+        print(lab.data_vault_status())
+    elif args.command == "data-export":
+        print(lab.data_export(hours=args.hours, upload=args.upload))
+    elif args.command == "data-import":
+        if not args.file:
+            raise SystemExit("--file es obligatorio para data-import")
+        print(lab.data_import(file=args.file, apply=args.apply and not args.dry_run))
+    elif args.command == "migration-readiness":
+        print(lab.migration_readiness())
+    elif args.command == "exit-latency-vault-smoke-test":
+        print(lab.exit_latency_vault_smoke_test())
 
 
 if __name__ == "__main__":
