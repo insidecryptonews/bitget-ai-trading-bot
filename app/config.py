@@ -151,6 +151,15 @@ class BotConfig:
     edge_guard_recent_hours: int = 6
     edge_guard_decay_recent_weight: float = 0.65
     edge_guard_max_recent_pf_drop: float = 0.35
+    enable_paper_policy_filter: bool = False
+    paper_policy_filter_mode: str = "shadow"
+    paper_policy_min_validation_pf: float = 1.2
+    paper_policy_min_samples: int = 500
+    paper_policy_require_walk_forward: bool = True
+    paper_policy_block_short_if_negative: bool = True
+    paper_policy_block_risk_off: bool = True
+    paper_policy_block_range: bool = True
+    paper_policy_news_gate_required: bool = True
     enable_mfe_mae_capture: bool = True
     mfe_mae_track_min_score: int = 70
     mfe_mae_track_no_trade: bool = False
@@ -248,6 +257,7 @@ class BotConfig:
         meta_model_mode = self.meta_model_mode.lower().strip()
         object.__setattr__(self, "margin_mode", margin_mode)
         object.__setattr__(self, "meta_model_mode", meta_model_mode)
+        object.__setattr__(self, "paper_policy_filter_mode", self.paper_policy_filter_mode.lower().strip())
         object.__setattr__(self, "full_research_report_mode", self.full_research_report_mode.lower().strip())
         object.__setattr__(self, "full_research_startup_mode", self.full_research_startup_mode.lower().strip())
         object.__setattr__(self, "margin_coin", self.margin_coin.upper().strip())
@@ -473,6 +483,15 @@ def load_config(load_dotenv_file: bool = True) -> BotConfig:
         edge_guard_recent_hours=env_int(os.getenv("EDGE_GUARD_RECENT_HOURS"), 6),
         edge_guard_decay_recent_weight=env_float(os.getenv("EDGE_GUARD_DECAY_RECENT_WEIGHT"), 0.65),
         edge_guard_max_recent_pf_drop=env_float(os.getenv("EDGE_GUARD_MAX_RECENT_PF_DROP"), 0.35),
+        enable_paper_policy_filter=env_bool(os.getenv("ENABLE_PAPER_POLICY_FILTER"), False),
+        paper_policy_filter_mode=os.getenv("PAPER_POLICY_FILTER_MODE", "shadow"),
+        paper_policy_min_validation_pf=env_float(os.getenv("PAPER_POLICY_MIN_VALIDATION_PF"), 1.2),
+        paper_policy_min_samples=env_int(os.getenv("PAPER_POLICY_MIN_SAMPLES"), 500),
+        paper_policy_require_walk_forward=env_bool(os.getenv("PAPER_POLICY_REQUIRE_WALK_FORWARD"), True),
+        paper_policy_block_short_if_negative=env_bool(os.getenv("PAPER_POLICY_BLOCK_SHORT_IF_NEGATIVE"), True),
+        paper_policy_block_risk_off=env_bool(os.getenv("PAPER_POLICY_BLOCK_RISK_OFF"), True),
+        paper_policy_block_range=env_bool(os.getenv("PAPER_POLICY_BLOCK_RANGE"), True),
+        paper_policy_news_gate_required=env_bool(os.getenv("PAPER_POLICY_NEWS_GATE_REQUIRED"), True),
         enable_mfe_mae_capture=env_bool(os.getenv("ENABLE_MFE_MAE_CAPTURE"), True),
         mfe_mae_track_min_score=env_int(os.getenv("MFE_MAE_TRACK_MIN_SCORE"), 70),
         mfe_mae_track_no_trade=env_bool(os.getenv("MFE_MAE_TRACK_NO_TRADE"), False),

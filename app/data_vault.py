@@ -25,6 +25,8 @@ IMPORT_START = "DATA IMPORT START"
 IMPORT_END = "DATA IMPORT END"
 MIGRATION_START = "MIGRATION READINESS START"
 MIGRATION_END = "MIGRATION READINESS END"
+MIGRATION_DEEP_START = "MIGRATION READINESS DEEP CHECK START"
+MIGRATION_DEEP_END = "MIGRATION READINESS DEEP CHECK END"
 
 EXPORT_TABLES: dict[str, str | None] = {
     "signal_observations": "timestamp",
@@ -66,6 +68,16 @@ class DataVault:
         external = DataVaultExternalStorage(self.config, self.logger)
         remote = external.list_backups() if self.config.data_vault_external_enabled else _empty_remote_status()
         state = self._read_state()
+        if self.config.data_vault_external_enabled and remote.get("remote_list_ok"):
+            self._update_cache({
+                "latest_remote_backup": remote.get("latest_remote_backup", ""),
+                "latest_remote_key": remote.get("latest_remote_backup", ""),
+                "remote_backup_count": safe_int(remote.get("remote_backup_count")),
+                "remote_list_ok": True,
+                "last_upload_status": state.get("last_upload_status") or remote.get("last_upload_status") or "none",
+                "last_upload_error": remote.get("sanitized_error") or "none",
+            })
+            state = self._read_state()
         return {
             "export_dir": str(self.export_dir),
             "local_backup_count": len(backups),
@@ -84,6 +96,9 @@ class DataVault:
             "last_upload_remote_key": state.get("last_upload_remote_key") or remote.get("latest_remote_backup") or "",
             "last_upload_verified": bool(state.get("last_upload_verified", False)),
             "last_upload_error": state.get("last_upload_error") or remote.get("sanitized_error") or "none",
+            "manifest_known_valid": _known_bool(state.get("manifest_valid")),
+            "checksum_known_valid": _known_bool(state.get("checksum_valid")),
+            "import_dry_run_last_ok": _known_bool(state.get("import_dry_run_ok")),
             "streaming_export": True,
             "memory_safe_export": True,
             "backup_in_progress": _BACKUP_LOCK.locked(),
@@ -108,6 +123,9 @@ class DataVault:
             f"last_upload_status: {payload['last_upload_status']}",
             f"last_upload_verified: {str(payload['last_upload_verified']).lower()}",
             f"last_upload_error: {payload['last_upload_error']}",
+            f"manifest_known_valid: {_format_known(payload['manifest_known_valid'])}",
+            f"checksum_known_valid: {_format_known(payload['checksum_known_valid'])}",
+            f"import_dry_run_last_ok: {_format_known(payload['import_dry_run_last_ok'])}",
             f"streaming_export: {str(payload['streaming_export']).lower()}",
             f"memory_safe_export: {str(payload['memory_safe_export']).lower()}",
             f"backup_in_progress: {str(payload['backup_in_progress']).lower()}",
@@ -197,10 +215,21 @@ class DataVault:
             self.prune_local_backups(apply=True)
         self._write_state({
             "last_export_file": str(backup_path),
+            "latest_local_backup": str(backup_path),
+            "latest_backup_size": local_size,
+            "latest_sha256": manifest.get("backup_sha256", ""),
+            "manifest_valid": True,
+            "checksum_valid": True,
+            "source": "local",
+            "secrets_excluded": True,
             "last_upload_status": "uploaded" if external.get("uploaded") else "failed" if external.get("attempted") else "none",
+            "upload_verified": bool(external.get("verified", False)),
             "last_upload_remote_key": external.get("remote_key", ""),
+            "latest_remote_backup": external.get("remote_key", ""),
+            "latest_remote_key": external.get("remote_key", ""),
             "last_upload_verified": bool(external.get("verified", False)),
             "last_upload_error": external.get("sanitized_error") or external.get("error") or "none",
+            "error_sanitized": external.get("sanitized_error") or external.get("error") or "none",
             "updated_at": datetime.now(timezone.utc).isoformat(),
         })
         return {
@@ -271,6 +300,17 @@ class DataVault:
                 else:
                     skipped += 1
             table_rows.append({"table": table, "rows": len(rows), "mode": "apply"})
+        if not apply:
+            self._update_cache({
+                "latest_local_backup": str(path),
+                "manifest_valid": True,
+                "checksum_valid": True,
+                "import_dry_run_ok": True,
+                "checked_at": datetime.now(timezone.utc).isoformat(),
+                "source": "local",
+                "secrets_excluded": True,
+                "error_sanitized": "none",
+            })
         return {
             "file": str(path),
             "mode": "apply" if apply else "dry-run",
@@ -331,10 +371,21 @@ class DataVault:
         result = DataVaultExternalStorage(self.config, self.logger).upload(latest, manifest)
         self._write_state({
             "last_export_file": str(latest),
+            "latest_local_backup": str(latest),
+            "latest_backup_size": latest.stat().st_size,
+            "latest_sha256": _sha256_file(latest),
+            "manifest_valid": manifest_valid,
+            "checksum_valid": checksum_valid,
+            "source": "local",
+            "secrets_excluded": True,
             "last_upload_status": "uploaded" if result.get("uploaded") else "failed" if result.get("attempted") else "none",
+            "upload_verified": bool(result.get("verified", False)),
             "last_upload_remote_key": result.get("remote_key", ""),
+            "latest_remote_backup": result.get("remote_key", ""),
+            "latest_remote_key": result.get("remote_key", ""),
             "last_upload_verified": bool(result.get("verified", False)),
             "last_upload_error": result.get("sanitized_error") or result.get("error") or "none",
+            "error_sanitized": result.get("sanitized_error") or result.get("error") or "none",
             "updated_at": datetime.now(timezone.utc).isoformat(),
         })
         return {
@@ -395,34 +446,58 @@ class DataVault:
     def migration_readiness(self) -> dict[str, Any]:
         backups = self.list_backups()
         latest = backups[-1] if backups else None
-        manifest_valid = checksum_valid = import_dry_run_ok = False
         remote = DataVaultExternalStorage(self.config, self.logger).list_backups() if self.config.data_vault_external_enabled else _empty_remote_status()
-        if latest:
-            try:
-                self.validate_backup(latest)
-                manifest_valid = checksum_valid = True
-                self.import_backup(file=latest, apply=False)
-                import_dry_run_ok = True
-            except Exception as exc:
-                if self.logger:
-                    self.logger.warning("Data vault readiness fallo: %s", _sanitize_text(str(exc)))
-        remote_verified = bool(remote.get("remote_list_ok") and safe_int(remote.get("remote_backup_count")) > 0)
-        ready = bool((latest or remote_verified) and manifest_valid and checksum_valid and import_dry_run_ok)
+        state = self._read_state()
+        if self.config.data_vault_external_enabled and remote.get("remote_list_ok"):
+            self._update_cache({
+                "latest_remote_backup": remote.get("latest_remote_backup", ""),
+                "latest_remote_key": remote.get("latest_remote_backup", ""),
+                "remote_backup_count": safe_int(remote.get("remote_backup_count")),
+                "remote_list_ok": True,
+                "last_upload_status": state.get("last_upload_status") or remote.get("last_upload_status") or "none",
+                "last_upload_error": remote.get("sanitized_error") or "none",
+            })
+            state = self._read_state()
+        remote_verified = bool(
+            remote.get("remote_list_ok")
+            and safe_int(remote.get("remote_backup_count")) > 0
+            and (state.get("last_upload_verified") is True or state.get("upload_verified") is True or bool(remote.get("latest_remote_backup")))
+        )
         source = "both" if latest and remote_verified else "local" if latest else "remote" if remote_verified else "none"
+        manifest_known = _known_bool(state.get("manifest_valid"))
+        checksum_known = _known_bool(state.get("checksum_valid"))
+        import_ok = _known_bool(state.get("import_dry_run_ok"))
+        ready: bool | str = bool((latest or remote_verified) and manifest_known is True and checksum_known is True and import_ok is True)
+        deep_required = not ready
+        if latest or remote_verified:
+            if ready is False and (manifest_known == "unknown" or checksum_known == "unknown" or import_ok == "unknown"):
+                ready = "partial"
         return {
+            "mode": "lightweight",
             "backup_exists": bool(latest),
+            "readiness_status": "ready" if ready is True else "partial" if ready == "partial" else "not_ready",
+            "reason": "heavy_verification_required" if deep_required and (latest or remote_verified) else "no_backup" if not latest and not remote_verified else "ready",
+            "next_action": "run migration-readiness-deep-check" if deep_required and (latest or remote_verified) else "none",
             "latest_backup_source": source,
             "latest_backup": str(latest) if latest else "",
             "latest_local_backup": str(latest) if latest else "",
             "latest_remote_backup": remote.get("latest_remote_backup", ""),
-            "manifest_valid": manifest_valid,
-            "checksum_valid": checksum_valid,
-            "import_dry_run_ok": import_dry_run_ok,
-            "external_backup_configured": _external_configured(self.config),
+            "latest_remote_key": state.get("latest_remote_key") or remote.get("latest_remote_backup", ""),
+            "local_backup_count": len(backups),
             "remote_backup_count": safe_int(remote.get("remote_backup_count")),
+            "last_upload_status": state.get("last_upload_status") or remote.get("last_upload_status") or "none",
+            "last_upload_verified": bool(state.get("last_upload_verified", False) or state.get("upload_verified", False)),
+            "manifest_known_valid": manifest_known,
+            "checksum_known_valid": checksum_known,
+            "import_dry_run_last_ok": import_ok,
+            "manifest_valid": manifest_known,
+            "checksum_valid": checksum_known,
+            "import_dry_run_ok": import_ok,
+            "external_backup_configured": _external_configured(self.config),
             "remote_verified": remote_verified,
             "secrets_excluded": True,
             "ready_for_vps_migration": ready,
+            "deep_check_required": deep_required,
             "final_recommendation": "NO LIVE",
         }
 
@@ -430,18 +505,26 @@ class DataVault:
         payload = self.migration_readiness()
         return "\n".join([
             MIGRATION_START,
+            "mode: lightweight",
             f"backup_exists: {str(payload['backup_exists']).lower()}",
+            f"readiness_status: {payload['readiness_status']}",
+            f"reason: {payload['reason']}",
+            f"next_action: {payload['next_action']}",
             f"latest_backup_source: {payload['latest_backup_source']}",
             f"latest_local_backup: {payload['latest_local_backup'] or 'none'}",
             f"latest_remote_backup: {payload['latest_remote_backup'] or 'none'}",
-            f"manifest_valid: {str(payload['manifest_valid']).lower()}",
-            f"checksum_valid: {str(payload['checksum_valid']).lower()}",
-            f"import_dry_run_ok: {str(payload['import_dry_run_ok']).lower()}",
-            f"external_backup_configured: {str(payload['external_backup_configured']).lower()}",
+            f"local_backup_count: {payload['local_backup_count']}",
             f"remote_backup_count: {payload['remote_backup_count']}",
+            f"last_upload_status: {payload['last_upload_status']}",
+            f"last_upload_verified: {str(payload['last_upload_verified']).lower()}",
+            f"manifest_known_valid: {_format_known(payload['manifest_known_valid'])}",
+            f"checksum_known_valid: {_format_known(payload['checksum_known_valid'])}",
+            f"import_dry_run_last_ok: {_format_known(payload['import_dry_run_last_ok'])}",
+            f"external_backup_configured: {str(payload['external_backup_configured']).lower()}",
             f"remote_verified: {str(payload['remote_verified']).lower()}",
             "secrets_excluded: true",
-            f"ready_for_vps_migration: {str(payload['ready_for_vps_migration']).lower()}",
+            f"ready_for_vps_migration: {_format_known(payload['ready_for_vps_migration'])}",
+            f"deep_check_required: {str(payload['deep_check_required']).lower()}",
             "next_steps:",
             "1. download latest backup or fetch from S3 compatible storage",
             "2. clone repo on VPS",
@@ -452,6 +535,75 @@ class DataVault:
             "7. start worker in paper mode",
             "final_recommendation: NO LIVE",
             MIGRATION_END,
+        ])
+
+    def migration_readiness_deep_check(self) -> dict[str, Any]:
+        backups = self.list_backups()
+        latest = backups[-1] if backups else None
+        if latest is None:
+            payload = {
+                "backup_source_checked": "none",
+                "latest_backup": "",
+                "manifest_valid": False,
+                "checksum_valid": False,
+                "import_dry_run_ok": False,
+                "cache_updated": False,
+                "ready_for_vps_migration": False,
+                "error_sanitized": "no_local_backup_for_deep_check",
+                "final_recommendation": "NO LIVE",
+            }
+            self._update_cache(payload)
+            return payload
+        error = "none"
+        manifest_valid = checksum_valid = import_ok = False
+        try:
+            manifest, _ = self.validate_backup(latest)
+            manifest_valid = checksum_valid = True
+            self.import_backup(file=latest, apply=False)
+            import_ok = True
+            sha = manifest.get("backup_sha256") or _sha256_file(latest)
+        except Exception as exc:
+            sha = _sha256_file(latest) if latest.exists() else ""
+            error = _sanitize_text(str(exc))[:300]
+        cache = {
+            "latest_local_backup": str(latest),
+            "latest_backup_size": latest.stat().st_size,
+            "latest_sha256": sha,
+            "manifest_valid": manifest_valid,
+            "checksum_valid": checksum_valid,
+            "import_dry_run_ok": import_ok,
+            "checked_at": datetime.now(timezone.utc).isoformat(),
+            "source": "local",
+            "secrets_excluded": True,
+            "error_sanitized": error,
+        }
+        self._update_cache(cache)
+        return {
+            "backup_source_checked": "local",
+            "latest_backup": str(latest),
+            "manifest_valid": manifest_valid,
+            "checksum_valid": checksum_valid,
+            "import_dry_run_ok": import_ok,
+            "cache_updated": True,
+            "ready_for_vps_migration": bool(manifest_valid and checksum_valid and import_ok),
+            "error_sanitized": error,
+            "final_recommendation": "NO LIVE",
+        }
+
+    def migration_readiness_deep_check_text(self) -> str:
+        payload = self.migration_readiness_deep_check()
+        return "\n".join([
+            MIGRATION_DEEP_START,
+            f"backup_source_checked: {payload['backup_source_checked']}",
+            f"latest_backup: {payload['latest_backup'] or 'none'}",
+            f"manifest_valid: {str(payload['manifest_valid']).lower()}",
+            f"checksum_valid: {str(payload['checksum_valid']).lower()}",
+            f"import_dry_run_ok: {str(payload['import_dry_run_ok']).lower()}",
+            f"cache_updated: {str(payload['cache_updated']).lower()}",
+            f"ready_for_vps_migration: {str(payload['ready_for_vps_migration']).lower()}",
+            f"error_sanitized: {payload.get('error_sanitized') or 'none'}",
+            "final_recommendation: NO LIVE",
+            MIGRATION_DEEP_END,
         ])
 
     def list_backups(self) -> list[Path]:
@@ -517,6 +669,12 @@ class DataVault:
             self._state_path().write_text(json.dumps(_sanitize_value(payload), indent=2, ensure_ascii=True), encoding="utf-8")
         except OSError:
             pass
+
+    def _update_cache(self, payload: dict[str, Any]) -> None:
+        state = self._read_state()
+        state.update(_sanitize_value(payload))
+        state["updated_at"] = datetime.now(timezone.utc).isoformat()
+        self._write_state(state)
 
 
 class DataVaultExternalStorage:
@@ -752,6 +910,27 @@ def _empty_remote_status() -> dict[str, Any]:
         "last_upload_status": "none",
         "sanitized_error": "none",
     }
+
+
+def _known_bool(value: Any) -> bool | str:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return "unknown"
+    text = str(value).strip().lower()
+    if text in {"true", "1", "yes"}:
+        return True
+    if text in {"false", "0", "no"}:
+        return False
+    return "unknown"
+
+
+def _format_known(value: Any) -> str:
+    if value is True:
+        return "true"
+    if value is False:
+        return "false"
+    return str(value or "unknown")
 
 
 def _age_hours(path: Path | None) -> float | None:

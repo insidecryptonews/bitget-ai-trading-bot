@@ -538,6 +538,11 @@ class ResearchLab:
 
         return PaperPolicyLab(self.config, self.db).to_text(hours=hours)
 
+    def paper_policy_orchestrator(self, hours: int = 24) -> str:
+        from .paper_policy_orchestrator import PaperPolicyOrchestrator
+
+        return PaperPolicyOrchestrator(self.config, self.db).to_text(hours=hours)
+
     def walk_forward(self, hours: int = 24) -> str:
         from .walk_forward_validation import WalkForwardValidation
 
@@ -547,6 +552,11 @@ class ResearchLab:
         from .policy_backtest import PolicyBacktest
 
         return PolicyBacktest(self.config, self.db).to_text(hours=hours)
+
+    def exit_policy_backtest(self, hours: int = 24) -> str:
+        from .exit_policy_backtest import ExitPolicyBacktest
+
+        return ExitPolicyBacktest(self.config, self.db).to_text(hours=hours)
 
     def policy_news_smoke_test(self) -> str:
         from .policy_news_smoke_test import PolicyNewsSmokeTest
@@ -593,6 +603,11 @@ class ResearchLab:
 
         return DataVault(self.config, self.db, self.logger).migration_readiness_text()
 
+    def migration_readiness_deep_check(self) -> str:
+        from .data_vault import DataVault
+
+        return DataVault(self.config, self.db, self.logger).migration_readiness_deep_check_text()
+
     def data_upload_latest(self) -> str:
         from .data_vault import DataVault
 
@@ -612,6 +627,11 @@ class ResearchLab:
         from .exit_latency_vault_smoke_test import ExitLatencyVaultSmokeTest
 
         return ExitLatencyVaultSmokeTest(self.config, self.db, self.logger).to_text()
+
+    def phase_readiness_smoke_test(self) -> str:
+        from .phase_readiness_smoke_test import PhaseReadinessSmokeTest
+
+        return PhaseReadinessSmokeTest(self.config, self.db, self.logger).to_text()
 
     def build_markdown_report(
         self,
@@ -1136,8 +1156,10 @@ def main() -> None:
             "catalyst-ingest",
             "news-risk-gate",
             "paper-policy-lab",
+            "paper-policy-orchestrator",
             "walk-forward",
             "policy-backtest",
+            "exit-policy-backtest",
             "policy-news-smoke-test",
             "time-death-lab",
             "adaptive-exit-policy",
@@ -1150,7 +1172,9 @@ def main() -> None:
             "data-vault-prune",
             "data-vault-smoke-test",
             "migration-readiness",
+            "migration-readiness-deep-check",
             "exit-latency-vault-smoke-test",
+            "phase-readiness-smoke-test",
         ],
     )
     parser.add_argument("--limit", type=int, default=None, help="Maximo de labels a procesar en phase2-persist.")
@@ -1277,10 +1301,14 @@ def main() -> None:
         print(lab.news_risk_gate(hours=args.hours))
     elif args.command == "paper-policy-lab":
         print(lab.paper_policy_lab(hours=args.hours))
+    elif args.command == "paper-policy-orchestrator":
+        print(lab.paper_policy_orchestrator(hours=args.hours))
     elif args.command == "walk-forward":
         print(lab.walk_forward(hours=args.hours))
     elif args.command == "policy-backtest":
         print(lab.policy_backtest(hours=args.hours))
+    elif args.command == "exit-policy-backtest":
+        print(lab.exit_policy_backtest(hours=args.hours))
     elif args.command == "policy-news-smoke-test":
         print(lab.policy_news_smoke_test())
     elif args.command == "time-death-lab":
@@ -1307,8 +1335,12 @@ def main() -> None:
         print(lab.data_vault_smoke_test())
     elif args.command == "migration-readiness":
         print(lab.migration_readiness())
+    elif args.command == "migration-readiness-deep-check":
+        print(lab.migration_readiness_deep_check())
     elif args.command == "exit-latency-vault-smoke-test":
         print(lab.exit_latency_vault_smoke_test())
+    elif args.command == "phase-readiness-smoke-test":
+        print(lab.phase_readiness_smoke_test())
 
 
 if __name__ == "__main__":

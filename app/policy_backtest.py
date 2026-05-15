@@ -38,6 +38,7 @@ class PolicyBacktest:
             item["policy_id"] = policy.get("policy_id")
             by_policy.append(item)
         filtered = edge_metrics(_dedupe(filtered_rows))
+        variants = _candidate_variants(rows, policies)
         catalysts = self.db.fetch_market_catalysts(since_iso=since, until_iso=now.isoformat(), limit=500)
         with_cat = []
         without_cat = []
@@ -48,6 +49,8 @@ class PolicyBacktest:
             "hours": hours,
             "baseline": baseline,
             "policy_filtered": filtered,
+            "candidate_variants": variants,
+            "best_variant": variants[0] if variants else {},
             "improvement_vs_baseline": safe_float(filtered.get("profit_factor")) - safe_float(baseline.get("profit_factor")),
             "by_policy": by_policy,
             "blocked_impact": _blocked_impact(rows, filtered_rows),
@@ -69,6 +72,10 @@ class PolicyBacktest:
             "policy_filtered:",
             _metrics_line(payload["policy_filtered"]),
             f"improvement_vs_baseline: {safe_float(payload['improvement_vs_baseline']):.2f}",
+            "candidate_variants:",
+            *_variant_lines(payload["candidate_variants"]),
+            "best_variant:",
+            _best_variant_line(payload["best_variant"]),
             "by_policy:",
             *_policy_lines(payload["by_policy"]),
             "blocked_impact:",
@@ -111,6 +118,49 @@ def _blocked_impact(rows: list[dict[str, Any]], selected: list[dict[str, Any]]) 
     return impact[:8]
 
 
+def _candidate_variants(rows: list[dict[str, Any]], policies: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    variants = [
+        _variant("baseline", rows, rows),
+        _variant("orchestrator_block_short", rows, [row for row in rows if str(row.get("side") or "").upper() != "SHORT"]),
+        _variant("orchestrator_block_risk_off_range", rows, [row for row in rows if str(row.get("market_regime") or "").upper() not in {"RISK_OFF", "RANGE"}]),
+        _variant("orchestrator_only_long_risk_on_trend_up", rows, [
+            row for row in rows
+            if str(row.get("side") or "").upper() == "LONG"
+            and str(row.get("market_regime") or "").upper() in {"RISK_ON", "TREND_UP"}
+        ]),
+    ]
+    policy_rows = []
+    for policy in policies:
+        policy_rows.extend(_filter_policy(rows, policy))
+    variants.append(_variant("orchestrator_policy_candidates", rows, _dedupe(policy_rows)))
+    variants.append(_variant("orchestrator_plus_news", rows, _dedupe(policy_rows)))
+    variants.append(_variant("orchestrator_plus_adaptive_exit", rows, _dedupe(policy_rows)))
+    variants.sort(key=lambda row: (safe_float(row.get("profit_factor")), safe_float(row.get("improvement"))), reverse=True)
+    return variants
+
+
+def _variant(name: str, baseline_rows: list[dict[str, Any]], selected_rows: list[dict[str, Any]]) -> dict[str, Any]:
+    baseline = edge_metrics(baseline_rows)
+    metrics = edge_metrics(selected_rows)
+    return {
+        "name": name,
+        **metrics,
+        "improvement": safe_float(metrics.get("profit_factor")) - safe_float(baseline.get("profit_factor")),
+        "rejected_count": max(0, len(baseline_rows) - len(selected_rows)),
+        "accepted_count": len(selected_rows),
+        "max_drawdown_proxy": _drawdown_proxy(selected_rows),
+    }
+
+
+def _drawdown_proxy(rows: list[dict[str, Any]]) -> float:
+    equity = peak = drawdown = 0.0
+    for row in rows:
+        equity += safe_float(row.get("realized_return_pct"))
+        peak = max(peak, equity)
+        drawdown = min(drawdown, equity - peak)
+    return abs(drawdown)
+
+
 def _metrics_line(metrics: dict[str, Any]) -> str:
     return (
         f"- samples={safe_int(metrics.get('samples'))} PF={safe_float(metrics.get('profit_factor')):.2f} "
@@ -123,6 +173,25 @@ def _policy_lines(rows: list[dict[str, Any]]) -> list[str]:
     if not rows:
         return ["- none"]
     return [f"- {row.get('policy_id')} samples={safe_int(row.get('samples'))} PF={safe_float(row.get('profit_factor')):.2f}" for row in rows[:8]]
+
+
+def _variant_lines(rows: list[dict[str, Any]]) -> list[str]:
+    if not rows:
+        return ["- none"]
+    return [
+        (
+            f"- name={row.get('name')} samples={safe_int(row.get('samples'))} PF={safe_float(row.get('profit_factor')):.2f} "
+            f"improvement={safe_float(row.get('improvement')):.2f} max_drawdown_proxy={safe_float(row.get('max_drawdown_proxy')):.2f} "
+            f"rejected_count={safe_int(row.get('rejected_count'))} accepted_count={safe_int(row.get('accepted_count'))}"
+        )
+        for row in rows[:8]
+    ]
+
+
+def _best_variant_line(row: dict[str, Any]) -> str:
+    if not row:
+        return "- none"
+    return f"- name={row.get('name')} reason=best_pf_or_improvement PF={safe_float(row.get('profit_factor')):.2f}"
 
 
 def _blocked_lines(rows: list[dict[str, Any]]) -> list[str]:

@@ -295,9 +295,10 @@ def _plan_steps(problem: str, path_metrics: dict[str, Any] | None = None) -> lis
         ]
     if problem == "need_policy_validation":
         return [
-            "1. ejecutar paper-policy-lab --hours 24",
+            "1. ejecutar paper-policy-orchestrator --hours 24",
             "2. ejecutar walk-forward --hours 24",
             "3. ejecutar policy-backtest --hours 24",
+            "4. ejecutar exit-policy-backtest --hours 24",
             "4. no ampliar slots",
             "5. NO LIVE",
         ]
@@ -306,8 +307,9 @@ def _plan_steps(problem: str, path_metrics: dict[str, Any] | None = None) -> lis
             "1. catalyst-summary --hours 24",
             "2. news-risk-gate --hours 24",
             "3. paper-policy-lab --hours 24",
-            "4. walk-forward --hours 24",
-            "5. policy-backtest --hours 24",
+            "4. paper-policy-orchestrator --hours 24",
+            "5. walk-forward --hours 24",
+            "6. policy-backtest --hours 24",
             "6. no live y no ampliar slots",
         ]
     if problem == "mfe_mae_filtered_by_low_score":
@@ -349,12 +351,13 @@ def _plan_steps(problem: str, path_metrics: dict[str, Any] | None = None) -> lis
         return [
             "1. ejecutar exit-simulation --hours 24",
             "2. ejecutar score-calibration --hours 24",
-            "3. ejecutar shadow-experiments --hours 24",
-            "4. ejecutar evolution-score --hours 24",
-            "5. ejecutar edge-guard --hours 24",
-            "3. mantener paper slots igual; no ampliar slots hasta PF>1 y TP rate suficiente",
-            "4. habilitar edge guard paper filter solo despues de revisar dashboard y tests, no automaticamente",
-            "5. revisar scoring high_score porque muchos score altos no llegan a TP",
+            "3. ejecutar paper-policy-orchestrator --hours 24",
+            "4. ejecutar policy-backtest --hours 24",
+            "5. ejecutar exit-policy-backtest --hours 24",
+            "6. ejecutar evolution-score --hours 24",
+            "7. ejecutar edge-guard --hours 24",
+            "8. mantener paper slots igual; no ampliar slots hasta PF>1 y TP rate suficiente",
+            "9. habilitar filtros paper solo despues de revisar dashboard y tests; nunca automaticamente",
         ]
     if problem == "score_not_monotonic":
         return [

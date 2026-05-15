@@ -209,6 +209,8 @@ def test_edge_guard_and_tp_sl_endpoints_return_json():
         ("/api/training/shadow-experiments?hours=24", "SHADOW EXPERIMENTS START"),
         ("/api/training/evolution-score?hours=24", "EVOLUTION SCORE START"),
         ("/api/training/mfe-mae-diagnostic?hours=24", "MFE MAE DIAGNOSTIC START"),
+        ("/api/training/paper-policy-orchestrator?hours=24", "PAPER POLICY ORCHESTRATOR START"),
+        ("/api/training/exit-policy-backtest?hours=24", "EXIT POLICY BACKTEST START"),
     ):
         status, body = _get(base + path)
         assert status == 200

@@ -76,8 +76,10 @@ def start_health_server(
                 "/api/training/catalyst-summary",
                 "/api/training/news-risk-gate",
                 "/api/training/paper-policy-lab",
+                "/api/training/paper-policy-orchestrator",
                 "/api/training/walk-forward",
                 "/api/training/policy-backtest",
+                "/api/training/exit-policy-backtest",
                 "/api/training/time-death-lab",
                 "/api/training/adaptive-exit-policy",
                 "/api/training/latency-audit",
@@ -87,6 +89,7 @@ def start_health_server(
                 "/api/training/data-upload-latest",
                 "/api/training/data-vault-prune",
                 "/api/training/migration-readiness",
+                "/api/training/migration-readiness-deep-check",
             }:
                 if not _authorized(config, query, self.headers):
                     self._send_json({"error": "unauthorized"}, status=401)
@@ -136,11 +139,17 @@ def start_health_server(
             if path == "/api/training/paper-policy-lab":
                 self._send_json(_paper_policy_lab(config, db, query))
                 return
+            if path == "/api/training/paper-policy-orchestrator":
+                self._send_json(_paper_policy_orchestrator(config, db, query))
+                return
             if path == "/api/training/walk-forward":
                 self._send_json(_walk_forward(config, db, query))
                 return
             if path == "/api/training/policy-backtest":
                 self._send_json(_policy_backtest(config, db, query))
+                return
+            if path == "/api/training/exit-policy-backtest":
+                self._send_json(_exit_policy_backtest(config, db, query))
                 return
             if path == "/api/training/time-death-lab":
                 self._send_json(_time_death_lab(config, db, query))
@@ -168,6 +177,9 @@ def start_health_server(
                 return
             if path == "/api/training/migration-readiness":
                 self._send_json(_migration_readiness(config, db, query))
+                return
+            if path == "/api/training/migration-readiness-deep-check":
+                self._send_json(_migration_readiness_deep_check(config, db, query))
                 return
             self._send_status(404, "not found")
 
@@ -402,12 +414,20 @@ def _paper_policy_lab(config: Any | None, db: Any | None, query: dict[str, list[
     return _lab_payload(config, db, query, "paper policy lab unavailable", ".paper_policy_lab", "PaperPolicyLab")
 
 
+def _paper_policy_orchestrator(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
+    return _lab_payload(config, db, query, "paper policy orchestrator unavailable", ".paper_policy_orchestrator", "PaperPolicyOrchestrator")
+
+
 def _walk_forward(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
     return _lab_payload(config, db, query, "walk-forward unavailable", ".walk_forward_validation", "WalkForwardValidation")
 
 
 def _policy_backtest(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
     return _lab_payload(config, db, query, "policy backtest unavailable", ".policy_backtest", "PolicyBacktest")
+
+
+def _exit_policy_backtest(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
+    return _lab_payload(config, db, query, "exit policy backtest unavailable", ".exit_policy_backtest", "ExitPolicyBacktest")
 
 
 def _time_death_lab(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
@@ -516,6 +536,40 @@ def _migration_readiness(config: Any | None, db: Any | None, query: dict[str, li
     return payload
 
 
+def _migration_readiness_deep_check(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
+    if config is None or db is None:
+        return {"error": "migration readiness deep check unavailable", "final_recommendation": "NO LIVE"}
+    run = str((query.get("run") or ["false"])[0]).lower() in {"1", "true", "yes"}
+    if not run:
+        text = "\n".join([
+            "MIGRATION READINESS DEEP CHECK START",
+            "status: run_from_cli_recommended",
+            "reason: deep check can be heavy for large backups",
+            "command: python -m app.research_lab migration-readiness-deep-check",
+            "final_recommendation: NO LIVE",
+            "MIGRATION READINESS DEEP CHECK END",
+        ])
+        return {
+            "text": text,
+            "status": "run_from_cli_recommended",
+            "final_recommendation": "NO LIVE",
+            "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        }
+    try:
+        from .data_vault import DataVault
+
+        vault = DataVault(config, db)
+        payload = vault.migration_readiness_deep_check()
+        text = _migration_deep_check_text(payload)
+    except Exception as exc:
+        return {"error": str(exc)[:300], "final_recommendation": "NO LIVE"}
+    payload = dict(payload)
+    payload["text"] = text
+    payload["generated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    payload["final_recommendation"] = "NO LIVE"
+    return payload
+
+
 def _data_export_text(payload: dict[str, Any], config: Any | None) -> str:
     external = payload.get("external_upload", {}) or {}
     provider = getattr(config, "data_vault_external_provider", "s3_compatible")
@@ -542,6 +596,22 @@ def _data_export_text(payload: dict[str, Any], config: Any | None) -> str:
         f"- sanitized_error: {external.get('sanitized_error', 'none') or 'none'}",
         "final_recommendation: NO LIVE",
         "DATA EXPORT END",
+    ])
+
+
+def _migration_deep_check_text(payload: dict[str, Any]) -> str:
+    return "\n".join([
+        "MIGRATION READINESS DEEP CHECK START",
+        f"backup_source_checked: {payload.get('backup_source_checked', 'none')}",
+        f"latest_backup: {payload.get('latest_backup') or 'none'}",
+        f"manifest_valid: {str(payload.get('manifest_valid')).lower()}",
+        f"checksum_valid: {str(payload.get('checksum_valid')).lower()}",
+        f"import_dry_run_ok: {str(payload.get('import_dry_run_ok')).lower()}",
+        f"cache_updated: {str(payload.get('cache_updated')).lower()}",
+        f"ready_for_vps_migration: {str(payload.get('ready_for_vps_migration')).lower()}",
+        f"error_sanitized: {payload.get('error_sanitized') or 'none'}",
+        "final_recommendation: NO LIVE",
+        "MIGRATION READINESS DEEP CHECK END",
     ])
 
 

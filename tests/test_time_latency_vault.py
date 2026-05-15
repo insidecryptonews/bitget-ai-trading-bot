@@ -237,7 +237,38 @@ def test_data_vault_status_and_migration_readiness_markers(tmp_path):
     vault.export(hours=168)
     text = vault.migration_readiness_text()
     assert "MIGRATION READINESS START" in text
-    assert "manifest_valid: true" in text
+    assert "mode: lightweight" in text
+    assert "manifest_known_valid: true" in text
+
+
+def test_migration_readiness_lightweight_uses_cache_without_decompressing(tmp_path, monkeypatch):
+    config = cfg(tmp_path)
+    db = make_db(tmp_path, config)
+    seed_label(db)
+    vault = DataVault(config, db, DummyLogger())
+    vault.export(hours=168)
+
+    def boom(path):
+        raise AssertionError("validate_backup should not run in lightweight readiness")
+
+    monkeypatch.setattr(vault, "validate_backup", boom)
+    payload = vault.migration_readiness()
+    assert payload["mode"] == "lightweight"
+    assert payload["manifest_known_valid"] is True
+    assert payload["checksum_known_valid"] is True
+
+
+def test_migration_readiness_deep_check_updates_cache(tmp_path):
+    config = cfg(tmp_path)
+    db = make_db(tmp_path, config)
+    seed_label(db)
+    vault = DataVault(config, db, DummyLogger())
+    vault.export(hours=168)
+    payload = vault.migration_readiness_deep_check()
+    assert payload["manifest_valid"] is True
+    assert payload["checksum_valid"] is True
+    assert payload["import_dry_run_ok"] is True
+    assert vault._read_state()["import_dry_run_ok"] is True
 
 
 def test_external_upload_disabled_and_missing_credentials_do_not_fail(tmp_path):
@@ -401,6 +432,7 @@ def test_dashboard_new_endpoints_do_not_expose_secrets(tmp_path):
         ("/api/training/data-upload-latest", "DATA UPLOAD LATEST START"),
         ("/api/training/data-vault-prune", "DATA VAULT PRUNE START"),
         ("/api/training/migration-readiness", "MIGRATION READINESS START"),
+        ("/api/training/migration-readiness-deep-check", "MIGRATION READINESS DEEP CHECK START"),
     ):
         status, body = _get(base + path + ("&" if "?" in path else "?") + "token=safe-token")
         assert status == 200

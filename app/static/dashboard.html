@@ -248,6 +248,11 @@
         <pre id="paperPolicyLabText">Sin cargar todavía.</pre>
       </div>
       <div class="card full">
+        <h2>Paper Policy Orchestrator</h2>
+        <div class="actions"><button id="paperPolicyOrchestratorBtn">Actualizar orchestrator 24h</button></div>
+        <pre id="paperPolicyOrchestratorText">Sin cargar todavÃ­a.</pre>
+      </div>
+      <div class="card full">
         <h2>Walk Forward Validation</h2>
         <div class="actions"><button id="walkForwardBtn">Actualizar walk-forward 24h</button></div>
         <pre id="walkForwardText">Sin cargar todavía.</pre>
@@ -256,6 +261,11 @@
         <h2>Policy Backtest</h2>
         <div class="actions"><button id="policyBacktestBtn">Actualizar policy backtest 24h</button></div>
         <pre id="policyBacktestText">Sin cargar todavía.</pre>
+      </div>
+      <div class="card full">
+        <h2>Exit Policy Backtest</h2>
+        <div class="actions"><button id="exitPolicyBacktestBtn">Actualizar exit policy backtest 24h</button></div>
+        <pre id="exitPolicyBacktestText">Sin cargar todavÃ­a.</pre>
       </div>
       <div class="card full">
         <h2>Time Death Lab</h2>
@@ -290,7 +300,10 @@
       </div>
       <div class="card full">
         <h2>Migration Readiness</h2>
-        <div class="actions"><button id="migrationReadinessBtn">Actualizar migration readiness</button></div>
+        <div class="actions">
+          <button id="migrationReadinessBtn">Actualizar migration readiness</button>
+          <button id="migrationDeepCheckBtn">Deep migration check</button>
+        </div>
         <pre id="migrationReadinessText">Sin cargar todavía.</pre>
       </div>
     </section>
@@ -600,8 +613,10 @@
     byId("catalystSummaryBtn").addEventListener("click", () => loadGenericLab("/api/training/catalyst-summary?hours=24", "catalystSummaryText"));
     byId("newsRiskGateBtn").addEventListener("click", () => loadGenericLab("/api/training/news-risk-gate?hours=24", "newsRiskGateText"));
     byId("paperPolicyLabBtn").addEventListener("click", () => loadGenericLab("/api/training/paper-policy-lab?hours=24", "paperPolicyLabText"));
+    byId("paperPolicyOrchestratorBtn").addEventListener("click", () => loadGenericLab("/api/training/paper-policy-orchestrator?hours=24", "paperPolicyOrchestratorText"));
     byId("walkForwardBtn").addEventListener("click", () => loadGenericLab("/api/training/walk-forward?hours=24", "walkForwardText"));
     byId("policyBacktestBtn").addEventListener("click", () => loadGenericLab("/api/training/policy-backtest?hours=24", "policyBacktestText"));
+    byId("exitPolicyBacktestBtn").addEventListener("click", () => loadGenericLab("/api/training/exit-policy-backtest?hours=24", "exitPolicyBacktestText"));
     byId("timeDeathLabBtn").addEventListener("click", () => loadGenericLab("/api/training/time-death-lab?hours=24", "timeDeathLabText"));
     byId("adaptiveExitPolicyBtn").addEventListener("click", () => loadGenericLab("/api/training/adaptive-exit-policy?hours=24", "adaptiveExitPolicyText"));
     byId("latencyAuditBtn").addEventListener("click", () => loadGenericLab("/api/training/latency-audit?hours=24", "latencyAuditText"));
@@ -612,6 +627,7 @@
     byId("dataUploadLatestBtn").addEventListener("click", () => loadGenericLab("/api/training/data-upload-latest", "dataVaultText"));
     byId("dataVaultPruneBtn").addEventListener("click", () => loadGenericLab("/api/training/data-vault-prune", "dataVaultText"));
     byId("migrationReadinessBtn").addEventListener("click", () => loadGenericLab("/api/training/migration-readiness", "migrationReadinessText"));
+    byId("migrationDeepCheckBtn").addEventListener("click", () => loadGenericLab("/api/training/migration-readiness-deep-check", "migrationReadinessText"));
     refresh();
     loadSummary();
     loadPlan();

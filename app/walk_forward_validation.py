@@ -30,13 +30,15 @@ class WalkForwardValidation:
         split = max(1, int(len(rows) * 0.70)) if rows else 0
         train = rows[:split]
         validation = rows[split:]
+        recent_split = max(1, int(len(rows) * 0.75)) if rows else 0
+        recent = rows[recent_split:]
         policies = PaperPolicyLab(self.config, self.db).build(hours=hours).get("candidate_policies", [])
         catalysts = self.db.fetch_market_catalysts(since_iso=since, until_iso=datetime.now(timezone.utc).isoformat(), limit=500)
         news = NewsRiskGate(self.config, self.db).build(hours=hours)
-        results = [self._validate_policy(policy, train, validation, catalysts, news) for policy in policies]
+        results = [self._validate_policy(policy, train, validation, recent, catalysts, news) for policy in policies]
         if not results and rows:
-            results.append(self._validate_policy({"policy_id": "baseline_all", "decision": "WATCH_ONLY"}, train, validation, catalysts, news))
-        return {"hours": hours, "policies": results, "final_recommendation": "NO LIVE"}
+            results.append(self._validate_policy({"policy_id": "baseline_all", "decision": "WATCH_ONLY"}, train, validation, recent, catalysts, news))
+        return {"hours": hours, "folds": _fold_summary(rows), "policies": results, "final_recommendation": "NO LIVE"}
 
     def to_text(self, *, hours: int = 24) -> str:
         payload = self.build(hours=hours)
@@ -55,34 +57,49 @@ class WalkForwardValidation:
         policy: dict[str, Any],
         train: list[dict[str, Any]],
         validation: list[dict[str, Any]],
+        recent: list[dict[str, Any]],
         catalysts: list[dict[str, Any]],
         news: dict[str, Any],
     ) -> dict[str, Any]:
         train_rows = _filter_policy(train, policy)
         validation_rows = _filter_policy(validation, policy)
+        recent_rows = _filter_policy(recent, policy)
         train_metrics = edge_metrics(train_rows)
         validation_metrics = edge_metrics(validation_rows)
+        recent_metrics = edge_metrics(recent_rows)
         catalyst_ratio = _catalyst_ratio(validation_rows, catalysts)
         news_conflict = _news_conflict(policy, news)
+        sample_size_ok = safe_int(validation_metrics.get("samples")) >= 100
+        deterioration = (
+            _pf_drop_ratio(train_metrics, validation_metrics) > 0.35
+            or _pf_drop_ratio(validation_metrics, recent_metrics) > 0.35
+        )
         decision = "SHADOW_VALIDATE"
         reason = "needs_more_validation"
-        if safe_int(validation_metrics.get("samples")) < 100:
+        if not sample_size_ok:
             decision, reason = "REJECT", "validation_sample_too_small"
         elif news_conflict:
             decision, reason = "REJECT", "news_risk_conflict"
         elif catalyst_ratio > 0.70:
             decision, reason = "WATCH_ONLY", "catalyst_dependent"
-        elif safe_float(validation_metrics.get("profit_factor")) >= 1.20:
-            decision, reason = "PAPER_CANDIDATE", "stable_candidate"
-        if safe_float(train_metrics.get("profit_factor")) - safe_float(validation_metrics.get("profit_factor")) > 0.60:
+        elif deterioration:
             decision, reason = "WATCH_ONLY", "recent_deterioration"
+        elif safe_float(train_metrics.get("profit_factor")) >= 1.0 and safe_float(validation_metrics.get("profit_factor")) >= 1.20:
+            decision, reason = "PAPER_CANDIDATE", "stable_candidate"
+        elif safe_float(validation_metrics.get("profit_factor")) >= 1.20:
+            decision, reason = "WATCH_ONLY", "validation_only_edge"
         return {
             "policy_id": policy.get("policy_id", "unknown"),
             "train_pf": train_metrics["profit_factor"],
             "validation_pf": validation_metrics["profit_factor"],
+            "recent_pf": recent_metrics["profit_factor"],
             "train_samples": train_metrics["samples"],
             "validation_samples": validation_metrics["samples"],
+            "recent_samples": recent_metrics["samples"],
             "stability": _stability(train_metrics, validation_metrics),
+            "stability_score": _stability(validation_metrics, recent_metrics),
+            "deterioration_detected": deterioration,
+            "sample_size_ok": sample_size_ok,
             "catalyst_dependency": catalyst_ratio,
             "news_risk": "conflict" if news_conflict else "none",
             "decision": decision,
@@ -137,6 +154,26 @@ def _stability(train: dict[str, Any], validation: dict[str, Any]) -> float:
     return max(0.0, min(1.0, 1.0 - abs(train_pf - validation_pf) / max(train_pf, 1.0)))
 
 
+def _pf_drop_ratio(old: dict[str, Any], new: dict[str, Any]) -> float:
+    old_pf = safe_float(old.get("profit_factor"))
+    new_pf = safe_float(new.get("profit_factor"))
+    if old_pf <= 0:
+        return 0.0
+    return max(0.0, (old_pf - new_pf) / max(old_pf, 1.0))
+
+
+def _fold_summary(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    if len(rows) < 3:
+        return []
+    size = max(1, len(rows) // 3)
+    folds = [rows[0:size], rows[size:size * 2], rows[size * 2:]]
+    out = []
+    for idx, fold in enumerate(folds, start=1):
+        metrics = edge_metrics(fold)
+        out.append({"fold": idx, "samples": metrics["samples"], "profit_factor": metrics["profit_factor"]})
+    return out
+
+
 def _score_bucket(score: int) -> str:
     if score >= 90:
         return "90-100"
@@ -153,7 +190,9 @@ def _policy_lines(rows: list[dict[str, Any]]) -> list[str]:
     return [
         (
             f"- policy_id={row.get('policy_id')} train_pf={safe_float(row.get('train_pf')):.2f} "
-            f"validation_pf={safe_float(row.get('validation_pf')):.2f} stability={safe_float(row.get('stability')):.2f} "
+            f"validation_pf={safe_float(row.get('validation_pf')):.2f} recent_pf={safe_float(row.get('recent_pf')):.2f} "
+            f"stability={safe_float(row.get('stability')):.2f} deterioration_detected={str(bool(row.get('deterioration_detected'))).lower()} "
+            f"sample_size_ok={str(bool(row.get('sample_size_ok'))).lower()} "
             f"catalyst_dependency={safe_float(row.get('catalyst_dependency')):.2f} news_risk={row.get('news_risk')} "
             f"decision={row.get('decision')} reason={row.get('reason')}"
         )
