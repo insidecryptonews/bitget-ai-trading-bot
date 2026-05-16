@@ -247,6 +247,14 @@ class BotConfig:
     vps_research_max_memory_mb: int = 6000
     vps_research_max_cpu_pct: int = 85
     vps_research_auto_throttle: bool = True
+    net_edge_taker_fee_bps: float = 6.0
+    net_edge_maker_fee_bps: float = 2.0
+    net_edge_slippage_bps: float = 3.0
+    net_edge_funding_bps_per_8h: float = 1.0
+    net_edge_min_net_pf: float = 1.20
+    net_edge_min_samples: int = 500
+    net_edge_min_tp_ratio: float = 0.05
+    net_edge_max_time_ratio: float = 0.80
 
     symbols: list[str] = field(default_factory=lambda: [
         "BTCUSDT",
@@ -599,6 +607,14 @@ def load_config(load_dotenv_file: bool = True) -> BotConfig:
         vps_research_max_memory_mb=env_int(os.getenv("VPS_RESEARCH_MAX_MEMORY_MB"), 6000),
         vps_research_max_cpu_pct=env_int(os.getenv("VPS_RESEARCH_MAX_CPU_PCT"), 85),
         vps_research_auto_throttle=env_bool(os.getenv("VPS_RESEARCH_AUTO_THROTTLE"), True),
+        net_edge_taker_fee_bps=env_float(os.getenv("NET_EDGE_TAKER_FEE_BPS"), 6.0),
+        net_edge_maker_fee_bps=env_float(os.getenv("NET_EDGE_MAKER_FEE_BPS"), 2.0),
+        net_edge_slippage_bps=env_float(os.getenv("NET_EDGE_SLIPPAGE_BPS"), 3.0),
+        net_edge_funding_bps_per_8h=env_float(os.getenv("NET_EDGE_FUNDING_BPS_PER_8H"), 1.0),
+        net_edge_min_net_pf=env_float(os.getenv("NET_EDGE_MIN_NET_PF"), 1.20),
+        net_edge_min_samples=env_int(os.getenv("NET_EDGE_MIN_SAMPLES"), 500),
+        net_edge_min_tp_ratio=env_float(os.getenv("NET_EDGE_MIN_TP_RATIO"), 0.05),
+        net_edge_max_time_ratio=env_float(os.getenv("NET_EDGE_MAX_TIME_RATIO"), 0.80),
         symbols=parse_csv_symbols(
             os.getenv(
                 "SYMBOLS",

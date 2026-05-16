@@ -288,6 +288,21 @@
         <pre id="fastExecutionReadinessText">Sin cargar todavía.</pre>
       </div>
       <div class="card full">
+        <h2>Edge Hardening</h2>
+        <div class="actions">
+          <button id="netEdgeLabBtn">Net edge lab</button>
+          <button id="antiOverfitGateBtn">Anti overfit gate</button>
+          <button id="evSlippageGateBtn">EV / slippage gate</button>
+          <button id="policyStabilityMatrixBtn">Policy stability matrix</button>
+          <button id="candidateRankingBtn">Candidate ranking</button>
+          <button id="decisionLedgerAuditBtn">Decision ledger audit</button>
+          <button id="adaptiveExitBacktestBtn">Adaptive exit backtest</button>
+          <button id="sizingSafetyLabBtn">Sizing safety lab</button>
+          <button id="structuredOutputGuardBtn">Structured output guard</button>
+        </div>
+        <pre id="edgeHardeningText">Sin cargar todavia.</pre>
+      </div>
+      <div class="card full">
         <h2>Data Vault / Backup</h2>
         <div class="actions">
           <button id="dataVaultStatusBtn">Actualizar vault status</button>
@@ -313,6 +328,11 @@
           <button id="vpsPreflightBtn">VPS preflight</button>
           <button id="vpsGuideBtn">Guia migracion VPS</button>
           <button id="fastRuntimePlanBtn">Fast runtime plan</button>
+          <button id="fastRuntimeReadinessBtn">Fast runtime readiness</button>
+          <button id="websocketMigrationPlanBtn">WebSocket migration plan</button>
+          <button id="vpsRuntimeHealthBtn">VPS runtime health</button>
+          <button id="dataRestoreBenchmarkBtn">Restore benchmark</button>
+          <button id="postMigrationBackupBtn">Post migration backup</button>
           <button id="workerLockStatusBtn">Worker lock status</button>
           <button id="dataDownloadLatestBtn">Descargar ultimo R2</button>
           <button id="dataRestoreDryRunBtn">Restore latest dry-run</button>
@@ -650,6 +670,15 @@
     byId("adaptiveExitPolicyBtn").addEventListener("click", () => loadGenericLab("/api/training/adaptive-exit-policy?hours=24", "adaptiveExitPolicyText"));
     byId("latencyAuditBtn").addEventListener("click", () => loadGenericLab("/api/training/latency-audit?hours=24", "latencyAuditText"));
     byId("fastExecutionReadinessBtn").addEventListener("click", () => loadGenericLab("/api/training/fast-execution-readiness", "fastExecutionReadinessText"));
+    byId("netEdgeLabBtn").addEventListener("click", () => loadGenericLab("/api/training/net-edge-lab?hours=24", "edgeHardeningText"));
+    byId("antiOverfitGateBtn").addEventListener("click", () => loadGenericLab("/api/training/anti-overfit-gate?hours=24", "edgeHardeningText"));
+    byId("evSlippageGateBtn").addEventListener("click", () => loadGenericLab("/api/training/ev-slippage-calibration-gate?hours=24", "edgeHardeningText"));
+    byId("policyStabilityMatrixBtn").addEventListener("click", () => loadGenericLab("/api/training/policy-stability-matrix?hours=24", "edgeHardeningText"));
+    byId("candidateRankingBtn").addEventListener("click", () => loadGenericLab("/api/training/candidate-ranking?hours=24", "edgeHardeningText"));
+    byId("decisionLedgerAuditBtn").addEventListener("click", () => loadGenericLab("/api/training/decision-ledger-audit?hours=24", "edgeHardeningText"));
+    byId("adaptiveExitBacktestBtn").addEventListener("click", () => loadGenericLab("/api/training/adaptive-exit-backtest?hours=24", "edgeHardeningText"));
+    byId("sizingSafetyLabBtn").addEventListener("click", () => loadGenericLab("/api/training/sizing-safety-lab?hours=24", "edgeHardeningText"));
+    byId("structuredOutputGuardBtn").addEventListener("click", () => loadGenericLab("/api/training/structured-output-guard-status", "edgeHardeningText"));
     byId("dataVaultStatusBtn").addEventListener("click", () => loadGenericLab("/api/training/data-vault-status", "dataVaultText"));
     byId("dataExportBtn").addEventListener("click", () => loadGenericLab("/api/training/data-export?hours=168", "dataVaultText"));
     byId("dataExport720Btn").addEventListener("click", () => loadGenericLab("/api/training/data-export?hours=720", "dataVaultText"));
@@ -660,6 +689,11 @@
     byId("vpsPreflightBtn").addEventListener("click", () => loadGenericLab("/api/training/vps-preflight", "vpsMigrationText"));
     byId("vpsGuideBtn").addEventListener("click", () => loadGenericLab("/api/training/vps-migration-guide", "vpsMigrationText"));
     byId("fastRuntimePlanBtn").addEventListener("click", () => loadGenericLab("/api/training/fast-runtime-plan?hours=24", "vpsMigrationText"));
+    byId("fastRuntimeReadinessBtn").addEventListener("click", () => loadGenericLab("/api/training/fast-runtime-readiness?hours=24", "vpsMigrationText"));
+    byId("websocketMigrationPlanBtn").addEventListener("click", () => loadGenericLab("/api/training/websocket-migration-plan?hours=24", "vpsMigrationText"));
+    byId("vpsRuntimeHealthBtn").addEventListener("click", () => loadGenericLab("/api/training/vps-runtime-health", "vpsMigrationText"));
+    byId("dataRestoreBenchmarkBtn").addEventListener("click", () => loadGenericLab("/api/training/data-restore-benchmark", "vpsMigrationText"));
+    byId("postMigrationBackupBtn").addEventListener("click", () => loadGenericLab("/api/training/post-migration-backup?hours=168", "vpsMigrationText"));
     byId("workerLockStatusBtn").addEventListener("click", () => loadGenericLab("/api/training/worker-lock-status", "vpsMigrationText"));
     byId("dataDownloadLatestBtn").addEventListener("click", () => loadGenericLab("/api/training/data-download-latest", "vpsMigrationText"));
     byId("dataRestoreDryRunBtn").addEventListener("click", () => loadGenericLab("/api/training/data-restore-latest", "vpsMigrationText"));

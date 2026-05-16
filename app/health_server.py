@@ -80,6 +80,20 @@ def start_health_server(
                 "/api/training/walk-forward",
                 "/api/training/policy-backtest",
                 "/api/training/exit-policy-backtest",
+                "/api/training/net-edge-lab",
+                "/api/training/anti-overfit-gate",
+                "/api/training/ev-slippage-calibration-gate",
+                "/api/training/policy-stability-matrix",
+                "/api/training/candidate-ranking",
+                "/api/training/decision-ledger-audit",
+                "/api/training/adaptive-exit-backtest",
+                "/api/training/sizing-safety-lab",
+                "/api/training/structured-output-guard-status",
+                "/api/training/vps-runtime-health",
+                "/api/training/post-migration-backup",
+                "/api/training/data-restore-benchmark",
+                "/api/training/fast-runtime-readiness",
+                "/api/training/websocket-migration-plan",
                 "/api/training/time-death-lab",
                 "/api/training/adaptive-exit-policy",
                 "/api/training/latency-audit",
@@ -156,6 +170,48 @@ def start_health_server(
                 return
             if path == "/api/training/exit-policy-backtest":
                 self._send_json(_exit_policy_backtest(config, db, query))
+                return
+            if path == "/api/training/net-edge-lab":
+                self._send_json(_net_edge_lab(config, db, query))
+                return
+            if path == "/api/training/anti-overfit-gate":
+                self._send_json(_anti_overfit_gate(config, db, query))
+                return
+            if path == "/api/training/ev-slippage-calibration-gate":
+                self._send_json(_ev_slippage_calibration_gate(config, db, query))
+                return
+            if path == "/api/training/policy-stability-matrix":
+                self._send_json(_policy_stability_matrix(config, db, query))
+                return
+            if path == "/api/training/candidate-ranking":
+                self._send_json(_candidate_ranking(config, db, query))
+                return
+            if path == "/api/training/decision-ledger-audit":
+                self._send_json(_decision_ledger_audit(config, db, query))
+                return
+            if path == "/api/training/adaptive-exit-backtest":
+                self._send_json(_adaptive_exit_backtest(config, db, query))
+                return
+            if path == "/api/training/sizing-safety-lab":
+                self._send_json(_sizing_safety_lab(config, db, query))
+                return
+            if path == "/api/training/structured-output-guard-status":
+                self._send_json(_structured_output_guard_status(config, db, query))
+                return
+            if path == "/api/training/vps-runtime-health":
+                self._send_json(_vps_runtime_health(config, db, query))
+                return
+            if path == "/api/training/post-migration-backup":
+                self._send_json(_post_migration_backup(config, db, query))
+                return
+            if path == "/api/training/data-restore-benchmark":
+                self._send_json(_data_restore_benchmark(config, db, query))
+                return
+            if path == "/api/training/fast-runtime-readiness":
+                self._send_json(_fast_runtime_readiness(config, db, query))
+                return
+            if path == "/api/training/websocket-migration-plan":
+                self._send_json(_websocket_migration_plan(config, db, query))
                 return
             if path == "/api/training/time-death-lab":
                 self._send_json(_time_death_lab(config, db, query))
@@ -454,6 +510,105 @@ def _policy_backtest(config: Any | None, db: Any | None, query: dict[str, list[s
 
 def _exit_policy_backtest(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
     return _lab_payload(config, db, query, "exit policy backtest unavailable", ".exit_policy_backtest", "ExitPolicyBacktest")
+
+
+def _net_edge_lab(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
+    return _lab_payload(config, db, query, "net edge lab unavailable", ".net_edge_lab", "NetEdgeLab")
+
+
+def _anti_overfit_gate(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
+    return _lab_payload(config, db, query, "anti overfit gate unavailable", ".anti_overfit_gate", "AntiOverfitGate")
+
+
+def _ev_slippage_calibration_gate(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
+    return _lab_payload(config, db, query, "ev slippage calibration gate unavailable", ".ev_slippage_calibration_gate", "EvSlippageCalibrationGate")
+
+
+def _policy_stability_matrix(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
+    return _lab_payload(config, db, query, "policy stability matrix unavailable", ".policy_stability_matrix", "PolicyStabilityMatrix")
+
+
+def _candidate_ranking(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
+    return _lab_payload(config, db, query, "candidate ranking unavailable", ".candidate_ranking", "CandidateRanking")
+
+
+def _decision_ledger_audit(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
+    return _lab_payload(config, db, query, "decision ledger audit unavailable", ".decision_ledger_audit", "DecisionLedgerAudit")
+
+
+def _adaptive_exit_backtest(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
+    return _lab_payload(config, db, query, "adaptive exit backtest unavailable", ".adaptive_exit_backtest", "AdaptiveExitBacktest")
+
+
+def _sizing_safety_lab(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
+    return _lab_payload(config, db, query, "sizing safety lab unavailable", ".sizing_safety_lab", "SizingSafetyLab")
+
+
+def _structured_output_guard_status(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
+    try:
+        from .structured_output_guard import smoke_test_text
+
+        text = smoke_test_text()
+    except Exception as exc:
+        return {"error": str(exc)[:300], "final_recommendation": "NO LIVE"}
+    return {"text": text, "status": "available", "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "final_recommendation": "NO LIVE"}
+
+
+def _vps_runtime_health(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
+    if config is None or db is None:
+        return {"error": "vps runtime health unavailable", "final_recommendation": "NO LIVE"}
+    try:
+        from .vps_runtime_health import VpsRuntimeHealth
+
+        lab = VpsRuntimeHealth(config, db)
+        payload = lab.build()
+        text = lab.to_text()
+    except Exception as exc:
+        return {"error": str(exc)[:300], "final_recommendation": "NO LIVE"}
+    payload = dict(payload)
+    payload["text"] = text
+    payload["generated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    payload["final_recommendation"] = "NO LIVE"
+    return payload
+
+
+def _post_migration_backup(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
+    hours = _query_int(query, "hours", 168)
+    if config is None or db is None:
+        return {"error": "post migration backup unavailable", "hours": hours, "final_recommendation": "NO LIVE"}
+    try:
+        from .post_migration_backup import PostMigrationBackup
+
+        text = PostMigrationBackup(config, db).to_text(hours=hours)
+    except Exception as exc:
+        return {"error": str(exc)[:300], "hours": hours, "final_recommendation": "NO LIVE"}
+    return {"text": text, "hours": hours, "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "final_recommendation": "NO LIVE"}
+
+
+def _data_restore_benchmark(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
+    if config is None or db is None:
+        return {"error": "data restore benchmark unavailable", "final_recommendation": "NO LIVE"}
+    try:
+        from .data_restore_benchmark import DataRestoreBenchmark
+
+        lab = DataRestoreBenchmark(config, db)
+        payload = lab.build(dry_run=True)
+        text = lab.to_text(dry_run=True)
+    except Exception as exc:
+        return {"error": str(exc)[:300], "final_recommendation": "NO LIVE"}
+    payload = dict(payload)
+    payload["text"] = text
+    payload["generated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    payload["final_recommendation"] = "NO LIVE"
+    return payload
+
+
+def _fast_runtime_readiness(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
+    return _lab_payload(config, db, query, "fast runtime readiness unavailable", ".fast_runtime_readiness", "FastRuntimeReadiness")
+
+
+def _websocket_migration_plan(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
+    return _lab_payload(config, db, query, "websocket migration plan unavailable", ".websocket_migration_plan", "WebsocketMigrationPlan")
 
 
 def _time_death_lab(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:

@@ -4,13 +4,19 @@ from dataclasses import dataclass
 from typing import Any
 
 from .adaptive_exit_policy_lab import AdaptiveExitPolicyLab
+from .anti_overfit_gate import AntiOverfitGate
+from .candidate_ranking import CandidateRanking
 from .catalyst_registry import CatalystRegistry
 from .config import BotConfig
+from .decision_ledger_audit import DecisionLedgerAudit
 from .edge_guard import ALLOW_PAPER, BLOCK_PAPER, SHADOW_ONLY, WATCH_ONLY, EdgeGuard
+from .ev_slippage_calibration_gate import EvSlippageCalibrationGate
 from .exit_simulation_lab import ExitSimulationLab
 from .latency_audit import LatencyAudit
+from .net_edge_lab import NetEdgeLab
 from .news_risk_gate import NewsRiskGate
 from .paper_policy_lab import PaperPolicyLab
+from .policy_stability_matrix import PolicyStabilityMatrix
 from .policy_backtest import PolicyBacktest
 from .score_calibration_lab import ScoreCalibrationLab
 from .time_death_lab import TimeDeathLab
@@ -57,7 +63,29 @@ class PaperPolicyOrchestrator:
         news = _safe_build(lambda: NewsRiskGate(self.config, self.db).build(hours=hours), {})
         catalyst = _safe_build(lambda: CatalystRegistry(self.config, self.db).build_summary(hours=hours), {})
         latency = _safe_build(lambda: LatencyAudit(self.config, self.db).build(hours=hours), {})
-        policy_candidates = self._merge(edge, policy_lab, walk, backtest, score, exit_sim, time_death, exit_policy, news, catalyst)
+        net_edge = _safe_build(lambda: NetEdgeLab(self.config, self.db).build(hours=hours), {})
+        anti_overfit = _safe_build(lambda: AntiOverfitGate(self.config, self.db).build(hours=hours), {})
+        ev_gate = _safe_build(lambda: EvSlippageCalibrationGate(self.config, self.db).build(hours=hours), {})
+        stability = _safe_build(lambda: PolicyStabilityMatrix(self.config, self.db).build(hours=hours), {})
+        ranking = _safe_build(lambda: CandidateRanking(self.config, self.db).build(hours=hours), {})
+        ledger = _safe_build(lambda: DecisionLedgerAudit(self.config, self.db).build(hours=hours), {})
+        policy_candidates = self._merge(
+            edge,
+            policy_lab,
+            walk,
+            backtest,
+            score,
+            exit_sim,
+            time_death,
+            exit_policy,
+            news,
+            catalyst,
+            net_edge,
+            anti_overfit,
+            ev_gate,
+            stability,
+            ranking,
+        )
         blocked = self._blocked(edge, news, time_death)
         return {
             "hours": hours,
@@ -82,6 +110,12 @@ class PaperPolicyOrchestrator:
                 "news_risk_gate": bool(news),
                 "catalyst_summary": bool(catalyst),
                 "latency_audit": bool(latency),
+                "net_edge_lab": bool(net_edge),
+                "anti_overfit_gate": bool(anti_overfit),
+                "ev_slippage_calibration_gate": bool(ev_gate),
+                "policy_stability_matrix": bool(stability),
+                "candidate_ranking": bool(ranking),
+                "decision_ledger_audit": bool(ledger),
             },
             "recommended_next_action": [
                 "keep paper/research",
@@ -140,8 +174,26 @@ class PaperPolicyOrchestrator:
         exit_policy: dict[str, Any],
         news: dict[str, Any],
         catalyst: dict[str, Any],
+        net_edge: dict[str, Any],
+        anti_overfit: dict[str, Any],
+        ev_gate: dict[str, Any],
+        stability: dict[str, Any],
+        ranking: dict[str, Any],
     ) -> list[dict[str, Any]]:
         walk_by_policy = {str(row.get("policy_id") or ""): row for row in walk.get("policies", [])}
+        net_by_policy = {str(row.get("group_value") or ""): row for row in net_edge.get("by_group", {}).get("policy_id", [])}
+        net_by_group = {
+            (group, str(row.get("group_value") or "").upper()): row
+            for group, rows in net_edge.get("by_group", {}).items()
+            for row in rows
+        }
+        anti_by_policy = {str(row.get("group_value") or ""): row for row in anti_overfit.get("candidates", [])}
+        ev_by_policy = {str(row.get("group_value") or ""): row for row in ev_gate.get("candidates", [])}
+        stability_by_policy = {str(row.get("policy_id") or ""): row for row in stability.get("matrix", [])}
+        ranking_by_policy = {}
+        for key in ("top_candidates", "watch_list", "reject_list"):
+            for row in ranking.get(key, []):
+                ranking_by_policy[str(row.get("group_value") or "")] = row
         news_blocked = _news_blocked_symbols(news)
         time_risk = _time_risk_groups(time_death)
         candidates: list[dict[str, Any]] = []
@@ -151,10 +203,16 @@ class PaperPolicyOrchestrator:
             group_value = str(row.get("group_value") or "")
             decision = _decision_from_edge(row, news_blocked, time_risk, self.config)
             policy_id = f"policy_{group_type}_{group_value}".replace(" ", "_")
+            net_row = net_by_policy.get(policy_id, {}) or net_by_group.get((group_type if group_type != "regime" else "market_regime", group_value.upper()), {})
+            anti_row = anti_by_policy.get(policy_id, {})
+            ev_row = ev_by_policy.get(policy_id, {})
+            stability_row = stability_by_policy.get(policy_id, {})
+            rank_row = ranking_by_policy.get(policy_id, {})
             walk_row = walk_by_policy.get(policy_id, {})
             if decision == ALLOW_PAPER_CANDIDATE and walk_row:
                 if str(walk_row.get("decision")) != "PAPER_CANDIDATE":
                     decision = ORCH_WATCH_ONLY
+            decision = _stricten_decision(decision, net_row, anti_row, ev_row, stability_row, rank_row)
             if decision == ALLOW_PAPER_CANDIDATE and safe_float(row.get("stability_score")) < 0.50:
                 decision = ORCH_WATCH_ONLY
             if decision == ALLOW_PAPER_CANDIDATE and safe_int(row.get("total_labels")) < self.config.paper_policy_min_samples:
@@ -170,11 +228,17 @@ class PaperPolicyOrchestrator:
                 "regime_allowlist": group_value if group_type == "regime" else "",
                 "score_bucket_allowlist": group_value if group_type == "score_bucket" else "",
                 "min_pf": safe_float(row.get("profit_factor")),
+                "train_pf": safe_float(anti_row.get("train_pf")),
                 "validation_pf": safe_float(walk_row.get("validation_pf")),
+                "recent_pf": safe_float(anti_row.get("recent_pf")),
+                "net_pf": safe_float(net_row.get("net_PF") or ev_row.get("net_PF")),
+                "net_EV": safe_float(ev_row.get("net_EV") or net_row.get("net_EV")),
                 "walk_forward_stability": safe_float(walk_row.get("stability")),
+                "stability": stability_row.get("trend_status", "unknown"),
                 "exit_policy": _best_exit_policy(exit_policy),
                 "news_gate": _news_gate_for_group(news, group_type, group_value),
                 "time_death_risk": time_risk.get((group_type, group_value.upper()), "unknown"),
+                "drawdown_proxy": safe_float(row.get("max_drawdown_proxy")),
                 "sample_size": safe_int(row.get("total_labels")),
                 "tp_ratio": safe_float(row.get("tp_ratio")),
                 "sl_ratio": safe_float(row.get("sl_ratio")),
@@ -225,6 +289,33 @@ def _decision_from_edge(row: dict[str, Any], news_blocked: set[str], time_risk: 
     if edge_decision == SHADOW_ONLY:
         return ORCH_SHADOW_ONLY
     return ORCH_WATCH_ONLY
+
+
+def _stricten_decision(
+    decision: str,
+    net_row: dict[str, Any],
+    anti_row: dict[str, Any],
+    ev_row: dict[str, Any],
+    stability_row: dict[str, Any],
+    rank_row: dict[str, Any],
+) -> str:
+    strict_votes = {
+        str(anti_row.get("final_decision") or ""),
+        str(ev_row.get("final_decision") or ""),
+        str(rank_row.get("decision") or ""),
+    }
+    if "REJECT" in strict_votes:
+        return ORCH_BLOCK_PAPER
+    net_samples = safe_int(net_row.get("samples") or ev_row.get("samples"))
+    if net_samples >= 500 and safe_float(net_row.get("net_EV") or ev_row.get("net_EV")) <= 0 and (net_row or ev_row):
+        return ORCH_BLOCK_PAPER
+    if net_samples >= 500 and safe_float(net_row.get("net_PF") or ev_row.get("net_PF")) and safe_float(net_row.get("net_PF") or ev_row.get("net_PF")) < 1.2:
+        return ORCH_BLOCK_PAPER
+    if str(stability_row.get("trend_status") or "") == "deteriorating":
+        return ORCH_WATCH_ONLY
+    if "SHADOW_CANDIDATE" in strict_votes and decision == ALLOW_PAPER_CANDIDATE:
+        return ORCH_SHADOW_ONLY
+    return decision
 
 
 def _reason(row: dict[str, Any], decision: str, walk_row: dict[str, Any], catalyst: dict[str, Any], time_risk: dict[tuple[str, str], str]) -> str:
@@ -336,6 +427,8 @@ def _policy_lines(rows: list[dict[str, Any]]) -> list[str]:
             f"symbol_allowlist={row.get('symbol_allowlist')} side_allowlist={row.get('side_allowlist')} "
             f"regime_allowlist={row.get('regime_allowlist')} score_bucket_allowlist={row.get('score_bucket_allowlist')} "
             f"min_pf={safe_float(row.get('min_pf')):.2f} validation_pf={safe_float(row.get('validation_pf')):.2f} "
+            f"recent_pf={safe_float(row.get('recent_pf')):.2f} net_pf={safe_float(row.get('net_pf')):.2f} "
+            f"net_EV={safe_float(row.get('net_EV')):.4f} stability={row.get('stability')} "
             f"walk_forward_stability={safe_float(row.get('walk_forward_stability')):.2f} news_gate={row.get('news_gate')} "
             f"time_death_risk={row.get('time_death_risk')} reason={row.get('reason')}"
         )

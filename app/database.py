@@ -751,6 +751,7 @@ class Database:
     def _create_indexes(self, conn: Any) -> None:
         indexes = [
             "CREATE INDEX IF NOT EXISTS idx_signal_labels_observation_id ON signal_labels(observation_id)",
+            "CREATE INDEX IF NOT EXISTS idx_signal_labels_timestamp ON signal_labels(timestamp)",
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_signal_path_metrics_observation ON signal_path_metrics(observation_id)",
             "CREATE INDEX IF NOT EXISTS idx_signal_path_metrics_created ON signal_path_metrics(created_at)",
             "CREATE INDEX IF NOT EXISTS idx_signal_path_metrics_symbol ON signal_path_metrics(symbol)",

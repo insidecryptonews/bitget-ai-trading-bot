@@ -558,6 +558,91 @@ class ResearchLab:
 
         return ExitPolicyBacktest(self.config, self.db).to_text(hours=hours)
 
+    def net_edge_lab(self, hours: int = 24) -> str:
+        from .net_edge_lab import NetEdgeLab
+
+        return NetEdgeLab(self.config, self.db).to_text(hours=hours)
+
+    def anti_overfit_gate(self, hours: int = 24) -> str:
+        from .anti_overfit_gate import AntiOverfitGate
+
+        return AntiOverfitGate(self.config, self.db).to_text(hours=hours)
+
+    def ev_slippage_calibration_gate(self, hours: int = 24) -> str:
+        from .ev_slippage_calibration_gate import EvSlippageCalibrationGate
+
+        return EvSlippageCalibrationGate(self.config, self.db).to_text(hours=hours)
+
+    def policy_stability_matrix(self, hours: int = 24) -> str:
+        from .policy_stability_matrix import PolicyStabilityMatrix
+
+        return PolicyStabilityMatrix(self.config, self.db).to_text(hours=hours)
+
+    def candidate_ranking(self, hours: int = 24) -> str:
+        from .candidate_ranking import CandidateRanking
+
+        return CandidateRanking(self.config, self.db).to_text(hours=hours)
+
+    def decision_ledger_audit(self, hours: int = 24) -> str:
+        from .decision_ledger_audit import DecisionLedgerAudit
+
+        return DecisionLedgerAudit(self.config, self.db).to_text(hours=hours)
+
+    def adaptive_exit_backtest(self, hours: int = 24) -> str:
+        from .adaptive_exit_backtest import AdaptiveExitBacktest
+
+        return AdaptiveExitBacktest(self.config, self.db).to_text(hours=hours)
+
+    def sizing_safety_lab(self, hours: int = 24) -> str:
+        from .sizing_safety_lab import SizingSafetyLab
+
+        return SizingSafetyLab(self.config, self.db).to_text(hours=hours)
+
+    def structured_output_guard_smoke_test(self) -> str:
+        from .structured_output_guard import smoke_test_text
+
+        return smoke_test_text()
+
+    def vps_runtime_health(self) -> str:
+        from .vps_runtime_health import VpsRuntimeHealth
+
+        return VpsRuntimeHealth(self.config, self.db, self.logger).to_text()
+
+    def post_migration_backup(self, hours: int = 168) -> str:
+        from .post_migration_backup import PostMigrationBackup
+
+        return PostMigrationBackup(self.config, self.db, self.logger).to_text(hours=hours)
+
+    def data_restore_benchmark(self) -> str:
+        from .data_restore_benchmark import DataRestoreBenchmark
+
+        return DataRestoreBenchmark(self.config, self.db, self.logger).to_text(dry_run=True)
+
+    def fast_runtime_readiness(self, hours: int = 24) -> str:
+        from .fast_runtime_readiness import FastRuntimeReadiness
+
+        return FastRuntimeReadiness(self.config, self.db).to_text(hours=hours)
+
+    def websocket_migration_plan(self, hours: int = 24) -> str:
+        from .websocket_migration_plan import WebsocketMigrationPlan
+
+        return WebsocketMigrationPlan(self.config, self.db).to_text(hours=hours)
+
+    def fast_runtime_smoke_test(self) -> str:
+        from .fast_runtime_smoke_test import FastRuntimeSmokeTest
+
+        return FastRuntimeSmokeTest(self.config, self.db, self.logger).to_text()
+
+    def edge_hardening_smoke_test(self) -> str:
+        from .edge_hardening_smoke_test import EdgeHardeningSmokeTest
+
+        return EdgeHardeningSmokeTest(self.config, self.db, self.logger).to_text()
+
+    def high_value_patterns_smoke_test(self) -> str:
+        from .high_value_patterns_smoke_test import HighValuePatternsSmokeTest
+
+        return HighValuePatternsSmokeTest(self.config, self.db, self.logger).to_text()
+
     def policy_news_smoke_test(self) -> str:
         from .policy_news_smoke_test import PolicyNewsSmokeTest
 
@@ -1190,6 +1275,23 @@ def main() -> None:
             "walk-forward",
             "policy-backtest",
             "exit-policy-backtest",
+            "net-edge-lab",
+            "anti-overfit-gate",
+            "ev-slippage-calibration-gate",
+            "policy-stability-matrix",
+            "candidate-ranking",
+            "decision-ledger-audit",
+            "adaptive-exit-backtest",
+            "sizing-safety-lab",
+            "structured-output-guard-smoke-test",
+            "vps-runtime-health",
+            "post-migration-backup",
+            "data-restore-benchmark",
+            "fast-runtime-readiness",
+            "websocket-migration-plan",
+            "fast-runtime-smoke-test",
+            "edge-hardening-smoke-test",
+            "high-value-patterns-smoke-test",
             "policy-news-smoke-test",
             "time-death-lab",
             "adaptive-exit-policy",
@@ -1345,6 +1447,40 @@ def main() -> None:
         print(lab.policy_backtest(hours=args.hours))
     elif args.command == "exit-policy-backtest":
         print(lab.exit_policy_backtest(hours=args.hours))
+    elif args.command == "net-edge-lab":
+        print(lab.net_edge_lab(hours=args.hours))
+    elif args.command == "anti-overfit-gate":
+        print(lab.anti_overfit_gate(hours=args.hours))
+    elif args.command == "ev-slippage-calibration-gate":
+        print(lab.ev_slippage_calibration_gate(hours=args.hours))
+    elif args.command == "policy-stability-matrix":
+        print(lab.policy_stability_matrix(hours=args.hours))
+    elif args.command == "candidate-ranking":
+        print(lab.candidate_ranking(hours=args.hours))
+    elif args.command == "decision-ledger-audit":
+        print(lab.decision_ledger_audit(hours=args.hours))
+    elif args.command == "adaptive-exit-backtest":
+        print(lab.adaptive_exit_backtest(hours=args.hours))
+    elif args.command == "sizing-safety-lab":
+        print(lab.sizing_safety_lab(hours=args.hours))
+    elif args.command == "structured-output-guard-smoke-test":
+        print(lab.structured_output_guard_smoke_test())
+    elif args.command == "vps-runtime-health":
+        print(lab.vps_runtime_health())
+    elif args.command == "post-migration-backup":
+        print(lab.post_migration_backup(hours=args.hours))
+    elif args.command == "data-restore-benchmark":
+        print(lab.data_restore_benchmark())
+    elif args.command == "fast-runtime-readiness":
+        print(lab.fast_runtime_readiness(hours=args.hours))
+    elif args.command == "websocket-migration-plan":
+        print(lab.websocket_migration_plan(hours=args.hours))
+    elif args.command == "fast-runtime-smoke-test":
+        print(lab.fast_runtime_smoke_test())
+    elif args.command == "edge-hardening-smoke-test":
+        print(lab.edge_hardening_smoke_test())
+    elif args.command == "high-value-patterns-smoke-test":
+        print(lab.high_value_patterns_smoke_test())
     elif args.command == "policy-news-smoke-test":
         print(lab.policy_news_smoke_test())
     elif args.command == "time-death-lab":
