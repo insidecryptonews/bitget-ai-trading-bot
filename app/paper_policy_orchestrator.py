@@ -87,6 +87,20 @@ class PaperPolicyOrchestrator:
             ranking,
         )
         blocked = self._blocked(edge, news, time_death)
+        no_actionable_candidates = ranking.get("status") == "NO_VALID_CANDIDATES"
+        next_action = [
+            "keep paper/research",
+            "do not activate live",
+            "review policy candidates before enabling any paper filter",
+            "keep ENABLE_PAPER_POLICY_FILTER=false until validation is stable",
+        ]
+        if no_actionable_candidates:
+            next_action = [
+                "keep_research",
+                "do not activate live",
+                "do not enable paper filter",
+                "wait for concrete validated symbol+side+regime candidates",
+            ]
         return {
             "hours": hours,
             "global_status": "PAPER_ONLY",
@@ -98,6 +112,7 @@ class PaperPolicyOrchestrator:
             },
             "policy_candidates": policy_candidates,
             "blocked": blocked,
+            "no_actionable_candidates": no_actionable_candidates,
             "module_status": {
                 "edge_guard": bool(edge),
                 "paper_policy_lab": bool(policy_lab),
@@ -117,12 +132,7 @@ class PaperPolicyOrchestrator:
                 "candidate_ranking": bool(ranking),
                 "decision_ledger_audit": bool(ledger),
             },
-            "recommended_next_action": [
-                "keep paper/research",
-                "do not activate live",
-                "review policy candidates before enabling any paper filter",
-                "keep ENABLE_PAPER_POLICY_FILTER=false until validation is stable",
-            ],
+            "recommended_next_action": next_action,
             "final_recommendation": "NO LIVE",
         }
 
@@ -133,6 +143,7 @@ class PaperPolicyOrchestrator:
             f"hours: {payload['hours']}",
             f"global_status: {payload['global_status']}",
             f"live_allowed: {str(payload['live_allowed']).lower()}",
+            f"no_actionable_candidates: {str(payload.get('no_actionable_candidates')).lower()}",
             "paper_filter:",
             f"- enabled={str(payload['policy_filter']['enabled']).lower()} mode={payload['policy_filter']['mode']} live_unaffected=true",
             "policy_candidates:",
@@ -212,6 +223,10 @@ class PaperPolicyOrchestrator:
             if decision == ALLOW_PAPER_CANDIDATE and walk_row:
                 if str(walk_row.get("decision")) != "PAPER_CANDIDATE":
                     decision = ORCH_WATCH_ONLY
+            if decision == ALLOW_PAPER_CANDIDATE and group_type == "score_bucket":
+                decision = ORCH_WATCH_ONLY
+            if decision == ALLOW_PAPER_CANDIDATE and ranking.get("status") == "NO_VALID_CANDIDATES":
+                decision = ORCH_WATCH_ONLY
             decision = _stricten_decision(decision, net_row, anti_row, ev_row, stability_row, rank_row)
             if decision == ALLOW_PAPER_CANDIDATE and safe_float(row.get("stability_score")) < 0.50:
                 decision = ORCH_WATCH_ONLY
@@ -324,6 +339,8 @@ def _reason(row: dict[str, Any], decision: str, walk_row: dict[str, Any], cataly
     if decision == ORCH_SHADOW_ONLY:
         return "time_death_or_quality_risk" if time_risk else str(row.get("reason") or "shadow_validate")
     if decision == ORCH_WATCH_ONLY:
+        if str(row.get("group_type") or "") == "score_bucket":
+            return "generic_bucket_not_actionable"
         if safe_int(row.get("total_labels")) < 500:
             return "sample_too_small"
         if walk_row and str(walk_row.get("decision")) != "PAPER_CANDIDATE":

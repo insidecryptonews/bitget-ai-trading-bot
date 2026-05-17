@@ -673,6 +673,31 @@ class ResearchLab:
 
         return TimeDeathSmokeTest(self.config, self.db, self.logger).to_text()
 
+    def pre_move_event_labeler(self, hours: int = 24) -> str:
+        from .pre_move_event_labeler import PreMoveEventLabeler
+
+        return PreMoveEventLabeler(self.config, self.db).to_text(hours=hours)
+
+    def pre_move_feature_snapshot(self, hours: int = 24) -> str:
+        from .pre_move_feature_snapshot import PreMoveFeatureSnapshot
+
+        return PreMoveFeatureSnapshot(self.config, self.db).to_text(hours=hours)
+
+    def pre_move_pattern_miner(self, hours: int = 24) -> str:
+        from .pre_move_pattern_miner import PreMovePatternMiner
+
+        return PreMovePatternMiner(self.config, self.db).to_text(hours=hours)
+
+    def pre_move_similarity_scanner(self, hours: int = 6) -> str:
+        from .pre_move_similarity_scanner import PreMoveSimilarityScanner
+
+        return PreMoveSimilarityScanner(self.config, self.db).to_text(hours=hours)
+
+    def pre_move_smoke_test(self) -> str:
+        from .pre_move_smoke_test import PreMoveSmokeTest
+
+        return PreMoveSmokeTest(self.config, self.db, self.logger).to_text()
+
     def adaptive_exit_policy(self, hours: int = 24) -> str:
         from .adaptive_exit_policy_lab import AdaptiveExitPolicyLab
 
@@ -1299,6 +1324,11 @@ def main() -> None:
             "time-death-filter-proposal",
             "exit-cause-backtest",
             "time-death-smoke-test",
+            "pre-move-event-labeler",
+            "pre-move-feature-snapshot",
+            "pre-move-pattern-miner",
+            "pre-move-similarity-scanner",
+            "pre-move-smoke-test",
             "net-edge-lab",
             "anti-overfit-gate",
             "ev-slippage-calibration-gate",
@@ -1479,6 +1509,16 @@ def main() -> None:
         print(lab.exit_cause_backtest(hours=args.hours))
     elif args.command == "time-death-smoke-test":
         print(lab.time_death_smoke_test())
+    elif args.command == "pre-move-event-labeler":
+        print(lab.pre_move_event_labeler(hours=args.hours))
+    elif args.command == "pre-move-feature-snapshot":
+        print(lab.pre_move_feature_snapshot(hours=args.hours))
+    elif args.command == "pre-move-pattern-miner":
+        print(lab.pre_move_pattern_miner(hours=args.hours))
+    elif args.command == "pre-move-similarity-scanner":
+        print(lab.pre_move_similarity_scanner(hours=args.hours))
+    elif args.command == "pre-move-smoke-test":
+        print(lab.pre_move_smoke_test())
     elif args.command == "net-edge-lab":
         print(lab.net_edge_lab(hours=args.hours))
     elif args.command == "anti-overfit-gate":

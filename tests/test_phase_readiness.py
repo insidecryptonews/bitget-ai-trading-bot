@@ -95,7 +95,9 @@ def test_paper_policy_orchestrator_generates_markers_and_allow_candidate(tmp_pat
     payload = PaperPolicyOrchestrator(config, db).build(hours=24)
     assert "PAPER POLICY ORCHESTRATOR START" in text
     assert "PAPER POLICY ORCHESTRATOR END" in text
-    assert any(row["decision"] == ALLOW_PAPER_CANDIDATE for row in payload["policy_candidates"])
+    assert payload["policy_candidates"]
+    assert not any(row["decision"] == ALLOW_PAPER_CANDIDATE for row in payload["policy_candidates"])
+    assert payload["no_actionable_candidates"] is True
     assert payload["live_allowed"] is False
 
 

@@ -282,6 +282,16 @@
         <pre id="timeDeathRepairText">Sin cargar todavia.</pre>
       </div>
       <div class="card full">
+        <h2>Pre-Move Intelligence</h2>
+        <div class="actions">
+          <button id="preMoveEventLabelerBtn">Event labeler 24h</button>
+          <button id="preMoveFeatureSnapshotBtn">Feature snapshot 24h</button>
+          <button id="preMovePatternMinerBtn">Pattern miner 24h</button>
+          <button id="preMoveSimilarityScannerBtn">Similarity scanner 6h</button>
+        </div>
+        <pre id="preMoveIntelligenceText">Sin cargar todavia.</pre>
+      </div>
+      <div class="card full">
         <h2>Adaptive Exit Policy</h2>
         <div class="actions"><button id="adaptiveExitPolicyBtn">Actualizar adaptive exit 24h</button></div>
         <pre id="adaptiveExitPolicyText">Sin cargar todavía.</pre>
@@ -679,6 +689,10 @@
     byId("timeDeathAutopsyBtn").addEventListener("click", () => loadGenericLab("/api/training/time-death-autopsy?hours=24", "timeDeathRepairText"));
     byId("timeDeathFilterProposalBtn").addEventListener("click", () => loadGenericLab("/api/training/time-death-filter-proposal?hours=24", "timeDeathRepairText"));
     byId("exitCauseBacktestBtn").addEventListener("click", () => loadGenericLab("/api/training/exit-cause-backtest?hours=24", "timeDeathRepairText"));
+    byId("preMoveEventLabelerBtn").addEventListener("click", () => loadGenericLab("/api/training/pre-move-event-labeler?hours=24", "preMoveIntelligenceText"));
+    byId("preMoveFeatureSnapshotBtn").addEventListener("click", () => loadGenericLab("/api/training/pre-move-feature-snapshot?hours=24", "preMoveIntelligenceText"));
+    byId("preMovePatternMinerBtn").addEventListener("click", () => loadGenericLab("/api/training/pre-move-pattern-miner?hours=24", "preMoveIntelligenceText"));
+    byId("preMoveSimilarityScannerBtn").addEventListener("click", () => loadGenericLab("/api/training/pre-move-similarity-scanner?hours=6", "preMoveIntelligenceText"));
     byId("adaptiveExitPolicyBtn").addEventListener("click", () => loadGenericLab("/api/training/adaptive-exit-policy?hours=24", "adaptiveExitPolicyText"));
     byId("latencyAuditBtn").addEventListener("click", () => loadGenericLab("/api/training/latency-audit?hours=24", "latencyAuditText"));
     byId("fastExecutionReadinessBtn").addEventListener("click", () => loadGenericLab("/api/training/fast-execution-readiness", "fastExecutionReadinessText"));

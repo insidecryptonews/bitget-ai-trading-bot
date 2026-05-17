@@ -219,13 +219,15 @@ def _select(groups: list[dict[str, Any]], decision: str) -> list[dict[str, Any]]
 
 def _strict_context(config: BotConfig, db: Database, hours: int) -> dict[str, Any]:
     try:
+        from .candidate_ranking import CandidateRanking
         from .net_edge_lab import NetEdgeLab
         from .time_death_autopsy import TimeDeathAutopsyLab
 
         net = NetEdgeLab(config, db).build(hours=hours)
         autopsy = TimeDeathAutopsyLab(config, db).build(hours=hours)
+        ranking = CandidateRanking(config, db).build(hours=hours)
     except Exception:
-        return {"net": {}, "autopsy": {}}
+        return {"net": {}, "autopsy": {}, "ranking": {}}
     net_map = {
         (_guard_group_type(group), str(row.get("group_value") or "").upper()): row
         for group, rows in net.get("by_group", {}).items()
@@ -235,13 +237,14 @@ def _strict_context(config: BotConfig, db: Database, hours: int) -> dict[str, An
         (_guard_group_type(str(row.get("group_key") or "")), str(row.get("group_value") or "").upper()): row
         for row in autopsy.get("groups", [])
     }
-    return {"net": net_map, "autopsy": autopsy_map}
+    return {"net": net_map, "autopsy": autopsy_map, "ranking": ranking}
 
 
 def _apply_strict_context(row: dict[str, Any], group_type: str, context: dict[str, Any], config: BotConfig) -> None:
     key = (group_type, str(row.get("group_value") or "").upper())
     net = context.get("net", {}).get(key, {})
     autopsy = context.get("autopsy", {}).get(key, {})
+    ranking = context.get("ranking", {})
     if net:
         row["net_EV"] = safe_float(net.get("net_EV"))
         row["net_PF"] = safe_float(net.get("net_PF"))
@@ -258,7 +261,14 @@ def _apply_strict_context(row: dict[str, Any], group_type: str, context: dict[st
         reason = str(autopsy.get("reason") or autopsy.get("likely_cause") or "high_time_death").lower()
     if autopsy and str(autopsy.get("decision")) == "WATCH_ONLY" and safe_int(autopsy.get("samples")) < config.edge_guard_min_sample:
         reason = "validation_sample_too_small"
+    ranking_has_evidence = bool(
+        ranking.get("top_candidates") or ranking.get("watch_list") or ranking.get("reject_list")
+    )
+    if ranking_has_evidence and ranking.get("status") == "NO_VALID_CANDIDATES":
+        reason = "candidate_ranking_no_valid_candidates"
     group_value = str(row.get("group_value") or "").upper()
+    if group_type == "score_bucket" and group_value in {"90-100", "90-94", "95-100"}:
+        reason = reason or "generic_bucket_not_actionable"
     if group_type == "regime" and group_value == "RISK_OFF" and safe_float(row.get("time_ratio")) > 0.80:
         reason = "risk_off_high_time_death"
     if group_type == "side" and group_value == "LONG" and safe_float(row.get("tp_ratio")) <= 0.001 and safe_float(row.get("sl_ratio")) > 0.15:

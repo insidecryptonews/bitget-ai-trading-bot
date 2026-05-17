@@ -83,6 +83,10 @@ def start_health_server(
                 "/api/training/time-death-autopsy",
                 "/api/training/time-death-filter-proposal",
                 "/api/training/exit-cause-backtest",
+                "/api/training/pre-move-event-labeler",
+                "/api/training/pre-move-feature-snapshot",
+                "/api/training/pre-move-pattern-miner",
+                "/api/training/pre-move-similarity-scanner",
                 "/api/training/net-edge-lab",
                 "/api/training/anti-overfit-gate",
                 "/api/training/ev-slippage-calibration-gate",
@@ -182,6 +186,18 @@ def start_health_server(
                 return
             if path == "/api/training/exit-cause-backtest":
                 self._send_json(_exit_cause_backtest(config, db, query))
+                return
+            if path == "/api/training/pre-move-event-labeler":
+                self._send_json(_pre_move_event_labeler(config, db, query))
+                return
+            if path == "/api/training/pre-move-feature-snapshot":
+                self._send_json(_pre_move_feature_snapshot(config, db, query))
+                return
+            if path == "/api/training/pre-move-pattern-miner":
+                self._send_json(_pre_move_pattern_miner(config, db, query))
+                return
+            if path == "/api/training/pre-move-similarity-scanner":
+                self._send_json(_pre_move_similarity_scanner(config, db, query))
                 return
             if path == "/api/training/net-edge-lab":
                 self._send_json(_net_edge_lab(config, db, query))
@@ -534,6 +550,22 @@ def _time_death_filter_proposal(config: Any | None, db: Any | None, query: dict[
 
 def _exit_cause_backtest(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
     return _lab_payload(config, db, query, "exit cause backtest unavailable", ".exit_cause_backtest", "ExitCauseBacktest")
+
+
+def _pre_move_event_labeler(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
+    return _lab_payload(config, db, query, "pre-move event labeler unavailable", ".pre_move_event_labeler", "PreMoveEventLabeler")
+
+
+def _pre_move_feature_snapshot(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
+    return _lab_payload(config, db, query, "pre-move feature snapshot unavailable", ".pre_move_feature_snapshot", "PreMoveFeatureSnapshot")
+
+
+def _pre_move_pattern_miner(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
+    return _lab_payload(config, db, query, "pre-move pattern miner unavailable", ".pre_move_pattern_miner", "PreMovePatternMiner")
+
+
+def _pre_move_similarity_scanner(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
+    return _lab_payload(config, db, query, "pre-move similarity scanner unavailable", ".pre_move_similarity_scanner", "PreMoveSimilarityScanner")
 
 
 def _net_edge_lab(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
