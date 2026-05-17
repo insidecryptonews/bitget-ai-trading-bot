@@ -62,6 +62,9 @@ def start_health_server(
             if not _dashboard_enabled(config):
                 self._send_status(404, "not found")
                 return
+            if path in {"/static/dashboard.css", "/static/dashboard.js"}:
+                self._send_static(path)
+                return
             if path in {
                 "/dashboard",
                 "/api/training/status",
@@ -386,6 +389,25 @@ def start_health_server(
             body = html.encode("utf-8")
             self.send_response(status)
             self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def _send_static(self, path: str) -> None:
+            filename = path.rsplit("/", 1)[-1]
+            if filename not in {"dashboard.css", "dashboard.js"}:
+                self._send_status(404, "not found")
+                return
+            file_path = STATIC_DIR / filename
+            try:
+                body = file_path.read_bytes()
+            except OSError:
+                self._send_status(404, "not found")
+                return
+            content_type = "text/css; charset=utf-8" if filename.endswith(".css") else "application/javascript; charset=utf-8"
+            self.send_response(200)
+            self.send_header("Content-Type", content_type)
             self.send_header("Cache-Control", "no-store")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()

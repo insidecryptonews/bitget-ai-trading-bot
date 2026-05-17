@@ -838,6 +838,11 @@ class ResearchLab:
 
         return BotIntegrityAuditSmokeTest(self.config, self.db, self.logger).to_text()
 
+    def dashboard_ui_v3_smoke_test(self) -> str:
+        from .dashboard_ui_v3_smoke_test import DashboardUiV3SmokeTest
+
+        return DashboardUiV3SmokeTest(self.config, self.db, self.logger).to_text()
+
     def build_markdown_report(
         self,
         dataset: list[dict[str, Any]] | None = None,
@@ -1421,6 +1426,7 @@ def main() -> None:
             "paper-trading-audit",
             "research-modules-audit",
             "bot-integrity-audit-smoke-test",
+            "dashboard-ui-v3-smoke-test",
         ],
     )
     parser.add_argument("--limit", type=int, default=None, help="Maximo de labels a procesar en phase2-persist.")
@@ -1669,6 +1675,8 @@ def main() -> None:
         print(lab.research_modules_audit(hours=args.hours))
     elif args.command == "bot-integrity-audit-smoke-test":
         print(lab.bot_integrity_audit_smoke_test())
+    elif args.command == "dashboard-ui-v3-smoke-test":
+        print(lab.dashboard_ui_v3_smoke_test())
 
 
 if __name__ == "__main__":

@@ -3,1128 +3,415 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Bitget AI Bot Dashboard Pro</title>
-  <style>
-    :root {
-      color-scheme: dark;
-      --bg: #0d1117;
-      --panel: #151b23;
-      --panel-2: #1c2430;
-      --text: #edf2f7;
-      --muted: #9aa8b6;
-      --line: #2b3542;
-      --good: #2dd4bf;
-      --warn: #f59e0b;
-      --bad: #f43f5e;
-      --info: #60a5fa;
-      --violet: #a78bfa;
-      --shadow: 0 18px 44px rgba(0,0,0,.28);
-    }
-    * { box-sizing: border-box; }
-    body {
-      margin: 0;
-      background:
-        radial-gradient(circle at 18% -10%, rgba(45, 212, 191, .13), transparent 28%),
-        radial-gradient(circle at 86% 2%, rgba(96, 165, 250, .12), transparent 30%),
-        linear-gradient(180deg, #090d13, var(--bg) 36%, #0a0f16);
-      color: var(--text);
-      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      line-height: 1.45;
-    }
-    header {
-      position: sticky;
-      top: 0;
-      z-index: 2;
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 16px;
-      padding: 16px clamp(16px, 3vw, 34px);
-      border-bottom: 1px solid var(--line);
-      background: rgba(13, 17, 23, 0.94);
-      backdrop-filter: blur(10px);
-    }
-    h1 { margin: 0; font-size: clamp(21px, 3vw, 34px); letter-spacing: 0; }
-    .subtitle { color: var(--muted); font-size: 14px; margin-top: 2px; }
-    .header-left { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
-    .header-meta { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; justify-content: flex-end; }
-    .tag {
-      display: inline-flex;
-      align-items: center;
-      min-height: 30px;
-      padding: 6px 10px;
-      border: 1px solid var(--line);
-      border-radius: 999px;
-      background: rgba(255,255,255,.04);
-      font-size: 12px;
-      font-weight: 800;
-      color: var(--muted);
-    }
-    .tag.good { border-color: rgba(45, 212, 191, .32); background: rgba(45, 212, 191, .10); }
-    .tag.bad { border-color: rgba(244, 63, 94, .36); background: rgba(244, 63, 94, .10); }
-    .tag.info { border-color: rgba(96, 165, 250, .35); background: rgba(96, 165, 250, .10); }
-    main { padding: 22px clamp(14px, 3vw, 34px) 40px; max-width: 1500px; margin: 0 auto; }
-    .status { display: flex; align-items: center; gap: 10px; color: var(--muted); font-size: 14px; }
-    .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--warn); box-shadow: 0 0 18px currentColor; }
-    .online .dot { background: var(--good); color: var(--good); }
-    .danger-banner {
-      display: none;
-      margin: 0 0 18px;
-      padding: 14px 16px;
-      border: 1px solid rgba(244, 63, 94, .5);
-      background: rgba(244, 63, 94, .12);
-      color: #fecdd3;
-      font-weight: 700;
-    }
-    .grid { display: grid; grid-template-columns: repeat(12, 1fr); gap: 14px; }
-    .card {
-      grid-column: span 3;
-      background: var(--panel);
-      border: 1px solid var(--line);
-      border-radius: 12px;
-      padding: 16px;
-      min-width: 0;
-      box-shadow: var(--shadow);
-    }
-    .wide { grid-column: span 6; }
-    .full { grid-column: 1 / -1; }
-    .card h2 { margin: 0 0 12px; font-size: 15px; color: #d8e2ee; font-weight: 700; }
-    .metric { display: flex; justify-content: space-between; gap: 12px; padding: 7px 0; border-bottom: 1px solid rgba(255,255,255,.05); }
-    .metric:last-child { border-bottom: 0; }
-    .label { color: var(--muted); min-width: 0; overflow-wrap: anywhere; }
-    .value { font-weight: 700; text-align: right; overflow-wrap: anywhere; }
-    .pill-row { display: flex; flex-wrap: wrap; gap: 8px; }
-    .pill { padding: 7px 10px; border-radius: 999px; background: var(--panel-2); border: 1px solid var(--line); font-weight: 700; }
-    .good { color: var(--good); }
-    .warn { color: var(--warn); }
-    .bad { color: var(--bad); }
-    .info { color: var(--info); }
-    .bar { height: 9px; border-radius: 999px; background: #263241; overflow: hidden; margin: 6px 0 11px; }
-    .bar span { display: block; height: 100%; width: 0; background: linear-gradient(90deg, var(--good), var(--info)); }
-    table { width: 100%; border-collapse: collapse; font-size: 13px; }
-    th, td { text-align: left; padding: 9px 7px; border-bottom: 1px solid rgba(255,255,255,.06); vertical-align: top; }
-    th { color: var(--muted); font-weight: 600; }
-    td { overflow-wrap: anywhere; }
-    button {
-      border: 1px solid var(--line);
-      background: var(--panel-2);
-      color: var(--text);
-      border-radius: 10px;
-      padding: 9px 12px;
-      cursor: pointer;
-      font-weight: 700;
-    }
-    button:hover { border-color: var(--info); }
-    button:active { transform: translateY(1px); }
-    pre {
-      min-height: 100px;
-      max-height: 340px;
-      overflow: auto;
-      background: #0a0f16;
-      border: 1px solid var(--line);
-      border-radius: 12px;
-      padding: 12px;
-      white-space: pre-wrap;
-      color: #d6e1eb;
-    }
-    .actions { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 10px; }
-    .pro-hero {
-      grid-column: 1 / -1;
-      display: grid;
-      grid-template-columns: minmax(0, 1.35fr) minmax(260px, .65fr);
-      gap: 14px;
-      align-items: stretch;
-    }
-    .pro-panel {
-      background: linear-gradient(180deg, rgba(28, 36, 48, .98), rgba(15, 23, 32, .98));
-      border: 1px solid var(--line);
-      border-radius: 14px;
-      padding: 18px;
-      box-shadow: var(--shadow);
-    }
-    .pro-title { font-size: clamp(22px, 3vw, 34px); font-weight: 800; margin: 0 0 8px; letter-spacing: 0; }
-    .pro-copy { color: var(--muted); max-width: 920px; margin: 0 0 14px; }
-    .primary-action { background: #1f6feb; border-color: #388bfd; color: #fff; }
-    .quiet-action { color: var(--muted); }
-    .quick-nav { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0 0; }
-    .quick-nav a {
-      color: var(--text);
-      text-decoration: none;
-      border: 1px solid var(--line);
-      border-radius: 999px;
-      padding: 7px 10px;
-      background: rgba(255,255,255,.03);
-      font-weight: 700;
-      font-size: 13px;
-    }
-    .readiness-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
-    .readiness-chip {
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      padding: 10px;
-      background: rgba(255,255,255,.03);
-    }
-    .readiness-chip span { display: block; color: var(--muted); font-size: 12px; }
-    .readiness-chip strong { display: block; margin-top: 4px; overflow-wrap: anywhere; }
-    .chart-row { display: grid; grid-template-columns: 140px 1fr 64px; align-items: center; gap: 9px; margin: 7px 0; }
-    .chart-label { color: var(--muted); overflow-wrap: anywhere; }
-    .chart-bar { height: 10px; border-radius: 999px; background: #263241; overflow: hidden; }
-    .chart-bar span { display: block; height: 100%; background: var(--info); }
-    .chart-value { text-align: right; font-weight: 800; }
-    .report-output { max-height: 520px; }
-    .maintenance-note { color: var(--warn); margin: 0 0 10px; font-size: 13px; }
-    .section-kicker {
-      grid-column: 1 / -1;
-      margin: 20px 0 -4px;
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 12px;
-    }
-    .section-kicker h2 { margin: 0; font-size: 18px; }
-    .section-kicker span { color: var(--muted); font-size: 13px; }
-    .big-status {
-      display: grid;
-      grid-template-columns: repeat(5, minmax(0, 1fr));
-      gap: 10px;
-      margin-top: 12px;
-    }
-    .status-tile {
-      min-height: 88px;
-      border: 1px solid var(--line);
-      border-radius: 12px;
-      padding: 12px;
-      background: rgba(255,255,255,.035);
-    }
-    .status-tile .name { color: var(--muted); font-size: 12px; }
-    .status-tile .state { margin-top: 8px; font-size: 16px; font-weight: 900; }
-    .donut {
-      width: 120px;
-      height: 120px;
-      border-radius: 50%;
-      display: grid;
-      place-items: center;
-      background: conic-gradient(var(--warn) 0deg, var(--warn) 220deg, var(--bad) 220deg, var(--bad) 300deg, var(--good) 300deg);
-      margin: 8px auto 12px;
-    }
-    .donut span {
-      display: grid;
-      place-items: center;
-      width: 82px;
-      height: 82px;
-      border-radius: 50%;
-      background: var(--panel);
-      font-weight: 900;
-    }
-    @media (max-width: 1100px) { .card, .wide { grid-column: span 6; } }
-    @media (max-width: 700px) {
-      header { align-items: flex-start; flex-direction: column; }
-      .pro-hero { grid-template-columns: 1fr; }
-      .readiness-grid { grid-template-columns: 1fr; }
-      .big-status { grid-template-columns: 1fr; }
-      .card, .wide { grid-column: 1 / -1; }
-      .metric { align-items: flex-start; flex-direction: column; gap: 2px; }
-      .value { text-align: left; }
-    }
-  </style>
+  <title>Bitget AI Research Control</title>
+  <link rel="stylesheet" href="/static/dashboard.css">
 </head>
-<body>
-  <header>
-    <div class="header-left">
-      <div>
-        <h1>Bitget AI Bot</h1>
-        <div class="subtitle">Training Dashboard Pro · visual monitor · research only</div>
-      </div>
-      <span class="tag good">PAPER ONLY</span>
-      <span class="tag bad">NO LIVE</span>
-    </div>
-    <div class="header-meta">
-      <span id="gitVersionTag" class="tag info">git: unknown</span>
-      <span id="utcTimeTag" class="tag">UTC: --:--</span>
-      <span id="madridTimeTag" class="tag">Madrid: --:--</span>
-      <div id="onlineState" class="status"><span class="dot"></span><span>conectando</span></div>
-    </div>
-  </header>
-  <main>
-    <div id="liveDanger" class="danger-banner">PELIGRO LIVE ACTIVO</div>
-    <section class="grid">
-      <div class="pro-hero">
-        <div class="pro-panel">
-          <div class="pro-title">Dashboard Pro</div>
-          <p class="pro-copy">Control visual, análisis read-only y exportación completa para revisar el bot sin tocar live, slots, backups destructivos ni ejecución real.</p>
-          <div class="actions">
-            <button id="copyChatGptReportBtn" class="primary-action">Copiar reporte completo para ChatGPT</button>
-            <button id="copyShortReportBtn">Copiar resumen corto</button>
-            <button id="copyLastReportBtn">Copiar último reporte generado</button>
-            <button id="downloadFullTxtBtn">Descargar TXT completo</button>
-            <button id="downloadFullJsonBtn">Descargar JSON completo</button>
-            <button id="refreshMainAnalysisBtn">Actualizar análisis principal</button>
-          </div>
-          <div class="actions">
-            <button id="downloadSignalsCsvBtn" class="quiet-action">CSV señales</button>
-            <button id="downloadPaperCsvBtn" class="quiet-action">CSV paper trades</button>
-            <button id="downloadLabelsCsvBtn" class="quiet-action">CSV labels</button>
-            <button id="downloadLatencyCsvBtn" class="quiet-action">CSV latency</button>
-            <button id="downloadPreMoveCsvBtn" class="quiet-action">CSV pre-move events</button>
-            <button id="downloadCandidatesCsvBtn" class="quiet-action">CSV candidates</button>
-          </div>
-          <div class="quick-nav">
-            <a href="#overview">Overview</a>
-            <a href="#paper-monitor">Paper Monitor</a>
-            <a href="#signals-monitor">Signals</a>
-            <a href="#edge-policy">Edge & Policy</a>
-            <a href="#time-death">Time Death</a>
-            <a href="#exit-calibration">Exit Calibration</a>
-            <a href="#pre-move">Pre-Move</a>
-            <a href="#runtime">Runtime</a>
-            <a href="#vault">Data Vault</a>
-          </div>
-          <pre id="fullReportPreview" class="report-output">El reporte completo se genera solo cuando pulsas el botón. No ejecuta live, backups ni restore.</pre>
+<body data-dashboard-version="ui-v3">
+  <div class="app-shell">
+    <aside class="sidebar" aria-label="Navegacion principal">
+      <div class="brand-block">
+        <div class="brand-mark">BA</div>
+        <div>
+          <div class="brand-title">Bitget AI</div>
+          <div class="brand-subtitle">Research Control</div>
         </div>
-        <div class="pro-panel">
-          <h2>Semáforo General</h2>
-          <div id="bigStatusGrid" class="big-status"></div>
+      </div>
+      <nav class="side-nav">
+        <button type="button" class="nav-link nav-item active" data-target="overview">Overview</button>
+        <button type="button" class="nav-link nav-item" data-target="paper-monitor">Paper Monitor</button>
+        <button type="button" class="nav-link nav-item" data-target="signals">Signals</button>
+        <button type="button" class="nav-link nav-item" data-target="edge-policy">Edge & Policy</button>
+        <button type="button" class="nav-link nav-item" data-target="time-death">Time Death</button>
+        <button type="button" class="nav-link nav-item" data-target="exit-calibration">Exit Calibration</button>
+        <button type="button" class="nav-link nav-item" data-target="pre-move">Pre-Move</button>
+        <button type="button" class="nav-link nav-item" data-target="runtime">Runtime</button>
+        <button type="button" class="nav-link nav-item" data-target="data-vault">Data Vault</button>
+        <button type="button" class="nav-link nav-item" data-target="reports">Reports & Exports</button>
+      </nav>
+      <div class="sidebar-footer">
+        <span class="status-dot safe"></span>
+        <span>Read-only research</span>
+      </div>
+    </aside>
+
+    <div class="page-frame">
+      <header class="topbar">
+        <div class="topbar-title">
+          <p class="eyebrow">Training Dashboard Pro</p>
+          <h1>Bitget AI Research Control</h1>
+        </div>
+        <div class="topbar-badges">
+          <span class="badge badge-safe">PAPER ONLY</span>
+          <span class="badge badge-danger">NO LIVE</span>
+          <span class="badge badge-info">DRY RUN</span>
+          <span id="onlineBadge" class="badge badge-muted">connecting</span>
+        </div>
+        <div class="topbar-meta">
+          <span id="gitVersionTag">git: unknown</span>
+          <span id="utcTimeTag">UTC: --:--</span>
+          <span id="madridTimeTag">Madrid: --:--</span>
+          <span id="lastRefreshTag">refresh: never</span>
+          <span id="workerStatusTag">worker: unknown</span>
+        </div>
+      </header>
+
+      <nav class="mobile-nav" aria-label="Navegacion compacta">
+        <button type="button" class="mobile-nav-item" data-target="overview">Overview</button>
+        <button type="button" class="mobile-nav-item" data-target="edge-policy">Edge</button>
+        <button type="button" class="mobile-nav-item" data-target="time-death">TIME</button>
+        <button type="button" class="mobile-nav-item" data-target="reports">Exports</button>
+      </nav>
+
+      <main class="content">
+        <section id="overview" class="section">
+          <div class="hero-card">
+            <div class="hero-copy">
+              <div class="hero-kicker">SAFE_PAPER_ONLY</div>
+              <h2>PAPER ONLY. NO LIVE. Keep research.</h2>
+              <p id="heroMessage">Esperando estado rapido. El dashboard no ejecuta labs pesados ni acciones peligrosas al cargar.</p>
+              <div class="hero-actions">
+                <button id="quickRefreshBtn" class="btn btn-primary">Actualizar estado rapido</button>
+                <button id="refreshMainAnalysisBtn" class="btn btn-secondary">Actualizar analisis principal</button>
+              </div>
+            </div>
+            <div class="hero-recommendation">
+              <span class="panel-label">Final recommendation</span>
+              <strong id="finalRecommendationHero">NO LIVE</strong>
+              <p id="mainProblemHero">No activar live ni filtros paper.</p>
+            </div>
+          </div>
+
+          <div id="overviewKpis" class="kpi-grid"></div>
           <div id="readinessGrid" class="readiness-grid"></div>
-          <div id="mainRefreshStatus" class="metric"><span class="label">análisis principal</span><span class="value info">en espera</span></div>
-          <div id="reportStatus" class="metric"><span class="label">último reporte</span><span class="value">sin generar</span></div>
-        </div>
-      </div>
-      <div class="section-kicker"><h2>Overview</h2><span>estado operativo sin acciones peligrosas</span></div>
-      <div class="card wide">
-        <a id="overview"></a>
-        <h2>Safety</h2>
-        <div class="pill-row" id="safetyPills"></div>
-      </div>
-      <div class="card wide">
-        <h2>Worker Health</h2>
-        <div id="healthMetrics"></div>
-      </div>
-      <div class="card">
-        <a id="paper-monitor"></a>
-        <h2>Paper</h2>
-        <div id="paperMetrics"></div>
-      </div>
-      <div class="card">
-        <h2>Training Quality</h2>
-        <div id="labelMetrics"></div>
-      </div>
-      <div class="card">
-        <h2>MFE/MAE Health</h2>
-        <div id="mfeMaeMetrics"></div>
-      </div>
-      <div class="card">
-        <a id="signals-monitor"></a>
-        <h2>Signals</h2>
-        <div id="signalMetrics"></div>
-      </div>
-      <div class="card">
-        <h2>Telegram</h2>
-        <div id="telegramMetrics"></div>
-      </div>
-      <div class="card wide">
-        <h2>Edge Warning</h2>
-        <div id="edgeWarning"></div>
-      </div>
-      <div class="card wide">
-        <h2>Open Paper Position</h2>
-        <div id="openPaperPosition"></div>
-      </div>
-      <div class="card wide">
-        <h2>Market Regime</h2>
-        <div id="regimeBars"></div>
-      </div>
-      <div class="card wide">
-        <h2>Diagnosis</h2>
-        <div id="diagnosis"></div>
-      </div>
-      <div class="card wide">
-        <h2>Top Signals</h2>
-        <table><thead><tr><th>symbol</th><th>side</th><th>score</th><th>reason</th></tr></thead><tbody id="topSignals"></tbody></table>
-      </div>
-      <div class="card wide">
-        <h2>Top Blocks</h2>
-        <table><thead><tr><th>reason</th><th>count</th></tr></thead><tbody id="topBlocks"></tbody></table>
-      </div>
-      <div class="card full">
-        <a id="edge-policy"></a>
-        <h2>Training Summary</h2>
-        <div class="actions"><button id="summaryBtn">Actualizar summary 6h</button></div>
-        <pre id="summaryText">Sin cargar todavía.</pre>
-      </div>
-      <div class="card full">
-        <h2>Acceleration Plan</h2>
-        <div class="actions"><button id="planBtn">Actualizar acceleration plan 24h</button></div>
-        <pre id="planText">Sin cargar todavía.</pre>
-      </div>
-      <div class="card full">
-        <h2>Opportunity Lab</h2>
-        <div class="actions"><button id="opportunityBtn">Actualizar shadow opportunity 24h</button></div>
-        <pre id="opportunityText">Sin cargar todavía.</pre>
-      </div>
-      <div class="card full">
-        <h2>Edge Guard</h2>
-        <div class="actions"><button id="edgeGuardBtn">Actualizar edge guard 24h</button></div>
-        <pre id="edgeGuardText">Sin cargar todavía.</pre>
-        <table><thead><tr><th>group</th><th>type</th><th>labels</th><th>PF</th><th>TIME%</th><th>SL%</th><th>TP%</th><th>decision</th><th>reason</th></tr></thead><tbody id="edgeCandidateRows"></tbody></table>
-      </div>
-      <div class="card full">
-        <h2>TP/SL Horizon Lab</h2>
-        <div class="actions"><button id="tpSlBtn">Actualizar TP/SL Lab 24h</button></div>
-        <div id="scoreCalibration"></div>
-        <pre id="tpSlText">Sin cargar todavía.</pre>
-      </div>
-      <div class="card full">
-        <h2>Exit Simulation</h2>
-        <div class="actions"><button id="exitSimulationBtn">Actualizar exit simulation 24h</button></div>
-        <div id="exitSimulationMetrics"></div>
-        <pre id="exitSimulationText">Sin cargar todavía.</pre>
-      </div>
-      <div class="card full">
-        <h2>MFE/MAE Diagnostic</h2>
-        <div class="actions"><button id="mfeMaeDiagnosticBtn">Actualizar MFE/MAE Diagnostic 24h</button></div>
-        <pre id="mfeMaeDiagnosticText">Sin cargar todavía.</pre>
-      </div>
-      <div class="card full">
-        <h2>Score Calibration</h2>
-        <div class="actions"><button id="scoreCalibrationBtn">Actualizar score calibration 24h</button></div>
-        <div id="scoreCalibrationV2"></div>
-        <pre id="scoreCalibrationText">Sin cargar todavía.</pre>
-      </div>
-      <div class="card full">
-        <h2>Shadow Experiments</h2>
-        <div class="actions"><button id="shadowExperimentsBtn">Actualizar shadow experiments 24h</button></div>
-        <pre id="shadowExperimentsText">Sin cargar todavía.</pre>
-      </div>
-      <div class="card full">
-        <h2>Evolution Score</h2>
-        <div class="actions"><button id="evolutionScoreBtn">Actualizar evolution score 24h</button></div>
-        <div id="evolutionScoreMetrics"></div>
-        <pre id="evolutionScoreText">Sin cargar todavía.</pre>
-      </div>
-      <div class="card full">
-        <h2>Catalyst Summary</h2>
-        <div class="actions"><button id="catalystSummaryBtn">Actualizar catalyst summary 24h</button></div>
-        <pre id="catalystSummaryText">Sin cargar todavía.</pre>
-      </div>
-      <div class="card full">
-        <h2>News Risk Gate</h2>
-        <div class="actions"><button id="newsRiskGateBtn">Actualizar news risk gate 24h</button></div>
-        <pre id="newsRiskGateText">Sin cargar todavía.</pre>
-      </div>
-      <div class="card full">
-        <h2>Paper Policy Lab</h2>
-        <div class="actions"><button id="paperPolicyLabBtn">Actualizar paper policy lab 24h</button></div>
-        <pre id="paperPolicyLabText">Sin cargar todavía.</pre>
-      </div>
-      <div class="card full">
-        <h2>Paper Policy Orchestrator</h2>
-        <div class="actions"><button id="paperPolicyOrchestratorBtn">Actualizar orchestrator 24h</button></div>
-        <pre id="paperPolicyOrchestratorText">Sin cargar todavÃ­a.</pre>
-      </div>
-      <div class="card full">
-        <h2>Walk Forward Validation</h2>
-        <div class="actions"><button id="walkForwardBtn">Actualizar walk-forward 24h</button></div>
-        <pre id="walkForwardText">Sin cargar todavía.</pre>
-      </div>
-      <div class="card full">
-        <h2>Policy Backtest</h2>
-        <div class="actions"><button id="policyBacktestBtn">Actualizar policy backtest 24h</button></div>
-        <pre id="policyBacktestText">Sin cargar todavía.</pre>
-      </div>
-      <div class="card full">
-        <h2>Exit Policy Backtest</h2>
-        <div class="actions"><button id="exitPolicyBacktestBtn">Actualizar exit policy backtest 24h</button></div>
-        <pre id="exitPolicyBacktestText">Sin cargar todavÃ­a.</pre>
-      </div>
-      <div class="card full">
-        <a id="exit-calibration"></a>
-        <div class="section-kicker"><h2>Exit Calibration</h2><span>research only · no exits applied</span></div>
-        <h2>Exit Label Calibration V2</h2>
-        <div class="actions"><button id="exitLabelCalibrationV2Btn">Actualizar exit calibration V2 24h</button></div>
-        <div id="exitCalibrationChart"></div>
-        <pre id="exitLabelCalibrationV2Text">Sin cargar todavía.</pre>
-      </div>
-      <div class="card full">
-        <a id="time-death"></a>
-        <h2>Time Death Lab</h2>
-        <div class="actions"><button id="timeDeathLabBtn">Actualizar time death 24h</button></div>
-        <div id="timeDeathChart"></div>
-        <pre id="timeDeathLabText">Sin cargar todavía.</pre>
-      </div>
-      <div class="card full">
-        <h2>Time Death Autopsy / Repair</h2>
-        <div class="actions">
-          <button id="timeDeathAutopsyBtn">Time death autopsy 24h</button>
-          <button id="timeDeathFilterProposalBtn">Filter proposal 24h</button>
-          <button id="exitCauseBacktestBtn">Exit cause backtest 24h</button>
-        </div>
-        <pre id="timeDeathRepairText">Sin cargar todavia.</pre>
-      </div>
-      <div class="card full">
-        <a id="pre-move"></a>
-        <h2>Pre-Move Intelligence</h2>
-        <div class="actions">
-          <button id="preMoveEventLabelerBtn">Event labeler 24h</button>
-          <button id="preMoveFeatureSnapshotBtn">Feature snapshot 24h</button>
-          <button id="preMovePatternMinerBtn">Pattern miner 24h</button>
-          <button id="preMoveSimilarityScannerBtn">Similarity scanner 6h</button>
-        </div>
-        <div id="preMoveChart"></div>
-        <pre id="preMoveIntelligenceText">Sin cargar todavia.</pre>
-      </div>
-      <div class="card full">
-        <h2>Adaptive Exit Policy</h2>
-        <div class="actions"><button id="adaptiveExitPolicyBtn">Actualizar adaptive exit 24h</button></div>
-        <pre id="adaptiveExitPolicyText">Sin cargar todavía.</pre>
-      </div>
-      <div class="card full">
-        <a id="runtime"></a>
-        <h2>Latency Audit</h2>
-        <div class="actions"><button id="latencyAuditBtn">Actualizar latency audit 24h</button></div>
-        <div id="latencyChart"></div>
-        <pre id="latencyAuditText">Sin cargar todavía.</pre>
-      </div>
-      <div class="card full">
-        <h2>Fast Execution Readiness</h2>
-        <div class="actions"><button id="fastExecutionReadinessBtn">Actualizar readiness</button></div>
-        <pre id="fastExecutionReadinessText">Sin cargar todavía.</pre>
-      </div>
-      <div class="card full">
-        <h2>Edge Hardening</h2>
-        <div class="actions">
-          <button id="netEdgeLabBtn">Net edge lab</button>
-          <button id="antiOverfitGateBtn">Anti overfit gate</button>
-          <button id="evSlippageGateBtn">EV / slippage gate</button>
-          <button id="policyStabilityMatrixBtn">Policy stability matrix</button>
-          <button id="candidateRankingBtn">Candidate ranking</button>
-          <button id="decisionLedgerAuditBtn">Decision ledger audit</button>
-          <button id="adaptiveExitBacktestBtn">Adaptive exit backtest</button>
-          <button id="sizingSafetyLabBtn">Sizing safety lab</button>
-          <button id="structuredOutputGuardBtn">Structured output guard</button>
-        </div>
-        <pre id="edgeHardeningText">Sin cargar todavia.</pre>
-      </div>
-      <div class="card full">
-        <a id="vault"></a>
-        <h2>Data Vault / Backup</h2>
-        <p class="maintenance-note">Maintenance/Advanced: estos botones no se ejecutan con el refresh principal.</p>
-        <div class="actions">
-          <button id="dataVaultStatusBtn">Actualizar vault status</button>
-          <button id="dataExportBtn">Crear backup 168h</button>
-          <button id="dataExport720Btn">Crear backup 720h</button>
-          <button id="dataUploadLatestBtn">Subir ultimo backup a R2</button>
-          <button id="dataVaultPruneBtn">Prune local dry-run</button>
-        </div>
-        <pre id="dataVaultText">Sin cargar todavía.</pre>
-      </div>
-      <div class="card full">
-        <h2>Migration Readiness</h2>
-        <div class="actions">
-          <button id="migrationReadinessBtn">Actualizar migration readiness</button>
-          <button id="migrationDeepCheckBtn">Deep migration check</button>
-        </div>
-        <pre id="migrationReadinessText">Sin cargar todavía.</pre>
-      </div>
-      <div class="card full">
-        <h2>VPS / Migration</h2>
-        <div id="vpsMigrationMetrics"></div>
-        <div class="actions">
-          <button id="vpsPreflightBtn">VPS preflight</button>
-          <button id="vpsGuideBtn">Guia migracion VPS</button>
-          <button id="fastRuntimePlanBtn">Fast runtime plan</button>
-          <button id="fastRuntimeReadinessBtn">Fast runtime readiness</button>
-          <button id="websocketMigrationPlanBtn">WebSocket migration plan</button>
-          <button id="vpsRuntimeHealthBtn">VPS runtime health</button>
-          <button id="dataRestoreBenchmarkBtn">Restore benchmark</button>
-          <button id="postMigrationBackupBtn">Post migration backup</button>
-          <button id="workerLockStatusBtn">Worker lock status</button>
-          <button id="dataDownloadLatestBtn">Descargar ultimo R2</button>
-          <button id="dataRestoreDryRunBtn">Restore latest dry-run</button>
-        </div>
-        <pre id="vpsMigrationText">Sin cargar todavia.</pre>
-      </div>
-    </section>
-  </main>
-  <script>
-    const REFRESH_SECONDS = Number("__DASHBOARD_REFRESH_SECONDS__") || 10;
-    const params = new URLSearchParams(window.location.search);
-    const token = params.get("token") || "";
-    const byId = (id) => document.getElementById(id);
-    let lastFullReportText = "";
-    let lastShortReportText = "";
-    function apiUrl(path) {
-      const separator = path.includes("?") ? "&" : "?";
-      return token ? `${path}${separator}token=${encodeURIComponent(token)}` : path;
-    }
-    function value(x, fallback = "0") { return x === undefined || x === null || x === "" ? fallback : x; }
-    function pct(x) { return `${((Number(x) || 0) * 100).toFixed(1)}%`; }
-    function metric(label, val, cls = "") {
-      return `<div class="metric"><span class="label">${escapeHtml(label)}</span><span class="value ${cls}">${escapeHtml(String(value(val)))}</span></div>`;
-    }
-    function pill(label, ok, inverted = false) {
-      const good = inverted ? !ok : !!ok;
-      return `<span class="pill ${good ? "good" : "bad"}">${escapeHtml(label)}=${escapeHtml(String(!!ok))}</span>`;
-    }
-    function escapeHtml(text) {
-      return String(text).replace(/[&<>"']/g, (m) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[m]));
-    }
-    async function fetchJson(path) {
-      const response = await fetch(apiUrl(path), { cache: "no-store" });
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      return response.json();
-    }
-    async function fetchText(path) {
-      const response = await fetch(apiUrl(path), { cache: "no-store" });
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      return response.text();
-    }
-    function downloadPath(path) {
-      window.open(apiUrl(path), "_blank", "noopener");
-    }
-    function setOnline(ok, text) {
-      const el = byId("onlineState");
-      el.className = ok ? "status online" : "status";
-      el.querySelector("span:last-child").textContent = text;
-    }
-    function updateClock(iso) {
-      const date = iso ? new Date(iso) : new Date();
-      const utc = new Intl.DateTimeFormat("es-ES", { timeZone: "UTC", hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false }).format(date);
-      const madrid = new Intl.DateTimeFormat("es-ES", { timeZone: "Europe/Madrid", hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false }).format(date);
-      byId("utcTimeTag").textContent = `UTC: ${utc}`;
-      byId("madridTimeTag").textContent = `Madrid: ${madrid}`;
-    }
-    function render(data) {
-      const safety = data.safety || {};
-      byId("liveDanger").style.display = safety.live_trading ? "block" : "none";
-      byId("safetyPills").innerHTML = [
-        pill("PAPER", safety.paper_trading),
-        pill("LIVE", safety.live_trading, true),
-        pill("DRY_RUN", safety.dry_run),
-        pill("LIGHTWEIGHT", safety.worker_lightweight_mode),
-      ].join("");
-      const h = data.health || {};
-      byId("healthMetrics").innerHTML =
-        metric("uptime min", h.uptime_min) +
-        metric("memory last/max", memoryText(h)) +
-        metric("cycles ok/error", `${value(h.cycles_ok)} / ${value(h.cycles_error)}`, h.cycles_error ? "warn" : "good") +
-        metric("API 429", h.api_429_count, h.api_429_count ? "warn" : "good") +
-        metric("API errors", h.api_error_count, h.api_error_count ? "warn" : "good");
-      const p = data.paper || {};
-      const a = data.allocator || {};
-      byId("paperMetrics").innerHTML =
-        metric("open positions", p.open_positions) +
-        metric("open success/fail", `${value(p.open_success)} / ${value(p.open_fail)}`) +
-        metric("reconcile runs", p.reconcile_runs) +
-        metric("closed label/time", `${value(p.reconcile_closed_label)} / ${value(p.reconcile_closed_time)}`) +
-        metric("left open", p.reconcile_left_open) +
-        metric("slot blocks", a.slot_blocks, a.slot_blocks ? "warn" : "good");
-      const labels = data.labels || {};
-      const edge = data.edge || {};
-      const pf = edge.profit_factor === undefined ? "esperando summary" : Number(edge.profit_factor).toFixed(2);
-      const timeRatio = edge.time_ratio === undefined ? labels.time_ratio : edge.time_ratio;
-      const slRatio = edge.sl_ratio === undefined ? labels.sl_ratio : edge.sl_ratio;
-      const tpRatio = edge.tp_ratio === undefined ? labels.tp_ratio : edge.tp_ratio;
-      byId("labelMetrics").innerHTML =
-        metric("total", labels.total) +
-        metric("TIME", labels.time) +
-        metric("SL", labels.sl) +
-        metric("TP1", labels.tp1) +
-        metric("TP2", labels.tp2) +
-        metric("PF", pf, Number(edge.profit_factor || 0) < 1 ? "bad" : "good") +
-        metric("TIME ratio", pct(timeRatio), timeRatio > 0.6 ? "warn" : "good") +
-        metric("SL ratio", pct(slRatio), slRatio > tpRatio ? "bad" : "") +
-        metric("TP ratio", pct(tpRatio), tpRatio < 0.05 ? "bad" : "good");
-      const mfe = data.mfe_mae || {};
-      const bySourceText = (mfe.by_source || []).map((x) => `${x.source}=${x.count}`).join(" ") || "none";
-      const noMfeText = Number(mfe.coverage_pct || 0) === 0
-        ? metric("status", "Sin muestras MFE/MAE todavía: no hubo señales elegibles desde el deploy o todas fueron score bajo.", "warn")
-        : "";
-      byId("mfeMaeMetrics").innerHTML =
-        metric("active", mfe.active || 0) +
-        metric("matured", mfe.matured || 0) +
-        metric("insufficient", mfe.insufficient || 0, Number(mfe.insufficient || 0) ? "warn" : "good") +
-        metric("coverage", pct(mfe.coverage_pct || 0), Number(mfe.coverage_pct || 0) < 0.3 ? "warn" : "good") +
-        metric("candidates seen", mfe.candidates_seen || 0) +
-        metric("candidates tracked", mfe.candidates_tracked || 0) +
-        metric("skipped low score", mfe.skipped_low_score || 0) +
-        metric("skipped no price", mfe.skipped_no_price || 0) +
-        metric("skipped duplicate", mfe.skipped_duplicate || 0) +
-        metric("skipped max active", mfe.skipped_max_active || 0) +
-        metric("market probes created", mfe.market_probes_created || 0) +
-        metric("low score samples", mfe.low_score_samples_tracked || 0) +
-        metric("by source", bySourceText) +
-        noMfeText;
-      const s = data.signals || {};
-      byId("signalMetrics").innerHTML =
-        metric("LONG", s.long) +
-        metric("SHORT", s.short) +
-        metric("NO_TRADE", s.no_trade) +
-        metric("high score", s.high_score) +
-        metric("missed high score", s.missed_high_score, s.missed_high_score ? "warn" : "good") +
-        metric("allocator selected/no_trade", `${value(a.selected)} / ${value(a.no_trade)}`);
-      const t = data.telegram || {};
-      byId("telegramMetrics").innerHTML =
-        metric("enabled", t.enabled) +
-        metric("configured", t.configured) +
-        metric("last sent", t.last_sent_at || "never") +
-        metric("sent count", t.sent_count) +
-        metric("last error", t.last_error || "none", t.last_error ? "warn" : "good");
-      renderEdgeWarning(data);
-      renderOpenPaper(data.open_paper_positions_detail || [], data.paper || {});
-      renderRegimes(data.regimes || {});
-      byId("diagnosis").innerHTML = (data.diagnosis || []).map((x) => `<div class="metric"><span class="value info">${escapeHtml(x)}</span></div>`).join("") +
-        metric("next action", data.next_action || "PAPER ONLY") +
-        metric("final", data.final_recommendation || "NO LIVE", "good");
-      renderRows("topSignals", data.top_signals || [], ["symbol", "side", "score", "reason"]);
-      renderRows("topBlocks", data.top_blocks || [], ["reason", "count"]);
-      renderVpsMigration(data.vps_migration || {}, data.worker_lock || {});
-      renderReadiness(data);
-      renderSignalCharts(data);
-      byId("gitVersionTag").textContent = `git: ${value(data.git_version, "unknown")}`;
-      updateClock(data.generated_at);
-      setOnline(true, `online · ${data.generated_at || new Date().toISOString()}`);
-    }
-    function memoryText(h) {
-      const last = Number(h.memory_mb_last || 0);
-      const max = Number(h.memory_mb_max || 0);
-      return last || max ? `${last.toFixed(2)} / ${max.toFixed(2)} MB` : "esperando medición";
-    }
-    function renderEdgeWarning(data) {
-      const edge = data.edge || {};
-      const warnings = [];
-      if (Number(edge.profit_factor || 0) < 1) warnings.push("NO AMPLIAR SLOTS: edge negativo");
-      if (Number(edge.tp_ratio || 0) < 0.05) warnings.push("Score alto no predice TP todavía");
-      if (Number(edge.time_ratio || 0) > 0.60) warnings.push("Demasiadas señales mueren por tiempo");
-      if (!warnings.length) warnings.push("PAPER ONLY: seguir observando sin ampliar slots");
-      byId("edgeWarning").innerHTML = warnings.map((x) => `<div class="metric"><span class="value ${x.includes("NO AMPLIAR") ? "bad" : "warn"}">${escapeHtml(x)}</span></div>`).join("") +
-        metric("PF 6h", edge.profit_factor === undefined ? "esperando summary" : Number(edge.profit_factor).toFixed(2));
-    }
-    function renderOpenPaper(rows, paper) {
-      if (!rows.length) {
-        byId("openPaperPosition").innerHTML = Number(paper.open_positions || 0) > 0
-          ? metric("status", "open_positions=1 pero detalle no disponible", "warn")
-          : metric("status", "sin posición paper abierta", "good");
-        return;
-      }
-      const row = rows[0] || {};
-      byId("openPaperPosition").innerHTML =
-        metric("symbol/side", `${value(row.symbol, "NA")} ${value(row.side, "")}`) +
-        metric("entry", row.entry_price) +
-        metric("SL", row.stop_loss) +
-        metric("TP1", row.take_profit_1) +
-        metric("TP2", row.take_profit_2) +
-        metric("score", row.score) +
-        metric("strategy", row.strategy || "NA") +
-        metric("opened_at", row.opened_at || "NA") +
-        metric("unrealized pnl", row.unrealized_pnl || 0);
-    }
-    function renderRegimes(regimes) {
-      const entries = ["CHOPPY_MARKET", "RANGE", "TREND_UP", "TREND_DOWN", "RISK_OFF"].map((key) => [key, Number(regimes[key] || 0)]);
-      const max = Math.max(1, ...entries.map(([, v]) => v));
-      byId("regimeBars").innerHTML = entries.map(([key, val]) =>
-        `<div class="metric"><span class="label">${key}</span><span class="value">${val}</span></div><div class="bar"><span style="width:${Math.min(100, val / max * 100)}%"></span></div>`
-      ).join("");
-    }
-    function renderRows(id, rows, keys) {
-      const body = byId(id);
-      if (!rows.length) { body.innerHTML = `<tr><td colspan="${keys.length}">none</td></tr>`; return; }
-      body.innerHTML = rows.map((row) => `<tr>${keys.map((key) => `<td>${escapeHtml(value(row[key], ""))}</td>`).join("")}</tr>`).join("");
-    }
-    function renderVpsMigration(vps, lock) {
-      const el = byId("vpsMigrationMetrics");
-      if (!el) return;
-      el.innerHTML =
-        metric("migration_readiness", vps.migration_readiness || "unknown") +
-        metric("latest_remote_backup", vps.latest_remote_backup || "none") +
-        metric("latest_local_backup", vps.latest_local_backup || "none") +
-        metric("r2_configured", vps.r2_configured, vps.r2_configured ? "good" : "warn") +
-        metric("r2_last_upload_verified", vps.r2_last_upload_verified, vps.r2_last_upload_verified ? "good" : "warn") +
-        metric("worker_lock_status", vps.worker_lock_status || lock.lock_status || "unknown") +
-        metric("active_instance_id", vps.active_instance_id || lock.active_worker_instance || "none") +
-        metric("current_runtime_profile", vps.current_runtime_profile || "railway_lightweight") +
-        metric("fast_runtime_readiness", vps.fast_runtime_readiness || "NOT_HFT") +
-        metric("final", vps.final_recommendation || "NO LIVE", "good");
-    }
-    function renderReadiness(data) {
-      const safety = data.safety || {};
-      const edge = data.edge || {};
-      const vps = data.vps_migration || {};
-      const liveOk = !safety.live_trading;
-      const backupOk = !!vps.r2_last_upload_verified || !!vps.latest_remote_backup;
-      const edgeOk = Number(edge.profit_factor || 0) >= 1 && Number(edge.tp_ratio || 0) >= 0.05;
-      const timeOk = Number(edge.time_ratio || 0) <= 0.60;
-      const chips = [
-        ["Infraestructura", data.generated_at ? "ONLINE" : "WAITING", data.generated_at ? "good" : "warn"],
-        ["Seguridad", liveOk ? "NO LIVE" : "LIVE ACTIVO", liveOk ? "good" : "bad"],
-        ["Backups", backupOk ? "R2 OK" : "CHECK VAULT", backupOk ? "good" : "warn"],
-        ["Edge neto", edgeOk ? "REVIEW" : "NO_VALID_CANDIDATES", edgeOk ? "warn" : "bad"],
-        ["TIME", timeOk ? "CONTROLADO" : "TIME DEATH ALTO", timeOk ? "good" : "bad"],
-        ["Live readiness", "NO LIVE", "good"],
-      ];
-      byId("readinessGrid").innerHTML = chips.map(([label, val, cls]) =>
-        `<div class="readiness-chip"><span>${escapeHtml(label)}</span><strong class="${cls}">${escapeHtml(val)}</strong></div>`
-      ).join("");
-      byId("bigStatusGrid").innerHTML = chips.slice(0, 5).map(([label, val, cls]) =>
-        `<div class="status-tile"><div class="name">${escapeHtml(label)}</div><div class="state ${cls}">${escapeHtml(val)}</div></div>`
-      ).join("");
-    }
-    function simpleBars(rows) {
-      return rows.map(([label, ratio, display, color]) => {
-        const width = Math.max(0, Math.min(100, Number(ratio || 0) * 100));
-        return `<div class="chart-row"><span class="chart-label">${escapeHtml(label)}</span><div class="chart-bar"><span style="width:${width}%;background:${color}"></span></div><span class="chart-value">${escapeHtml(String(display))}</span></div>`;
-      }).join("");
-    }
-    function renderSignalCharts(data) {
-      const signals = data.signals || {};
-      const labels = data.labels || {};
-      const totalSignals = Math.max(1, Number(signals.long || 0) + Number(signals.short || 0) + Number(signals.no_trade || 0));
-      const totalLabels = Math.max(1, Number(labels.time || 0) + Number(labels.sl || 0) + Number(labels.tp1 || 0) + Number(labels.tp2 || 0));
-      const target = byId("scoreCalibration");
-      if (!target || target.dataset.manual) return;
-      target.innerHTML =
-        `<h2>LONG / SHORT / NO_TRADE</h2>` +
-        simpleBars([
-          ["LONG", Number(signals.long || 0) / totalSignals, signals.long || 0, "var(--good)"],
-          ["SHORT", Number(signals.short || 0) / totalSignals, signals.short || 0, "var(--info)"],
-          ["NO_TRADE", Number(signals.no_trade || 0) / totalSignals, signals.no_trade || 0, "var(--warn)"],
-        ]) +
-        `<h2>TP / SL / TIME</h2>` +
-        simpleBars([
-          ["TP", (Number(labels.tp1 || 0) + Number(labels.tp2 || 0)) / totalLabels, Number(labels.tp1 || 0) + Number(labels.tp2 || 0), "var(--good)"],
-          ["SL", Number(labels.sl || 0) / totalLabels, labels.sl || 0, "var(--bad)"],
-          ["TIME", Number(labels.time || 0) / totalLabels, labels.time || 0, "var(--warn)"],
-        ]);
-    }
-    function renderTextRatioChart(targetId, text) {
-      const target = byId(targetId);
-      if (!target) return;
-      const findPct = (label) => {
-        const match = String(text).match(new RegExp(`${label}\\s*[:=]\\s*([0-9]+(?:\\.[0-9]+)?)`, "i"));
-        return match ? Number(match[1]) / 100 : 0;
-      };
-      target.innerHTML = simpleBars([
-        ["TP%", findPct("TP%"), `${(findPct("TP%") * 100).toFixed(1)}%`, "var(--good)"],
-        ["SL%", findPct("SL%"), `${(findPct("SL%") * 100).toFixed(1)}%`, "var(--bad)"],
-        ["TIME%", findPct("TIME%"), `${(findPct("TIME%") * 100).toFixed(1)}%`, "var(--warn)"],
-      ]);
-    }
-    function renderPreMoveQuickChart(text) {
-      const longMatch = /long_events:\s*([0-9]+)/i.exec(text);
-      const shortMatch = /short_events:\s*([0-9]+)/i.exec(text);
-      const longEvents = longMatch ? Number(longMatch[1]) : 0;
-      const shortEvents = shortMatch ? Number(shortMatch[1]) : 0;
-      const total = Math.max(1, longEvents + shortEvents);
-      byId("preMoveChart").innerHTML = simpleBars([
-        ["LONG events", longEvents / total, longEvents, "var(--good)"],
-        ["SHORT events", shortEvents / total, shortEvents, "var(--info)"],
-      ]);
-    }
-    function renderLatencyQuickChart(text) {
-      const findMs = (name) => {
-        const match = String(text).match(new RegExp(`${name}[^0-9]*([0-9]+(?:\\.[0-9]+)?)`, "i"));
-        return match ? Number(match[1]) : 0;
-      };
-      const vals = [
-        ["p50", findMs("p50"), "var(--good)"],
-        ["p95", findMs("p95"), "var(--warn)"],
-        ["p99", findMs("p99"), "var(--bad)"],
-      ];
-      const max = Math.max(1, ...vals.map(([, v]) => v));
-      byId("latencyChart").innerHTML = simpleBars(vals.map(([label, val, color]) => [label, Number(val) / max, `${val} ms`, color]));
-    }
-    function renderExitCalibrationChart(text) {
-      const extract = (label) => {
-        const match = String(text).match(new RegExp(`${label}[^0-9-]*(-?[0-9]+(?:\\.[0-9]+)?)`, "i"));
-        return match ? Number(match[1]) : 0;
-      };
-      const currentTime = extract("current_TIME") || extract("TIME%");
-      const shadowTime = extract("shadow_TIME");
-      const shadowTp = extract("shadow_TP");
-      const netEv = extract("net_EV");
-      byId("exitCalibrationChart").innerHTML =
-        `<div class="donut"><span>${Math.max(0, shadowTp || 0).toFixed(1)}% TP</span></div>` +
-        simpleBars([
-          ["Current TIME", currentTime / 100, `${currentTime.toFixed(1)}%`, "var(--warn)"],
-          ["Shadow TIME", shadowTime / 100, `${shadowTime.toFixed(1)}%`, shadowTime > 80 ? "var(--bad)" : "var(--good)"],
-          ["Shadow TP", shadowTp / 100, `${shadowTp.toFixed(1)}%`, "var(--good)"],
-          ["Net EV", Math.min(1, Math.abs(netEv) * 20), netEv.toFixed(4), netEv >= 0 ? "var(--good)" : "var(--bad)"],
-        ]) +
-        `<div class="metric"><span class="label">policy</span><span class="value warn">Research only. No exits applied.</span></div>`;
-    }
-    function renderEdgeCandidates(rows) {
-      const body = byId("edgeCandidateRows");
-      if (!rows || !rows.length) { body.innerHTML = `<tr><td colspan="9">none</td></tr>`; return; }
-      body.innerHTML = rows.slice(0, 20).map((row) => `<tr>
-        <td>${escapeHtml(value(row.group_value, ""))}</td>
-        <td>${escapeHtml(value(row.group_type, ""))}</td>
-        <td>${escapeHtml(value(row.total_labels, 0))}</td>
-        <td>${Number(row.profit_factor || 0).toFixed(2)}</td>
-        <td>${pct(row.time_ratio)}</td>
-        <td>${pct(row.sl_ratio)}</td>
-        <td>${pct(row.tp_ratio)}</td>
-        <td>${escapeHtml(value(row.decision, ""))}</td>
-        <td>${escapeHtml(value(row.reason, ""))}</td>
-      </tr>`).join("");
-    }
-    function renderScoreCalibration(rows) {
-      byId("scoreCalibration").dataset.manual = "true";
-      if (!rows || !rows.length) {
-        byId("scoreCalibration").innerHTML = metric("score calibration", "insufficient data", "warn");
-        return;
-      }
-      const byBucket = {};
-      rows.forEach((row) => { byBucket[row.group_value] = row; });
-      const pf80 = Number((byBucket["80-89"] || {}).profit_factor || 0);
-      const pf90 = Number((byBucket["90-100"] || {}).profit_factor || 0);
-      const warning = pf80 > 0 && pf90 > 0 && pf80 > pf90 ? metric("warning", "score_not_monotonic: 80-89 mejor que 90-100", "warn") : "";
-      byId("scoreCalibration").innerHTML = ["70-79", "80-89", "90-100"].map((bucket) => {
-        const row = byBucket[bucket] || {};
-        return metric(bucket, `PF=${Number(row.profit_factor || 0).toFixed(2)} TP=${pct(row.tp_ratio)} TIME=${pct(row.time_ratio)} SL=${pct(row.sl_ratio)}`);
-      }).join("") + warning;
-    }
-    async function refresh() {
-      try { render(await fetchJson("/api/training/status")); }
-      catch (err) { setOnline(false, `offline · ${err.message}`); }
-    }
-    async function loadSummary() {
-      byId("summaryText").textContent = "Cargando...";
-      try { byId("summaryText").textContent = (await fetchJson("/api/training/summary?hours=6")).text || "Sin datos."; }
-      catch (err) { byId("summaryText").textContent = `Error: ${err.message}`; }
-    }
-    async function loadPlan() {
-      byId("planText").textContent = "Cargando...";
-      try { byId("planText").textContent = (await fetchJson("/api/training/acceleration-plan?hours=24")).text || "Sin datos."; }
-      catch (err) { byId("planText").textContent = `Error: ${err.message}`; }
-    }
-    async function loadOpportunity() {
-      byId("opportunityText").textContent = "Cargando...";
-      try { byId("opportunityText").textContent = (await fetchJson("/api/training/shadow-opportunity?hours=24")).text || "Sin datos."; }
-      catch (err) { byId("opportunityText").textContent = `Error: ${err.message}`; }
-    }
-    async function loadEdgeGuard() {
-      byId("edgeGuardText").textContent = "Cargando...";
-      try {
-        const data = await fetchJson("/api/training/edge-guard?hours=24");
-        byId("edgeGuardText").textContent = data.text || "Sin datos.";
-        renderEdgeCandidates(data.candidate_table || []);
-      }
-      catch (err) { byId("edgeGuardText").textContent = `Error: ${err.message}`; }
-    }
-    async function loadTpSl() {
-      byId("tpSlText").textContent = "Cargando...";
-      try {
-        const data = await fetchJson("/api/training/tp-sl-lab?hours=24");
-        byId("tpSlText").textContent = data.text || "Sin datos.";
-        renderScoreCalibration(data.by_score_bucket || []);
-      }
-      catch (err) { byId("tpSlText").textContent = `Error: ${err.message}`; }
-    }
-    async function loadExitSimulation() {
-      byId("exitSimulationText").textContent = "Cargando...";
-      try {
-        const data = await fetchJson("/api/training/exit-simulation?hours=24");
-        const best = (data.best_exit_candidates || [])[0] || {};
-        byId("exitSimulationText").textContent = data.text || "Sin datos.";
-        byId("exitSimulationMetrics").innerHTML =
-          metric("best TP/SL", best.name || data.status || "none") +
-          metric("best PF", Number(best.profit_factor || 0).toFixed(2), Number(best.profit_factor || 0) < 1 ? "bad" : "good") +
-          metric("TP ratio", pct(best.tp_ratio || 0)) +
-          metric("SL ratio", pct(best.sl_ratio || 0)) +
-          metric("TIME ratio", pct(best.time_ratio || 0));
-      }
-      catch (err) { byId("exitSimulationText").textContent = `Error: ${err.message}`; }
-    }
-    async function loadMfeMaeDiagnostic() {
-      byId("mfeMaeDiagnosticText").textContent = "Cargando...";
-      try { byId("mfeMaeDiagnosticText").textContent = (await fetchJson("/api/training/mfe-mae-diagnostic?hours=24")).text || "Sin datos."; }
-      catch (err) { byId("mfeMaeDiagnosticText").textContent = `Error: ${err.message}`; }
-    }
-    async function loadScoreCalibrationV2() {
-      byId("scoreCalibrationText").textContent = "Cargando...";
-      try {
-        const data = await fetchJson("/api/training/score-calibration?hours=24");
-        byId("scoreCalibrationText").textContent = data.text || "Sin datos.";
-        renderScoreCalibrationTo("scoreCalibrationV2", data.score_buckets || []);
-      }
-      catch (err) { byId("scoreCalibrationText").textContent = `Error: ${err.message}`; }
-    }
-    function renderScoreCalibrationTo(id, rows) {
-      if (!rows || !rows.length) { byId(id).innerHTML = metric("score calibration", "insufficient data", "warn"); return; }
-      const byBucket = {};
-      rows.forEach((row) => { byBucket[row.group_value] = row; });
-      byId(id).innerHTML = ["70-79", "80-89", "90-94", "95-100"].map((bucket) => {
-        const row = byBucket[bucket] || {};
-        return metric(bucket, `PF=${Number(row.profit_factor || 0).toFixed(2)} TP=${pct(row.tp_ratio)} SL=${pct(row.sl_ratio)} TIME=${pct(row.time_ratio)}`);
-      }).join("");
-    }
-    async function loadShadowExperiments() {
-      byId("shadowExperimentsText").textContent = "Cargando...";
-      try { byId("shadowExperimentsText").textContent = (await fetchJson("/api/training/shadow-experiments?hours=24")).text || "Sin datos."; }
-      catch (err) { byId("shadowExperimentsText").textContent = `Error: ${err.message}`; }
-    }
-    async function loadEvolutionScore() {
-      byId("evolutionScoreText").textContent = "Cargando...";
-      try {
-        const data = await fetchJson("/api/training/evolution-score?hours=24");
-        byId("evolutionScoreText").textContent = data.text || "Sin datos.";
-        byId("evolutionScoreMetrics").innerHTML =
-          metric("data_quality", Number(data.data_quality || 0).toFixed(1)) +
-          metric("edge_quality", Number(data.edge_quality || 0).toFixed(1), Number(data.edge_quality || 0) < 45 ? "bad" : "good") +
-          metric("stability", Number(data.stability || 0).toFixed(1)) +
-          metric("safety", Number(data.safety || 0).toFixed(1), "good") +
-          metric("final_status", data.final_status || "NO_LIVE", "warn");
-      }
-      catch (err) { byId("evolutionScoreText").textContent = `Error: ${err.message}`; }
-    }
-    async function loadGenericLab(path, elementId) {
-      byId(elementId).textContent = "Cargando...";
-      try {
-        const text = (await fetchJson(path)).text || "Sin datos.";
-        byId(elementId).textContent = text;
-        if (path.includes("time-death")) renderTextRatioChart("timeDeathChart", text);
-        if (path.includes("pre-move")) renderPreMoveQuickChart(text);
-        if (path.includes("latency-audit")) renderLatencyQuickChart(text);
-        if (path.includes("exit-label-calibration-v2")) renderExitCalibrationChart(text);
-      }
-      catch (err) { byId(elementId).textContent = `Error: ${err.message}`; }
-    }
-    async function copyChatGptReport() {
-      const preview = byId("fullReportPreview");
-      preview.textContent = "Generando reporte completo... puede tardar unos segundos.";
-      try {
-        const text = await fetchText("/api/training/full-report?hours=24&format=text");
-        lastFullReportText = text;
-        preview.textContent = text;
-        const sizeKb = (new Blob([text]).size / 1024).toFixed(1);
-        byId("reportStatus").innerHTML = `<span class="label">último reporte completo</span><span class="value good">OK · ${sizeKb} KB · ${new Date().toLocaleTimeString()}</span>`;
-        if (navigator.clipboard && window.isSecureContext) {
-          await navigator.clipboard.writeText(text);
-          byId("mainRefreshStatus").innerHTML = `<span class="label">reporte ChatGPT</span><span class="value good">copiado</span>`;
-        } else {
-          byId("mainRefreshStatus").innerHTML = `<span class="label">reporte ChatGPT</span><span class="value warn">listo para copiar manualmente</span>`;
-        }
-      } catch (err) {
-        preview.textContent = `Error: ${err.message}`;
-      }
-    }
-    async function copyShortReport() {
-      const preview = byId("fullReportPreview");
-      preview.textContent = "Generando resumen corto...";
-      try {
-        const text = await fetchText("/api/training/short-report?hours=24&format=text");
-        lastShortReportText = text;
-        preview.textContent = text;
-        if (navigator.clipboard && window.isSecureContext) await navigator.clipboard.writeText(text);
-        const sizeKb = (new Blob([text]).size / 1024).toFixed(1);
-        byId("reportStatus").innerHTML = `<span class="label">resumen corto</span><span class="value good">OK · ${sizeKb} KB · ${new Date().toLocaleTimeString()}</span>`;
-      } catch (err) {
-        preview.textContent = `Error: ${err.message}`;
-        byId("reportStatus").innerHTML = `<span class="label">resumen corto</span><span class="value bad">ERROR</span>`;
-      }
-    }
-    async function copyLastReport() {
-      const text = lastFullReportText || lastShortReportText || byId("fullReportPreview").textContent || "";
-      if (!text || text.includes("se genera solo")) {
-        byId("reportStatus").innerHTML = `<span class="label">último reporte</span><span class="value warn">sin reporte generado</span>`;
-        return;
-      }
-      if (navigator.clipboard && window.isSecureContext) await navigator.clipboard.writeText(text);
-      byId("reportStatus").innerHTML = `<span class="label">último reporte</span><span class="value good">copiado de cache local</span>`;
-    }
-    async function refreshMainAnalysis() {
-      const steps = [
-        ["Training Summary", loadSummary],
-        ["Time Death Autopsy", () => loadGenericLab("/api/training/time-death-autopsy?hours=24", "timeDeathRepairText")],
-        ["Candidate Ranking", () => loadGenericLab("/api/training/candidate-ranking?hours=24", "edgeHardeningText")],
-        ["Edge Guard", loadEdgeGuard],
-        ["Orchestrator", () => loadGenericLab("/api/training/paper-policy-orchestrator?hours=24", "paperPolicyOrchestratorText")],
-        ["Exit Calibration V2", () => loadGenericLab("/api/training/exit-label-calibration-v2?hours=24", "exitLabelCalibrationV2Text")],
-        ["Pre-Move Pattern Miner", () => loadGenericLab("/api/training/pre-move-pattern-miner?hours=24", "preMoveIntelligenceText")],
-        ["Latency", () => loadGenericLab("/api/training/latency-audit?hours=24", "latencyAuditText")],
-        ["Data Vault", () => loadGenericLab("/api/training/data-vault-status", "dataVaultText")],
-      ];
-      for (let i = 0; i < steps.length; i += 1) {
-        const [name, fn] = steps[i];
-        byId("mainRefreshStatus").innerHTML = `<span class="label">running section ${i + 1}/${steps.length}</span><span class="value info">${escapeHtml(name)}</span>`;
-        try { await fn(); }
-        catch (err) {
-          byId("mainRefreshStatus").innerHTML = `<span class="label">${escapeHtml(name)}</span><span class="value warn">error · ${escapeHtml(err.message)}</span>`;
-        }
-      }
-      byId("mainRefreshStatus").innerHTML = `<span class="label">análisis principal</span><span class="value good">actualizado ${new Date().toLocaleTimeString()}</span>`;
-    }
-    byId("summaryBtn").addEventListener("click", loadSummary);
-    byId("copyChatGptReportBtn").addEventListener("click", copyChatGptReport);
-    byId("copyShortReportBtn").addEventListener("click", copyShortReport);
-    byId("copyLastReportBtn").addEventListener("click", copyLastReport);
-    byId("downloadFullTxtBtn").addEventListener("click", () => downloadPath("/api/training/export/full.txt?hours=24"));
-    byId("downloadFullJsonBtn").addEventListener("click", () => downloadPath("/api/training/export/full.json?hours=24"));
-    byId("downloadSignalsCsvBtn").addEventListener("click", () => downloadPath("/api/training/export/signals.csv?hours=24&limit=2000"));
-    byId("downloadPaperCsvBtn").addEventListener("click", () => downloadPath("/api/training/export/paper-trades.csv?hours=168&limit=2000"));
-    byId("downloadLabelsCsvBtn").addEventListener("click", () => downloadPath("/api/training/export/labels.csv?hours=24&limit=2000"));
-    byId("downloadLatencyCsvBtn").addEventListener("click", () => downloadPath("/api/training/export/latency.csv?hours=24&limit=2000"));
-    byId("downloadPreMoveCsvBtn").addEventListener("click", () => downloadPath("/api/training/export/pre-move-events.csv?hours=24&limit=2000"));
-    byId("downloadCandidatesCsvBtn").addEventListener("click", () => downloadPath("/api/training/export/candidates.csv?hours=24&limit=2000"));
-    byId("refreshMainAnalysisBtn").addEventListener("click", refreshMainAnalysis);
-    byId("planBtn").addEventListener("click", loadPlan);
-    byId("opportunityBtn").addEventListener("click", loadOpportunity);
-    byId("edgeGuardBtn").addEventListener("click", loadEdgeGuard);
-    byId("tpSlBtn").addEventListener("click", loadTpSl);
-    byId("exitSimulationBtn").addEventListener("click", loadExitSimulation);
-    byId("exitLabelCalibrationV2Btn").addEventListener("click", () => loadGenericLab("/api/training/exit-label-calibration-v2?hours=24", "exitLabelCalibrationV2Text"));
-    byId("mfeMaeDiagnosticBtn").addEventListener("click", loadMfeMaeDiagnostic);
-    byId("scoreCalibrationBtn").addEventListener("click", loadScoreCalibrationV2);
-    byId("shadowExperimentsBtn").addEventListener("click", loadShadowExperiments);
-    byId("evolutionScoreBtn").addEventListener("click", loadEvolutionScore);
-    byId("catalystSummaryBtn").addEventListener("click", () => loadGenericLab("/api/training/catalyst-summary?hours=24", "catalystSummaryText"));
-    byId("newsRiskGateBtn").addEventListener("click", () => loadGenericLab("/api/training/news-risk-gate?hours=24", "newsRiskGateText"));
-    byId("paperPolicyLabBtn").addEventListener("click", () => loadGenericLab("/api/training/paper-policy-lab?hours=24", "paperPolicyLabText"));
-    byId("paperPolicyOrchestratorBtn").addEventListener("click", () => loadGenericLab("/api/training/paper-policy-orchestrator?hours=24", "paperPolicyOrchestratorText"));
-    byId("walkForwardBtn").addEventListener("click", () => loadGenericLab("/api/training/walk-forward?hours=24", "walkForwardText"));
-    byId("policyBacktestBtn").addEventListener("click", () => loadGenericLab("/api/training/policy-backtest?hours=24", "policyBacktestText"));
-    byId("exitPolicyBacktestBtn").addEventListener("click", () => loadGenericLab("/api/training/exit-policy-backtest?hours=24", "exitPolicyBacktestText"));
-    byId("timeDeathLabBtn").addEventListener("click", () => loadGenericLab("/api/training/time-death-lab?hours=24", "timeDeathLabText"));
-    byId("timeDeathAutopsyBtn").addEventListener("click", () => loadGenericLab("/api/training/time-death-autopsy?hours=24", "timeDeathRepairText"));
-    byId("timeDeathFilterProposalBtn").addEventListener("click", () => loadGenericLab("/api/training/time-death-filter-proposal?hours=24", "timeDeathRepairText"));
-    byId("exitCauseBacktestBtn").addEventListener("click", () => loadGenericLab("/api/training/exit-cause-backtest?hours=24", "timeDeathRepairText"));
-    byId("preMoveEventLabelerBtn").addEventListener("click", () => loadGenericLab("/api/training/pre-move-event-labeler?hours=24", "preMoveIntelligenceText"));
-    byId("preMoveFeatureSnapshotBtn").addEventListener("click", () => loadGenericLab("/api/training/pre-move-feature-snapshot?hours=24", "preMoveIntelligenceText"));
-    byId("preMovePatternMinerBtn").addEventListener("click", () => loadGenericLab("/api/training/pre-move-pattern-miner?hours=24", "preMoveIntelligenceText"));
-    byId("preMoveSimilarityScannerBtn").addEventListener("click", () => loadGenericLab("/api/training/pre-move-similarity-scanner?hours=6", "preMoveIntelligenceText"));
-    byId("adaptiveExitPolicyBtn").addEventListener("click", () => loadGenericLab("/api/training/adaptive-exit-policy?hours=24", "adaptiveExitPolicyText"));
-    byId("latencyAuditBtn").addEventListener("click", () => loadGenericLab("/api/training/latency-audit?hours=24", "latencyAuditText"));
-    byId("fastExecutionReadinessBtn").addEventListener("click", () => loadGenericLab("/api/training/fast-execution-readiness", "fastExecutionReadinessText"));
-    byId("netEdgeLabBtn").addEventListener("click", () => loadGenericLab("/api/training/net-edge-lab?hours=24", "edgeHardeningText"));
-    byId("antiOverfitGateBtn").addEventListener("click", () => loadGenericLab("/api/training/anti-overfit-gate?hours=24", "edgeHardeningText"));
-    byId("evSlippageGateBtn").addEventListener("click", () => loadGenericLab("/api/training/ev-slippage-calibration-gate?hours=24", "edgeHardeningText"));
-    byId("policyStabilityMatrixBtn").addEventListener("click", () => loadGenericLab("/api/training/policy-stability-matrix?hours=24", "edgeHardeningText"));
-    byId("candidateRankingBtn").addEventListener("click", () => loadGenericLab("/api/training/candidate-ranking?hours=24", "edgeHardeningText"));
-    byId("decisionLedgerAuditBtn").addEventListener("click", () => loadGenericLab("/api/training/decision-ledger-audit?hours=24", "edgeHardeningText"));
-    byId("adaptiveExitBacktestBtn").addEventListener("click", () => loadGenericLab("/api/training/adaptive-exit-backtest?hours=24", "edgeHardeningText"));
-    byId("sizingSafetyLabBtn").addEventListener("click", () => loadGenericLab("/api/training/sizing-safety-lab?hours=24", "edgeHardeningText"));
-    byId("structuredOutputGuardBtn").addEventListener("click", () => loadGenericLab("/api/training/structured-output-guard-status", "edgeHardeningText"));
-    byId("dataVaultStatusBtn").addEventListener("click", () => loadGenericLab("/api/training/data-vault-status", "dataVaultText"));
-    byId("dataExportBtn").addEventListener("click", () => loadGenericLab("/api/training/data-export?hours=168", "dataVaultText"));
-    byId("dataExport720Btn").addEventListener("click", () => loadGenericLab("/api/training/data-export?hours=720", "dataVaultText"));
-    byId("dataUploadLatestBtn").addEventListener("click", () => loadGenericLab("/api/training/data-upload-latest", "dataVaultText"));
-    byId("dataVaultPruneBtn").addEventListener("click", () => loadGenericLab("/api/training/data-vault-prune", "dataVaultText"));
-    byId("migrationReadinessBtn").addEventListener("click", () => loadGenericLab("/api/training/migration-readiness", "migrationReadinessText"));
-    byId("migrationDeepCheckBtn").addEventListener("click", () => loadGenericLab("/api/training/migration-readiness-deep-check", "migrationReadinessText"));
-    byId("vpsPreflightBtn").addEventListener("click", () => loadGenericLab("/api/training/vps-preflight", "vpsMigrationText"));
-    byId("vpsGuideBtn").addEventListener("click", () => loadGenericLab("/api/training/vps-migration-guide", "vpsMigrationText"));
-    byId("fastRuntimePlanBtn").addEventListener("click", () => loadGenericLab("/api/training/fast-runtime-plan?hours=24", "vpsMigrationText"));
-    byId("fastRuntimeReadinessBtn").addEventListener("click", () => loadGenericLab("/api/training/fast-runtime-readiness?hours=24", "vpsMigrationText"));
-    byId("websocketMigrationPlanBtn").addEventListener("click", () => loadGenericLab("/api/training/websocket-migration-plan?hours=24", "vpsMigrationText"));
-    byId("vpsRuntimeHealthBtn").addEventListener("click", () => loadGenericLab("/api/training/vps-runtime-health", "vpsMigrationText"));
-    byId("dataRestoreBenchmarkBtn").addEventListener("click", () => loadGenericLab("/api/training/data-restore-benchmark", "vpsMigrationText"));
-    byId("postMigrationBackupBtn").addEventListener("click", () => loadGenericLab("/api/training/post-migration-backup?hours=168", "vpsMigrationText"));
-    byId("workerLockStatusBtn").addEventListener("click", () => loadGenericLab("/api/training/worker-lock-status", "vpsMigrationText"));
-    byId("dataDownloadLatestBtn").addEventListener("click", () => loadGenericLab("/api/training/data-download-latest", "vpsMigrationText"));
-    byId("dataRestoreDryRunBtn").addEventListener("click", () => loadGenericLab("/api/training/data-restore-latest", "vpsMigrationText"));
-    refresh();
-    loadSummary();
-    loadPlan();
-    setInterval(refresh, REFRESH_SECONDS * 1000);
-  </script>
+
+          <div class="visual-grid">
+            <article class="panel chart-panel">
+              <div class="panel-head">
+                <div>
+                  <span class="panel-label">Training quality</span>
+                  <h3>TP / SL / TIME</h3>
+                </div>
+                <span id="timeRiskBadge" class="badge badge-muted">no data</span>
+              </div>
+              <div id="outcomeStackedChart" class="chart-body"></div>
+            </article>
+            <article class="panel chart-panel">
+              <div class="panel-head">
+                <div>
+                  <span class="panel-label">Signal flow</span>
+                  <h3>LONG / SHORT / NO_TRADE</h3>
+                </div>
+              </div>
+              <div id="signalBarChart" class="chart-body"></div>
+            </article>
+            <article class="panel chart-panel">
+              <div class="panel-head">
+                <div>
+                  <span class="panel-label">Decision state</span>
+                  <h3>Candidate status</h3>
+                </div>
+              </div>
+              <div id="candidateStatusChart" class="chart-body"></div>
+            </article>
+            <article class="panel chart-panel">
+              <div class="panel-head">
+                <div>
+                  <span class="panel-label">TIME death</span>
+                  <h3>Recent pressure</h3>
+                </div>
+              </div>
+              <div id="timeDeathMiniChart" class="chart-body"></div>
+            </article>
+          </div>
+        </section>
+
+        <section id="paper-monitor" class="section">
+          <div class="section-title">
+            <div>
+              <span class="eyebrow">Simulation only</span>
+              <h2>Paper Monitor</h2>
+            </div>
+            <p>Paper PnL no equivale a fills reales.</p>
+          </div>
+          <div class="two-column">
+            <article class="panel">
+              <div class="panel-head">
+                <h3>Open paper position</h3>
+                <span id="paperOpenBadge" class="badge badge-muted">none</span>
+              </div>
+              <div id="paperPositionCard" class="position-card empty-state">Sin posicion paper abierta.</div>
+            </article>
+            <article class="panel chart-panel">
+              <div class="panel-head">
+                <h3>Paper summary</h3>
+              </div>
+              <div id="paperSummaryCards" class="mini-kpi-grid"></div>
+              <div id="paperOutcomeChart" class="chart-body"></div>
+            </article>
+          </div>
+        </section>
+
+        <section id="signals" class="section">
+          <div class="section-title">
+            <div>
+              <span class="eyebrow">Flow and blocks</span>
+              <h2>Signal Monitor</h2>
+            </div>
+            <p>El score alto es una confluencia bruta, no una prueba de edge.</p>
+          </div>
+          <div class="two-column">
+            <article class="panel">
+              <div class="panel-head"><h3>Top signals</h3></div>
+              <div id="topSignalsList" class="compact-list"></div>
+            </article>
+            <article class="panel">
+              <div class="panel-head"><h3>Top blocks</h3></div>
+              <div id="topBlocksList" class="compact-list"></div>
+            </article>
+          </div>
+        </section>
+
+        <section id="edge-policy" class="section">
+          <div class="section-title">
+            <div>
+              <span class="eyebrow">Decision panel</span>
+              <h2>Edge & Policy</h2>
+            </div>
+            <p>Candidate Ranking manda sobre Edge Guard. No hay activacion automatica.</p>
+          </div>
+          <div class="decision-grid">
+            <article class="decision-card danger">
+              <span class="panel-label">Candidate Ranking</span>
+              <strong id="candidateRankingState">NO_VALID_CANDIDATES</strong>
+              <p>No activar filtros paper ni live si no hay candidatos accionables.</p>
+            </article>
+            <article class="decision-card warning">
+              <span class="panel-label">Edge Guard</span>
+              <strong id="edgeGuardState">No allow candidates</strong>
+              <p>Gross edge no basta; se exige net EV y validacion.</p>
+            </article>
+            <article class="decision-card info">
+              <span class="panel-label">Orchestrator</span>
+              <strong id="orchestratorState">PAPER_ONLY</strong>
+              <p>live_allowed=false, policy filter shadow/off.</p>
+            </article>
+          </div>
+          <div class="lab-actions">
+            <button id="candidateRankingBtn" class="btn btn-secondary">Candidate ranking 24h</button>
+            <button id="edgeGuardBtn" class="btn btn-secondary">Edge guard 24h</button>
+            <button id="paperPolicyOrchestratorBtn" class="btn btn-secondary">Orchestrator 24h</button>
+            <button id="netEdgeLabBtn" class="btn btn-secondary">Net edge lab</button>
+            <button id="evSlippageGateBtn" class="btn btn-secondary">EV / slippage gate</button>
+            <button id="antiOverfitGateBtn" class="btn btn-secondary">Anti overfit</button>
+            <button id="policyStabilityMatrixBtn" class="btn btn-secondary">Policy stability</button>
+          </div>
+          <details class="report-details">
+            <summary>Ver salida tecnica Edge & Policy</summary>
+            <pre id="edgePolicyOutput">Sin cargar todavia.</pre>
+          </details>
+        </section>
+
+        <section id="time-death" class="section">
+          <div class="section-title">
+            <div>
+              <span class="eyebrow">Exit diagnosis</span>
+              <h2>Time Death</h2>
+            </div>
+            <p>TIME no es un fallo de reloj. Significa que la senal no toco TP ni SL dentro del horizonte.</p>
+          </div>
+          <div class="two-column">
+            <article class="panel chart-panel">
+              <div class="panel-head">
+                <h3>TIME vs TP/SL</h3>
+                <span id="timeDeathStatusBadge" class="badge badge-danger">research</span>
+              </div>
+              <div id="timeDeathChart" class="chart-body"></div>
+            </article>
+            <article class="panel">
+              <div class="panel-head"><h3>Interpretacion</h3></div>
+              <div class="explain-box">
+                Puede ser TP lejano, horizonte mal calibrado o simplemente falta de edge. Si TIME supera 80%, el estado debe seguir en research y NO LIVE.
+              </div>
+              <div class="lab-actions vertical">
+                <button id="timeDeathAutopsyBtn" class="btn btn-secondary">Time death autopsy 24h</button>
+                <button id="timeDeathFilterProposalBtn" class="btn btn-secondary">Filter proposal 24h</button>
+                <button id="exitCauseBacktestBtn" class="btn btn-secondary">Exit cause backtest 24h</button>
+              </div>
+            </article>
+          </div>
+          <details class="report-details">
+            <summary>Ver salida tecnica Time Death</summary>
+            <pre id="timeDeathOutput">Sin cargar todavia.</pre>
+          </details>
+        </section>
+
+        <section id="exit-calibration" class="section">
+          <div class="section-title">
+            <div>
+              <span class="eyebrow">Research only</span>
+              <h2>Exit Calibration V2</h2>
+            </div>
+            <p>No se aplica ninguna salida real. market_probe es NOT ACTIONABLE.</p>
+          </div>
+          <div class="visual-grid">
+            <article class="panel chart-panel span-2">
+              <div class="panel-head">
+                <h3>Current exit vs shadow candidates</h3>
+                <span class="badge badge-info">Exit Label Calibration V2</span>
+              </div>
+              <div id="exitCalibrationChart" class="chart-body"></div>
+            </article>
+            <article class="panel">
+              <div class="panel-head"><h3>Exit diagnosis</h3></div>
+              <div id="exitCalibrationDiagnosis" class="compact-list"></div>
+            </article>
+          </div>
+          <div class="lab-actions">
+            <button id="exitLabelCalibrationV2Btn" class="btn btn-primary">Actualizar exit calibration V2 24h</button>
+            <button id="exitSimulationBtn" class="btn btn-secondary">Exit simulation 24h</button>
+            <button id="exitPolicyBacktestBtn" class="btn btn-secondary">Exit policy backtest 24h</button>
+            <button id="adaptiveExitBacktestBtn" class="btn btn-secondary">Adaptive exit backtest</button>
+          </div>
+          <div class="table-shell">
+            <table>
+              <thead><tr><th>group</th><th>source</th><th>samples</th><th>best TP/SL/HOLD</th><th>net EV</th><th>net PF</th><th>decision</th></tr></thead>
+              <tbody id="exitCalibrationRows"><tr><td colspan="7">Sin datos cargados.</td></tr></tbody>
+            </table>
+          </div>
+          <details class="report-details">
+            <summary>Ver salida tecnica Exit Calibration</summary>
+            <pre id="exitCalibrationOutput">Sin cargar todavia.</pre>
+          </details>
+        </section>
+
+        <section id="pre-move" class="section">
+          <div class="section-title">
+            <div>
+              <span class="eyebrow">Pattern memory</span>
+              <h2>Pre-Move Intelligence</h2>
+            </div>
+            <p>No favorece LONG ni SHORT por defecto. Sin patron validado: NO_VALID_PATTERNS.</p>
+          </div>
+          <div class="two-column">
+            <article class="panel chart-panel">
+              <div class="panel-head"><h3>Long vs short events</h3></div>
+              <div id="preMoveChart" class="chart-body"></div>
+            </article>
+            <article class="panel">
+              <div class="panel-head"><h3>Current similar setups</h3></div>
+              <div id="preMoveSetups" class="compact-list empty-state">NO_VALID_PATTERNS. Research only.</div>
+            </article>
+          </div>
+          <div class="lab-actions">
+            <button id="preMoveEventLabelerBtn" class="btn btn-secondary">Event labeler 24h</button>
+            <button id="preMoveFeatureSnapshotBtn" class="btn btn-secondary">Feature snapshot 24h</button>
+            <button id="preMovePatternMinerBtn" class="btn btn-secondary">Pattern miner 24h</button>
+            <button id="preMoveSimilarityScannerBtn" class="btn btn-secondary">Similarity scanner 6h</button>
+          </div>
+          <details class="report-details">
+            <summary>Ver salida tecnica Pre-Move</summary>
+            <pre id="preMoveOutput">Sin cargar todavia.</pre>
+          </details>
+        </section>
+
+        <section id="runtime" class="section">
+          <div class="section-title">
+            <div>
+              <span class="eyebrow">VPS runtime</span>
+              <h2>Runtime / Latency</h2>
+            </div>
+            <p>WebSocket solo despues de edge validado.</p>
+          </div>
+          <div class="two-column">
+            <article class="panel">
+              <div class="panel-head"><h3>Worker health</h3></div>
+              <div id="runtimeMetrics" class="metric-list"></div>
+            </article>
+            <article class="panel chart-panel">
+              <div class="panel-head"><h3>Latency p50 / p95 / p99</h3></div>
+              <div id="latencyChart" class="chart-body"></div>
+            </article>
+          </div>
+          <div class="lab-actions">
+            <button id="latencyAuditBtn" class="btn btn-secondary">Latency audit 24h</button>
+            <button id="vpsRuntimeHealthBtn" class="btn btn-secondary">VPS runtime health</button>
+            <button id="fastRuntimeReadinessBtn" class="btn btn-secondary">Fast runtime readiness</button>
+            <button id="websocketMigrationPlanBtn" class="btn btn-secondary">WebSocket plan</button>
+          </div>
+          <details class="report-details">
+            <summary>Ver salida tecnica Runtime</summary>
+            <pre id="runtimeOutput">Sin cargar todavia.</pre>
+          </details>
+        </section>
+
+        <section id="data-vault" class="section">
+          <div class="section-title">
+            <div>
+              <span class="eyebrow">Backup state</span>
+              <h2>Data Vault / Backups</h2>
+            </div>
+            <p>Sin restore visible como accion principal. Secrets excluded.</p>
+          </div>
+          <div id="vaultCards" class="kpi-grid compact"></div>
+          <div class="advanced-box">
+            <details>
+              <summary>Maintenance / Advanced backup actions</summary>
+              <p>Estos botones no se ejecutan desde el refresh principal. No hay restore destructivo aqui.</p>
+              <div class="lab-actions">
+                <button id="dataVaultStatusBtn" class="btn btn-secondary">Actualizar vault status</button>
+                <button id="dataExportBtn" class="btn btn-secondary">Crear backup 168h</button>
+                <button id="dataExport720Btn" class="btn btn-secondary">Crear backup 720h</button>
+                <button id="dataUploadLatestBtn" class="btn btn-secondary">Subir ultimo backup a R2</button>
+                <button id="dataVaultPruneBtn" class="btn btn-secondary">Prune local dry-run</button>
+              </div>
+            </details>
+          </div>
+          <details class="report-details">
+            <summary>Ver salida tecnica Data Vault</summary>
+            <pre id="dataVaultOutput">Sin cargar todavia.</pre>
+          </details>
+        </section>
+
+        <section id="reports" class="section">
+          <div class="section-title">
+            <div>
+              <span class="eyebrow">Copy and export</span>
+              <h2>Reports & Exports</h2>
+            </div>
+            <p>El reporte completo puede tardar 1-2 minutos. No se genera automaticamente.</p>
+          </div>
+          <div class="reports-grid">
+            <article class="panel">
+              <div class="panel-head"><h3>ChatGPT reports</h3></div>
+              <div class="report-action-grid">
+                <button id="copyShortReportBtn" class="btn btn-primary report-btn">Copiar resumen corto</button>
+                <button id="copyChatGptReportBtn" class="btn btn-primary report-btn">Copiar reporte completo para ChatGPT</button>
+                <button id="copyLastReportBtn" class="btn btn-secondary report-btn">Copiar ultimo reporte generado</button>
+                <button id="downloadFullTxtBtn" class="btn btn-secondary export-btn">Descargar TXT completo</button>
+                <button id="downloadFullJsonBtn" class="btn btn-secondary export-btn">Descargar JSON completo</button>
+              </div>
+              <div id="reportStatus" class="report-status">idle</div>
+            </article>
+            <article class="panel">
+              <div class="panel-head"><h3>CSV exports</h3></div>
+              <div class="report-action-grid">
+                <button id="downloadSignalsCsvBtn" class="btn btn-secondary export-btn">CSV senales</button>
+                <button id="downloadPaperCsvBtn" class="btn btn-secondary export-btn">CSV paper trades</button>
+                <button id="downloadLabelsCsvBtn" class="btn btn-secondary export-btn">CSV labels</button>
+                <button id="downloadLatencyCsvBtn" class="btn btn-secondary export-btn">CSV latency</button>
+                <button id="downloadPreMoveCsvBtn" class="btn btn-secondary export-btn">CSV pre-move events</button>
+                <button id="downloadCandidatesCsvBtn" class="btn btn-secondary export-btn">CSV candidates</button>
+              </div>
+            </article>
+          </div>
+          <details class="report-details report-large">
+            <summary>Ultimo reporte generado</summary>
+            <pre id="fullReportPreview">El reporte esta colapsado por defecto. Genera uno manualmente para verlo aqui.</pre>
+          </details>
+        </section>
+      </main>
+    </div>
+  </div>
+  <script src="/static/dashboard.js"></script>
 </body>
 </html>
