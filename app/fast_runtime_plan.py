@@ -23,16 +23,15 @@ class FastRuntimePlan:
         signal_generation = metrics.get("signal_generation_ms", {})
         return {
             "hours": hours,
-            "current_runtime": "Railway polling research/paper",
+            "current_runtime": "VPS polling research/paper",
             "market_fetch_ms": market_fetch,
             "decision_ms": decision,
             "signal_generation_ms": signal_generation,
             "polling_interval_seconds": self.config.scan_interval_seconds,
             "railway_limitations": [
-                "polling HTTP",
-                "cold restarts possible",
-                "shared memory ceiling",
-                "not suitable for HFT",
+                "railway removed_or_disabled",
+                "current VPS still uses polling HTTP",
+                "not suitable for HFT until WebSocket runtime exists",
             ],
             "vps_preparation": [
                 "single worker lock",

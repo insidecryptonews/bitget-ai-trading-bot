@@ -188,7 +188,8 @@ def test_fast_execution_readiness_marks_railway_research_not_hft(tmp_path):
     text = FastExecutionReadiness(cfg(tmp_path), None).to_text()
     assert "FAST EXECUTION READINESS START" in text
     assert "is_hft_ready: false" in text
-    assert "STAY_ON_RAILWAY_FOR_NOW" in text
+    assert "VPS research/paper" in text
+    assert "NO LIVE" in text
 
 
 def test_data_export_creates_manifest_checksums_and_excludes_secrets(tmp_path):

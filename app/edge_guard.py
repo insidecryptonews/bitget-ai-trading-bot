@@ -11,6 +11,7 @@ from .utils import safe_float, safe_int
 
 
 ALLOW_PAPER = "ALLOW_PAPER"
+GROSS_EDGE_ONLY = "GROSS_EDGE_ONLY"
 WATCH_ONLY = "WATCH_ONLY"
 SHADOW_ONLY = "SHADOW_ONLY"
 BLOCK_PAPER = "BLOCK_PAPER"
@@ -44,6 +45,7 @@ class EdgeGuard:
         since_iso = since.isoformat()
         recent_since_iso = (now - timedelta(hours=max(1, int(self.config.edge_guard_recent_hours or 6)))).isoformat()
         overall = self.db.get_high_score_label_summary_since(since_iso, self.config.min_score_to_trade)
+        strict_context = _strict_context(self.config, self.db, hours)
         groups: list[dict[str, Any]] = []
         for group_key, group_type in (
             ("symbol", "symbol"),
@@ -74,13 +76,16 @@ class EdgeGuard:
                 enriched["recent_sl_ratio"] = safe_float(recent.get("sl_ratio"))
                 enriched["stability_score"] = self._stability_score(enriched)
                 enriched["sample_quality"] = min(safe_float(enriched.get("total_labels")) / max(1.0, float(self.config.edge_guard_min_sample)), 1.0)
+                _apply_strict_context(enriched, group_type, strict_context, self.config)
                 enriched["decision"], enriched["reason"] = self.classify_metrics(enriched)
+                enriched["final_decision"] = _final_decision(enriched)
                 groups.append(enriched)
         return {
             "hours": hours,
             "generated_at": now.isoformat(),
             "overall": _overall_metrics(overall),
             "allow_paper_candidates": _select(groups, ALLOW_PAPER),
+            "gross_edge_only_candidates": _select(groups, GROSS_EDGE_ONLY),
             "watch_only_candidates": _select(groups, WATCH_ONLY),
             "shadow_only_candidates": _select(groups, SHADOW_ONLY),
             "block_paper_candidates": _select(groups, BLOCK_PAPER),
@@ -98,6 +103,8 @@ class EdgeGuard:
             _overall_line(report["overall"]),
             "allow_paper_candidates:",
             *_candidate_lines(report["allow_paper_candidates"]),
+            "gross_edge_only_candidates:",
+            *_candidate_lines(report.get("gross_edge_only_candidates", [])),
             "watch_only_candidates:",
             *_candidate_lines(report["watch_only_candidates"]),
             "shadow_only_candidates:",
@@ -117,10 +124,17 @@ class EdgeGuard:
         tp_ratio = safe_float(row.get("tp_ratio"))
         sl_ratio = safe_float(row.get("sl_ratio"))
         time_ratio = safe_float(row.get("time_ratio"))
+        strict_reason = str(row.get("strict_block_reason") or "")
         if sample < self.config.edge_guard_min_sample:
             return WATCH_ONLY, "sample_too_small"
+        if strict_reason:
+            if pf >= 1.0:
+                return GROSS_EDGE_ONLY, strict_reason
+            return BLOCK_PAPER, strict_reason
         if self._recent_deteriorating(row):
             return WATCH_ONLY, "recent_deterioration"
+        if time_ratio > safe_float(getattr(self.config, "net_edge_max_time_ratio", self.config.edge_guard_max_time_ratio)):
+            return GROSS_EDGE_ONLY if pf >= 1.0 else BLOCK_PAPER, "high_time_death"
         if sl_ratio > 0.15 and tp_ratio < 0.03:
             return BLOCK_PAPER, "sl_high_tp_low"
         if pf < 1.0:
@@ -203,6 +217,73 @@ def _select(groups: list[dict[str, Any]], decision: str) -> list[dict[str, Any]]
     return selected[:12]
 
 
+def _strict_context(config: BotConfig, db: Database, hours: int) -> dict[str, Any]:
+    try:
+        from .net_edge_lab import NetEdgeLab
+        from .time_death_autopsy import TimeDeathAutopsyLab
+
+        net = NetEdgeLab(config, db).build(hours=hours)
+        autopsy = TimeDeathAutopsyLab(config, db).build(hours=hours)
+    except Exception:
+        return {"net": {}, "autopsy": {}}
+    net_map = {
+        (_guard_group_type(group), str(row.get("group_value") or "").upper()): row
+        for group, rows in net.get("by_group", {}).items()
+        for row in rows
+    }
+    autopsy_map = {
+        (_guard_group_type(str(row.get("group_key") or "")), str(row.get("group_value") or "").upper()): row
+        for row in autopsy.get("groups", [])
+    }
+    return {"net": net_map, "autopsy": autopsy_map}
+
+
+def _apply_strict_context(row: dict[str, Any], group_type: str, context: dict[str, Any], config: BotConfig) -> None:
+    key = (group_type, str(row.get("group_value") or "").upper())
+    net = context.get("net", {}).get(key, {})
+    autopsy = context.get("autopsy", {}).get(key, {})
+    if net:
+        row["net_EV"] = safe_float(net.get("net_EV"))
+        row["net_PF"] = safe_float(net.get("net_PF"))
+    if autopsy:
+        row["time_death_cause"] = autopsy.get("likely_cause")
+        row["time_death_decision"] = autopsy.get("decision")
+    reason = ""
+    if net and safe_int(net.get("samples")) >= config.net_edge_min_samples:
+        if safe_float(net.get("net_EV")) <= 0:
+            reason = "net_ev_negative"
+        elif safe_float(net.get("net_PF")) < config.net_edge_min_net_pf:
+            reason = "net_pf_below_min"
+    if autopsy and str(autopsy.get("decision")) == "REJECT":
+        reason = str(autopsy.get("reason") or autopsy.get("likely_cause") or "high_time_death").lower()
+    if autopsy and str(autopsy.get("decision")) == "WATCH_ONLY" and safe_int(autopsy.get("samples")) < config.edge_guard_min_sample:
+        reason = "validation_sample_too_small"
+    group_value = str(row.get("group_value") or "").upper()
+    if group_type == "regime" and group_value == "RISK_OFF" and safe_float(row.get("time_ratio")) > 0.80:
+        reason = "risk_off_high_time_death"
+    if group_type == "side" and group_value == "LONG" and safe_float(row.get("tp_ratio")) <= 0.001 and safe_float(row.get("sl_ratio")) > 0.15:
+        reason = "long_sl_high_tp_low"
+    if group_type == "symbol" and group_value == "BNBUSDT" and (safe_float(row.get("profit_factor")) < 1.0 or safe_float(row.get("time_ratio")) >= 1.0):
+        reason = "bnb_bad_symbol"
+    if group_type == "score_bucket" and group_value.startswith("70-") and safe_float(row.get("time_ratio")) > 0.85:
+        reason = "score_70_79_high_time_death"
+    if reason:
+        row["strict_block_reason"] = reason
+
+
+def _guard_group_type(group: str) -> str:
+    return {"market_regime": "regime", "strategy": "strategy", "policy_id": "policy_id"}.get(group, group)
+
+
+def _final_decision(row: dict[str, Any]) -> str:
+    decision = str(row.get("decision") or "")
+    if decision == GROSS_EDGE_ONLY:
+        return "BLOCKED_BY_NET_GATE"
+    if decision == ALLOW_PAPER:
+        return "ALLOW_PAPER"
+    return decision
+
+
 def _reason_counts(groups: list[dict[str, Any]]) -> list[dict[str, Any]]:
     counts: dict[str, int] = {}
     for row in groups:
@@ -245,7 +326,7 @@ def _candidate_lines(rows: list[dict[str, Any]]) -> list[str]:
             f"TP%={safe_float(row.get('tp_ratio')) * 100:.1f} "
             f"recentPF={safe_float(row.get('recent_profit_factor')):.2f} "
             f"stability={safe_float(row.get('stability_score')):.2f} "
-            f"reason={row.get('reason')}"
+            f"decision={row.get('decision')} final_decision={row.get('final_decision')} reason={row.get('reason')}"
         )
         for row in rows[:10]
     ]

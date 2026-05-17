@@ -250,7 +250,7 @@ def _operational_context(config: BotConfig, db: Database, hours: int) -> dict[st
         "time_death_risk": 0.0,
         "exit_policy_quality": 0.0,
         "latency_readiness": 100.0,
-        "future_vps_readiness": "STAY_ON_RAILWAY_FOR_NOW",
+        "future_vps_readiness": "VPS_ACTIVE_FAST_RUNTIME_AFTER_EDGE_VALIDATION",
         "data_vault_status": "unknown",
         "backup_recency": "none",
         "migration_readiness": "not_ready",

@@ -21,8 +21,15 @@ class CandidateRanking:
             apply_net_costs(row, costs)
             for row in fetch_group_metrics(self.db, since=since_iso(hours), group_key="policy_id", limit=100, min_samples=1)
         ]
+        recent = {
+            str(row.get("group_value") or ""): row
+            for row in fetch_group_metrics(self.db, since=since_iso(max(1, min(6, hours))), group_key="policy_id", limit=120, min_samples=1)
+        }
         ranked = []
         for row in rows:
+            rec = recent.get(str(row.get("group_value") or ""), {})
+            row["recent_pf"] = safe_float(rec.get("gross_pf"))
+            row["recent_samples"] = safe_int(rec.get("samples"))
             score, reason = _score(row, costs)
             item = dict(row)
             item["ranking_score"] = score
@@ -32,6 +39,7 @@ class CandidateRanking:
         ranked.sort(key=lambda item: safe_float(item.get("ranking_score")), reverse=True)
         return {
             "hours": max(1, int(hours or 24)),
+            "status": "OK" if any(row.get("decision") == "PAPER_CANDIDATE" for row in ranked) else "NO_VALID_CANDIDATES",
             "top_candidates": [row for row in ranked if row.get("decision") == "PAPER_CANDIDATE"][:5],
             "watch_list": [row for row in ranked if row.get("decision") in {"WATCH_ONLY", "SHADOW_CANDIDATE"}][:10],
             "reject_list": [row for row in ranked if row.get("decision") == "REJECT"][:10],
@@ -43,6 +51,7 @@ class CandidateRanking:
         return "\n".join([
             START,
             f"hours: {payload['hours']}",
+            f"status: {payload['status']}",
             "top_5_candidates:",
             *_lines(payload["top_candidates"]),
             "watch_list:",
@@ -59,7 +68,17 @@ def _score(row: dict[str, Any], costs: Any) -> tuple[float, str]:
     net_pf_score = min(1.0, safe_float(row.get("net_PF")) / max(costs.min_net_pf * 2.0, 1.0))
     ev_score = max(0.0, min(1.0, safe_float(row.get("net_EV")) + 0.5))
     tp_score = min(1.0, safe_float(row.get("tp_ratio")) / max(costs.min_tp_ratio, 0.001))
-    penalty = safe_float(row.get("time_ratio")) * 0.30 + safe_float(row.get("sl_ratio")) * 0.35
+    penalty = safe_float(row.get("time_ratio")) * 0.55 + safe_float(row.get("sl_ratio")) * 0.45
+    policy_id = str(row.get("group_value") or "").upper()
+    recent_pf = safe_float(row.get("recent_pf"))
+    if recent_pf and recent_pf < safe_float(row.get("gross_PF")) * 0.65:
+        penalty += 0.30
+    if "_RISK_OFF_" in policy_id or policy_id.endswith("_RISK_OFF"):
+        penalty += 0.20
+    if "_LONG_" in policy_id and safe_float(row.get("tp_ratio")) < 0.02:
+        penalty += 0.25
+    if policy_id.endswith("_70-79") or "_70-79" in policy_id:
+        penalty += 0.15 if safe_float(row.get("time_ratio")) > 0.85 else 0.0
     score = max(0.0, (sample_score * 0.20 + net_pf_score * 0.30 + ev_score * 0.25 + tp_score * 0.25) - penalty)
     if safe_int(row.get("samples")) < costs.min_samples:
         return score, "sample_too_small"
@@ -69,6 +88,8 @@ def _score(row: dict[str, Any], costs: Any) -> tuple[float, str]:
         return score, "net_pf_below_min"
     if safe_float(row.get("time_ratio")) > costs.max_time_ratio:
         return score, "time_death_risk"
+    if recent_pf and recent_pf < safe_float(row.get("gross_PF")) * 0.65:
+        return score, "recent_deterioration"
     return score, "multi_metric_candidate"
 
 

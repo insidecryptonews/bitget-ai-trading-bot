@@ -273,6 +273,15 @@
         <pre id="timeDeathLabText">Sin cargar todavía.</pre>
       </div>
       <div class="card full">
+        <h2>Time Death Autopsy / Repair</h2>
+        <div class="actions">
+          <button id="timeDeathAutopsyBtn">Time death autopsy 24h</button>
+          <button id="timeDeathFilterProposalBtn">Filter proposal 24h</button>
+          <button id="exitCauseBacktestBtn">Exit cause backtest 24h</button>
+        </div>
+        <pre id="timeDeathRepairText">Sin cargar todavia.</pre>
+      </div>
+      <div class="card full">
         <h2>Adaptive Exit Policy</h2>
         <div class="actions"><button id="adaptiveExitPolicyBtn">Actualizar adaptive exit 24h</button></div>
         <pre id="adaptiveExitPolicyText">Sin cargar todavía.</pre>
@@ -667,6 +676,9 @@
     byId("policyBacktestBtn").addEventListener("click", () => loadGenericLab("/api/training/policy-backtest?hours=24", "policyBacktestText"));
     byId("exitPolicyBacktestBtn").addEventListener("click", () => loadGenericLab("/api/training/exit-policy-backtest?hours=24", "exitPolicyBacktestText"));
     byId("timeDeathLabBtn").addEventListener("click", () => loadGenericLab("/api/training/time-death-lab?hours=24", "timeDeathLabText"));
+    byId("timeDeathAutopsyBtn").addEventListener("click", () => loadGenericLab("/api/training/time-death-autopsy?hours=24", "timeDeathRepairText"));
+    byId("timeDeathFilterProposalBtn").addEventListener("click", () => loadGenericLab("/api/training/time-death-filter-proposal?hours=24", "timeDeathRepairText"));
+    byId("exitCauseBacktestBtn").addEventListener("click", () => loadGenericLab("/api/training/exit-cause-backtest?hours=24", "timeDeathRepairText"));
     byId("adaptiveExitPolicyBtn").addEventListener("click", () => loadGenericLab("/api/training/adaptive-exit-policy?hours=24", "adaptiveExitPolicyText"));
     byId("latencyAuditBtn").addEventListener("click", () => loadGenericLab("/api/training/latency-audit?hours=24", "latencyAuditText"));
     byId("fastExecutionReadinessBtn").addEventListener("click", () => loadGenericLab("/api/training/fast-execution-readiness", "fastExecutionReadinessText"));

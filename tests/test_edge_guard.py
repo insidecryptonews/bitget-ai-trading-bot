@@ -3,7 +3,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from app.config import BotConfig, PROJECT_ROOT
-from app.edge_guard import ALLOW_PAPER, BLOCK_PAPER, EdgeGuard
+from app.edge_guard import ALLOW_PAPER, BLOCK_PAPER, GROSS_EDGE_ONLY, EdgeGuard
 from app.tp_sl_horizon_lab import END as TP_END, START as TP_START, TpSlHorizonLab
 
 
@@ -29,14 +29,21 @@ def test_edge_guard_classifies_pf_below_one_as_block_or_shadow():
     row = {"group_value": "DOGEUSDT", "total_labels": 900, "profit_factor": 0.44, "tp_ratio": 0.02, "sl_ratio": 0.10, "time_ratio": 0.88}
     decision, reason = EdgeGuard(BotConfig(), EdgeDb()).classify_metrics(row)
     assert decision in {BLOCK_PAPER, "SHADOW_ONLY"}
-    assert reason in {"pf_below_1", "edge_not_confirmed", "sl_high_tp_low"}
+    assert reason in {"pf_below_1", "edge_not_confirmed", "sl_high_tp_low", "high_time_death"}
 
 
 def test_edge_guard_classifies_good_sample_as_allow_paper():
-    row = {"group_value": "ETHUSDT", "total_labels": 5704, "profit_factor": 1.93, "tp_ratio": 0.035, "sl_ratio": 0.018, "time_ratio": 0.947}
+    row = {"group_value": "ETHUSDT", "total_labels": 5704, "profit_factor": 1.93, "tp_ratio": 0.035, "sl_ratio": 0.018, "time_ratio": 0.50}
     decision, reason = EdgeGuard(BotConfig(), EdgeDb()).classify_metrics(row)
     assert decision == ALLOW_PAPER
     assert reason == "edge_thresholds_met"
+
+
+def test_edge_guard_blocks_gross_edge_when_time_death_is_high():
+    row = {"group_value": "ETHUSDT", "total_labels": 5704, "profit_factor": 1.93, "tp_ratio": 0.035, "sl_ratio": 0.018, "time_ratio": 0.947}
+    decision, reason = EdgeGuard(BotConfig(), EdgeDb()).classify_metrics(row)
+    assert decision == GROSS_EDGE_ONLY
+    assert reason == "high_time_death"
 
 
 def test_edge_guard_v2_blocks_recent_deterioration():

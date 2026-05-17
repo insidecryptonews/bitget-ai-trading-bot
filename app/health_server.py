@@ -80,6 +80,9 @@ def start_health_server(
                 "/api/training/walk-forward",
                 "/api/training/policy-backtest",
                 "/api/training/exit-policy-backtest",
+                "/api/training/time-death-autopsy",
+                "/api/training/time-death-filter-proposal",
+                "/api/training/exit-cause-backtest",
                 "/api/training/net-edge-lab",
                 "/api/training/anti-overfit-gate",
                 "/api/training/ev-slippage-calibration-gate",
@@ -170,6 +173,15 @@ def start_health_server(
                 return
             if path == "/api/training/exit-policy-backtest":
                 self._send_json(_exit_policy_backtest(config, db, query))
+                return
+            if path == "/api/training/time-death-autopsy":
+                self._send_json(_time_death_autopsy(config, db, query))
+                return
+            if path == "/api/training/time-death-filter-proposal":
+                self._send_json(_time_death_filter_proposal(config, db, query))
+                return
+            if path == "/api/training/exit-cause-backtest":
+                self._send_json(_exit_cause_backtest(config, db, query))
                 return
             if path == "/api/training/net-edge-lab":
                 self._send_json(_net_edge_lab(config, db, query))
@@ -510,6 +522,18 @@ def _policy_backtest(config: Any | None, db: Any | None, query: dict[str, list[s
 
 def _exit_policy_backtest(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
     return _lab_payload(config, db, query, "exit policy backtest unavailable", ".exit_policy_backtest", "ExitPolicyBacktest")
+
+
+def _time_death_autopsy(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
+    return _lab_payload(config, db, query, "time death autopsy unavailable", ".time_death_autopsy", "TimeDeathAutopsyLab")
+
+
+def _time_death_filter_proposal(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
+    return _lab_payload(config, db, query, "time death filter proposal unavailable", ".time_death_filter_proposal", "TimeDeathFilterProposal")
+
+
+def _exit_cause_backtest(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
+    return _lab_payload(config, db, query, "exit cause backtest unavailable", ".exit_cause_backtest", "ExitCauseBacktest")
 
 
 def _net_edge_lab(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:

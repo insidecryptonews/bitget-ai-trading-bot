@@ -60,7 +60,12 @@ class PaperPolicyLab:
             for row in news.get("symbol_decisions", [])
             if row.get("decision") == NEWS_CATALYST_BOOST_RESEARCH_ONLY
         }
-        for row in edge.get("allow_paper_candidates", []) + edge.get("watch_only_candidates", []):
+        edge_rows = (
+            edge.get("allow_paper_candidates", [])
+            + edge.get("gross_edge_only_candidates", [])
+            + edge.get("watch_only_candidates", [])
+        )
+        for row in edge_rows:
             group_type = str(row.get("group_type") or "")
             group_value = str(row.get("group_value") or "")
             samples = safe_int(row.get("total_labels"))

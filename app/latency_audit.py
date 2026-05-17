@@ -13,7 +13,7 @@ END = "LATENCY AUDIT END"
 
 
 class LatencyAudit:
-    """Compact latency report for Railway research/paper mode."""
+    """Compact latency report for VPS research/paper mode."""
 
     def __init__(self, config: BotConfig, db: Database) -> None:
         self.config = config
@@ -31,11 +31,12 @@ class LatencyAudit:
             "metrics": by_metric,
             "bottlenecks": bottlenecks,
             "railway_status": {
+                "status": "removed_or_disabled",
                 "research_mode_ok": bool(self.config.worker_lightweight_mode and not self.config.live_trading),
                 "paper_trading": bool(self.config.paper_trading),
             },
             "fast_execution_readiness": ["NOT_HFT", "RESEARCH_MODE_ONLY"],
-            "recommendation": ["keep Railway for research/paper", "future VPS/WebSocket only after edge validation"],
+            "recommendation": ["keep VPS for research/paper", "future VPS/WebSocket only after edge validation"],
             "final_recommendation": "NO LIVE",
         }
 
@@ -50,6 +51,7 @@ class LatencyAudit:
             "bottlenecks:",
             *_bottleneck_lines(payload["bottlenecks"]),
             "railway_status:",
+            f"- status={payload['railway_status']['status']}",
             f"- research_mode_ok={str(payload['railway_status']['research_mode_ok']).lower()}",
             "fast_execution_readiness:",
             *[f"- {item}" for item in payload["fast_execution_readiness"]],

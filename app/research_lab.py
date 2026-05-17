@@ -653,6 +653,26 @@ class ResearchLab:
 
         return TimeDeathLab(self.config, self.db).to_text(hours=hours)
 
+    def time_death_autopsy(self, hours: int = 24) -> str:
+        from .time_death_autopsy import TimeDeathAutopsyLab
+
+        return TimeDeathAutopsyLab(self.config, self.db).to_text(hours=hours)
+
+    def time_death_filter_proposal(self, hours: int = 24) -> str:
+        from .time_death_filter_proposal import TimeDeathFilterProposal
+
+        return TimeDeathFilterProposal(self.config, self.db).to_text(hours=hours)
+
+    def exit_cause_backtest(self, hours: int = 24) -> str:
+        from .exit_cause_backtest import ExitCauseBacktest
+
+        return ExitCauseBacktest(self.config, self.db).to_text(hours=hours)
+
+    def time_death_smoke_test(self) -> str:
+        from .time_death_smoke_test import TimeDeathSmokeTest
+
+        return TimeDeathSmokeTest(self.config, self.db, self.logger).to_text()
+
     def adaptive_exit_policy(self, hours: int = 24) -> str:
         from .adaptive_exit_policy_lab import AdaptiveExitPolicyLab
 
@@ -1275,6 +1295,10 @@ def main() -> None:
             "walk-forward",
             "policy-backtest",
             "exit-policy-backtest",
+            "time-death-autopsy",
+            "time-death-filter-proposal",
+            "exit-cause-backtest",
+            "time-death-smoke-test",
             "net-edge-lab",
             "anti-overfit-gate",
             "ev-slippage-calibration-gate",
@@ -1447,6 +1471,14 @@ def main() -> None:
         print(lab.policy_backtest(hours=args.hours))
     elif args.command == "exit-policy-backtest":
         print(lab.exit_policy_backtest(hours=args.hours))
+    elif args.command == "time-death-autopsy":
+        print(lab.time_death_autopsy(hours=args.hours))
+    elif args.command == "time-death-filter-proposal":
+        print(lab.time_death_filter_proposal(hours=args.hours))
+    elif args.command == "exit-cause-backtest":
+        print(lab.exit_cause_backtest(hours=args.hours))
+    elif args.command == "time-death-smoke-test":
+        print(lab.time_death_smoke_test())
     elif args.command == "net-edge-lab":
         print(lab.net_edge_lab(hours=args.hours))
     elif args.command == "anti-overfit-gate":

@@ -289,8 +289,8 @@ def _plan_steps(problem: str, path_metrics: dict[str, Any] | None = None) -> lis
     if problem == "latency_bottleneck":
         return [
             "1. ejecutar latency-audit --hours 24",
-            "2. mantener Railway solo para research/paper",
-            "3. preparar VPS/WebSocket solo si edge queda validado",
+            "2. mantener VPS solo para research/paper",
+            "3. preparar WebSocket solo si edge queda validado",
             "4. NO LIVE",
         ]
     if problem == "need_policy_validation":

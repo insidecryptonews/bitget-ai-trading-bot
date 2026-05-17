@@ -17,9 +17,10 @@ class FastExecutionReadiness:
 
     def build(self, *, hours: int = 24) -> dict[str, Any]:
         return {
-            "current_mode": "Railway research/paper",
+            "current_mode": "VPS research/paper",
             "is_hft_ready": False,
             "is_ok_for_research": bool(self.config.worker_lightweight_mode and self.config.paper_trading and not self.config.live_trading),
+            "railway_status": "removed_or_disabled",
             "future_vps_plan": [
                 "websocket_market_stream",
                 "async_execution_worker",
@@ -35,7 +36,7 @@ class FastExecutionReadiness:
                 "low drawdown",
                 "enough samples",
             ],
-            "final_recommendation": "STAY_ON_RAILWAY_FOR_NOW",
+            "final_recommendation": "NO LIVE",
         }
 
     def to_text(self, *, hours: int = 24) -> str:
@@ -43,12 +44,14 @@ class FastExecutionReadiness:
         return "\n".join([
             START,
             f"current_mode: {payload['current_mode']}",
+            f"railway_status: {payload['railway_status']}",
             f"is_hft_ready: {str(payload['is_hft_ready']).lower()}",
             f"is_ok_for_research: {str(payload['is_ok_for_research']).lower()}",
             "future_vps_plan:",
             *[f"- {item}" for item in payload["future_vps_plan"]],
             "migration_conditions:",
             *[f"- {item}" for item in payload["migration_conditions"]],
+            "future_fast_runtime: WebSocket only after edge validation",
             f"final_recommendation: {payload['final_recommendation']}",
             END,
         ])
