@@ -808,6 +808,36 @@ class ResearchLab:
 
         return VpsMigrationSmokeTest(self.config, self.db, self.logger).to_text()
 
+    def security_audit(self) -> str:
+        from .bot_integrity_audit import security_audit_text
+
+        return security_audit_text(self.config, self.db)
+
+    def label_time_audit(self, hours: int = 24) -> str:
+        from .bot_integrity_audit import label_time_audit_text
+
+        return label_time_audit_text(self.config, self.db, hours=hours)
+
+    def paper_trading_audit(self, hours: int = 24) -> str:
+        from .bot_integrity_audit import paper_trading_audit_text
+
+        return paper_trading_audit_text(self.config, self.db, hours=hours)
+
+    def research_modules_audit(self, hours: int = 24) -> str:
+        from .bot_integrity_audit import research_modules_audit_text
+
+        return research_modules_audit_text(self.config, self.db, hours=hours)
+
+    def bot_integrity_audit(self, hours: int = 24) -> str:
+        from .bot_integrity_audit import bot_integrity_audit_text
+
+        return bot_integrity_audit_text(self.config, self.db, hours=hours)
+
+    def bot_integrity_audit_smoke_test(self) -> str:
+        from .bot_integrity_audit import BotIntegrityAuditSmokeTest
+
+        return BotIntegrityAuditSmokeTest(self.config, self.db, self.logger).to_text()
+
     def build_markdown_report(
         self,
         dataset: list[dict[str, Any]] | None = None,
@@ -1385,6 +1415,12 @@ def main() -> None:
             "vps-preflight",
             "fast-runtime-plan",
             "vps-migration-smoke-test",
+            "bot-integrity-audit",
+            "security-audit",
+            "label-time-audit",
+            "paper-trading-audit",
+            "research-modules-audit",
+            "bot-integrity-audit-smoke-test",
         ],
     )
     parser.add_argument("--limit", type=int, default=None, help="Maximo de labels a procesar en phase2-persist.")
@@ -1621,6 +1657,18 @@ def main() -> None:
         print(lab.fast_runtime_plan(hours=args.hours))
     elif args.command == "vps-migration-smoke-test":
         print(lab.vps_migration_smoke_test())
+    elif args.command == "bot-integrity-audit":
+        print(lab.bot_integrity_audit(hours=args.hours))
+    elif args.command == "security-audit":
+        print(lab.security_audit())
+    elif args.command == "label-time-audit":
+        print(lab.label_time_audit(hours=args.hours))
+    elif args.command == "paper-trading-audit":
+        print(lab.paper_trading_audit(hours=args.hours))
+    elif args.command == "research-modules-audit":
+        print(lab.research_modules_audit(hours=args.hours))
+    elif args.command == "bot-integrity-audit-smoke-test":
+        print(lab.bot_integrity_audit_smoke_test())
 
 
 if __name__ == "__main__":
