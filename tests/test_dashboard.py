@@ -179,6 +179,57 @@ def test_dashboard_pro_full_report_and_csv_exports_are_safe():
     assert "first_barrier_hit" in body
 
 
+def test_dashboard_beauty_exit_calibration_endpoint_and_short_report():
+    class DummyDb:
+        def fetch_signal_path_metrics_since(self, since, limit=50000):
+            del since, limit
+            return [{
+                "source": "market_probe",
+                "symbol": "BTCUSDT",
+                "side": "LONG",
+                "score": 0,
+                "score_bucket": "PROBE",
+                "market_regime": "CHOPPY_MARKET",
+                "max_favorable_pct": 0.5,
+                "max_adverse_pct": 0.1,
+                "final_return_pct": 0.1,
+                "bars_tracked": 30,
+                "status": "matured",
+            }] * 600
+
+        def get_open_paper_positions_summary(self, limit=5):
+            return []
+
+        def get_paper_trade_summary(self):
+            return {"total": 0, "open": 0, "closed": 0}
+
+        def fetch_table_rows(self, *args, **kwargs):
+            return []
+
+        def fetch_labeled_signal_rows_since(self, *args, **kwargs):
+            return []
+
+        def fetch_latency_metrics_since(self, *args, **kwargs):
+            return []
+
+    base = _start_server(BotConfig(dashboard_auth_token="dash-secret"), db=DummyDb())
+    status, body = _get(base + "/dashboard?token=dash-secret")
+    assert status == 200
+    assert "Training Dashboard Pro" in body
+    assert "Madrid:" in body
+    assert "Exit Label Calibration V2" in body
+    assert "Copiar resumen corto" in body
+    status, body = _get(base + "/api/training/exit-label-calibration-v2?token=dash-secret")
+    assert status == 200
+    payload = json.loads(body)
+    assert "EXIT LABEL CALIBRATION V2 START" in payload["text"]
+    assert "market_probe_research_only" in payload["text"]
+    status, body = _get(base + "/api/training/short-report?token=dash-secret")
+    assert status == 200
+    assert "DASHBOARD PRO SHORT REPORT START" in body
+    assert "TOKEN" not in body
+
+
 def test_shadow_opportunity_endpoint_returns_json():
     class DummyDb:
         def get_training_observation_summary_since(self, *args, **kwargs):

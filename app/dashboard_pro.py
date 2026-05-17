@@ -136,6 +136,7 @@ class DashboardProReporter:
             ("Pre-Move Pattern Miner 24h", lambda: lab.pre_move_pattern_miner(hours=hours)),
             ("Pre-Move Similarity Scanner 6h", lambda: lab.pre_move_similarity_scanner(hours=6)),
             ("Exit Simulation 24h", lambda: lab.exit_simulation(hours=hours)),
+            ("Exit Label Calibration V2 24h", lambda: lab.exit_label_calibration_v2(hours=hours)),
             ("Exit Policy Backtest 24h", lambda: lab.exit_policy_backtest(hours=hours)),
             ("Latency Audit 24h", lambda: lab.latency_audit(hours=hours)),
             ("VPS Runtime Health", lambda: lab.vps_runtime_health()),
@@ -143,16 +144,65 @@ class DashboardProReporter:
         ]
         started = time.perf_counter()
         rendered = [self._run_section(name, callback) for name, callback in sections]
-        text = self.to_text(rendered, hours=hours, duration_ms=int((time.perf_counter() - started) * 1000))
+        duration_ms = int((time.perf_counter() - started) * 1000)
+        text = self.to_text(rendered, hours=hours, duration_ms=duration_ms)
         return sanitize_json_for_dashboard(
             {
                 "generated_at": _iso_now(),
                 "hours": hours,
                 "git_version": _git_version(),
+                "duration_ms": duration_ms,
+                "approx_size_bytes": len(text.encode("utf-8")),
                 "sections": [section.to_dict() for section in rendered],
                 "text": text,
                 "final_recommendation": "NO LIVE",
                 "recommended_next_action": "PAPER ONLY: revisar edge neto, TIME death y Candidate Ranking antes de cualquier cambio.",
+            }
+        )
+
+    def build_short(self, *, hours: int = 24) -> dict[str, Any]:
+        from .research_lab import ResearchLab
+
+        lab = ResearchLab(self.db, self.config, self.logger)
+        sections: list[tuple[str, Callable[[], str]]] = [
+            ("Safety", self._safety_section),
+            ("Worker Health", self._worker_health_section),
+            ("Paper Positions", self._paper_positions_section),
+            ("Training Summary 6h", lambda: lab.training_summary(hours=6)),
+            ("Candidate Ranking 24h", lambda: lab.candidate_ranking(hours=hours)),
+            ("Edge Guard 24h", lambda: lab.edge_guard(hours=hours)),
+            ("Paper Policy Orchestrator 24h", lambda: lab.paper_policy_orchestrator(hours=hours)),
+            ("Time Death Autopsy 24h", lambda: lab.time_death_autopsy(hours=hours)),
+            ("Exit Label Calibration V2 24h", lambda: lab.exit_label_calibration_v2(hours=hours)),
+            ("Pre-Move Pattern Miner 24h", lambda: lab.pre_move_pattern_miner(hours=hours)),
+            ("Data Vault Status", lambda: lab.data_vault_status()),
+        ]
+        started = time.perf_counter()
+        rendered = [self._run_section(name, callback) for name, callback in sections]
+        duration_ms = int((time.perf_counter() - started) * 1000)
+        lines = [
+            "DASHBOARD PRO SHORT REPORT START",
+            f"timestamp: {_iso_now()}",
+            f"hours: {hours}",
+            f"git_version: {_git_version()}",
+            f"duration_ms: {duration_ms}",
+            "final_recommendation: NO LIVE",
+            "",
+        ]
+        for section in rendered:
+            lines.extend([f"[{section.name}]", section.text.strip()[:2500] or "not_loaded", ""])
+        lines.append("DASHBOARD PRO SHORT REPORT END")
+        text = sanitize_text_for_dashboard("\n".join(lines))
+        return sanitize_json_for_dashboard(
+            {
+                "generated_at": _iso_now(),
+                "hours": hours,
+                "git_version": _git_version(),
+                "duration_ms": duration_ms,
+                "approx_size_bytes": len(text.encode("utf-8")),
+                "sections": [section.to_dict() for section in rendered],
+                "text": text,
+                "final_recommendation": "NO LIVE",
             }
         )
 
@@ -268,6 +318,10 @@ def build_dashboard_full_report(config: Any, db: Any, *, hours: int = 24, logger
 
 def full_report_text(config: Any, db: Any, *, hours: int = 24, logger: Any | None = None) -> str:
     return str(build_dashboard_full_report(config, db, hours=hours, logger=logger).get("text") or "")
+
+
+def build_dashboard_short_report(config: Any, db: Any, *, hours: int = 24, logger: Any | None = None) -> dict[str, Any]:
+    return DashboardProReporter(config, db, logger).build_short(hours=hours)
 
 
 def export_csv(config: Any, db: Any, kind: str, *, hours: int = 24, limit: int = 1000) -> tuple[str, str]:

@@ -18,11 +18,15 @@
       --bad: #f43f5e;
       --info: #60a5fa;
       --violet: #a78bfa;
+      --shadow: 0 18px 44px rgba(0,0,0,.28);
     }
     * { box-sizing: border-box; }
     body {
       margin: 0;
-      background: var(--bg);
+      background:
+        radial-gradient(circle at 18% -10%, rgba(45, 212, 191, .13), transparent 28%),
+        radial-gradient(circle at 86% 2%, rgba(96, 165, 250, .12), transparent 30%),
+        linear-gradient(180deg, #090d13, var(--bg) 36%, #0a0f16);
       color: var(--text);
       font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
       line-height: 1.45;
@@ -35,13 +39,30 @@
       align-items: center;
       justify-content: space-between;
       gap: 16px;
-      padding: 18px clamp(16px, 3vw, 34px);
+      padding: 16px clamp(16px, 3vw, 34px);
       border-bottom: 1px solid var(--line);
       background: rgba(13, 17, 23, 0.94);
       backdrop-filter: blur(10px);
     }
     h1 { margin: 0; font-size: clamp(21px, 3vw, 34px); letter-spacing: 0; }
     .subtitle { color: var(--muted); font-size: 14px; margin-top: 2px; }
+    .header-left { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+    .header-meta { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; justify-content: flex-end; }
+    .tag {
+      display: inline-flex;
+      align-items: center;
+      min-height: 30px;
+      padding: 6px 10px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: rgba(255,255,255,.04);
+      font-size: 12px;
+      font-weight: 800;
+      color: var(--muted);
+    }
+    .tag.good { border-color: rgba(45, 212, 191, .32); background: rgba(45, 212, 191, .10); }
+    .tag.bad { border-color: rgba(244, 63, 94, .36); background: rgba(244, 63, 94, .10); }
+    .tag.info { border-color: rgba(96, 165, 250, .35); background: rgba(96, 165, 250, .10); }
     main { padding: 22px clamp(14px, 3vw, 34px) 40px; max-width: 1500px; margin: 0 auto; }
     .status { display: flex; align-items: center; gap: 10px; color: var(--muted); font-size: 14px; }
     .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--warn); box-shadow: 0 0 18px currentColor; }
@@ -60,9 +81,10 @@
       grid-column: span 3;
       background: var(--panel);
       border: 1px solid var(--line);
-      border-radius: 8px;
+      border-radius: 12px;
       padding: 16px;
       min-width: 0;
+      box-shadow: var(--shadow);
     }
     .wide { grid-column: span 6; }
     .full { grid-column: 1 / -1; }
@@ -87,19 +109,20 @@
       border: 1px solid var(--line);
       background: var(--panel-2);
       color: var(--text);
-      border-radius: 8px;
+      border-radius: 10px;
       padding: 9px 12px;
       cursor: pointer;
       font-weight: 700;
     }
     button:hover { border-color: var(--info); }
+    button:active { transform: translateY(1px); }
     pre {
       min-height: 100px;
       max-height: 340px;
       overflow: auto;
       background: #0a0f16;
       border: 1px solid var(--line);
-      border-radius: 8px;
+      border-radius: 12px;
       padding: 12px;
       white-space: pre-wrap;
       color: #d6e1eb;
@@ -115,8 +138,9 @@
     .pro-panel {
       background: linear-gradient(180deg, rgba(28, 36, 48, .98), rgba(15, 23, 32, .98));
       border: 1px solid var(--line);
-      border-radius: 8px;
+      border-radius: 14px;
       padding: 18px;
+      box-shadow: var(--shadow);
     }
     .pro-title { font-size: clamp(22px, 3vw, 34px); font-weight: 800; margin: 0 0 8px; letter-spacing: 0; }
     .pro-copy { color: var(--muted); max-width: 920px; margin: 0 0 14px; }
@@ -149,11 +173,55 @@
     .chart-value { text-align: right; font-weight: 800; }
     .report-output { max-height: 520px; }
     .maintenance-note { color: var(--warn); margin: 0 0 10px; font-size: 13px; }
+    .section-kicker {
+      grid-column: 1 / -1;
+      margin: 20px 0 -4px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+    }
+    .section-kicker h2 { margin: 0; font-size: 18px; }
+    .section-kicker span { color: var(--muted); font-size: 13px; }
+    .big-status {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(0, 1fr));
+      gap: 10px;
+      margin-top: 12px;
+    }
+    .status-tile {
+      min-height: 88px;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 12px;
+      background: rgba(255,255,255,.035);
+    }
+    .status-tile .name { color: var(--muted); font-size: 12px; }
+    .status-tile .state { margin-top: 8px; font-size: 16px; font-weight: 900; }
+    .donut {
+      width: 120px;
+      height: 120px;
+      border-radius: 50%;
+      display: grid;
+      place-items: center;
+      background: conic-gradient(var(--warn) 0deg, var(--warn) 220deg, var(--bad) 220deg, var(--bad) 300deg, var(--good) 300deg);
+      margin: 8px auto 12px;
+    }
+    .donut span {
+      display: grid;
+      place-items: center;
+      width: 82px;
+      height: 82px;
+      border-radius: 50%;
+      background: var(--panel);
+      font-weight: 900;
+    }
     @media (max-width: 1100px) { .card, .wide { grid-column: span 6; } }
     @media (max-width: 700px) {
       header { align-items: flex-start; flex-direction: column; }
       .pro-hero { grid-template-columns: 1fr; }
       .readiness-grid { grid-template-columns: 1fr; }
+      .big-status { grid-template-columns: 1fr; }
       .card, .wide { grid-column: 1 / -1; }
       .metric { align-items: flex-start; flex-direction: column; gap: 2px; }
       .value { text-align: left; }
@@ -162,11 +230,20 @@
 </head>
 <body>
   <header>
-    <div>
-      <h1>Bitget AI Bot</h1>
-      <div class="subtitle">Training Dashboard Pro · PAPER ONLY · NO LIVE</div>
+    <div class="header-left">
+      <div>
+        <h1>Bitget AI Bot</h1>
+        <div class="subtitle">Training Dashboard Pro · visual monitor · research only</div>
+      </div>
+      <span class="tag good">PAPER ONLY</span>
+      <span class="tag bad">NO LIVE</span>
     </div>
-    <div id="onlineState" class="status"><span class="dot"></span><span>conectando</span></div>
+    <div class="header-meta">
+      <span id="gitVersionTag" class="tag info">git: unknown</span>
+      <span id="utcTimeTag" class="tag">UTC: --:--</span>
+      <span id="madridTimeTag" class="tag">Madrid: --:--</span>
+      <div id="onlineState" class="status"><span class="dot"></span><span>conectando</span></div>
+    </div>
   </header>
   <main>
     <div id="liveDanger" class="danger-banner">PELIGRO LIVE ACTIVO</div>
@@ -177,6 +254,8 @@
           <p class="pro-copy">Control visual, análisis read-only y exportación completa para revisar el bot sin tocar live, slots, backups destructivos ni ejecución real.</p>
           <div class="actions">
             <button id="copyChatGptReportBtn" class="primary-action">Copiar reporte completo para ChatGPT</button>
+            <button id="copyShortReportBtn">Copiar resumen corto</button>
+            <button id="copyLastReportBtn">Copiar último reporte generado</button>
             <button id="downloadFullTxtBtn">Descargar TXT completo</button>
             <button id="downloadFullJsonBtn">Descargar JSON completo</button>
             <button id="refreshMainAnalysisBtn">Actualizar análisis principal</button>
@@ -195,6 +274,7 @@
             <a href="#signals-monitor">Signals</a>
             <a href="#edge-policy">Edge & Policy</a>
             <a href="#time-death">Time Death</a>
+            <a href="#exit-calibration">Exit Calibration</a>
             <a href="#pre-move">Pre-Move</a>
             <a href="#runtime">Runtime</a>
             <a href="#vault">Data Vault</a>
@@ -203,10 +283,13 @@
         </div>
         <div class="pro-panel">
           <h2>Semáforo General</h2>
+          <div id="bigStatusGrid" class="big-status"></div>
           <div id="readinessGrid" class="readiness-grid"></div>
           <div id="mainRefreshStatus" class="metric"><span class="label">análisis principal</span><span class="value info">en espera</span></div>
+          <div id="reportStatus" class="metric"><span class="label">último reporte</span><span class="value">sin generar</span></div>
         </div>
       </div>
+      <div class="section-kicker"><h2>Overview</h2><span>estado operativo sin acciones peligrosas</span></div>
       <div class="card wide">
         <a id="overview"></a>
         <h2>Safety</h2>
@@ -354,6 +437,14 @@
         <pre id="exitPolicyBacktestText">Sin cargar todavÃ­a.</pre>
       </div>
       <div class="card full">
+        <a id="exit-calibration"></a>
+        <div class="section-kicker"><h2>Exit Calibration</h2><span>research only · no exits applied</span></div>
+        <h2>Exit Label Calibration V2</h2>
+        <div class="actions"><button id="exitLabelCalibrationV2Btn">Actualizar exit calibration V2 24h</button></div>
+        <div id="exitCalibrationChart"></div>
+        <pre id="exitLabelCalibrationV2Text">Sin cargar todavía.</pre>
+      </div>
+      <div class="card full">
         <a id="time-death"></a>
         <h2>Time Death Lab</h2>
         <div class="actions"><button id="timeDeathLabBtn">Actualizar time death 24h</button></div>
@@ -459,6 +550,8 @@
     const params = new URLSearchParams(window.location.search);
     const token = params.get("token") || "";
     const byId = (id) => document.getElementById(id);
+    let lastFullReportText = "";
+    let lastShortReportText = "";
     function apiUrl(path) {
       const separator = path.includes("?") ? "&" : "?";
       return token ? `${path}${separator}token=${encodeURIComponent(token)}` : path;
@@ -492,6 +585,13 @@
       const el = byId("onlineState");
       el.className = ok ? "status online" : "status";
       el.querySelector("span:last-child").textContent = text;
+    }
+    function updateClock(iso) {
+      const date = iso ? new Date(iso) : new Date();
+      const utc = new Intl.DateTimeFormat("es-ES", { timeZone: "UTC", hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false }).format(date);
+      const madrid = new Intl.DateTimeFormat("es-ES", { timeZone: "Europe/Madrid", hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false }).format(date);
+      byId("utcTimeTag").textContent = `UTC: ${utc}`;
+      byId("madridTimeTag").textContent = `Madrid: ${madrid}`;
     }
     function render(data) {
       const safety = data.safety || {};
@@ -580,6 +680,8 @@
       renderVpsMigration(data.vps_migration || {}, data.worker_lock || {});
       renderReadiness(data);
       renderSignalCharts(data);
+      byId("gitVersionTag").textContent = `git: ${value(data.git_version, "unknown")}`;
+      updateClock(data.generated_at);
       setOnline(true, `online · ${data.generated_at || new Date().toISOString()}`);
     }
     function memoryText(h) {
@@ -662,6 +764,9 @@
       byId("readinessGrid").innerHTML = chips.map(([label, val, cls]) =>
         `<div class="readiness-chip"><span>${escapeHtml(label)}</span><strong class="${cls}">${escapeHtml(val)}</strong></div>`
       ).join("");
+      byId("bigStatusGrid").innerHTML = chips.slice(0, 5).map(([label, val, cls]) =>
+        `<div class="status-tile"><div class="name">${escapeHtml(label)}</div><div class="state ${cls}">${escapeHtml(val)}</div></div>`
+      ).join("");
     }
     function simpleBars(rows) {
       return rows.map(([label, ratio, display, color]) => {
@@ -726,6 +831,25 @@
       ];
       const max = Math.max(1, ...vals.map(([, v]) => v));
       byId("latencyChart").innerHTML = simpleBars(vals.map(([label, val, color]) => [label, Number(val) / max, `${val} ms`, color]));
+    }
+    function renderExitCalibrationChart(text) {
+      const extract = (label) => {
+        const match = String(text).match(new RegExp(`${label}[^0-9-]*(-?[0-9]+(?:\\.[0-9]+)?)`, "i"));
+        return match ? Number(match[1]) : 0;
+      };
+      const currentTime = extract("current_TIME") || extract("TIME%");
+      const shadowTime = extract("shadow_TIME");
+      const shadowTp = extract("shadow_TP");
+      const netEv = extract("net_EV");
+      byId("exitCalibrationChart").innerHTML =
+        `<div class="donut"><span>${Math.max(0, shadowTp || 0).toFixed(1)}% TP</span></div>` +
+        simpleBars([
+          ["Current TIME", currentTime / 100, `${currentTime.toFixed(1)}%`, "var(--warn)"],
+          ["Shadow TIME", shadowTime / 100, `${shadowTime.toFixed(1)}%`, shadowTime > 80 ? "var(--bad)" : "var(--good)"],
+          ["Shadow TP", shadowTp / 100, `${shadowTp.toFixed(1)}%`, "var(--good)"],
+          ["Net EV", Math.min(1, Math.abs(netEv) * 20), netEv.toFixed(4), netEv >= 0 ? "var(--good)" : "var(--bad)"],
+        ]) +
+        `<div class="metric"><span class="label">policy</span><span class="value warn">Research only. No exits applied.</span></div>`;
     }
     function renderEdgeCandidates(rows) {
       const body = byId("edgeCandidateRows");
@@ -860,6 +984,7 @@
         if (path.includes("time-death")) renderTextRatioChart("timeDeathChart", text);
         if (path.includes("pre-move")) renderPreMoveQuickChart(text);
         if (path.includes("latency-audit")) renderLatencyQuickChart(text);
+        if (path.includes("exit-label-calibration-v2")) renderExitCalibrationChart(text);
       }
       catch (err) { byId(elementId).textContent = `Error: ${err.message}`; }
     }
@@ -868,7 +993,10 @@
       preview.textContent = "Generando reporte completo... puede tardar unos segundos.";
       try {
         const text = await fetchText("/api/training/full-report?hours=24&format=text");
+        lastFullReportText = text;
         preview.textContent = text;
+        const sizeKb = (new Blob([text]).size / 1024).toFixed(1);
+        byId("reportStatus").innerHTML = `<span class="label">último reporte completo</span><span class="value good">OK · ${sizeKb} KB · ${new Date().toLocaleTimeString()}</span>`;
         if (navigator.clipboard && window.isSecureContext) {
           await navigator.clipboard.writeText(text);
           byId("mainRefreshStatus").innerHTML = `<span class="label">reporte ChatGPT</span><span class="value good">copiado</span>`;
@@ -879,6 +1007,30 @@
         preview.textContent = `Error: ${err.message}`;
       }
     }
+    async function copyShortReport() {
+      const preview = byId("fullReportPreview");
+      preview.textContent = "Generando resumen corto...";
+      try {
+        const text = await fetchText("/api/training/short-report?hours=24&format=text");
+        lastShortReportText = text;
+        preview.textContent = text;
+        if (navigator.clipboard && window.isSecureContext) await navigator.clipboard.writeText(text);
+        const sizeKb = (new Blob([text]).size / 1024).toFixed(1);
+        byId("reportStatus").innerHTML = `<span class="label">resumen corto</span><span class="value good">OK · ${sizeKb} KB · ${new Date().toLocaleTimeString()}</span>`;
+      } catch (err) {
+        preview.textContent = `Error: ${err.message}`;
+        byId("reportStatus").innerHTML = `<span class="label">resumen corto</span><span class="value bad">ERROR</span>`;
+      }
+    }
+    async function copyLastReport() {
+      const text = lastFullReportText || lastShortReportText || byId("fullReportPreview").textContent || "";
+      if (!text || text.includes("se genera solo")) {
+        byId("reportStatus").innerHTML = `<span class="label">último reporte</span><span class="value warn">sin reporte generado</span>`;
+        return;
+      }
+      if (navigator.clipboard && window.isSecureContext) await navigator.clipboard.writeText(text);
+      byId("reportStatus").innerHTML = `<span class="label">último reporte</span><span class="value good">copiado de cache local</span>`;
+    }
     async function refreshMainAnalysis() {
       const steps = [
         ["Training Summary", loadSummary],
@@ -886,6 +1038,7 @@
         ["Candidate Ranking", () => loadGenericLab("/api/training/candidate-ranking?hours=24", "edgeHardeningText")],
         ["Edge Guard", loadEdgeGuard],
         ["Orchestrator", () => loadGenericLab("/api/training/paper-policy-orchestrator?hours=24", "paperPolicyOrchestratorText")],
+        ["Exit Calibration V2", () => loadGenericLab("/api/training/exit-label-calibration-v2?hours=24", "exitLabelCalibrationV2Text")],
         ["Pre-Move Pattern Miner", () => loadGenericLab("/api/training/pre-move-pattern-miner?hours=24", "preMoveIntelligenceText")],
         ["Latency", () => loadGenericLab("/api/training/latency-audit?hours=24", "latencyAuditText")],
         ["Data Vault", () => loadGenericLab("/api/training/data-vault-status", "dataVaultText")],
@@ -902,6 +1055,8 @@
     }
     byId("summaryBtn").addEventListener("click", loadSummary);
     byId("copyChatGptReportBtn").addEventListener("click", copyChatGptReport);
+    byId("copyShortReportBtn").addEventListener("click", copyShortReport);
+    byId("copyLastReportBtn").addEventListener("click", copyLastReport);
     byId("downloadFullTxtBtn").addEventListener("click", () => downloadPath("/api/training/export/full.txt?hours=24"));
     byId("downloadFullJsonBtn").addEventListener("click", () => downloadPath("/api/training/export/full.json?hours=24"));
     byId("downloadSignalsCsvBtn").addEventListener("click", () => downloadPath("/api/training/export/signals.csv?hours=24&limit=2000"));
@@ -916,6 +1071,7 @@
     byId("edgeGuardBtn").addEventListener("click", loadEdgeGuard);
     byId("tpSlBtn").addEventListener("click", loadTpSl);
     byId("exitSimulationBtn").addEventListener("click", loadExitSimulation);
+    byId("exitLabelCalibrationV2Btn").addEventListener("click", () => loadGenericLab("/api/training/exit-label-calibration-v2?hours=24", "exitLabelCalibrationV2Text"));
     byId("mfeMaeDiagnosticBtn").addEventListener("click", loadMfeMaeDiagnostic);
     byId("scoreCalibrationBtn").addEventListener("click", loadScoreCalibrationV2);
     byId("shadowExperimentsBtn").addEventListener("click", loadShadowExperiments);

@@ -38,6 +38,7 @@ class HealthState:
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 DASHBOARD_PATH = STATIC_DIR / "dashboard.html"
 _DASHBOARD_LAB_CACHE: dict[str, dict[str, Any]] = {}
+_DASHBOARD_FULL_REPORT_CACHE: dict[str, dict[str, Any]] = {}
 
 
 def start_health_server(
@@ -70,6 +71,7 @@ def start_health_server(
                 "/api/training/edge-guard",
                 "/api/training/tp-sl-lab",
                 "/api/training/exit-simulation",
+                "/api/training/exit-label-calibration-v2",
                 "/api/training/score-calibration",
                 "/api/training/shadow-experiments",
                 "/api/training/evolution-score",
@@ -127,6 +129,7 @@ def start_health_server(
                 "/api/training/export/latency.csv",
                 "/api/training/export/pre-move-events.csv",
                 "/api/training/export/candidates.csv",
+                "/api/training/short-report",
             }:
                 if not _authorized(config, query, self.headers):
                     self._send_json({"error": "unauthorized"}, status=401)
@@ -154,6 +157,9 @@ def start_health_server(
                 return
             if path == "/api/training/exit-simulation":
                 self._send_json(_exit_simulation(config, db, query))
+                return
+            if path == "/api/training/exit-label-calibration-v2":
+                self._send_json(_exit_label_calibration_v2(config, db, query))
                 return
             if path == "/api/training/score-calibration":
                 self._send_json(_score_calibration(config, db, query))
@@ -307,6 +313,14 @@ def start_health_server(
                 else:
                     self._send_text(str(payload.get("text") or ""))
                 return
+            if path == "/api/training/short-report":
+                payload = _dashboard_short_report(config, db, query)
+                fmt = (query.get("format") or ["text"])[0].lower()
+                if fmt == "json":
+                    self._send_json(payload)
+                else:
+                    self._send_text(str(payload.get("text") or ""))
+                return
             if path == "/api/training/export/full.txt":
                 payload = _dashboard_full_report(config, db, query)
                 self._send_text(str(payload.get("text") or ""), filename="bitget_training_full_report.txt")
@@ -454,6 +468,12 @@ def _training_status(config: Any | None, db: Any | None, training_pulse: Any | N
     if "mfe_mae" not in payload:
         payload["mfe_mae"] = {}
     payload["generated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    try:
+        from .dashboard_pro import _git_version
+
+        payload["git_version"] = _git_version()
+    except Exception:
+        payload["git_version"] = "unknown"
     return payload
 
 
@@ -562,6 +582,10 @@ def _tp_sl_lab(config: Any | None, db: Any | None, query: dict[str, list[str]]) 
 
 def _exit_simulation(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
     return _lab_payload(config, db, query, "exit simulation unavailable", ".exit_simulation_lab", "ExitSimulationLab")
+
+
+def _exit_label_calibration_v2(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
+    return _lab_payload(config, db, query, "exit label calibration v2 unavailable", ".exit_label_calibration_v2", "ExitLabelCalibrationV2")
 
 
 def _score_calibration(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
@@ -1165,10 +1189,19 @@ def _dashboard_full_report(config: Any | None, db: Any | None, query: dict[str, 
     hours = _query_int(query, "hours", 24)
     if config is None or db is None:
         return {"error": "full report unavailable", "hours": hours, "final_recommendation": "NO LIVE"}
+    cache_key = f"full:{hours}"
+    force = (query.get("force") or ["0"])[0] in {"1", "true", "yes"}
+    cached = _DASHBOARD_FULL_REPORT_CACHE.get(cache_key)
+    if cached and not force and time.time() - float(cached.get("cached_at_epoch", 0.0) or 0.0) < 300:
+        payload = dict(cached.get("payload") or {})
+        payload["cache_hit"] = True
+        return payload
     try:
         from .dashboard_pro import build_dashboard_full_report
 
         payload = build_dashboard_full_report(config, db, hours=hours)
+        payload["cache_hit"] = False
+        _DASHBOARD_FULL_REPORT_CACHE[cache_key] = {"cached_at_epoch": time.time(), "payload": payload}
         _cache_dashboard_lab(
             f"dashboard_full_report:{hours}",
             payload,
@@ -1180,6 +1213,23 @@ def _dashboard_full_report(config: Any | None, db: Any | None, query: dict[str, 
         return {
             "error": str(exc)[:300],
             "text": f"DASHBOARD PRO FULL REPORT START\nERROR_SANITIZED: {type(exc).__name__}\nfinal_recommendation: NO LIVE\nDASHBOARD PRO FULL REPORT END",
+            "hours": hours,
+            "final_recommendation": "NO LIVE",
+        }
+
+
+def _dashboard_short_report(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
+    hours = _query_int(query, "hours", 24)
+    if config is None or db is None:
+        return {"error": "short report unavailable", "hours": hours, "final_recommendation": "NO LIVE"}
+    try:
+        from .dashboard_pro import build_dashboard_short_report
+
+        return build_dashboard_short_report(config, db, hours=hours)
+    except Exception as exc:
+        return {
+            "error": str(exc)[:300],
+            "text": f"DASHBOARD PRO SHORT REPORT START\nERROR_SANITIZED: {type(exc).__name__}\nfinal_recommendation: NO LIVE\nDASHBOARD PRO SHORT REPORT END",
             "hours": hours,
             "final_recommendation": "NO LIVE",
         }

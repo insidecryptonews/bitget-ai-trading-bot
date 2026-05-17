@@ -451,6 +451,11 @@ class ResearchLab:
 
         return ExitSimulationLab(self.config, self.db).to_text(hours=hours)
 
+    def exit_label_calibration_v2(self, hours: int = 24) -> str:
+        from .exit_label_calibration_v2 import ExitLabelCalibrationV2
+
+        return ExitLabelCalibrationV2(self.config, self.db).to_text(hours=hours)
+
     def score_calibration(self, hours: int = 24) -> str:
         from .score_calibration_lab import ScoreCalibrationLab
 
@@ -702,6 +707,11 @@ class ResearchLab:
         from .dashboard_pro_smoke_test import DashboardProSmokeTest
 
         return DashboardProSmokeTest(self.config, self.db, self.logger).to_text()
+
+    def dashboard_beauty_exit_calibration_smoke_test(self) -> str:
+        from .dashboard_beauty_exit_calibration_smoke_test import DashboardBeautyExitCalibrationSmokeTest
+
+        return DashboardBeautyExitCalibrationSmokeTest(self.config, self.db, self.logger).to_text()
 
     def adaptive_exit_policy(self, hours: int = 24) -> str:
         from .adaptive_exit_policy_lab import AdaptiveExitPolicyLab
@@ -1310,6 +1320,7 @@ def main() -> None:
             "edge-guard",
             "tp-sl-lab",
             "exit-simulation",
+            "exit-label-calibration-v2",
             "score-calibration",
             "shadow-experiments",
             "evolution-score",
@@ -1335,6 +1346,7 @@ def main() -> None:
             "pre-move-similarity-scanner",
             "pre-move-smoke-test",
             "dashboard-pro-smoke-test",
+            "dashboard-beauty-exit-calibration-smoke-test",
             "net-edge-lab",
             "anti-overfit-gate",
             "ev-slippage-calibration-gate",
@@ -1467,6 +1479,8 @@ def main() -> None:
         print(lab.tp_sl_lab(hours=args.hours))
     elif args.command == "exit-simulation":
         print(lab.exit_simulation(hours=args.hours))
+    elif args.command == "exit-label-calibration-v2":
+        print(lab.exit_label_calibration_v2(hours=args.hours))
     elif args.command == "score-calibration":
         print(lab.score_calibration(hours=args.hours))
     elif args.command == "shadow-experiments":
@@ -1527,6 +1541,8 @@ def main() -> None:
         print(lab.pre_move_smoke_test())
     elif args.command == "dashboard-pro-smoke-test":
         print(lab.dashboard_pro_smoke_test())
+    elif args.command == "dashboard-beauty-exit-calibration-smoke-test":
+        print(lab.dashboard_beauty_exit_calibration_smoke_test())
     elif args.command == "net-edge-lab":
         print(lab.net_edge_lab(hours=args.hours))
     elif args.command == "anti-overfit-gate":
