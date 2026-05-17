@@ -698,6 +698,11 @@ class ResearchLab:
 
         return PreMoveSmokeTest(self.config, self.db, self.logger).to_text()
 
+    def dashboard_pro_smoke_test(self) -> str:
+        from .dashboard_pro_smoke_test import DashboardProSmokeTest
+
+        return DashboardProSmokeTest(self.config, self.db, self.logger).to_text()
+
     def adaptive_exit_policy(self, hours: int = 24) -> str:
         from .adaptive_exit_policy_lab import AdaptiveExitPolicyLab
 
@@ -1329,6 +1334,7 @@ def main() -> None:
             "pre-move-pattern-miner",
             "pre-move-similarity-scanner",
             "pre-move-smoke-test",
+            "dashboard-pro-smoke-test",
             "net-edge-lab",
             "anti-overfit-gate",
             "ev-slippage-calibration-gate",
@@ -1519,6 +1525,8 @@ def main() -> None:
         print(lab.pre_move_similarity_scanner(hours=args.hours))
     elif args.command == "pre-move-smoke-test":
         print(lab.pre_move_smoke_test())
+    elif args.command == "dashboard-pro-smoke-test":
+        print(lab.dashboard_pro_smoke_test())
     elif args.command == "net-edge-lab":
         print(lab.net_edge_lab(hours=args.hours))
     elif args.command == "anti-overfit-gate":

@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Bitget AI Bot Training Dashboard</title>
+  <title>Bitget AI Bot Dashboard Pro</title>
   <style>
     :root {
       color-scheme: dark;
@@ -105,9 +105,55 @@
       color: #d6e1eb;
     }
     .actions { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 10px; }
+    .pro-hero {
+      grid-column: 1 / -1;
+      display: grid;
+      grid-template-columns: minmax(0, 1.35fr) minmax(260px, .65fr);
+      gap: 14px;
+      align-items: stretch;
+    }
+    .pro-panel {
+      background: linear-gradient(180deg, rgba(28, 36, 48, .98), rgba(15, 23, 32, .98));
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 18px;
+    }
+    .pro-title { font-size: clamp(22px, 3vw, 34px); font-weight: 800; margin: 0 0 8px; letter-spacing: 0; }
+    .pro-copy { color: var(--muted); max-width: 920px; margin: 0 0 14px; }
+    .primary-action { background: #1f6feb; border-color: #388bfd; color: #fff; }
+    .quiet-action { color: var(--muted); }
+    .quick-nav { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0 0; }
+    .quick-nav a {
+      color: var(--text);
+      text-decoration: none;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 7px 10px;
+      background: rgba(255,255,255,.03);
+      font-weight: 700;
+      font-size: 13px;
+    }
+    .readiness-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+    .readiness-chip {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 10px;
+      background: rgba(255,255,255,.03);
+    }
+    .readiness-chip span { display: block; color: var(--muted); font-size: 12px; }
+    .readiness-chip strong { display: block; margin-top: 4px; overflow-wrap: anywhere; }
+    .chart-row { display: grid; grid-template-columns: 140px 1fr 64px; align-items: center; gap: 9px; margin: 7px 0; }
+    .chart-label { color: var(--muted); overflow-wrap: anywhere; }
+    .chart-bar { height: 10px; border-radius: 999px; background: #263241; overflow: hidden; }
+    .chart-bar span { display: block; height: 100%; background: var(--info); }
+    .chart-value { text-align: right; font-weight: 800; }
+    .report-output { max-height: 520px; }
+    .maintenance-note { color: var(--warn); margin: 0 0 10px; font-size: 13px; }
     @media (max-width: 1100px) { .card, .wide { grid-column: span 6; } }
     @media (max-width: 700px) {
       header { align-items: flex-start; flex-direction: column; }
+      .pro-hero { grid-template-columns: 1fr; }
+      .readiness-grid { grid-template-columns: 1fr; }
       .card, .wide { grid-column: 1 / -1; }
       .metric { align-items: flex-start; flex-direction: column; gap: 2px; }
       .value { text-align: left; }
@@ -118,14 +164,51 @@
   <header>
     <div>
       <h1>Bitget AI Bot</h1>
-      <div class="subtitle">Training Dashboard</div>
+      <div class="subtitle">Training Dashboard Pro · PAPER ONLY · NO LIVE</div>
     </div>
     <div id="onlineState" class="status"><span class="dot"></span><span>conectando</span></div>
   </header>
   <main>
     <div id="liveDanger" class="danger-banner">PELIGRO LIVE ACTIVO</div>
     <section class="grid">
+      <div class="pro-hero">
+        <div class="pro-panel">
+          <div class="pro-title">Dashboard Pro</div>
+          <p class="pro-copy">Control visual, análisis read-only y exportación completa para revisar el bot sin tocar live, slots, backups destructivos ni ejecución real.</p>
+          <div class="actions">
+            <button id="copyChatGptReportBtn" class="primary-action">Copiar reporte completo para ChatGPT</button>
+            <button id="downloadFullTxtBtn">Descargar TXT completo</button>
+            <button id="downloadFullJsonBtn">Descargar JSON completo</button>
+            <button id="refreshMainAnalysisBtn">Actualizar análisis principal</button>
+          </div>
+          <div class="actions">
+            <button id="downloadSignalsCsvBtn" class="quiet-action">CSV señales</button>
+            <button id="downloadPaperCsvBtn" class="quiet-action">CSV paper trades</button>
+            <button id="downloadLabelsCsvBtn" class="quiet-action">CSV labels</button>
+            <button id="downloadLatencyCsvBtn" class="quiet-action">CSV latency</button>
+            <button id="downloadPreMoveCsvBtn" class="quiet-action">CSV pre-move events</button>
+            <button id="downloadCandidatesCsvBtn" class="quiet-action">CSV candidates</button>
+          </div>
+          <div class="quick-nav">
+            <a href="#overview">Overview</a>
+            <a href="#paper-monitor">Paper Monitor</a>
+            <a href="#signals-monitor">Signals</a>
+            <a href="#edge-policy">Edge & Policy</a>
+            <a href="#time-death">Time Death</a>
+            <a href="#pre-move">Pre-Move</a>
+            <a href="#runtime">Runtime</a>
+            <a href="#vault">Data Vault</a>
+          </div>
+          <pre id="fullReportPreview" class="report-output">El reporte completo se genera solo cuando pulsas el botón. No ejecuta live, backups ni restore.</pre>
+        </div>
+        <div class="pro-panel">
+          <h2>Semáforo General</h2>
+          <div id="readinessGrid" class="readiness-grid"></div>
+          <div id="mainRefreshStatus" class="metric"><span class="label">análisis principal</span><span class="value info">en espera</span></div>
+        </div>
+      </div>
       <div class="card wide">
+        <a id="overview"></a>
         <h2>Safety</h2>
         <div class="pill-row" id="safetyPills"></div>
       </div>
@@ -134,6 +217,7 @@
         <div id="healthMetrics"></div>
       </div>
       <div class="card">
+        <a id="paper-monitor"></a>
         <h2>Paper</h2>
         <div id="paperMetrics"></div>
       </div>
@@ -146,6 +230,7 @@
         <div id="mfeMaeMetrics"></div>
       </div>
       <div class="card">
+        <a id="signals-monitor"></a>
         <h2>Signals</h2>
         <div id="signalMetrics"></div>
       </div>
@@ -178,6 +263,7 @@
         <table><thead><tr><th>reason</th><th>count</th></tr></thead><tbody id="topBlocks"></tbody></table>
       </div>
       <div class="card full">
+        <a id="edge-policy"></a>
         <h2>Training Summary</h2>
         <div class="actions"><button id="summaryBtn">Actualizar summary 6h</button></div>
         <pre id="summaryText">Sin cargar todavía.</pre>
@@ -268,8 +354,10 @@
         <pre id="exitPolicyBacktestText">Sin cargar todavÃ­a.</pre>
       </div>
       <div class="card full">
+        <a id="time-death"></a>
         <h2>Time Death Lab</h2>
         <div class="actions"><button id="timeDeathLabBtn">Actualizar time death 24h</button></div>
+        <div id="timeDeathChart"></div>
         <pre id="timeDeathLabText">Sin cargar todavía.</pre>
       </div>
       <div class="card full">
@@ -282,6 +370,7 @@
         <pre id="timeDeathRepairText">Sin cargar todavia.</pre>
       </div>
       <div class="card full">
+        <a id="pre-move"></a>
         <h2>Pre-Move Intelligence</h2>
         <div class="actions">
           <button id="preMoveEventLabelerBtn">Event labeler 24h</button>
@@ -289,6 +378,7 @@
           <button id="preMovePatternMinerBtn">Pattern miner 24h</button>
           <button id="preMoveSimilarityScannerBtn">Similarity scanner 6h</button>
         </div>
+        <div id="preMoveChart"></div>
         <pre id="preMoveIntelligenceText">Sin cargar todavia.</pre>
       </div>
       <div class="card full">
@@ -297,8 +387,10 @@
         <pre id="adaptiveExitPolicyText">Sin cargar todavía.</pre>
       </div>
       <div class="card full">
+        <a id="runtime"></a>
         <h2>Latency Audit</h2>
         <div class="actions"><button id="latencyAuditBtn">Actualizar latency audit 24h</button></div>
+        <div id="latencyChart"></div>
         <pre id="latencyAuditText">Sin cargar todavía.</pre>
       </div>
       <div class="card full">
@@ -322,7 +414,9 @@
         <pre id="edgeHardeningText">Sin cargar todavia.</pre>
       </div>
       <div class="card full">
+        <a id="vault"></a>
         <h2>Data Vault / Backup</h2>
+        <p class="maintenance-note">Maintenance/Advanced: estos botones no se ejecutan con el refresh principal.</p>
         <div class="actions">
           <button id="dataVaultStatusBtn">Actualizar vault status</button>
           <button id="dataExportBtn">Crear backup 168h</button>
@@ -385,6 +479,14 @@
       const response = await fetch(apiUrl(path), { cache: "no-store" });
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       return response.json();
+    }
+    async function fetchText(path) {
+      const response = await fetch(apiUrl(path), { cache: "no-store" });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      return response.text();
+    }
+    function downloadPath(path) {
+      window.open(apiUrl(path), "_blank", "noopener");
     }
     function setOnline(ok, text) {
       const el = byId("onlineState");
@@ -476,6 +578,8 @@
       renderRows("topSignals", data.top_signals || [], ["symbol", "side", "score", "reason"]);
       renderRows("topBlocks", data.top_blocks || [], ["reason", "count"]);
       renderVpsMigration(data.vps_migration || {}, data.worker_lock || {});
+      renderReadiness(data);
+      renderSignalCharts(data);
       setOnline(true, `online · ${data.generated_at || new Date().toISOString()}`);
     }
     function memoryText(h) {
@@ -539,6 +643,90 @@
         metric("fast_runtime_readiness", vps.fast_runtime_readiness || "NOT_HFT") +
         metric("final", vps.final_recommendation || "NO LIVE", "good");
     }
+    function renderReadiness(data) {
+      const safety = data.safety || {};
+      const edge = data.edge || {};
+      const vps = data.vps_migration || {};
+      const liveOk = !safety.live_trading;
+      const backupOk = !!vps.r2_last_upload_verified || !!vps.latest_remote_backup;
+      const edgeOk = Number(edge.profit_factor || 0) >= 1 && Number(edge.tp_ratio || 0) >= 0.05;
+      const timeOk = Number(edge.time_ratio || 0) <= 0.60;
+      const chips = [
+        ["Infraestructura", data.generated_at ? "ONLINE" : "WAITING", data.generated_at ? "good" : "warn"],
+        ["Seguridad", liveOk ? "NO LIVE" : "LIVE ACTIVO", liveOk ? "good" : "bad"],
+        ["Backups", backupOk ? "R2 OK" : "CHECK VAULT", backupOk ? "good" : "warn"],
+        ["Edge neto", edgeOk ? "REVIEW" : "NO_VALID_CANDIDATES", edgeOk ? "warn" : "bad"],
+        ["TIME", timeOk ? "CONTROLADO" : "TIME DEATH ALTO", timeOk ? "good" : "bad"],
+        ["Live readiness", "NO LIVE", "good"],
+      ];
+      byId("readinessGrid").innerHTML = chips.map(([label, val, cls]) =>
+        `<div class="readiness-chip"><span>${escapeHtml(label)}</span><strong class="${cls}">${escapeHtml(val)}</strong></div>`
+      ).join("");
+    }
+    function simpleBars(rows) {
+      return rows.map(([label, ratio, display, color]) => {
+        const width = Math.max(0, Math.min(100, Number(ratio || 0) * 100));
+        return `<div class="chart-row"><span class="chart-label">${escapeHtml(label)}</span><div class="chart-bar"><span style="width:${width}%;background:${color}"></span></div><span class="chart-value">${escapeHtml(String(display))}</span></div>`;
+      }).join("");
+    }
+    function renderSignalCharts(data) {
+      const signals = data.signals || {};
+      const labels = data.labels || {};
+      const totalSignals = Math.max(1, Number(signals.long || 0) + Number(signals.short || 0) + Number(signals.no_trade || 0));
+      const totalLabels = Math.max(1, Number(labels.time || 0) + Number(labels.sl || 0) + Number(labels.tp1 || 0) + Number(labels.tp2 || 0));
+      const target = byId("scoreCalibration");
+      if (!target || target.dataset.manual) return;
+      target.innerHTML =
+        `<h2>LONG / SHORT / NO_TRADE</h2>` +
+        simpleBars([
+          ["LONG", Number(signals.long || 0) / totalSignals, signals.long || 0, "var(--good)"],
+          ["SHORT", Number(signals.short || 0) / totalSignals, signals.short || 0, "var(--info)"],
+          ["NO_TRADE", Number(signals.no_trade || 0) / totalSignals, signals.no_trade || 0, "var(--warn)"],
+        ]) +
+        `<h2>TP / SL / TIME</h2>` +
+        simpleBars([
+          ["TP", (Number(labels.tp1 || 0) + Number(labels.tp2 || 0)) / totalLabels, Number(labels.tp1 || 0) + Number(labels.tp2 || 0), "var(--good)"],
+          ["SL", Number(labels.sl || 0) / totalLabels, labels.sl || 0, "var(--bad)"],
+          ["TIME", Number(labels.time || 0) / totalLabels, labels.time || 0, "var(--warn)"],
+        ]);
+    }
+    function renderTextRatioChart(targetId, text) {
+      const target = byId(targetId);
+      if (!target) return;
+      const findPct = (label) => {
+        const match = String(text).match(new RegExp(`${label}\\s*[:=]\\s*([0-9]+(?:\\.[0-9]+)?)`, "i"));
+        return match ? Number(match[1]) / 100 : 0;
+      };
+      target.innerHTML = simpleBars([
+        ["TP%", findPct("TP%"), `${(findPct("TP%") * 100).toFixed(1)}%`, "var(--good)"],
+        ["SL%", findPct("SL%"), `${(findPct("SL%") * 100).toFixed(1)}%`, "var(--bad)"],
+        ["TIME%", findPct("TIME%"), `${(findPct("TIME%") * 100).toFixed(1)}%`, "var(--warn)"],
+      ]);
+    }
+    function renderPreMoveQuickChart(text) {
+      const longMatch = /long_events:\s*([0-9]+)/i.exec(text);
+      const shortMatch = /short_events:\s*([0-9]+)/i.exec(text);
+      const longEvents = longMatch ? Number(longMatch[1]) : 0;
+      const shortEvents = shortMatch ? Number(shortMatch[1]) : 0;
+      const total = Math.max(1, longEvents + shortEvents);
+      byId("preMoveChart").innerHTML = simpleBars([
+        ["LONG events", longEvents / total, longEvents, "var(--good)"],
+        ["SHORT events", shortEvents / total, shortEvents, "var(--info)"],
+      ]);
+    }
+    function renderLatencyQuickChart(text) {
+      const findMs = (name) => {
+        const match = String(text).match(new RegExp(`${name}[^0-9]*([0-9]+(?:\\.[0-9]+)?)`, "i"));
+        return match ? Number(match[1]) : 0;
+      };
+      const vals = [
+        ["p50", findMs("p50"), "var(--good)"],
+        ["p95", findMs("p95"), "var(--warn)"],
+        ["p99", findMs("p99"), "var(--bad)"],
+      ];
+      const max = Math.max(1, ...vals.map(([, v]) => v));
+      byId("latencyChart").innerHTML = simpleBars(vals.map(([label, val, color]) => [label, Number(val) / max, `${val} ms`, color]));
+    }
     function renderEdgeCandidates(rows) {
       const body = byId("edgeCandidateRows");
       if (!rows || !rows.length) { body.innerHTML = `<tr><td colspan="9">none</td></tr>`; return; }
@@ -555,6 +743,7 @@
       </tr>`).join("");
     }
     function renderScoreCalibration(rows) {
+      byId("scoreCalibration").dataset.manual = "true";
       if (!rows || !rows.length) {
         byId("scoreCalibration").innerHTML = metric("score calibration", "insufficient data", "warn");
         return;
@@ -665,10 +854,63 @@
     }
     async function loadGenericLab(path, elementId) {
       byId(elementId).textContent = "Cargando...";
-      try { byId(elementId).textContent = (await fetchJson(path)).text || "Sin datos."; }
+      try {
+        const text = (await fetchJson(path)).text || "Sin datos.";
+        byId(elementId).textContent = text;
+        if (path.includes("time-death")) renderTextRatioChart("timeDeathChart", text);
+        if (path.includes("pre-move")) renderPreMoveQuickChart(text);
+        if (path.includes("latency-audit")) renderLatencyQuickChart(text);
+      }
       catch (err) { byId(elementId).textContent = `Error: ${err.message}`; }
     }
+    async function copyChatGptReport() {
+      const preview = byId("fullReportPreview");
+      preview.textContent = "Generando reporte completo... puede tardar unos segundos.";
+      try {
+        const text = await fetchText("/api/training/full-report?hours=24&format=text");
+        preview.textContent = text;
+        if (navigator.clipboard && window.isSecureContext) {
+          await navigator.clipboard.writeText(text);
+          byId("mainRefreshStatus").innerHTML = `<span class="label">reporte ChatGPT</span><span class="value good">copiado</span>`;
+        } else {
+          byId("mainRefreshStatus").innerHTML = `<span class="label">reporte ChatGPT</span><span class="value warn">listo para copiar manualmente</span>`;
+        }
+      } catch (err) {
+        preview.textContent = `Error: ${err.message}`;
+      }
+    }
+    async function refreshMainAnalysis() {
+      const steps = [
+        ["Training Summary", loadSummary],
+        ["Time Death Autopsy", () => loadGenericLab("/api/training/time-death-autopsy?hours=24", "timeDeathRepairText")],
+        ["Candidate Ranking", () => loadGenericLab("/api/training/candidate-ranking?hours=24", "edgeHardeningText")],
+        ["Edge Guard", loadEdgeGuard],
+        ["Orchestrator", () => loadGenericLab("/api/training/paper-policy-orchestrator?hours=24", "paperPolicyOrchestratorText")],
+        ["Pre-Move Pattern Miner", () => loadGenericLab("/api/training/pre-move-pattern-miner?hours=24", "preMoveIntelligenceText")],
+        ["Latency", () => loadGenericLab("/api/training/latency-audit?hours=24", "latencyAuditText")],
+        ["Data Vault", () => loadGenericLab("/api/training/data-vault-status", "dataVaultText")],
+      ];
+      for (let i = 0; i < steps.length; i += 1) {
+        const [name, fn] = steps[i];
+        byId("mainRefreshStatus").innerHTML = `<span class="label">running section ${i + 1}/${steps.length}</span><span class="value info">${escapeHtml(name)}</span>`;
+        try { await fn(); }
+        catch (err) {
+          byId("mainRefreshStatus").innerHTML = `<span class="label">${escapeHtml(name)}</span><span class="value warn">error · ${escapeHtml(err.message)}</span>`;
+        }
+      }
+      byId("mainRefreshStatus").innerHTML = `<span class="label">análisis principal</span><span class="value good">actualizado ${new Date().toLocaleTimeString()}</span>`;
+    }
     byId("summaryBtn").addEventListener("click", loadSummary);
+    byId("copyChatGptReportBtn").addEventListener("click", copyChatGptReport);
+    byId("downloadFullTxtBtn").addEventListener("click", () => downloadPath("/api/training/export/full.txt?hours=24"));
+    byId("downloadFullJsonBtn").addEventListener("click", () => downloadPath("/api/training/export/full.json?hours=24"));
+    byId("downloadSignalsCsvBtn").addEventListener("click", () => downloadPath("/api/training/export/signals.csv?hours=24&limit=2000"));
+    byId("downloadPaperCsvBtn").addEventListener("click", () => downloadPath("/api/training/export/paper-trades.csv?hours=168&limit=2000"));
+    byId("downloadLabelsCsvBtn").addEventListener("click", () => downloadPath("/api/training/export/labels.csv?hours=24&limit=2000"));
+    byId("downloadLatencyCsvBtn").addEventListener("click", () => downloadPath("/api/training/export/latency.csv?hours=24&limit=2000"));
+    byId("downloadPreMoveCsvBtn").addEventListener("click", () => downloadPath("/api/training/export/pre-move-events.csv?hours=24&limit=2000"));
+    byId("downloadCandidatesCsvBtn").addEventListener("click", () => downloadPath("/api/training/export/candidates.csv?hours=24&limit=2000"));
+    byId("refreshMainAnalysisBtn").addEventListener("click", refreshMainAnalysis);
     byId("planBtn").addEventListener("click", loadPlan);
     byId("opportunityBtn").addEventListener("click", loadOpportunity);
     byId("edgeGuardBtn").addEventListener("click", loadEdgeGuard);

@@ -130,6 +130,55 @@ def test_health_still_works_with_dashboard_auth():
     assert json.loads(body)["status"] == "ok"
 
 
+def test_dashboard_pro_full_report_and_csv_exports_are_safe():
+    class DummyDb:
+        def get_open_paper_positions_summary(self, limit=5):
+            return [{"symbol": "BTCUSDT", "side": "LONG", "reason": "TOKEN=must_not_leak"}]
+
+        def get_paper_trade_summary(self):
+            return {"total": 1, "open": 1, "closed": 0}
+
+        def fetch_table_rows(self, table, *, since_iso=None, timestamp_column=None, limit=1000):
+            del since_iso, timestamp_column, limit
+            if table == "signal_observations":
+                return [{"timestamp": "2026-05-17T00:00:00+00:00", "symbol": "BTCUSDT", "side": "NO_TRADE"}]
+            if table == "trades":
+                return [{"timestamp": "2026-05-17T00:00:00+00:00", "mode": "paper", "symbol": "BTCUSDT"}]
+            return []
+
+        def fetch_labeled_signal_rows_since(self, since_iso, limit=1000):
+            del since_iso, limit
+            return [{"symbol": "BTCUSDT", "first_barrier_hit": "TIME"}]
+
+        def fetch_latency_metrics_since(self, since_iso, limit=1000):
+            del since_iso, limit
+            return [{"metric_name": "dashboard_api_ms", "duration_ms": 10}]
+
+    base = _start_server(BotConfig(dashboard_auth_token="dash-secret"), db=DummyDb())
+    try:
+        _get(base + "/api/training/full-report?format=json")
+    except urllib.error.HTTPError as exc:
+        assert exc.code == 401
+    else:
+        raise AssertionError("expected 401 without dashboard token")
+    status, body = _get(base + "/api/training/full-report?format=text&token=dash-secret")
+    assert status == 200
+    assert "DASHBOARD PRO FULL REPORT START" in body
+    assert "DASHBOARD PRO FULL REPORT END" in body
+    assert "must_not_leak" not in body
+    status, body = _get(base + "/api/training/full-report?format=json&token=dash-secret")
+    assert status == 200
+    payload = json.loads(body)
+    assert payload["final_recommendation"] == "NO LIVE"
+    assert "must_not_leak" not in body
+    status, body = _get(base + "/api/training/export/signals.csv?token=dash-secret")
+    assert status == 200
+    assert "symbol" in body
+    status, body = _get(base + "/api/training/export/labels.csv?token=dash-secret")
+    assert status == 200
+    assert "first_barrier_hit" in body
+
+
 def test_shadow_opportunity_endpoint_returns_json():
     class DummyDb:
         def get_training_observation_summary_since(self, *args, **kwargs):

@@ -37,6 +37,7 @@ class HealthState:
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 DASHBOARD_PATH = STATIC_DIR / "dashboard.html"
+_DASHBOARD_LAB_CACHE: dict[str, dict[str, Any]] = {}
 
 
 def start_health_server(
@@ -117,6 +118,15 @@ def start_health_server(
                 "/api/training/vps-preflight",
                 "/api/training/fast-runtime-plan",
                 "/api/training/worker-lock-status",
+                "/api/training/full-report",
+                "/api/training/export/full.txt",
+                "/api/training/export/full.json",
+                "/api/training/export/signals.csv",
+                "/api/training/export/paper-trades.csv",
+                "/api/training/export/labels.csv",
+                "/api/training/export/latency.csv",
+                "/api/training/export/pre-move-events.csv",
+                "/api/training/export/candidates.csv",
             }:
                 if not _authorized(config, query, self.headers):
                     self._send_json({"error": "unauthorized"}, status=401)
@@ -289,13 +299,71 @@ def start_health_server(
             if path == "/api/training/worker-lock-status":
                 self._send_json(_worker_lock_status(config, db, query))
                 return
+            if path == "/api/training/full-report":
+                payload = _dashboard_full_report(config, db, query)
+                fmt = (query.get("format") or ["text"])[0].lower()
+                if fmt == "json":
+                    self._send_json(payload)
+                else:
+                    self._send_text(str(payload.get("text") or ""))
+                return
+            if path == "/api/training/export/full.txt":
+                payload = _dashboard_full_report(config, db, query)
+                self._send_text(str(payload.get("text") or ""), filename="bitget_training_full_report.txt")
+                return
+            if path == "/api/training/export/full.json":
+                self._send_json(_dashboard_full_report(config, db, query))
+                return
+            if path.startswith("/api/training/export/") and path.endswith(".csv"):
+                filename, csv_text = _dashboard_csv_export(config, db, path, query)
+                self._send_csv(csv_text, filename=filename)
+                return
             self._send_status(404, "not found")
 
         def _send_json(self, payload: dict[str, Any], status: int = 200) -> None:
+            try:
+                from .dashboard_pro import sanitize_json_for_dashboard
+
+                payload = sanitize_json_for_dashboard(payload)
+            except Exception:
+                pass
             body = json.dumps(payload, ensure_ascii=True, default=str).encode("utf-8")
             self.send_response(status)
             self.send_header("Content-Type", "application/json")
             self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def _send_text(self, text: str, status: int = 200, filename: str | None = None) -> None:
+            try:
+                from .dashboard_pro import sanitize_text_for_dashboard
+
+                text = sanitize_text_for_dashboard(text)
+            except Exception:
+                pass
+            body = text.encode("utf-8")
+            self.send_response(status)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
+            if filename:
+                self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def _send_csv(self, text: str, status: int = 200, filename: str = "export.csv") -> None:
+            try:
+                from .dashboard_pro import sanitize_text_for_dashboard
+
+                text = sanitize_text_for_dashboard(text)
+            except Exception:
+                pass
+            body = text.encode("utf-8")
+            self.send_response(status)
+            self.send_header("Content-Type", "text/csv; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
@@ -1041,6 +1109,8 @@ def _lab_payload(
     hours = _query_int(query, "hours", 24)
     if config is None or db is None:
         return {"error": error_message, "hours": hours, "final_recommendation": "NO LIVE"}
+    cache_key = f"{module_name}:{class_name}:{hours}"
+    started = time.perf_counter()
     try:
         import importlib
 
@@ -1055,12 +1125,78 @@ def _lab_payload(
         else:
             text = lab.to_summary_text(hours=hours)
     except Exception as exc:
-        return {"error": str(exc)[:300], "hours": hours, "final_recommendation": "NO LIVE"}
+        payload = {"error": str(exc)[:300], "hours": hours, "final_recommendation": "NO LIVE"}
+        _cache_dashboard_lab(cache_key, payload, "error", int((time.perf_counter() - started) * 1000))
+        return payload
     payload = dict(payload)
     payload["text"] = text
     payload["generated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    payload["cache"] = {
+        "key": cache_key,
+        "created_at": payload["generated_at"],
+        "duration_ms": int((time.perf_counter() - started) * 1000),
+        "status": "ok",
+    }
     payload["final_recommendation"] = "NO LIVE"
+    _cache_dashboard_lab(cache_key, payload, "ok", payload["cache"]["duration_ms"])
     return payload
+
+
+def _cache_dashboard_lab(key: str, payload: dict[str, Any], status: str, duration_ms: int) -> None:
+    try:
+        from .dashboard_pro import sanitize_json_for_dashboard
+
+        clean = sanitize_json_for_dashboard(payload)
+    except Exception:
+        clean = payload
+    _DASHBOARD_LAB_CACHE[key] = {
+        "key": key,
+        "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "duration_ms": duration_ms,
+        "status": status,
+        "payload_json": clean,
+    }
+    while len(_DASHBOARD_LAB_CACHE) > 80:
+        oldest = sorted(_DASHBOARD_LAB_CACHE.items(), key=lambda item: str(item[1].get("created_at") or ""))[0][0]
+        _DASHBOARD_LAB_CACHE.pop(oldest, None)
+
+
+def _dashboard_full_report(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
+    hours = _query_int(query, "hours", 24)
+    if config is None or db is None:
+        return {"error": "full report unavailable", "hours": hours, "final_recommendation": "NO LIVE"}
+    try:
+        from .dashboard_pro import build_dashboard_full_report
+
+        payload = build_dashboard_full_report(config, db, hours=hours)
+        _cache_dashboard_lab(
+            f"dashboard_full_report:{hours}",
+            payload,
+            "ok",
+            int(sum(int(section.get("duration_ms") or 0) for section in payload.get("sections", []))),
+        )
+        return payload
+    except Exception as exc:
+        return {
+            "error": str(exc)[:300],
+            "text": f"DASHBOARD PRO FULL REPORT START\nERROR_SANITIZED: {type(exc).__name__}\nfinal_recommendation: NO LIVE\nDASHBOARD PRO FULL REPORT END",
+            "hours": hours,
+            "final_recommendation": "NO LIVE",
+        }
+
+
+def _dashboard_csv_export(config: Any | None, db: Any | None, path: str, query: dict[str, list[str]]) -> tuple[str, str]:
+    if config is None or db is None:
+        return "export.csv", "error\nexport unavailable\n"
+    hours = _query_int(query, "hours", 24)
+    limit = _query_int(query, "limit", 1000)
+    kind = path.rsplit("/", 1)[-1].removesuffix(".csv")
+    try:
+        from .dashboard_pro import export_csv
+
+        return export_csv(config, db, kind, hours=hours, limit=limit)
+    except Exception as exc:
+        return f"{kind}.csv", f"error\n{str(exc)[:120]}\n"
 
 
 def _open_paper_positions_detail(db: Any | None) -> list[dict[str, Any]]:
