@@ -457,9 +457,14 @@ class ResearchLab:
         return ExitLabelCalibrationV2(self.config, self.db).to_text(hours=hours)
 
     def score_calibration(self, hours: int = 24) -> str:
-        from .score_calibration_lab import ScoreCalibrationLab
+        from .score_calibration import ScoreCalibration
 
-        return ScoreCalibrationLab(self.config, self.db).to_text(hours=hours)
+        return ScoreCalibration(self.config, self.db).to_text(hours=hours)
+
+    def score_calibration_smoke_test(self) -> str:
+        from .score_calibration_smoke_test import score_calibration_smoke_text
+
+        return score_calibration_smoke_text(self.config)
 
     def shadow_experiments(self, hours: int = 24) -> str:
         from .shadow_experiments import ShadowExperimentsLab
@@ -587,6 +592,16 @@ class ResearchLab:
         from .candidate_ranking import CandidateRanking
 
         return CandidateRanking(self.config, self.db).to_text(hours=hours)
+
+    def candidate_incubator(self, hours: int = 24) -> str:
+        from .candidate_incubator import CandidateIncubator
+
+        return CandidateIncubator(self.config, self.db).to_text(hours=hours)
+
+    def candidate_incubator_smoke_test(self) -> str:
+        from .candidate_incubator_smoke_test import candidate_incubator_smoke_text
+
+        return candidate_incubator_smoke_text(self.config)
 
     def decision_ledger_audit(self, hours: int = 24) -> str:
         from .decision_ledger_audit import DecisionLedgerAudit
@@ -1357,6 +1372,9 @@ def main() -> None:
             "exit-simulation",
             "exit-label-calibration-v2",
             "score-calibration",
+            "score-calibration-smoke-test",
+            "candidate-incubator",
+            "candidate-incubator-smoke-test",
             "shadow-experiments",
             "evolution-score",
             "mfe-mae-diagnostic",
@@ -1525,6 +1543,12 @@ def main() -> None:
         print(lab.exit_label_calibration_v2(hours=args.hours))
     elif args.command == "score-calibration":
         print(lab.score_calibration(hours=args.hours))
+    elif args.command == "score-calibration-smoke-test":
+        print(lab.score_calibration_smoke_test())
+    elif args.command == "candidate-incubator":
+        print(lab.candidate_incubator(hours=args.hours))
+    elif args.command == "candidate-incubator-smoke-test":
+        print(lab.candidate_incubator_smoke_test())
     elif args.command == "shadow-experiments":
         print(lab.shadow_experiments(hours=args.hours))
     elif args.command == "evolution-score":

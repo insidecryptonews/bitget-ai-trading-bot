@@ -306,6 +306,7 @@ def test_edge_guard_and_tp_sl_endpoints_return_json():
     for path, marker in (
         ("/api/training/exit-simulation?hours=24", "EXIT SIMULATION START"),
         ("/api/training/score-calibration?hours=24", "SCORE CALIBRATION START"),
+        ("/api/training/candidate-incubator?hours=24", "CANDIDATE INCUBATOR START"),
         ("/api/training/shadow-experiments?hours=24", "SHADOW EXPERIMENTS START"),
         ("/api/training/evolution-score?hours=24", "EVOLUTION SCORE START"),
         ("/api/training/mfe-mae-diagnostic?hours=24", "MFE MAE DIAGNOSTIC START"),

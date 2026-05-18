@@ -76,6 +76,7 @@ def start_health_server(
                 "/api/training/exit-simulation",
                 "/api/training/exit-label-calibration-v2",
                 "/api/training/score-calibration",
+                "/api/training/candidate-incubator",
                 "/api/training/shadow-experiments",
                 "/api/training/evolution-score",
                 "/api/training/mfe-mae-diagnostic",
@@ -166,6 +167,9 @@ def start_health_server(
                 return
             if path == "/api/training/score-calibration":
                 self._send_json(_score_calibration(config, db, query))
+                return
+            if path == "/api/training/candidate-incubator":
+                self._send_json(_candidate_incubator(config, db, query))
                 return
             if path == "/api/training/shadow-experiments":
                 self._send_json(_shadow_experiments(config, db, query))
@@ -611,7 +615,11 @@ def _exit_label_calibration_v2(config: Any | None, db: Any | None, query: dict[s
 
 
 def _score_calibration(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
-    return _lab_payload(config, db, query, "score calibration unavailable", ".score_calibration_lab", "ScoreCalibrationLab")
+    return _lab_payload(config, db, query, "score calibration unavailable", ".score_calibration", "ScoreCalibration")
+
+
+def _candidate_incubator(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
+    return _lab_payload(config, db, query, "candidate incubator unavailable", ".candidate_incubator", "CandidateIncubator")
 
 
 def _shadow_experiments(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:

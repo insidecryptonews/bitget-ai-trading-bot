@@ -22,6 +22,9 @@ def test_dashboard_ui_v3_structure_is_real_app_shell():
     assert "outcomeStackedChart" in html
     assert "signalBarChart" in html
     assert "Reports & Exports" in html
+    assert "Score & Incubator" in html
+    assert "scoreMonotonicityChart" in html
+    assert "candidateIncubatorBtn" in html
     assert "Exit Label Calibration V2" in html
     assert "Time Death" in html
     assert "UTC:" in html
@@ -32,6 +35,8 @@ def test_dashboard_ui_v3_structure_is_real_app_shell():
     assert "renderReadinessGrid" in js
     assert "renderStackedBar" in js
     assert "renderHorizontalBarChart" in js
+    assert "handleScoreCalibration" in js
+    assert "handleCandidateIncubator" in js
 
 
 def test_dashboard_ui_v3_has_no_dangerous_primary_actions():

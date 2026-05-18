@@ -96,6 +96,7 @@ class DashboardUiV3SmokeTest:
             "contains_kpi_cards": "overviewKpis" in html and "kpi-card" in css,
             "contains_chart_containers": all(token in html for token in ("outcomeStackedChart", "signalBarChart", "candidateStatusChart", "exitCalibrationChart", "preMoveChart", "latencyChart")),
             "contains_reports_exports_separate": 'id="reports"' in html and "Reports & Exports" in html,
+            "contains_score_incubator": 'id="score-incubator"' in html and "Score & Incubator" in html,
             "contains_exit_calibration_v2": "Exit Label Calibration V2" in html,
             "contains_edge_policy": "Edge & Policy" in html,
             "contains_time_death": "Time Death" in html,

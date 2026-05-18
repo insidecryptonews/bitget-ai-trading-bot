@@ -21,6 +21,7 @@
         <button type="button" class="nav-link nav-item" data-target="paper-monitor">Paper Monitor</button>
         <button type="button" class="nav-link nav-item" data-target="signals">Signals</button>
         <button type="button" class="nav-link nav-item" data-target="edge-policy">Edge & Policy</button>
+        <button type="button" class="nav-link nav-item" data-target="score-incubator">Score & Incubator</button>
         <button type="button" class="nav-link nav-item" data-target="time-death">Time Death</button>
         <button type="button" class="nav-link nav-item" data-target="exit-calibration">Exit Calibration</button>
         <button type="button" class="nav-link nav-item" data-target="pre-move">Pre-Move</button>
@@ -58,6 +59,7 @@
       <nav class="mobile-nav" aria-label="Navegacion compacta">
         <button type="button" class="mobile-nav-item" data-target="overview">Overview</button>
         <button type="button" class="mobile-nav-item" data-target="edge-policy">Edge</button>
+        <button type="button" class="mobile-nav-item" data-target="score-incubator">Score</button>
         <button type="button" class="mobile-nav-item" data-target="time-death">TIME</button>
         <button type="button" class="mobile-nav-item" data-target="reports">Exports</button>
       </nav>
@@ -208,6 +210,57 @@
           <details class="report-details">
             <summary>Ver salida tecnica Edge & Policy</summary>
             <pre id="edgePolicyOutput">Sin cargar todavia.</pre>
+          </details>
+        </section>
+
+        <section id="score-incubator" class="section">
+          <div class="section-title">
+            <div>
+              <span class="eyebrow">Research / shadow only</span>
+              <h2>Score & Incubator</h2>
+            </div>
+            <p>Research only. No paper/live activation. Score alto no basta sin net EV y setup concreto.</p>
+          </div>
+          <div class="decision-grid">
+            <article class="decision-card warning">
+              <span class="panel-label">Score quality</span>
+              <strong id="scoreQualityState">not loaded</strong>
+              <p id="scoreProblemText">Ejecuta Score Calibration para revisar monotonicidad.</p>
+            </article>
+            <article class="decision-card info">
+              <span class="panel-label">Incubator</span>
+              <strong id="incubatorState">shadow only</strong>
+              <p id="incubatorProblemText">Ningun candidato activa paper/live.</p>
+            </article>
+            <article class="decision-card danger">
+              <span class="panel-label">Activation</span>
+              <strong>DISABLED</strong>
+              <p>ENABLE_PAPER_POLICY_FILTER sigue off. PAPER_POLICY_FILTER_MODE sigue shadow.</p>
+            </article>
+          </div>
+          <div class="visual-grid">
+            <article class="panel chart-panel">
+              <div class="panel-head"><h3>Score monotonicity</h3></div>
+              <div id="scoreMonotonicityChart" class="chart-body"></div>
+            </article>
+            <article class="panel chart-panel">
+              <div class="panel-head"><h3>Incubator status</h3></div>
+              <div id="incubatorStatusChart" class="chart-body"></div>
+            </article>
+          </div>
+          <div class="lab-actions">
+            <button id="scoreCalibrationBtn" class="btn btn-secondary">Score calibration 24h</button>
+            <button id="candidateIncubatorBtn" class="btn btn-secondary">Candidate incubator 24h</button>
+          </div>
+          <div class="table-shell">
+            <table>
+              <thead><tr><th>candidate</th><th>samples</th><th>TP</th><th>SL</th><th>TIME</th><th>net EV</th><th>status</th></tr></thead>
+              <tbody id="incubatorRows"><tr><td colspan="7">Sin datos cargados.</td></tr></tbody>
+            </table>
+          </div>
+          <details class="report-details">
+            <summary>Ver salida tecnica Score & Incubator</summary>
+            <pre id="scoreIncubatorOutput">Sin cargar todavia.</pre>
           </details>
         </section>
 

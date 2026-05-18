@@ -14,6 +14,8 @@
     { name: "Training Summary", url: "/api/training/summary?hours=6", target: "edgePolicyOutput", handler: handleSummary },
     { name: "Time Death Autopsy", url: "/api/training/time-death-autopsy?hours=24", target: "timeDeathOutput", handler: handleTimeDeath },
     { name: "Candidate Ranking", url: "/api/training/candidate-ranking?hours=24", target: "edgePolicyOutput", append: true, handler: handleCandidateRanking },
+    { name: "Score Calibration", url: "/api/training/score-calibration?hours=24", target: "scoreIncubatorOutput", handler: handleScoreCalibration },
+    { name: "Candidate Incubator", url: "/api/training/candidate-incubator?hours=24", target: "scoreIncubatorOutput", append: true, handler: handleCandidateIncubator },
     { name: "Edge Guard", url: "/api/training/edge-guard?hours=24", target: "edgePolicyOutput", append: true, handler: handleEdgeGuard },
     { name: "Orchestrator", url: "/api/training/paper-policy-orchestrator?hours=24", target: "edgePolicyOutput", append: true, handler: handleOrchestrator },
     { name: "Pre-Move", url: "/api/training/pre-move-event-labeler?hours=24", target: "preMoveOutput", handler: handlePreMove },
@@ -435,6 +437,49 @@
     $("orchestratorState").textContent = noAction ? "PAPER_ONLY / no actionable" : "PAPER_ONLY / watch";
   }
 
+  function handleScoreCalibration(payload, text) {
+    const quality = safeText(payload.overall_score_quality || (text.match(/overall_score_quality:\s*(\S+)/i) || [])[1], "MIXED");
+    const problem = safeText(payload.biggest_problem || (text.match(/biggest_problem:\s*(\S+)/i) || [])[1], "score_not_monotonic");
+    setText("scoreQualityState", quality);
+    setText("scoreProblemText", `biggest_problem: ${problem}. Research only; no penalty applied.`);
+    const rows = payload.by_score_bucket || [];
+    setHtml("scoreMonotonicityChart", rows.length ? renderHorizontalBarChart(rows.slice(0, 9).map((row) => ({
+      label: row.group_value || row.score_bucket || "bucket",
+      value: Math.max(0, num(row.net_EV_est) + 1),
+      color: num(row.net_EV_est) > 0 ? "green" : "red",
+      display: `${fmt(row.net_EV_est, 4)} EV / ${pct(row.tp_ratio)} TP`,
+    }))) : renderEmptyState("Score calibration no cargado."));
+  }
+
+  function handleCandidateIncubator(payload, text) {
+    const counts = payload.candidate_status_counts || {};
+    const total = Object.values(counts).reduce((sum, value) => sum + num(value), 0);
+    setText("incubatorState", total ? `${total} setups reviewed` : "no setups loaded");
+    setText("incubatorProblemText", "RESEARCH ONLY. PAPER_CANDIDATE_DISABLED no activa nada.");
+    const chartRows = Object.entries(counts).map(([label, value]) => ({
+      label,
+      value,
+      color: label === "REJECT" ? "red" : label === "WATCH_ONLY" || label === "NEED_MORE_DATA" ? "orange" : "blue",
+      display: value,
+    }));
+    setHtml("incubatorStatusChart", chartRows.length ? renderHorizontalBarChart(chartRows) : renderEmptyState("Incubadora no cargada."));
+    const rows = payload.candidates || payload.top_shadow_only || [];
+    if (!rows.length) {
+      setHtml("incubatorRows", `<tr><td colspan="7">Sin candidatos incubados. NO LIVE.</td></tr>`);
+      return;
+    }
+    setHtml("incubatorRows", rows.slice(0, 12).map((row) => `
+      <tr>
+        <td>${escapeHtml(row.candidate_id || `${row.symbol || "NA"}_${row.side || "NA"}_${row.market_regime || "NA"}_${row.score_bucket || "NA"}`)}</td>
+        <td>${escapeHtml(row.samples || 0)}</td>
+        <td>${escapeHtml(pct(row.TP))}</td>
+        <td>${escapeHtml(pct(row.SL))}</td>
+        <td>${escapeHtml(pct(row.TIME))}</td>
+        <td>${escapeHtml(fmt(row.net_EV_est, 4))}</td>
+        <td>${escapeHtml(row.candidate_status || "WATCH_ONLY")}</td>
+      </tr>`).join(""));
+  }
+
   function handleTimeDeath(payload, text) {
     const time = extractPercent(text, "TIME%");
     const tp = extractPercent(text, "TP%");
@@ -602,6 +647,8 @@
 
     const labBindings = [
       ["candidateRankingBtn", "/api/training/candidate-ranking?hours=24", "edgePolicyOutput", handleCandidateRanking, true],
+      ["scoreCalibrationBtn", "/api/training/score-calibration?hours=24", "scoreIncubatorOutput", handleScoreCalibration],
+      ["candidateIncubatorBtn", "/api/training/candidate-incubator?hours=24", "scoreIncubatorOutput", handleCandidateIncubator, true],
       ["edgeGuardBtn", "/api/training/edge-guard?hours=24", "edgePolicyOutput", handleEdgeGuard, true],
       ["paperPolicyOrchestratorBtn", "/api/training/paper-policy-orchestrator?hours=24", "edgePolicyOutput", handleOrchestrator, true],
       ["netEdgeLabBtn", "/api/training/net-edge-lab?hours=24", "edgePolicyOutput", null, true],
