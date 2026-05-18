@@ -77,6 +77,10 @@ def start_health_server(
                 "/api/training/exit-label-calibration-v2",
                 "/api/training/score-calibration",
                 "/api/training/candidate-incubator",
+                "/api/training/training-data-integrity",
+                "/api/training/worker-health-audit",
+                "/api/training/data-vault-audit",
+                "/api/training/dashboard-data-binding-audit",
                 "/api/training/shadow-experiments",
                 "/api/training/evolution-score",
                 "/api/training/mfe-mae-diagnostic",
@@ -170,6 +174,18 @@ def start_health_server(
                 return
             if path == "/api/training/candidate-incubator":
                 self._send_json(_candidate_incubator(config, db, query))
+                return
+            if path == "/api/training/training-data-integrity":
+                self._send_json(_training_data_integrity(config, db, query))
+                return
+            if path == "/api/training/worker-health-audit":
+                self._send_json(_worker_health_audit(config, db, query))
+                return
+            if path == "/api/training/data-vault-audit":
+                self._send_json(_data_vault_audit(config, db, query))
+                return
+            if path == "/api/training/dashboard-data-binding-audit":
+                self._send_json(_dashboard_data_binding_audit(config, db, query))
                 return
             if path == "/api/training/shadow-experiments":
                 self._send_json(_shadow_experiments(config, db, query))
@@ -620,6 +636,22 @@ def _score_calibration(config: Any | None, db: Any | None, query: dict[str, list
 
 def _candidate_incubator(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
     return _lab_payload(config, db, query, "candidate incubator unavailable", ".candidate_incubator", "CandidateIncubator")
+
+
+def _training_data_integrity(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
+    return _lab_payload(config, db, query, "training data integrity unavailable", ".training_data_integrity", "TrainingDataIntegrity")
+
+
+def _worker_health_audit(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
+    return _lab_payload(config, db, query, "worker health audit unavailable", ".worker_health_audit", "WorkerHealthAudit")
+
+
+def _data_vault_audit(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
+    return _lab_payload(config, db, query, "data vault audit unavailable", ".data_vault_audit", "DataVaultAudit")
+
+
+def _dashboard_data_binding_audit(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
+    return _lab_payload(config, db, query, "dashboard data binding audit unavailable", ".dashboard_data_binding_audit", "DashboardDataBindingAudit")
 
 
 def _shadow_experiments(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:

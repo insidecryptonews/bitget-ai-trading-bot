@@ -37,6 +37,11 @@ def test_dashboard_ui_v3_structure_is_real_app_shell():
     assert "renderHorizontalBarChart" in js
     assert "handleScoreCalibration" in js
     assert "handleCandidateIncubator" in js
+    assert "labelsReady" in js
+    assert "pendingText" in js
+    assert "trainingDataIntegrityBtn" in html
+    assert "workerHealthAuditBtn" in html
+    assert "dashboardDataBindingAuditBtn" in html
 
 
 def test_dashboard_ui_v3_has_no_dangerous_primary_actions():
@@ -108,6 +113,8 @@ def test_dashboard_main_refresh_does_not_call_backup_restore_or_live():
     assert "data-restore" not in main_steps
     assert "post-migration-backup" not in main_steps
     assert "LIVE_TRADING=true" not in main_steps
+    assert "training-data-integrity" in main_steps
+    assert "worker-health-audit" in main_steps
 
 
 def test_dashboard_ui_v3_smoke_test_passes():

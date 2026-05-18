@@ -603,6 +603,41 @@ class ResearchLab:
 
         return candidate_incubator_smoke_text(self.config)
 
+    def training_data_integrity(self, hours: int = 24) -> str:
+        from .training_data_integrity import TrainingDataIntegrity
+
+        return TrainingDataIntegrity(self.config, self.db).to_text(hours=hours)
+
+    def training_data_integrity_smoke_test(self) -> str:
+        from .training_data_integrity import TrainingDataIntegritySmokeTest
+
+        return TrainingDataIntegritySmokeTest(self.config, self.db, self.logger).to_text()
+
+    def worker_health_audit(self) -> str:
+        from .worker_health_audit import WorkerHealthAudit
+
+        return WorkerHealthAudit(self.config, self.db, self.logger).to_text()
+
+    def worker_health_audit_smoke_test(self) -> str:
+        from .worker_health_audit import WorkerHealthAuditSmokeTest
+
+        return WorkerHealthAuditSmokeTest(self.config, self.db, self.logger).to_text()
+
+    def data_vault_audit(self) -> str:
+        from .data_vault_audit import DataVaultAudit
+
+        return DataVaultAudit(self.config, self.db, self.logger).to_text()
+
+    def dashboard_data_binding_audit(self) -> str:
+        from .dashboard_data_binding_audit import DashboardDataBindingAudit
+
+        return DashboardDataBindingAudit(self.config, self.db, self.logger).to_text()
+
+    def dashboard_data_binding_smoke_test(self) -> str:
+        from .dashboard_data_binding_audit import DashboardDataBindingSmokeTest
+
+        return DashboardDataBindingSmokeTest(self.config, self.db, self.logger).to_text()
+
     def decision_ledger_audit(self, hours: int = 24) -> str:
         from .decision_ledger_audit import DecisionLedgerAudit
 
@@ -1375,6 +1410,13 @@ def main() -> None:
             "score-calibration-smoke-test",
             "candidate-incubator",
             "candidate-incubator-smoke-test",
+            "training-data-integrity",
+            "training-data-integrity-smoke-test",
+            "worker-health-audit",
+            "worker-health-audit-smoke-test",
+            "data-vault-audit",
+            "dashboard-data-binding-audit",
+            "dashboard-data-binding-smoke-test",
             "shadow-experiments",
             "evolution-score",
             "mfe-mae-diagnostic",
@@ -1549,6 +1591,20 @@ def main() -> None:
         print(lab.candidate_incubator(hours=args.hours))
     elif args.command == "candidate-incubator-smoke-test":
         print(lab.candidate_incubator_smoke_test())
+    elif args.command == "training-data-integrity":
+        print(lab.training_data_integrity(hours=args.hours))
+    elif args.command == "training-data-integrity-smoke-test":
+        print(lab.training_data_integrity_smoke_test())
+    elif args.command == "worker-health-audit":
+        print(lab.worker_health_audit())
+    elif args.command == "worker-health-audit-smoke-test":
+        print(lab.worker_health_audit_smoke_test())
+    elif args.command == "data-vault-audit":
+        print(lab.data_vault_audit())
+    elif args.command == "dashboard-data-binding-audit":
+        print(lab.dashboard_data_binding_audit())
+    elif args.command == "dashboard-data-binding-smoke-test":
+        print(lab.dashboard_data_binding_smoke_test())
     elif args.command == "shadow-experiments":
         print(lab.shadow_experiments(hours=args.hours))
     elif args.command == "evolution-score":

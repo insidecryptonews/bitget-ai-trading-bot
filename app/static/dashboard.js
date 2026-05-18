@@ -8,6 +8,7 @@
     lastFullReportText: "",
     lastShortReportText: "",
     lastReportGeneratedAt: "",
+    trainingSummary: null,
   };
 
   const MAIN_ANALYSIS_STEPS = [
@@ -16,11 +17,15 @@
     { name: "Candidate Ranking", url: "/api/training/candidate-ranking?hours=24", target: "edgePolicyOutput", append: true, handler: handleCandidateRanking },
     { name: "Score Calibration", url: "/api/training/score-calibration?hours=24", target: "scoreIncubatorOutput", handler: handleScoreCalibration },
     { name: "Candidate Incubator", url: "/api/training/candidate-incubator?hours=24", target: "scoreIncubatorOutput", append: true, handler: handleCandidateIncubator },
+    { name: "Training Data Integrity", url: "/api/training/training-data-integrity?hours=24", target: "scoreIncubatorOutput", append: true },
+    { name: "Worker Health Audit", url: "/api/training/worker-health-audit", target: "runtimeOutput", append: true },
+    { name: "Dashboard Data Binding", url: "/api/training/dashboard-data-binding-audit", target: "runtimeOutput", append: true },
     { name: "Edge Guard", url: "/api/training/edge-guard?hours=24", target: "edgePolicyOutput", append: true, handler: handleEdgeGuard },
     { name: "Orchestrator", url: "/api/training/paper-policy-orchestrator?hours=24", target: "edgePolicyOutput", append: true, handler: handleOrchestrator },
     { name: "Pre-Move", url: "/api/training/pre-move-event-labeler?hours=24", target: "preMoveOutput", handler: handlePreMove },
     { name: "Latency", url: "/api/training/latency-audit?hours=24", target: "runtimeOutput", handler: handleLatency },
     { name: "Data Vault Status", url: "/api/training/data-vault-status", target: "dataVaultOutput", handler: handleVault },
+    { name: "Data Vault Audit", url: "/api/training/data-vault-audit", target: "dataVaultOutput", append: true },
     { name: "Exit Calibration V2", url: "/api/training/exit-label-calibration-v2?hours=24", target: "exitCalibrationOutput", handler: handleExitCalibration },
   ];
 
@@ -28,6 +33,7 @@
   const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
   const num = (value, fallback = 0) => Number.isFinite(Number(value)) ? Number(value) : fallback;
   const pct = (ratio) => `${(num(ratio) * 100).toFixed(1)}%`;
+  const pendingText = (label = "pendiente") => label;
   const fmt = (value, digits = 2) => num(value).toFixed(digits);
   const safeText = (value, fallback = "n/a") => {
     if (value === null || value === undefined || value === "") return fallback;
@@ -178,19 +184,27 @@
     setText("workerStatusTag", `worker: ${num(health.cycles_error) > 0 ? "warning" : "ok"}`);
     setText("finalRecommendationHero", finalRecommendation);
 
-    const timeRatio = num(labels.time_ratio);
-    const tpRatio = num(labels.tp_ratio);
-    const slRatio = num(labels.sl_ratio);
+    const labelsTotal = num(labels.total, NaN);
+    const labelsReady = Number.isFinite(labelsTotal) && labelsTotal > 0;
+    const summaryReady = Boolean(state.trainingSummary);
+    const timeRatio = summaryReady ? state.trainingSummary.time / 100 : labelsReady ? num(labels.time_ratio) : NaN;
+    const tpRatio = summaryReady ? state.trainingSummary.tp / 100 : labelsReady ? num(labels.tp_ratio) : NaN;
+    const slRatio = summaryReady ? state.trainingSummary.sl / 100 : labelsReady ? num(labels.sl_ratio) : NaN;
+    const labelNote = summaryReady ? "Training Summary manual" : labelsReady ? `${num(labels.time)} TIME / ${num(labels.total)} labels` : "pendiente: usa Training Summary manual";
+    const timeDisplay = Number.isFinite(timeRatio) ? pct(timeRatio) : pendingText();
+    const tpDisplay = Number.isFinite(tpRatio) ? pct(tpRatio) : pendingText();
+    const slDisplay = Number.isFinite(slRatio) ? pct(slRatio) : pendingText();
+    const pfDisplay = summaryReady ? fmt(state.trainingSummary.pf, 2) : pendingText("research");
     const candidateState = inferCandidateState();
-    const mainProblem = timeRatio > 0.8 ? "TIME death alto / no valid candidates" : candidateState === "NO_VALID_CANDIDATES" ? "No valid candidates" : "Keep research";
+    const mainProblem = Number.isFinite(timeRatio) && timeRatio > 0.8 ? "TIME death alto / no valid candidates" : candidateState === "NO_VALID_CANDIDATES" ? "No valid candidates" : "Keep research";
     setText("mainProblemHero", mainProblem);
     setText("heroMessage", `${finalRecommendation}. No activar live ni filtros paper. Estado rapido: ${mainProblem}.`);
 
     const kpis = [
-      { label: "PF 6h", value: "research", note: "usa Training Summary manual", state: "watch" },
-      { label: "TIME ratio", value: pct(timeRatio), note: `${num(labels.time)} TIME / ${num(labels.total)} labels`, state: timeRatio > 0.8 ? "bad" : timeRatio > 0.5 ? "watch" : "ok" },
-      { label: "TP ratio", value: pct(tpRatio), note: "TP1 + TP2", state: tpRatio <= 0.05 ? "bad" : "ok" },
-      { label: "SL ratio", value: pct(slRatio), note: "stop-loss outcomes", state: slRatio > 0.25 ? "bad" : "watch" },
+      { label: "PF 6h", value: pfDisplay, note: summaryReady ? "Training Summary cargado" : "usa Training Summary manual", state: summaryReady && state.trainingSummary.pf < 1 ? "bad" : "watch" },
+      { label: "TIME ratio", value: timeDisplay, note: labelNote, state: Number.isFinite(timeRatio) ? timeRatio > 0.8 ? "bad" : timeRatio > 0.5 ? "watch" : "ok" : "watch" },
+      { label: "TP ratio", value: tpDisplay, note: "TP1 + TP2", state: Number.isFinite(tpRatio) ? tpRatio <= 0.05 ? "bad" : "ok" : "watch" },
+      { label: "SL ratio", value: slDisplay, note: "stop-loss outcomes", state: Number.isFinite(slRatio) ? slRatio > 0.25 ? "bad" : "watch" : "watch" },
       { label: "Candidate status", value: candidateState, note: "ranking/orchestrator manual", state: candidateState === "NO_VALID_CANDIDATES" ? "bad" : "watch" },
       { label: "Net EV est.", value: "not loaded", note: "Net Edge Lab manual", state: "watch" },
       { label: "Open paper", value: safeText(paper.open_positions, "0"), note: "simulated positions", state: num(paper.open_positions) > 0 ? "watch" : "ok" },
@@ -202,21 +216,25 @@
       { label: "Safety", value: safety.live_trading ? "DANGER" : "OK", state: safety.live_trading ? "bad" : "ok", note: "LIVE must stay false" },
       { label: "Worker", value: num(health.cycles_error) > 0 ? "WARNING" : "OK", state: num(health.cycles_error) > 0 ? "watch" : "ok", note: `${safeText(health.uptime_min, 0)} min uptime` },
       { label: "Backups", value: "CHECK", state: "watch", note: "Data Vault manual" },
-      { label: "Data quality", value: num(labels.total) > 0 ? "OBSERVING" : "NO DATA", state: num(labels.total) > 0 ? "watch" : "bad", note: "labels window" },
-      { label: "TIME", value: timeRatio > 0.8 ? "BAD" : "WATCH", state: timeRatio > 0.8 ? "bad" : "watch", note: pct(timeRatio) },
+      { label: "Data quality", value: labelsReady || summaryReady ? "OBSERVING" : "PENDIENTE", state: labelsReady || summaryReady ? "watch" : "watch", note: labelsReady ? "labels window" : "manual refresh required" },
+      { label: "TIME", value: Number.isFinite(timeRatio) ? timeRatio > 0.8 ? "BAD" : "WATCH" : "PENDIENTE", state: Number.isFinite(timeRatio) && timeRatio > 0.8 ? "bad" : "watch", note: Number.isFinite(timeRatio) ? pct(timeRatio) : "not loaded" },
       { label: "Net Edge", value: "WATCH", state: "watch", note: "requires net labs" },
       { label: "Candidates", value: candidateState, state: candidateState === "NO_VALID_CANDIDATES" ? "bad" : "watch", note: "manual refresh" },
       { label: "Live readiness", value: "NO LIVE", state: "bad", note: "paper/research only" },
     ];
     setHtml("readinessGrid", renderReadinessGrid(readiness));
 
-    setHtml("outcomeStackedChart", renderStackedBar([
+    setHtml("outcomeStackedChart", summaryReady ? renderStackedBar([
+      { label: "TIME", value: state.trainingSummary.time, className: "time" },
+      { label: "SL", value: state.trainingSummary.sl, className: "sl" },
+      { label: "TP", value: state.trainingSummary.tp, className: "tp" },
+    ]) : labelsReady ? renderStackedBar([
       { label: "TIME", value: num(labels.time), className: "time" },
       { label: "SL", value: num(labels.sl), className: "sl" },
       { label: "TP", value: num(labels.tp1) + num(labels.tp2), className: "tp" },
-    ]));
-    $("timeRiskBadge").textContent = timeRatio > 0.8 ? "TIME BAD" : "watch";
-    $("timeRiskBadge").className = `badge ${timeRatio > 0.8 ? "badge-danger" : "badge-warning"}`;
+    ]) : renderEmptyState("Pendiente: ejecuta Training Summary o analisis principal"));
+    $("timeRiskBadge").textContent = Number.isFinite(timeRatio) ? timeRatio > 0.8 ? "TIME BAD" : "watch" : "pending";
+    $("timeRiskBadge").className = `badge ${Number.isFinite(timeRatio) && timeRatio > 0.8 ? "badge-danger" : "badge-warning"}`;
     setHtml("signalBarChart", renderHorizontalBarChart([
       { label: "LONG", value: num(signals.long), color: "green", display: num(signals.long) },
       { label: "SHORT", value: num(signals.short), color: "red", display: num(signals.short) },
@@ -228,10 +246,10 @@
       { label: "BLOCKED", value: 1, color: "red", display: "no live" },
     ]));
     setHtml("timeDeathMiniChart", renderMiniBars([
-      { label: "TIME", value: timeRatio * 100, color: timeRatio > 0.8 ? "red" : "orange", display: pct(timeRatio) },
-      { label: "TP", value: tpRatio * 100, color: "green", display: pct(tpRatio) },
-      { label: "SL", value: slRatio * 100, color: "red", display: pct(slRatio) },
-    ]));
+      { label: "TIME", value: Number.isFinite(timeRatio) ? timeRatio * 100 : 0, color: Number.isFinite(timeRatio) && timeRatio > 0.8 ? "red" : "orange", display: Number.isFinite(timeRatio) ? pct(timeRatio) : "pending" },
+      { label: "TP", value: Number.isFinite(tpRatio) ? tpRatio * 100 : 0, color: "green", display: Number.isFinite(tpRatio) ? pct(tpRatio) : "pending" },
+      { label: "SL", value: Number.isFinite(slRatio) ? slRatio * 100 : 0, color: "red", display: Number.isFinite(slRatio) ? pct(slRatio) : "pending" },
+    ].filter((row) => Number.isFinite(row.value) && row.value > 0)));
     setHtml("timeDeathChart", $("outcomeStackedChart").innerHTML);
 
     setHtml("paperSummaryCards", [
@@ -405,17 +423,27 @@
   }
 
   function handleSummary(payload, text) {
-    const pf = (text.match(/PF=([0-9.]+)/i) || text.match(/PF:\s*([0-9.]+)/i) || [])[1] || "loaded";
+    const pfRaw = (text.match(/PF=([0-9.]+)/i) || text.match(/PF:\s*([0-9.]+)/i) || [])[1] || "0";
     const time = extractPercent(text, "TIME%");
     const tp = extractPercent(text, "TP%");
     const sl = extractPercent(text, "SL%");
+    state.trainingSummary = {
+      pf: num(pfRaw),
+      time,
+      tp,
+      sl,
+      loadedAt: new Date().toLocaleTimeString("es-ES"),
+    };
     setHtml("outcomeStackedChart", renderStackedBar([
       { label: "TIME", value: time, className: "time" },
       { label: "SL", value: sl, className: "sl" },
       { label: "TP", value: tp, className: "tp" },
     ]));
     $("finalRecommendationHero").textContent = "NO LIVE";
-    $("mainProblemHero").textContent = `PF ${pf} / TIME ${time.toFixed(1)}%`;
+    $("mainProblemHero").textContent = `PF ${fmt(pfRaw, 2)} / TIME ${time.toFixed(1)}%`;
+    if (state.status) {
+      renderStatus(state.status);
+    }
   }
 
   function handleCandidateRanking(payload, text) {
@@ -649,6 +677,7 @@
       ["candidateRankingBtn", "/api/training/candidate-ranking?hours=24", "edgePolicyOutput", handleCandidateRanking, true],
       ["scoreCalibrationBtn", "/api/training/score-calibration?hours=24", "scoreIncubatorOutput", handleScoreCalibration],
       ["candidateIncubatorBtn", "/api/training/candidate-incubator?hours=24", "scoreIncubatorOutput", handleCandidateIncubator, true],
+      ["trainingDataIntegrityBtn", "/api/training/training-data-integrity?hours=24", "scoreIncubatorOutput", null, true],
       ["edgeGuardBtn", "/api/training/edge-guard?hours=24", "edgePolicyOutput", handleEdgeGuard, true],
       ["paperPolicyOrchestratorBtn", "/api/training/paper-policy-orchestrator?hours=24", "edgePolicyOutput", handleOrchestrator, true],
       ["netEdgeLabBtn", "/api/training/net-edge-lab?hours=24", "edgePolicyOutput", null, true],
@@ -668,9 +697,12 @@
       ["preMoveSimilarityScannerBtn", "/api/training/pre-move-similarity-scanner?hours=6", "preMoveOutput", null, true],
       ["latencyAuditBtn", "/api/training/latency-audit?hours=24", "runtimeOutput", handleLatency],
       ["vpsRuntimeHealthBtn", "/api/training/vps-runtime-health", "runtimeOutput", null, true],
+      ["workerHealthAuditBtn", "/api/training/worker-health-audit", "runtimeOutput", null, true],
+      ["dashboardDataBindingAuditBtn", "/api/training/dashboard-data-binding-audit", "runtimeOutput", null, true],
       ["fastRuntimeReadinessBtn", "/api/training/fast-runtime-readiness?hours=24", "runtimeOutput", null, true],
       ["websocketMigrationPlanBtn", "/api/training/websocket-migration-plan?hours=24", "runtimeOutput", null, true],
       ["dataVaultStatusBtn", "/api/training/data-vault-status", "dataVaultOutput", handleVault],
+      ["dataVaultAuditBtn", "/api/training/data-vault-audit", "dataVaultOutput", null, true],
       ["dataExportBtn", "/api/training/data-export?hours=168&upload=1", "dataVaultOutput", handleVault],
       ["dataExport720Btn", "/api/training/data-export?hours=720&upload=1", "dataVaultOutput", handleVault],
       ["dataUploadLatestBtn", "/api/training/data-upload-latest", "dataVaultOutput", handleVault],
