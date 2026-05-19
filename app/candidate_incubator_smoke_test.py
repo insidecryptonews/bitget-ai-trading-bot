@@ -91,7 +91,12 @@ def candidate_incubator_smoke_text(config: Any) -> str:
         "need_more_data_small_sample": "NEED_MORE_DATA" in statuses,
         "shadow_only_candidate": "SHADOW_ONLY" in statuses,
         "paper_candidate_disabled_no_activation": "PAPER_CANDIDATE_DISABLED" in statuses and not payload.get("paper_filter_enabled"),
-        "market_probe_never_actionable": bool(market_probe_rows) and all(row.get("candidate_status") == "REJECT" for row in market_probe_rows),
+        "market_probe_never_actionable": bool(market_probe_rows) and all(
+            row.get("actionability") == "NOT_ACTIONABLE_MARKET_PROBE"
+            and row.get("candidate_status") not in {"SHADOW_ONLY", "PAPER_CANDIDATE_DISABLED"}
+            for row in market_probe_rows
+        ),
+        "micro_probe_not_plain_reject": bool(market_probe_rows) and any(row.get("candidate_category") in {"NEED_MORE_DATA_NOT_ACTIONABLE", "WATCH_ONLY_MARKET_PROBE"} for row in market_probe_rows),
         "final_recommendation_no_live": payload.get("final_recommendation") == "NO LIVE",
     }
     result = "PASS" if all(checks.values()) else "FAIL"

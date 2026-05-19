@@ -7,6 +7,12 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
+from .cost_model import (
+    calculate_net_metrics_for_returns,
+    explain_cost_breakdown,
+    get_bitget_usdt_m_vip0_fee_model,
+    round_trip_fee_bps,
+)
 from .config import PROJECT_ROOT
 from .edge_hardening_utils import cost_config
 from .score_calibration import load_score_rows
@@ -32,29 +38,30 @@ class BitgetCostModelAudit:
 
     def inventory(self) -> dict[str, Any]:
         scan = _scan_cost_code()
-        current_round_trip = 2.0 * safe_float(self.costs.taker_fee_bps)
+        fee_model = get_bitget_usdt_m_vip0_fee_model()
+        current_round_trip = round_trip_fee_bps("taker", "taker")
         possible_double = scan["risk_manager_slippage"] and scan["research_slippage"]
         return {
-            "fee_source": "config.net_edge_* defaults; compared against user-provided Bitget USDT-M Futures VIP0",
-            "product_type": "USDT-M Futures perpetual",
-            "maker_fee_assumption": safe_float(self.costs.maker_fee_bps),
-            "taker_fee_assumption": safe_float(self.costs.taker_fee_bps),
+            "fee_source": "centralized app.cost_model Bitget USDT-M Futures VIP0 fee model",
+            "product_type": fee_model.product_type,
+            "maker_fee_assumption": fee_model.maker_fee_bps,
+            "taker_fee_assumption": fee_model.taker_fee_bps,
             "round_trip_fee_assumption": current_round_trip,
             "bitget_vip0_maker_fee_bps": BITGET_USDTM_VIP0_MAKER_BPS,
             "bitget_vip0_taker_fee_bps": BITGET_USDTM_VIP0_TAKER_BPS,
             "slippage_assumption": safe_float(self.costs.slippage_bps),
-            "funding_assumption": safe_float(self.costs.funding_bps_per_8h),
+            "funding_assumption": "sign-aware; applies only when holding crosses funding timestamp",
             "spread_assumption": "not directly included in net edge labs unless spread columns are used downstream",
-            "formula_net_EV": "gross_return_pct - (2*taker_fee_bps + 2*slippage_bps)/100 - positive funding approximation",
-            "formula_net_PF": "sum(max(return-cost,0))/abs(sum(min(return-cost,0)))",
+            "formula_net_EV": "gross_return_pct - fee_bps/100 - slippage_bps/100 - signed_funding_bps/100",
+            "formula_net_PF": "sum(max(return-corrected_cost,0))/abs(sum(min(return-corrected_cost,0)))",
             "where_used": scan["where_used"],
             "applies_to_trade_signal": True,
-            "applies_to_market_probe": True,
-            "applies_to_TIME": True,
+            "applies_to_market_probe": False,
+            "applies_to_TIME": "only with explicit TIME_EXIT_ASSUMPTION",
             "applies_to_TP": True,
             "applies_to_SL": True,
             "possible_double_counting": possible_double,
-            "funding_current_behavior": "positive penalty approximation; audit required before trusting net_EV",
+            "funding_current_behavior": "corrected: zero unless timestamp crossed; sign depends on side and funding rate",
             "final_recommendation": "NO LIVE",
         }
 
@@ -70,7 +77,7 @@ class BitgetCostModelAudit:
             f"bitget_vip0_maker_fee_bps: {payload['bitget_vip0_maker_fee_bps']}",
             f"bitget_vip0_taker_fee_bps: {payload['bitget_vip0_taker_fee_bps']}",
             f"slippage_assumption: {payload['slippage_assumption']} bps per side",
-            f"funding_assumption: {payload['funding_assumption']} bps per 8h",
+            f"funding_assumption: {payload['funding_assumption']}",
             f"spread_assumption: {payload['spread_assumption']}",
             f"formula_net_EV: {payload['formula_net_EV']}",
             f"formula_net_PF: {payload['formula_net_PF']}",
@@ -168,8 +175,8 @@ class BitgetCostModelSmokeTest:
             payload["maker_fee"] == 2.0
             and payload["taker_fee"] == 6.0
             and "SPOT_FEES_USED_WRONG" not in payload["diagnostics"]
-            and payload["funding_model_status"] in {"WARNING", "BAD", "OK"}
-            and inventory["applies_to_market_probe"] is True
+            and payload["funding_model_status"] in {"UNKNOWN_HOLDING_TIME", "OK"}
+            and inventory["applies_to_market_probe"] is False
             and payload["final_recommendation"] == "NO LIVE"
         )
         return "\n".join([
@@ -180,7 +187,7 @@ class BitgetCostModelSmokeTest:
             f"funding_sign_and_crossing_checked: {str(bool(payload['funding_model_status'])).lower()}",
             f"gross_edge_positive_net_negative_checked: {str(bool(payload['top_groups_still_negative']) or changed).lower()}",
             f"low_cost_scenario_checked: {str(changed or bool(payload['groups'])).lower()}",
-            f"market_probe_cost_pollution_checked: {str(inventory['applies_to_market_probe']).lower()}",
+            f"market_probe_cost_pollution_fixed: {str(inventory['applies_to_market_probe'] is False).lower()}",
             "LIVE_TRADING=false",
             "DRY_RUN=true",
             "PAPER_TRADING=true",
@@ -215,8 +222,15 @@ def _group_cost_metrics(group_key: str, rows: list[dict[str, Any]], costs: Any) 
     mfes = [safe_float(row.get("mfe")) for row in rows]
     maes = [safe_float(row.get("mae")) for row in rows]
     hits = [_hit(row.get("first_barrier_hit")) for row in rows]
-    scenarios = _scenario_costs(rows, costs)
-    net_values = {name: _net_metrics(returns, cost) for name, cost in scenarios.items()}
+    scenarios = _scenario_breakdowns(rows, costs)
+    net_values = {name: calculate_net_metrics_for_returns(returns, breakdowns) for name, breakdowns in scenarios.items()}
+    current_breakdowns = scenarios["current_bot_model"]
+    avg_fee = _avg([item.fee_component_bps for item in current_breakdowns])
+    avg_slip = _avg([item.slippage_component_bps for item in current_breakdowns])
+    avg_funding = _avg([item.funding_component_bps for item in current_breakdowns])
+    avg_total = _avg([item.total_cost_bps for item in current_breakdowns])
+    funding_status = _dominant([item.funding_model_status for item in current_breakdowns])
+    double_counting = _dominant([item.double_counting_risk for item in current_breakdowns])
     symbol, side, regime, bucket, source = group_key.split("|", 4)
     return {
         "group": group_key,
@@ -234,10 +248,16 @@ def _group_cost_metrics(group_key: str, rows: list[dict[str, Any]], costs: Any) 
         "net_EV_maker_taker": net_values["maker_taker"]["net_EV"],
         "net_EV_maker_maker": net_values["maker_maker"]["net_EV"],
         "net_EV_zero_slippage": net_values["zero_slippage_research_only"]["net_EV"],
-        "cost_per_trade_current": scenarios["current_bot_model"],
-        "fee_component": (2.0 * safe_float(costs.taker_fee_bps)) / 100.0,
-        "slippage_component": (2.0 * safe_float(costs.slippage_bps)) / 100.0,
-        "funding_component": max(0.0, ((avg_bars * 5.0) / 480.0) * safe_float(costs.funding_bps_per_8h) / 100.0),
+        "cost_per_trade_current": avg_total / 100.0,
+        "fee_component": avg_fee / 100.0,
+        "slippage_component": avg_slip / 100.0,
+        "funding_component": avg_funding / 100.0,
+        "fee_component_bps": avg_fee,
+        "slippage_component_bps": avg_slip,
+        "funding_component_bps": avg_funding,
+        "total_cost_bps": avg_total,
+        "funding_model_status": funding_status,
+        "double_counting_risk": double_counting,
         "spread_component": sum(safe_float(row.get("spread_pct")) for row in rows) / max(samples, 1),
         "avg_MFE": sum(mfes) / max(samples, 1),
         "median_MFE": sorted(mfes)[samples // 2] if mfes else 0.0,
@@ -251,35 +271,36 @@ def _group_cost_metrics(group_key: str, rows: list[dict[str, Any]], costs: Any) 
     }
 
 
-def _scenario_costs(rows: list[dict[str, Any]], costs: Any) -> dict[str, float]:
-    avg_bars = sum(safe_float(row.get("bars")) for row in rows) / max(len(rows), 1)
-    current_fee = (2.0 * safe_float(costs.taker_fee_bps)) / 100.0
-    current_slippage = (2.0 * safe_float(costs.slippage_bps)) / 100.0
-    current_funding = max(0.0, ((avg_bars * 5.0) / 480.0) * safe_float(costs.funding_bps_per_8h) / 100.0)
-    dynamic_funding = _dynamic_funding_pct(rows, avg_bars)
-    funding_if_crossed = dynamic_funding if _crosses_funding_timestamp(avg_bars) else 0.0
-    return {
-        "current_bot_model": current_fee + current_slippage + current_funding,
-        "taker_taker": 12.0 / 100.0 + current_slippage,
-        "maker_taker": 8.0 / 100.0 + current_slippage,
-        "maker_maker": 4.0 / 100.0 + current_slippage,
-        "half_slippage": current_fee + current_slippage / 2.0 + current_funding,
-        "zero_slippage_research_only": current_fee + current_funding,
-        "zero_funding_if_no_timestamp_cross": current_fee + current_slippage + funding_if_crossed,
-        "dynamic_funding_by_symbol_if_available": current_fee + current_slippage + funding_if_crossed,
-        "live_conservative": 12.0 / 100.0 + current_slippage + funding_if_crossed,
-        "user_observed_low_costs_unverified": 8.0 / 100.0 + current_slippage / 2.0 + funding_if_crossed,
+def _scenario_breakdowns(rows: list[dict[str, Any]], costs: Any) -> dict[str, list[Any]]:
+    scenarios = {
+        "current_bot_model": ("taker", "taker", safe_float(costs.slippage_bps)),
+        "taker_taker": ("taker", "taker", safe_float(costs.slippage_bps)),
+        "maker_taker": ("maker", "taker", safe_float(costs.slippage_bps)),
+        "maker_maker": ("maker", "maker", safe_float(costs.slippage_bps)),
+        "half_slippage": ("taker", "taker", safe_float(costs.slippage_bps) / 2.0),
+        "zero_slippage_research_only": ("taker", "taker", 0.0),
+        "zero_funding_if_no_timestamp_cross": ("taker", "taker", safe_float(costs.slippage_bps)),
+        "dynamic_funding_by_symbol_if_available": ("taker", "taker", safe_float(costs.slippage_bps)),
+        "live_conservative": ("taker", "taker", max(safe_float(costs.slippage_bps), 3.0)),
+        "user_observed_low_costs_unverified": ("maker", "taker", safe_float(costs.slippage_bps) / 2.0),
     }
-
-
-def _net_metrics(returns: list[float], cost_pct: float) -> dict[str, float]:
-    net = [value - cost_pct for value in returns]
-    gains = sum(value for value in net if value > 0)
-    losses = abs(sum(value for value in net if value < 0))
-    return {
-        "net_EV": sum(net) / max(len(net), 1),
-        "net_PF": gains / losses if losses > 0 else 999.0 if gains > 0 else 0.0,
-    }
+    out: dict[str, list[Any]] = {}
+    for name, (entry_type, exit_type, slip) in scenarios.items():
+        out[name] = [
+            explain_cost_breakdown(
+                source=str(row.get("source") or "trade_signal"),
+                side=str(row.get("side") or ""),
+                entry_type=entry_type,
+                exit_type=exit_type,
+                slippage_bps=slip,
+                entry_time=row.get("timestamp"),
+                holding_bars=row.get("bars"),
+                funding_rate=row.get("funding_rate") if safe_float(row.get("funding_rate")) else None,
+                outcome=str(row.get("first_barrier_hit") or ""),
+            )
+            for row in rows
+        ]
+    return out
 
 
 def _dynamic_funding_pct(rows: list[dict[str, Any]], avg_bars: float) -> float:
@@ -319,24 +340,24 @@ def _summary(groups: list[dict[str, Any]], inventory: dict[str, Any], costs: Any
     diagnostics = []
     if safe_float(costs.maker_fee_bps) != BITGET_USDTM_VIP0_MAKER_BPS or safe_float(costs.taker_fee_bps) != BITGET_USDTM_VIP0_TAKER_BPS:
         diagnostics.append("FEE_TOO_AGGRESSIVE")
-    if safe_float(costs.funding_bps_per_8h) > 0:
-        diagnostics.append("FUNDING_ALWAYS_APPLIED_BAD")
+    if any(row.get("funding_model_status") == "UNKNOWN_HOLDING_TIME" for row in groups):
+        diagnostics.append("FUNDING_UNKNOWN_HOLDING_TIME")
     if safe_float(costs.slippage_bps) >= 5:
         diagnostics.append("SLIPPAGE_TOO_AGGRESSIVE")
     if inventory.get("possible_double_counting"):
         diagnostics.append("DOUBLE_COUNTING_POSSIBLE")
-    if any(row.get("source") == "market_probe" for row in groups):
+    if any(row.get("source") == "market_probe" and safe_float(row.get("total_cost_bps")) != 0 for row in groups):
         diagnostics.append("MARKET_PROBE_COST_POLLUTION")
     if any(safe_float(row.get("TIME")) > 0 for row in groups):
-        diagnostics.append("TIME_LABEL_COST_POLLUTION")
+        diagnostics.append("TIME_EXIT_ASSUMPTION_EXPLICIT")
     if _constant_penalty_suspected(groups):
         diagnostics.append("NET_EV_CONSTANT_PENALTY_SUSPECTED")
     if not diagnostics and gross_edge_net_negative:
         diagnostics.append("MODEL_SEEMS_REASONABLE_EDGE_BAD")
     rate = len(gross_edge_net_negative) / max(len(gross_edge), 1)
-    funding_status = "BAD" if "FUNDING_ALWAYS_APPLIED_BAD" in diagnostics else "OK"
+    funding_status = "UNKNOWN_HOLDING_TIME" if "FUNDING_UNKNOWN_HOLDING_TIME" in diagnostics else "OK"
     slippage_status = "WARNING" if "SLIPPAGE_TOO_AGGRESSIVE" in diagnostics else "OK"
-    cost_status = "BAD" if "FUNDING_ALWAYS_APPLIED_BAD" in diagnostics or "NET_EV_CONSTANT_PENALTY_SUSPECTED" in diagnostics else "WARNING" if diagnostics else "OK"
+    cost_status = "BAD" if "NET_EV_CONSTANT_PENALTY_SUSPECTED" in diagnostics else "WARNING" if diagnostics else "OK"
     reason = ",".join(diagnostics) if diagnostics else "cost_model_inventory_clean"
     return {
         "cost_model_status": cost_status,
@@ -363,6 +384,19 @@ def _constant_penalty_suspected(groups: list[dict[str, Any]]) -> bool:
     values = {round(safe_float(row.get("cost_per_trade_current")), 4) for row in groups[:50]}
     net_values = [round(safe_float(row.get("net_EV_current")), 4) for row in groups[:50]]
     return len(values) == 1 and len(set(net_values)) <= 3 and len(groups) >= 5
+
+
+def _avg(values: list[float]) -> float:
+    return sum(values) / max(len(values), 1)
+
+
+def _dominant(values: list[str]) -> str:
+    if not values:
+        return "unknown"
+    counts: dict[str, int] = {}
+    for value in values:
+        counts[str(value)] = counts.get(str(value), 0) + 1
+    return sorted(counts.items(), key=lambda item: item[1], reverse=True)[0][0]
 
 
 def _fee_source_status(costs: Any) -> str:

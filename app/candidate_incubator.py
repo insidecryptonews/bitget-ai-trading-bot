@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import Counter, defaultdict
 from typing import Any
 
+from .cost_model import MARKET_PROBE_ACTIONABILITY, calculate_net_metrics_for_returns, explain_cost_breakdown
 from .edge_hardening_utils import cost_config
 from .score_calibration import load_score_rows, metric_snapshot
 from .utils import safe_float, safe_int
@@ -11,6 +12,14 @@ from .utils import safe_float, safe_int
 START = "CANDIDATE INCUBATOR START"
 END = "CANDIDATE INCUBATOR END"
 STATUSES = {"REJECT", "WATCH_ONLY", "NEED_MORE_DATA", "SHADOW_ONLY", "PAPER_CANDIDATE_DISABLED"}
+CATEGORIES = {
+    "RESEARCH_POCKET",
+    "NEED_MORE_DATA_NOT_ACTIONABLE",
+    "REJECT_BAD_EDGE",
+    "REJECT_DATA_QUALITY",
+    "WATCH_ONLY_TRADE_SIGNAL",
+    "WATCH_ONLY_MARKET_PROBE",
+}
 PROMISING_KEYS = {"SHORT", "RISK_OFF", "TREND_DOWN", "ETHUSDT", "DOGEUSDT", "XRPUSDT", "BTCUSDT", "SOLUSDT"}
 EXIT_PROFILES = {
     "current_exit": None,
@@ -44,16 +53,22 @@ class CandidateIncubator:
         more = [row for row in candidates if row.get("candidate_status") == "NEED_MORE_DATA"]
         shadow = [row for row in candidates if row.get("candidate_status") == "SHADOW_ONLY"]
         disabled = [row for row in candidates if row.get("candidate_status") == "PAPER_CANDIDATE_DISABLED"]
+        category_counts = dict(Counter(str(row.get("candidate_category")) for row in candidates))
         return {
             "hours": max(1, int(hours or 24)),
             "total_candidates": len(candidates),
             "candidate_status_counts": dict(Counter(str(row.get("candidate_status")) for row in candidates)),
+            "candidate_category_counts": category_counts,
             "candidates": candidates[:80],
             "top_reject": reject[:15],
             "top_watch_only": watch[:15],
             "top_need_more_data": more[:15],
             "top_shadow_only": shadow[:15],
             "disabled_paper_candidates": disabled[:10],
+            "actionable_candidates": [],
+            "promising_not_actionable": [row for row in candidates if row.get("candidate_category") in {"RESEARCH_POCKET", "NEED_MORE_DATA_NOT_ACTIONABLE"}][:20],
+            "market_probe_only": [row for row in candidates if row.get("actionability") == MARKET_PROBE_ACTIONABILITY][:20],
+            "reject_bad_edge": [row for row in candidates if row.get("candidate_category") == "REJECT_BAD_EDGE"][:20],
             "promising_raw_pockets": _promising_raw_pockets(candidates),
             "paper_filter_enabled": False,
             "do_not_apply": True,
@@ -68,8 +83,14 @@ class CandidateIncubator:
             f"total_candidates: {payload['total_candidates']}",
             "candidate_status_counts:",
             *_count_lines(payload["candidate_status_counts"]),
+            "candidate_category_counts:",
+            *_count_lines(payload["candidate_category_counts"]),
             "disabled_paper_candidates:",
             *_candidate_lines(payload["disabled_paper_candidates"]),
+            "promising_not_actionable:",
+            *_candidate_lines(payload["promising_not_actionable"]),
+            "market_probe_only:",
+            *_candidate_lines(payload["market_probe_only"]),
             "top_shadow_only:",
             *_candidate_lines(payload["top_shadow_only"]),
             "top_watch_only:",
@@ -98,7 +119,7 @@ class CandidateIncubator:
         regime = _dominant(rows, "market_regime")
         bucket = _dominant(rows, "score_bucket")
         source = _dominant(rows, "source")
-        status, reason = _candidate_status(current, best, source=source, side=side, config=self.config)
+        status, reason, actionability, category = _candidate_status(current, best, source=source, side=side, config=self.config)
         return {
             "candidate_id": f"{symbol}_{side}_{regime}_{bucket}_{best.get('profile')}",
             "symbol": symbol,
@@ -129,6 +150,8 @@ class CandidateIncubator:
             "exit_decision": _exit_decision(best, current),
             "candidate_status": status,
             "reason": reason,
+            "actionability": actionability,
+            "candidate_category": category,
         }
 
 
@@ -155,7 +178,7 @@ def _candidate_groups(rows: list[dict[str, Any]]) -> dict[str, list[dict[str, An
     return groups
 
 
-def _candidate_status(current: dict[str, Any], best: dict[str, Any], *, source: str, side: str, config: Any) -> tuple[str, str]:
+def _candidate_status(current: dict[str, Any], best: dict[str, Any], *, source: str, side: str, config: Any) -> tuple[str, str, str, str]:
     samples = safe_int(current.get("samples"))
     net_ev = safe_float(current.get("net_EV_est"))
     net_pf = safe_float(current.get("net_PF_est"))
@@ -168,33 +191,38 @@ def _candidate_status(current: dict[str, Any], best: dict[str, Any], *, source: 
     min_net_pf = safe_float(getattr(config, "candidate_incubator_min_net_pf", 1.15))
     soft = safe_int(getattr(config, "candidate_incubator_min_samples_soft", 250))
     hard = safe_int(getattr(config, "candidate_incubator_min_samples_hard", 750))
-    if source == "market_probe":
-        return "REJECT", "market_probe_not_actionable"
+    source_text = str(source or "").lower()
+    if source_text == "market_probe":
+        if samples < soft and (gross_pf > 1.2 or net_ev > 0 or tp >= 0.30):
+            return "NEED_MORE_DATA", "sample_too_small + market_probe_not_actionable", MARKET_PROBE_ACTIONABILITY, "NEED_MORE_DATA_NOT_ACTIONABLE"
+        if gross_pf > 1.2 or net_ev > 0:
+            return "WATCH_ONLY", "market_probe_not_actionable", MARKET_PROBE_ACTIONABILITY, "WATCH_ONLY_MARKET_PROBE"
+        return "REJECT", "market_probe_not_actionable_bad_edge", MARKET_PROBE_ACTIONABILITY, "REJECT_DATA_QUALITY"
     if gross_pf < 1.0:
-        return "REJECT", "gross_pf_below_1"
+        return "REJECT", "gross_pf_below_1", "ACTIONABLE_RESEARCH_SIGNAL", "REJECT_BAD_EDGE"
     if net_ev < -0.05:
-        return "REJECT", "net_ev_negative_strong"
+        return "REJECT", "net_ev_negative_strong", "ACTIONABLE_RESEARCH_SIGNAL", "REJECT_BAD_EDGE"
     if sl > max_sl:
-        return "REJECT", "sl_ratio_too_high"
+        return "REJECT", "sl_ratio_too_high", "ACTIONABLE_RESEARCH_SIGNAL", "REJECT_BAD_EDGE"
     if time_ratio > 0.92:
-        return "REJECT", "time_extreme"
+        return "REJECT", "time_extreme", "ACTIONABLE_RESEARCH_SIGNAL", "REJECT_BAD_EDGE"
     if side == "LONG" and (tp < 0.03 or sl > tp):
-        return "REJECT", "long_bad_side"
+        return "REJECT", "long_bad_side", "ACTIONABLE_RESEARCH_SIGNAL", "REJECT_BAD_EDGE"
     if samples < soft:
         if gross_pf > 1.2 or net_ev > 0:
-            return "NEED_MORE_DATA", "sample_too_small_promising"
-        return "REJECT", "sample_too_small"
+            return "NEED_MORE_DATA", "sample_too_small_promising", "ACTIONABLE_RESEARCH_SIGNAL", "RESEARCH_POCKET"
+        return "REJECT", "sample_too_small", "ACTIONABLE_RESEARCH_SIGNAL", "REJECT_DATA_QUALITY"
     if net_ev <= 0 or net_pf < 1.0:
-        return "WATCH_ONLY", "gross_edge_but_net_uncertain_or_negative"
+        return "WATCH_ONLY", "gross_edge_but_net_uncertain_or_negative", "ACTIONABLE_RESEARCH_SIGNAL", "WATCH_ONLY_TRADE_SIGNAL"
     if time_ratio > max_time:
-        return "WATCH_ONLY", "time_ratio_high"
+        return "WATCH_ONLY", "time_ratio_high", "ACTIONABLE_RESEARCH_SIGNAL", "WATCH_ONLY_TRADE_SIGNAL"
     if safe_float(best.get("net_EV")) <= 0 or safe_float(best.get("net_PF")) < min_net_pf:
-        return "WATCH_ONLY", "exit_variant_not_net_confirmed"
+        return "WATCH_ONLY", "exit_variant_not_net_confirmed", "ACTIONABLE_RESEARCH_SIGNAL", "WATCH_ONLY_TRADE_SIGNAL"
     if samples < hard:
-        return "SHADOW_ONLY", "positive_preliminary_needs_walkforward"
+        return "SHADOW_ONLY", "positive_preliminary_needs_walkforward", "ACTIONABLE_RESEARCH_SIGNAL", "RESEARCH_POCKET"
     if net_pf >= min_net_pf and net_ev > 0 and _stability_score(current) >= 0.55:
-        return "PAPER_CANDIDATE_DISABLED", "strong_thresholds_but_disabled_until_phase_6"
-    return "SHADOW_ONLY", "positive_but_not_strong_enough"
+        return "PAPER_CANDIDATE_DISABLED", "strong_thresholds_but_disabled_until_phase_6", "ACTIONABLE_RESEARCH_SIGNAL", "RESEARCH_POCKET"
+    return "SHADOW_ONLY", "positive_but_not_strong_enough", "ACTIONABLE_RESEARCH_SIGNAL", "RESEARCH_POCKET"
 
 
 def _exit_report(profile: str, rows: list[dict[str, Any]], config: Any) -> dict[str, Any]:
@@ -230,15 +258,26 @@ def _exit_report(profile: str, rows: list[dict[str, Any]], config: Any) -> dict[
             returns.append(final_return)
             time_count += 1
     costs = cost_config(config)
-    total_cost = (2 * safe_float(costs.taker_fee_bps) + 2 * safe_float(costs.slippage_bps)) / 100.0
-    net_returns = [value - total_cost for value in returns]
-    net_gains = sum(value for value in net_returns if value > 0)
-    net_losses = abs(sum(value for value in net_returns if value < 0))
+    breakdowns = [
+        explain_cost_breakdown(
+            source=str(row.get("source") or "trade_signal"),
+            side=str(row.get("side") or ""),
+            entry_type="taker",
+            exit_type="taker",
+            slippage_bps=costs.slippage_bps,
+            entry_time=row.get("timestamp"),
+            holding_bars=holding if spec is not None else row.get("bars"),
+            funding_rate=row.get("funding_rate") if safe_float(row.get("funding_rate")) else None,
+            outcome=str(row.get("first_barrier_hit") or ""),
+        )
+        for row in rows
+    ]
+    net = calculate_net_metrics_for_returns(returns, breakdowns)
     samples = len(rows)
     return {
         "profile": profile,
-        "net_EV": sum(net_returns) / max(samples, 1),
-        "net_PF": net_gains / net_losses if net_losses > 0 else 999.0 if net_gains > 0 else 0.0,
+        "net_EV": net["net_EV"],
+        "net_PF": net["net_PF"],
         "TP": tp_count / max(samples, 1),
         "SL": sl_count / max(samples, 1),
         "TIME": time_count / max(samples, 1),
@@ -307,6 +346,8 @@ def _promising_raw_pockets(candidates: list[dict[str, Any]]) -> list[dict[str, A
             "reason": row.get("reason"),
             "net_EV_est": row.get("net_EV_est"),
             "net_PF_est": row.get("net_PF_est"),
+            "actionability": row.get("actionability"),
+            "candidate_category": row.get("candidate_category"),
         })
     return pockets[:20]
 
@@ -333,7 +374,8 @@ def _candidate_lines(rows: list[dict[str, Any]]) -> list[str]:
             f"TIME%={safe_float(row.get('TIME')) * 100:.1f} gross_PF={safe_float(row.get('gross_PF')):.2f} "
             f"net_PF={safe_float(row.get('net_PF_est')):.2f} net_EV={safe_float(row.get('net_EV_est')):.4f} "
             f"best_exit={row.get('best_exit_profile')} exit_decision={row.get('exit_decision')} "
-            f"status={row.get('candidate_status')} reason={row.get('reason')}"
+            f"status={row.get('candidate_status')} category={row.get('candidate_category')} "
+            f"actionability={row.get('actionability')} reason={row.get('reason')}"
         )
     return out
 

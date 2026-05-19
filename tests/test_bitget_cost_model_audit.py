@@ -4,11 +4,9 @@ from app.bitget_cost_model_audit import (
     BitgetCostModelAudit,
     BitgetCostModelSmokeTest,
     _CostSmokeDb,
-    _funding_rate_to_pct,
-    _scenario_costs,
 )
 from app.config import BotConfig
-from app.edge_hardening_utils import cost_config
+from app.cost_model import explain_cost_breakdown, normalize_funding_rate_to_bps, should_apply_funding
 
 
 def test_bitget_cost_model_audit_uses_usdt_m_futures_fees_not_spot():
@@ -22,20 +20,20 @@ def test_bitget_cost_model_audit_uses_usdt_m_futures_fees_not_spot():
     assert payload["taker_fee"] == BITGET_USDTM_VIP0_TAKER_BPS == 6.0
     assert payload["product_type"] == "USDT-M Futures perpetual"
     assert "spot" not in str(payload["fee_source_status"]).lower()
-    assert inventory["applies_to_market_probe"] is True
+    assert inventory["applies_to_market_probe"] is False
     assert payload["cost_sensitivity_summary"]["groups"] > 0
 
 
 def test_funding_can_be_income_or_cost_and_only_applies_when_crossed():
-    costs = cost_config(BotConfig())
-    short_rows = [{"side": "SHORT", "funding_rate": 0.0001, "bars": 100, "return_pct": 0.1}]
-    long_rows = [{"side": "LONG", "funding_rate": 0.0001, "bars": 100, "return_pct": 0.1}]
-
-    assert _funding_rate_to_pct(0.0001) == 0.01
-    assert _scenario_costs(short_rows, costs)["dynamic_funding_by_symbol_if_available"] < _scenario_costs(long_rows, costs)["dynamic_funding_by_symbol_if_available"]
-    no_cross = [{"side": "LONG", "funding_rate": 0.0001, "bars": 10, "return_pct": 0.1}]
-    expected_no_funding = (2 * costs.taker_fee_bps + 2 * costs.slippage_bps) / 100.0
-    assert abs(_scenario_costs(no_cross, costs)["zero_funding_if_no_timestamp_cross"] - expected_no_funding) < 0.000001
+    assert normalize_funding_rate_to_bps(0.0001) == 1.0
+    assert should_apply_funding("2026-05-19T07:55:00+00:00", "2026-05-19T08:05:00+00:00") is True
+    assert should_apply_funding("2026-05-19T01:00:00+00:00", "2026-05-19T02:00:00+00:00") is False
+    short = explain_cost_breakdown(side="SHORT", entry_time="2026-05-19T07:55:00+00:00", exit_time="2026-05-19T08:05:00+00:00", funding_rate=0.0001)
+    long = explain_cost_breakdown(side="LONG", entry_time="2026-05-19T07:55:00+00:00", exit_time="2026-05-19T08:05:00+00:00", funding_rate=0.0001)
+    no_cross = explain_cost_breakdown(side="LONG", entry_time="2026-05-19T01:00:00+00:00", exit_time="2026-05-19T02:00:00+00:00", funding_rate=0.0001)
+    assert short.funding_component_bps < 0
+    assert long.funding_component_bps > 0
+    assert no_cross.funding_component_bps == 0
 
 
 def test_bitget_cost_model_smoke_test_passes():

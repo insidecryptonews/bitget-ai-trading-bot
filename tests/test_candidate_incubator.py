@@ -16,7 +16,9 @@ def test_candidate_incubator_statuses_and_market_probe_block():
     assert "SHADOW_ONLY" in statuses
     assert "PAPER_CANDIDATE_DISABLED" in statuses
     assert probe_rows
-    assert all(row["candidate_status"] == "REJECT" for row in probe_rows)
+    assert all(row["actionability"] == "NOT_ACTIONABLE_MARKET_PROBE" for row in probe_rows)
+    assert all(row["candidate_status"] not in {"SHADOW_ONLY", "PAPER_CANDIDATE_DISABLED"} for row in probe_rows)
+    assert any(row["candidate_category"] in {"NEED_MORE_DATA_NOT_ACTIONABLE", "WATCH_ONLY_MARKET_PROBE"} for row in probe_rows)
 
 
 def test_candidate_incubator_smoke_test_passes_and_never_activates():

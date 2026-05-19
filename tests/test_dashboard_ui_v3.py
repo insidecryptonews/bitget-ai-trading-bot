@@ -24,6 +24,7 @@ def test_dashboard_ui_v3_structure_is_real_app_shell():
     assert "Reports & Exports" in html
     assert "Score & Incubator" in html
     assert "Data Pipeline & Cost Diagnostics" in html
+    assert "Core Corrections / Fase 5 Final" in html
     assert "Pipeline & Costs" in html
     assert "Bitget fees" in html
     assert "scoreMonotonicityChart" in html
@@ -49,6 +50,8 @@ def test_dashboard_ui_v3_structure_is_real_app_shell():
     assert "labelQualityV2Btn" in html
     assert "bitgetCostModelAuditBtn" in html
     assert "marginModeAuditBtn" in html
+    assert "coreCorrectionsBtn" in html
+    assert "handleCoreCorrections" in js
     assert "workerHealthAuditBtn" in html
     assert "dashboardDataBindingAuditBtn" in html
 
@@ -124,6 +127,7 @@ def test_dashboard_main_refresh_does_not_call_backup_restore_or_live():
     assert "LIVE_TRADING=true" not in main_steps
     assert "training-data-integrity" in main_steps
     assert "data-pipeline-diagnosis" in main_steps
+    assert "core-corrections" in main_steps
     assert "label-quality-v2" in main_steps
     assert "bitget-cost-model-audit" in main_steps
     assert "margin-mode-audit" in main_steps

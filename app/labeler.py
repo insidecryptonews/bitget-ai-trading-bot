@@ -6,6 +6,7 @@ from typing import Any
 import pandas as pd
 
 from .config import BotConfig
+from .data_guards import should_insert_label
 from .database import Database
 from .utils import iso_utc, safe_float
 
@@ -95,6 +96,18 @@ class TripleBarrierLabeler:
         payload = asdict(outcome)
         payload["would_have_won"] = int(outcome.would_have_won)
         payload["raw_label_json"] = asdict(outcome)
+        if outcome.observation_id:
+            existing = []
+            fetch_existing = getattr(self.db, "fetch_signal_label_for_observation", None)
+            if callable(fetch_existing):
+                row = fetch_existing(outcome.observation_id)
+                if row:
+                    existing.append(row)
+            allowed, reason = should_insert_label(existing, payload)
+            if not allowed:
+                if self.logger:
+                    self.logger.info("Label guard skipped observation_id=%s reason=%s", outcome.observation_id, reason)
+                return int(existing[0].get("id") or 0) if existing else 0
         return self.db.record_signal_label(payload)
 
     @staticmethod

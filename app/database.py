@@ -1016,6 +1016,19 @@ class Database:
             cur = conn.execute(sql, tuple(payload[col] for col in columns))
             return self._inserted_id(cur)
 
+    def fetch_signal_label_for_observation(self, observation_id: int) -> dict[str, Any] | None:
+        sql = "SELECT * FROM signal_labels WHERE observation_id=? ORDER BY id DESC LIMIT 1"
+        if self._use_postgres:
+            sql = sql.replace("?", "%s")
+        with self._connect() as conn:
+            row = conn.execute(sql, (int(observation_id),)).fetchone()
+            if not row:
+                return None
+            return self._row_to_dict(row)
+
+    def signal_label_exists(self, observation_id: int) -> bool:
+        return self.fetch_signal_label_for_observation(int(observation_id)) is not None
+
     def ensure_strategy_variant(self, name: str, params: dict[str, Any], enabled: bool = True) -> int:
         params_json = json_dumps(params)
         with self._connect() as conn:

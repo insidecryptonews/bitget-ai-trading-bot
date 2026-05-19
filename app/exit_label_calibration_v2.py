@@ -6,6 +6,7 @@ from itertools import product
 from statistics import median
 from typing import Any
 
+from .cost_model import calculate_net_metrics_for_returns, explain_cost_breakdown
 from .edge_hardening_utils import cost_config
 from .utils import safe_float, safe_int
 
@@ -242,7 +243,7 @@ def _simulate(rows: list[dict[str, Any]], tp_pct: float, sl_pct: float, holding:
         else:
             returns.append(final_return)
             time_count += 1
-    metrics = _metrics_from_returns(returns, tp_count, sl_count, time_count, costs, holding=holding)
+    metrics = _metrics_from_returns(returns, tp_count, sl_count, time_count, costs, holding=holding, rows=rows)
     metrics.update({"tp_pct": tp_pct, "sl_pct": sl_pct, "holding_bars": holding, "name": f"TP={tp_pct:.2f}% SL={sl_pct:.2f}% HOLD={holding}"})
     return metrics
 
@@ -262,7 +263,7 @@ def _current_metrics(rows: list[dict[str, Any]], costs: Any) -> dict[str, Any]:
             sl_count += 1
         else:
             time_count += 1
-    metrics = _metrics_from_returns(returns, tp_count, sl_count, time_count, costs, holding=30)
+    metrics = _metrics_from_returns(returns, tp_count, sl_count, time_count, costs, holding=30, rows=rows)
     mfe = [safe_float(row.get("max_favorable_pct")) for row in rows]
     mae = [safe_float(row.get("max_adverse_pct")) for row in rows]
     metrics.update(
@@ -278,30 +279,62 @@ def _current_metrics(rows: list[dict[str, Any]], costs: Any) -> dict[str, Any]:
     return metrics
 
 
-def _metrics_from_returns(returns: list[float], tp_count: int, sl_count: int, time_count: int, costs: Any, *, holding: int) -> dict[str, Any]:
+def _metrics_from_returns(returns: list[float], tp_count: int, sl_count: int, time_count: int, costs: Any, *, holding: int, rows: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     samples = len(returns)
     gross_gains = sum(value for value in returns if value > 0)
     gross_losses = abs(sum(value for value in returns if value < 0))
-    fee_pct = (2.0 * safe_float(costs.taker_fee_bps)) / 100.0
-    slippage_pct = (2.0 * safe_float(costs.slippage_bps)) / 100.0
-    funding_pct = max(0.0, (safe_float(holding) * 5.0 / 480.0) * safe_float(costs.funding_bps_per_8h) / 100.0)
-    total_cost = fee_pct + slippage_pct + funding_pct
-    net_returns = [value - total_cost for value in returns]
-    net_gains = sum(value for value in net_returns if value > 0)
-    net_losses = abs(sum(value for value in net_returns if value < 0))
+    source_rows = rows or [{} for _ in returns]
+    if source_rows and all(str(row.get("source") or "").lower() == "market_probe" for row in source_rows):
+        return {
+            "samples": samples,
+            "gross_PF": gross_gains / gross_losses if gross_losses > 0 else 999.0 if gross_gains > 0 else 0.0,
+            "net_PF": gross_gains / gross_losses if gross_losses > 0 else 999.0 if gross_gains > 0 else 0.0,
+            "gross_EV": sum(returns) / max(samples, 1),
+            "net_EV": sum(returns) / max(samples, 1),
+            "tp_ratio": tp_count / max(samples, 1),
+            "sl_ratio": sl_count / max(samples, 1),
+            "time_ratio": time_count / max(samples, 1),
+            "drawdown_proxy": abs(min(returns)) if returns else 0.0,
+            "estimated_fee_cost": 0.0,
+            "estimated_slippage_cost": 0.0,
+            "estimated_funding_cost": 0.0,
+            "funding_model_status": "NOT_APPLIED_RESEARCH_PROBE",
+            "cost_application_explanation": "market_probe is research-only; no actionable costs applied",
+        }
+    breakdowns = [
+        explain_cost_breakdown(
+            source=str(row.get("source") or "trade_signal"),
+            side=str(row.get("side") or ""),
+            entry_type="taker",
+            exit_type="taker",
+            slippage_bps=costs.slippage_bps,
+            entry_time=row.get("created_at") or row.get("timestamp"),
+            holding_bars=holding,
+            funding_rate=row.get("funding_rate") if safe_float(row.get("funding_rate")) else None,
+            outcome=str(row.get("first_barrier_hit") or ""),
+        )
+        for row in source_rows
+    ]
+    net = calculate_net_metrics_for_returns(returns, breakdowns)
+    avg_fee = sum(item.fee_component_bps for item in breakdowns) / max(len(breakdowns), 1) / 100.0
+    avg_slip = sum(item.slippage_component_bps for item in breakdowns) / max(len(breakdowns), 1) / 100.0
+    avg_funding = sum(item.funding_component_bps for item in breakdowns) / max(len(breakdowns), 1) / 100.0
+    net_returns = [safe_float(value) - safe_float(breakdowns[index].total_cost_bps) / 100.0 for index, value in enumerate(returns)]
     return {
         "samples": samples,
         "gross_PF": gross_gains / gross_losses if gross_losses > 0 else 999.0 if gross_gains > 0 else 0.0,
-        "net_PF": net_gains / net_losses if net_losses > 0 else 999.0 if net_gains > 0 else 0.0,
+        "net_PF": net["net_PF"],
         "gross_EV": sum(returns) / max(samples, 1),
-        "net_EV": sum(net_returns) / max(samples, 1),
+        "net_EV": net["net_EV"],
         "tp_ratio": tp_count / max(samples, 1),
         "sl_ratio": sl_count / max(samples, 1),
         "time_ratio": time_count / max(samples, 1),
         "drawdown_proxy": abs(min(net_returns)) if net_returns else 0.0,
-        "estimated_fee_cost": fee_pct,
-        "estimated_slippage_cost": slippage_pct,
-        "estimated_funding_cost": funding_pct,
+        "estimated_fee_cost": avg_fee,
+        "estimated_slippage_cost": avg_slip,
+        "estimated_funding_cost": avg_funding,
+        "funding_model_status": _dominant_text([item.funding_model_status for item in breakdowns]),
+        "cost_application_explanation": _dominant_text([item.cost_application_explanation for item in breakdowns]),
     }
 
 
@@ -341,6 +374,16 @@ def _diagnosis(current: dict[str, Any], source_rows: list[dict[str, Any]]) -> li
         notes.append("sin evidencia suficiente para cambiar exits")
     notes.append("Research only. No exits applied.")
     return notes
+
+
+def _dominant_text(values: list[str]) -> str:
+    if not values:
+        return "unknown"
+    counts: dict[str, int] = {}
+    for value in values:
+        text = str(value)
+        counts[text] = counts.get(text, 0) + 1
+    return sorted(counts.items(), key=lambda item: item[1], reverse=True)[0][0]
 
 
 def _recommended_shadow_tests(rows: list[dict[str, Any]], diagnosis: list[str]) -> list[str]:
@@ -454,4 +497,3 @@ def _bullet_lines(rows: list[str]) -> list[str]:
     if not rows:
         return ["- none"]
     return [row if str(row).startswith("-") else f"- {row}" for row in rows]
-

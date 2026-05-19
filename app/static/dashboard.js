@@ -18,6 +18,7 @@
     { name: "Score Calibration", url: "/api/training/score-calibration?hours=24", target: "scoreIncubatorOutput", handler: handleScoreCalibration },
     { name: "Candidate Incubator", url: "/api/training/candidate-incubator?hours=24", target: "scoreIncubatorOutput", append: true, handler: handleCandidateIncubator },
     { name: "Training Data Integrity", url: "/api/training/training-data-integrity?hours=24", target: "scoreIncubatorOutput", append: true },
+    { name: "Core Corrections", url: "/api/training/core-corrections?hours=24", target: "pipelineCostOutput", handler: handleCoreCorrections },
     { name: "Data Pipeline Diagnosis", url: "/api/training/data-pipeline-diagnosis?hours=24", target: "pipelineCostOutput", handler: handleDataPipelineDiagnosis },
     { name: "Label Quality V2", url: "/api/training/label-quality-v2?hours=24", target: "pipelineCostOutput", append: true, handler: handleLabelQualityV2 },
     { name: "Bitget Cost Model", url: "/api/training/bitget-cost-model-audit?hours=24", target: "pipelineCostOutput", append: true, handler: handleBitgetCostModel },
@@ -508,8 +509,22 @@
         <td>${escapeHtml(pct(row.SL))}</td>
         <td>${escapeHtml(pct(row.TIME))}</td>
         <td>${escapeHtml(fmt(row.net_EV_est, 4))}</td>
-        <td>${escapeHtml(row.candidate_status || "WATCH_ONLY")}</td>
+        <td>${escapeHtml(`${row.candidate_status || "WATCH_ONLY"} ${row.candidate_category || ""}`)}</td>
       </tr>`).join(""));
+  }
+
+  function handleCoreCorrections(payload, text) {
+    const funding = safeText(payload.funding_model_status || (text.match(/funding_model_status:\s*(\S+)/i) || [])[1], "UNKNOWN");
+    const doubleCounting = safeText(payload.double_counting_risk || (text.match(/double_counting_risk:\s*(\S+)/i) || [])[1], "UNKNOWN");
+    const labelGuard = safeText(payload.labeler_guard_status || (text.match(/labeler_guard_status:\s*(\S+)/i) || [])[1], "UNKNOWN");
+    const duplicateGuard = safeText(payload.duplicate_guard_status || (text.match(/duplicate_guard_status:\s*(\S+)/i) || [])[1], "UNKNOWN");
+    const actionability = safeText(payload.candidate_actionability_logic || (text.match(/candidate_actionability_logic:\s*(.+)/i) || [])[1], "market_probe_not_actionable");
+    setText("coreCorrectionsState", payload.cost_model_fixed === true || /cost_model_fixed:\s*true/i.test(text) ? "FIXED_READ_ONLY" : "CHECK");
+    setText("coreCorrectionsText", `double_counting=${doubleCounting}; no live/no writes.`);
+    setText("fundingModelState", funding);
+    setText("labelerGuardState", labelGuard);
+    setText("duplicateGuardState", duplicateGuard);
+    setText("candidateActionabilityState", actionability);
   }
 
   function handleDataPipelineDiagnosis(payload, text) {
@@ -738,6 +753,7 @@
       ["scoreCalibrationBtn", "/api/training/score-calibration?hours=24", "scoreIncubatorOutput", handleScoreCalibration],
       ["candidateIncubatorBtn", "/api/training/candidate-incubator?hours=24", "scoreIncubatorOutput", handleCandidateIncubator, true],
       ["trainingDataIntegrityBtn", "/api/training/training-data-integrity?hours=24", "scoreIncubatorOutput", null, true],
+      ["coreCorrectionsBtn", "/api/training/core-corrections?hours=24", "pipelineCostOutput", handleCoreCorrections],
       ["dataPipelineDiagnosisBtn", "/api/training/data-pipeline-diagnosis?hours=24", "pipelineCostOutput", handleDataPipelineDiagnosis],
       ["relationRepairAuditBtn", "/api/training/relation-repair-audit?hours=24", "pipelineCostOutput", handleRelationRepair, true],
       ["labelQualityV2Btn", "/api/training/label-quality-v2?hours=24", "pipelineCostOutput", handleLabelQualityV2, true],

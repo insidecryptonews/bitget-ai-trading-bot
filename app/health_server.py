@@ -87,6 +87,7 @@ def start_health_server(
                 "/api/training/bitget-cost-model-audit",
                 "/api/training/cost-model-inventory",
                 "/api/training/margin-mode-audit",
+                "/api/training/core-corrections",
                 "/api/training/shadow-experiments",
                 "/api/training/evolution-score",
                 "/api/training/mfe-mae-diagnostic",
@@ -210,6 +211,9 @@ def start_health_server(
                 return
             if path == "/api/training/margin-mode-audit":
                 self._send_json(_margin_mode_audit(config, db, query))
+                return
+            if path == "/api/training/core-corrections":
+                self._send_json(_core_corrections(config, db, query))
                 return
             if path == "/api/training/shadow-experiments":
                 self._send_json(_shadow_experiments(config, db, query))
@@ -721,6 +725,10 @@ def _cost_model_inventory(config: Any | None, db: Any | None, query: dict[str, l
 
 def _margin_mode_audit(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
     return _lab_payload(config, db, query, "margin mode audit unavailable", ".margin_mode_audit", "MarginModeAudit")
+
+
+def _core_corrections(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
+    return _lab_payload(config, db, query, "core corrections unavailable", ".core_corrections", "CoreCorrections")
 
 
 def _shadow_experiments(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:

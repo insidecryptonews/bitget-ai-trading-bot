@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 from statistics import median
 from typing import Any, Iterable
 
+from .cost_model import calculate_net_metrics_for_returns, explain_cost_breakdown
 from .edge_hardening_utils import cost_config
 from .utils import safe_float, safe_int
 
@@ -185,6 +186,7 @@ def _normalize_row(row: dict[str, Any], path: dict[str, Any]) -> dict[str, Any]:
         "bars": safe_float(row.get("bars_to_outcome") if row.get("bars_to_outcome") is not None else path.get("bars_tracked")),
         "funding_rate": safe_float(row.get("funding_rate")),
         "spread_pct": safe_float(row.get("spread_pct")),
+        "already_includes_costs": bool(row.get("already_includes_costs") or path.get("already_includes_costs")),
     }
 
 
@@ -239,12 +241,26 @@ def _metrics(rows: list[dict[str, Any]], costs: Any, *, group_key: str = "", gro
     bars = [safe_float(row.get("bars")) for row in rows]
     gross_gains = sum(value for value in returns if value > 0)
     gross_losses = abs(sum(value for value in returns if value < 0))
-    avg_bars = sum(bars) / max(len(bars), 1)
-    total_cost = _cost_pct(costs, avg_bars)
-    net_returns = [value - total_cost for value in returns]
-    net_gains = sum(value for value in net_returns if value > 0)
-    net_losses = abs(sum(value for value in net_returns if value < 0))
-    net_ev = sum(net_returns) / max(samples, 1)
+    breakdowns = [
+        explain_cost_breakdown(
+            source=str(row.get("source") or "trade_signal"),
+            side=str(row.get("side") or ""),
+            entry_type="taker",
+            exit_type="taker",
+            slippage_bps=costs.slippage_bps,
+            entry_time=row.get("timestamp"),
+            holding_bars=row.get("bars"),
+            funding_rate=row.get("funding_rate") if safe_float(row.get("funding_rate")) else None,
+            outcome=str(row.get("first_barrier_hit") or ""),
+            already_includes_costs=bool(row.get("already_includes_costs")),
+        )
+        for row in rows
+    ]
+    net = calculate_net_metrics_for_returns(returns, breakdowns)
+    avg_total_cost = sum(item.total_cost_bps for item in breakdowns) / max(len(breakdowns), 1) / 100.0
+    avg_fee = sum(item.fee_component_bps for item in breakdowns) / max(len(breakdowns), 1)
+    avg_slip = sum(item.slippage_component_bps for item in breakdowns) / max(len(breakdowns), 1)
+    avg_funding = sum(item.funding_component_bps for item in breakdowns) / max(len(breakdowns), 1)
     row = {
         "group_key": group_key,
         "group_value": group_value,
@@ -257,9 +273,16 @@ def _metrics(rows: list[dict[str, Any]], costs: Any, *, group_key: str = "", gro
         "time_ratio": hits["TIME"] / max(samples, 1),
         "gross_PF": gross_gains / gross_losses if gross_losses > 0 else 999.0 if gross_gains > 0 else 0.0,
         "gross_expectancy": sum(returns) / max(samples, 1),
-        "estimated_fee_slippage_funding": total_cost,
-        "net_EV_est": net_ev,
-        "net_PF_est": net_gains / net_losses if net_losses > 0 else 999.0 if net_gains > 0 else 0.0,
+        "estimated_fee_slippage_funding": avg_total_cost,
+        "fee_component_bps": avg_fee,
+        "slippage_component_bps": avg_slip,
+        "funding_component_bps": avg_funding,
+        "total_cost_bps": sum(item.total_cost_bps for item in breakdowns) / max(len(breakdowns), 1),
+        "funding_model_status": _dominant_text([item.funding_model_status for item in breakdowns]),
+        "cost_application_explanation": _dominant_text([item.cost_application_explanation for item in breakdowns]),
+        "actionability": _dominant_text([item.actionability for item in breakdowns]),
+        "net_EV_est": net["net_EV"],
+        "net_PF_est": net["net_PF"],
         "avg_MFE": sum(mfes) / max(len(mfes), 1),
         "avg_MAE": sum(maes) / max(len(maes), 1),
         "median_MFE": median(mfes) if mfes else 0.0,
@@ -405,10 +428,14 @@ def _hit_class(hit: Any) -> str:
 
 
 def _cost_pct(costs: Any, avg_bars: float) -> float:
-    fee_pct = (2.0 * safe_float(costs.taker_fee_bps)) / 100.0
-    slippage_pct = (2.0 * safe_float(costs.slippage_bps)) / 100.0
-    funding_pct = max(0.0, ((avg_bars * 5.0) / 480.0) * safe_float(costs.funding_bps_per_8h) / 100.0)
-    return fee_pct + slippage_pct + funding_pct
+    breakdown = explain_cost_breakdown(slippage_bps=safe_float(costs.slippage_bps), holding_bars=avg_bars)
+    return breakdown.total_cost_bps / 100.0
+
+
+def _dominant_text(values: list[str]) -> str:
+    if not values:
+        return "unknown"
+    return Counter(values).most_common(1)[0][0]
 
 
 def _confidence(samples: int) -> str:

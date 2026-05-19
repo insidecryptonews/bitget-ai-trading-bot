@@ -275,7 +275,19 @@
             </div>
             <p>Audita duplicados, relaciones, labels, costes Bitget USDT-M y margin mode. No escribe DB ni toca ejecucion.</p>
           </div>
+          <div class="section-title compact">
+            <div>
+              <span class="eyebrow">Fase 5 Final</span>
+              <h3>Core Corrections / Fase 5 Final</h3>
+            </div>
+            <p>Correcciones research-only: funding por timestamp, costes separados, guards futuros y actionability sin market_probe.</p>
+          </div>
           <div class="decision-grid">
+            <article class="decision-card info">
+              <span class="panel-label">Core corrections</span>
+              <strong id="coreCorrectionsState">not loaded</strong>
+              <p id="coreCorrectionsText">Funding, labels, duplicados y candidatos quedan en modo read-only/shadow.</p>
+            </article>
             <article class="decision-card warning">
               <span class="panel-label">Pipeline</span>
               <strong id="pipelineStatusState">not loaded</strong>
@@ -285,6 +297,21 @@
               <span class="panel-label">Cost model</span>
               <strong id="costModelState">not loaded</strong>
               <p id="costModelProblemText">USDT-M VIP0: maker 0.02%, taker 0.06%. Funding no es coste fijo.</p>
+            </article>
+            <article class="decision-card info">
+              <span class="panel-label">Funding model</span>
+              <strong id="fundingModelState">not loaded</strong>
+              <p>Solo aplica si cruza 00:00/08:00/16:00 UTC y puede ser coste o ingreso.</p>
+            </article>
+            <article class="decision-card info">
+              <span class="panel-label">Guards</span>
+              <strong id="labelerGuardState">not loaded</strong>
+              <p id="duplicateGuardState">Duplicate guard pendiente.</p>
+            </article>
+            <article class="decision-card warning">
+              <span class="panel-label">Candidate actionability</span>
+              <strong id="candidateActionabilityState">not loaded</strong>
+              <p>market_probe nunca es accionable; micro-pockets pasan a research/need-more-data.</p>
             </article>
             <article class="decision-card info">
               <span class="panel-label">Margin mode</span>
@@ -316,6 +343,7 @@
             </article>
           </div>
           <div class="lab-actions">
+            <button id="coreCorrectionsBtn" class="btn btn-secondary">Core corrections</button>
             <button id="dataPipelineDiagnosisBtn" class="btn btn-secondary">Data pipeline diagnosis 24h</button>
             <button id="relationRepairAuditBtn" class="btn btn-secondary">Relation repair audit 24h</button>
             <button id="labelQualityV2Btn" class="btn btn-secondary">Label quality V2 24h</button>

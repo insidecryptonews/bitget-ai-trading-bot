@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from .cost_model import explain_cost_breakdown
 from .edge_hardening_utils import FINAL_NO_LIVE, cost_config
 from .exit_policy_backtest import ExitPolicyBacktest
 from .utils import safe_float, safe_int
@@ -24,8 +25,10 @@ class AdaptiveExitBacktest:
         variants = []
         for row in base.get("variants", []):
             item = dict(row)
-            total_cost_pct = (2 * costs.taker_fee_bps + 2 * costs.slippage_bps + costs.funding_bps_per_8h) / 100.0
+            breakdown = explain_cost_breakdown(slippage_bps=costs.slippage_bps, outcome=str(item.get("outcome") or ""))
+            total_cost_pct = breakdown.total_cost_bps / 100.0
             item["estimated_total_cost"] = total_cost_pct
+            item["funding_model_status"] = breakdown.funding_model_status
             item["net_expectancy"] = safe_float(item.get("expectancy")) - total_cost_pct
             gross_pf = safe_float(item.get("profit_factor"))
             item["net_pf_proxy"] = max(0.0, gross_pf - total_cost_pct)

@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from .cost_model import explain_cost_breakdown
 from .utils import safe_float, safe_int
 
 
@@ -97,6 +98,8 @@ def fetch_group_metrics(
             SUM(CASE WHEN sl.first_barrier_hit = 'TP2' THEN 1 ELSE 0 END) AS tp2_count,
             AVG(COALESCE(sl.realized_return_pct, 0)) AS gross_expectancy,
             AVG(COALESCE(sl.bars_to_outcome, 0)) AS avg_bars_to_outcome,
+            AVG(COALESCE(so.funding_rate, 0)) AS avg_funding_rate,
+            AVG(COALESCE(so.spread_pct, 0)) AS avg_spread_pct,
             MIN(COALESCE(sl.realized_return_pct, 0)) AS worst_return,
             SUM(CASE WHEN COALESCE(sl.realized_return_pct, 0) > 0 THEN COALESCE(sl.realized_return_pct, 0) ELSE 0 END) AS gross_gains,
             SUM(CASE WHEN COALESCE(sl.realized_return_pct, 0) < 0 THEN COALESCE(sl.realized_return_pct, 0) ELSE 0 END) AS gross_losses
@@ -153,11 +156,20 @@ def apply_net_costs(row: dict[str, Any], costs: NetCostConfig) -> dict[str, Any]
     out = dict(row)
     samples = max(1, safe_int(out.get("samples")))
     avg_bars = max(0.0, safe_float(out.get("avg_bars_to_outcome")))
-    hold_8h = (avg_bars * 5.0) / 480.0
-    fee_pct = (2.0 * costs.taker_fee_bps) / 100.0
-    slippage_pct = (2.0 * costs.slippage_bps) / 100.0
-    funding_pct = max(0.0, hold_8h * costs.funding_bps_per_8h / 100.0)
-    total_cost_pct = fee_pct + slippage_pct + funding_pct
+    breakdown = explain_cost_breakdown(
+        source=str(out.get("source") or "trade_signal"),
+        side=str(out.get("side") or ""),
+        entry_type="taker",
+        exit_type="taker",
+        slippage_bps=costs.slippage_bps,
+        holding_bars=avg_bars,
+        funding_rate=out.get("avg_funding_rate") if safe_float(out.get("avg_funding_rate")) else None,
+        outcome=str(out.get("first_barrier_hit") or ""),
+    )
+    fee_pct = breakdown.fee_component_bps / 100.0
+    slippage_pct = breakdown.slippage_component_bps / 100.0
+    funding_pct = breakdown.funding_component_bps / 100.0
+    total_cost_pct = breakdown.total_cost_bps / 100.0
     gross_gains = safe_float(out.get("gross_gains") if "gross_gains" in out else out.get("gains"))
     gross_losses = abs(safe_float(out.get("gross_losses") if "gross_losses" in out else out.get("losses")))
     net_gains = max(0.0, gross_gains - total_cost_pct * samples)
@@ -173,6 +185,15 @@ def apply_net_costs(row: dict[str, Any], costs: NetCostConfig) -> dict[str, Any]
     out["gross_EV"] = out["gross_expectancy"]
     out["net_EV"] = out["net_expectancy"]
     out["net_edge_after_costs"] = out["net_EV"]
+    out["fee_component_bps"] = breakdown.fee_component_bps
+    out["slippage_component_bps"] = breakdown.slippage_component_bps
+    out["funding_component_bps"] = breakdown.funding_component_bps
+    out["total_cost_bps"] = breakdown.total_cost_bps
+    out["funding_model_status"] = breakdown.funding_model_status
+    out["cost_trace_id"] = breakdown.cost_trace_id
+    out["cost_application_explanation"] = breakdown.cost_application_explanation
+    out["double_counting_risk"] = breakdown.double_counting_risk
+    out["actionability"] = breakdown.actionability
     out["confidence_class"] = confidence_class(samples)
     out["final_decision"] = net_decision(out, costs)
     return out

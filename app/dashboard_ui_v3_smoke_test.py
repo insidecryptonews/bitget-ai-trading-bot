@@ -98,6 +98,7 @@ class DashboardUiV3SmokeTest:
             "contains_reports_exports_separate": 'id="reports"' in html and "Reports & Exports" in html,
             "contains_score_incubator": 'id="score-incubator"' in html and "Score & Incubator" in html,
             "contains_pipeline_cost_diagnostics": 'id="pipeline-cost"' in html and "Data Pipeline & Cost Diagnostics" in html,
+            "contains_core_corrections": "Core Corrections / Fase 5 Final" in html and "coreCorrectionsBtn" in html and "core-corrections" in js,
             "contains_bitget_cost_model": "Bitget Fees" in html or "Bitget fees" in html,
             "contains_training_integrity_audit": "trainingDataIntegrityBtn" in html and "training-data-integrity" in js,
             "contains_data_pipeline_diagnosis": "dataPipelineDiagnosisBtn" in html and "data-pipeline-diagnosis" in js,

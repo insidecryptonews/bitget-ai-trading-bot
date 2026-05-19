@@ -693,6 +693,41 @@ class ResearchLab:
 
         return MarginModeAuditSmokeTest(self.config, self.db, self.logger).to_text()
 
+    def core_corrections(self, hours: int = 24) -> str:
+        from .core_corrections import CoreCorrections
+
+        return CoreCorrections(self.config, self.db).to_text(hours=hours)
+
+    def core_corrections_smoke_test(self) -> str:
+        from .core_corrections import core_corrections_smoke_text
+
+        return core_corrections_smoke_text(self.config, self.db)
+
+    def cost_model_correction_smoke_test(self) -> str:
+        from .core_corrections import cost_model_correction_smoke_text
+
+        return cost_model_correction_smoke_text()
+
+    def funding_model_smoke_test(self) -> str:
+        from .core_corrections import funding_model_smoke_text
+
+        return funding_model_smoke_text()
+
+    def labeler_guard_smoke_test(self) -> str:
+        from .data_guards import labeler_guard_smoke_text
+
+        return labeler_guard_smoke_text()
+
+    def duplicate_guard_smoke_test(self) -> str:
+        from .data_guards import duplicate_guard_smoke_text
+
+        return duplicate_guard_smoke_text()
+
+    def candidate_actionability_smoke_test(self) -> str:
+        from .candidate_incubator_smoke_test import candidate_incubator_smoke_text
+
+        return candidate_incubator_smoke_text(self.config)
+
     def decision_ledger_audit(self, hours: int = 24) -> str:
         from .decision_ledger_audit import DecisionLedgerAudit
 
@@ -1483,6 +1518,13 @@ def main() -> None:
             "bitget-cost-model-smoke-test",
             "margin-mode-audit",
             "margin-mode-audit-smoke-test",
+            "core-corrections",
+            "core-corrections-smoke-test",
+            "cost-model-correction-smoke-test",
+            "funding-model-smoke-test",
+            "labeler-guard-smoke-test",
+            "duplicate-guard-smoke-test",
+            "candidate-actionability-smoke-test",
             "shadow-experiments",
             "evolution-score",
             "mfe-mae-diagnostic",
@@ -1693,6 +1735,20 @@ def main() -> None:
         print(lab.margin_mode_audit())
     elif args.command == "margin-mode-audit-smoke-test":
         print(lab.margin_mode_audit_smoke_test())
+    elif args.command == "core-corrections":
+        print(lab.core_corrections(hours=args.hours))
+    elif args.command == "core-corrections-smoke-test":
+        print(lab.core_corrections_smoke_test())
+    elif args.command == "cost-model-correction-smoke-test":
+        print(lab.cost_model_correction_smoke_test())
+    elif args.command == "funding-model-smoke-test":
+        print(lab.funding_model_smoke_test())
+    elif args.command == "labeler-guard-smoke-test":
+        print(lab.labeler_guard_smoke_test())
+    elif args.command == "duplicate-guard-smoke-test":
+        print(lab.duplicate_guard_smoke_test())
+    elif args.command == "candidate-actionability-smoke-test":
+        print(lab.candidate_actionability_smoke_test())
     elif args.command == "shadow-experiments":
         print(lab.shadow_experiments(hours=args.hours))
     elif args.command == "evolution-score":
