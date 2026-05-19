@@ -6,8 +6,21 @@ from app.signal_engine import Signal
 
 
 class DummyDB:
+    def __init__(self):
+        self.intents = []
+
     def record_trade(self, **kwargs):
         return 1
+
+    def fetch_pending_execution_intents(self):
+        return []
+
+    def record_execution_intent(self, **kwargs):
+        self.intents.append(("record", kwargs))
+        return len(self.intents)
+
+    def update_execution_intent(self, *args, **kwargs):
+        self.intents.append(("update", args, kwargs))
 
 
 class DummyTelegram:
@@ -18,6 +31,11 @@ class DummyTelegram:
         pass
 
     def send(self, message):
+        pass
+
+
+class LiveTelegram(DummyTelegram):
+    def trade_opened(self, signal):
         pass
 
 
@@ -40,6 +58,7 @@ class DummyClient:
         self.orders = []
         self.closes = []
         self.ensure_ok = True
+        self.stop_failures = 0
 
     def place_order(self, **kwargs):
         self.orders.append(kwargs)
@@ -54,6 +73,12 @@ class DummyClient:
     def close_position_market(self, symbol, side, size, client_oid):
         self.closes.append({"symbol": symbol, "side": side, "size": size, "client_oid": client_oid})
         return {"orderId": "close"}
+
+    def place_tpsl_order(self, **kwargs):
+        if kwargs.get("plan_type") == "loss_plan" and self.stop_failures > 0:
+            self.stop_failures -= 1
+            raise RuntimeError("stop failed")
+        return {"orderId": kwargs.get("plan_type")}
 
 
 def signal():
@@ -146,3 +171,50 @@ def test_execution_engine_stop_failure_closes_with_original_position_side():
     result = engine.execute(sig, risk, rules())
     assert not result.executed
     assert client.closes == [{"symbol": "BTCUSDT", "side": "LONG", "size": "0.1", "client_oid": client.closes[0]["client_oid"]}]
+
+
+def test_execution_engine_records_pending_and_confirmed_intent_in_live_path():
+    cfg = BotConfig(
+        paper_trading=False,
+        live_trading=True,
+        dry_run=False,
+        bitget_api_key="key",
+        bitget_api_secret="secret",
+        bitget_passphrase="pass",
+    )
+    client = DummyClient()
+    db = DummyDB()
+    engine = ExecutionEngine(cfg, client, db, LiveTelegram(), DummyLogger())
+    sig = signal()
+    risk = RiskDecision(True, "ok", signal=sig, selected_margin_usdt=12, notional=36)
+
+    result = engine.execute(sig, risk, rules())
+
+    assert result.executed
+    assert db.intents[0][0] == "record"
+    assert any(item[0] == "update" and item[2]["status"] == "CONFIRMED" for item in db.intents)
+
+
+def test_execution_engine_blocks_live_when_pending_intent_exists():
+    class PendingDb(DummyDB):
+        def fetch_pending_execution_intents(self):
+            return [{"client_oid": "old", "status": "PENDING_EXECUTION"}]
+
+    cfg = BotConfig(
+        paper_trading=False,
+        live_trading=True,
+        dry_run=False,
+        bitget_api_key="key",
+        bitget_api_secret="secret",
+        bitget_passphrase="pass",
+    )
+    client = DummyClient()
+    engine = ExecutionEngine(cfg, client, PendingDb(), DummyTelegram(), DummyLogger())
+    sig = signal()
+    risk = RiskDecision(True, "ok", signal=sig, selected_margin_usdt=12, notional=36)
+
+    result = engine.execute(sig, risk, rules())
+
+    assert not result.executed
+    assert "PENDING_EXECUTION" in result.reason
+    assert client.orders == []

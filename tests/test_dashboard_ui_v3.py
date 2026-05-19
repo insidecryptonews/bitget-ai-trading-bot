@@ -52,6 +52,11 @@ def test_dashboard_ui_v3_structure_is_real_app_shell():
     assert "marginModeAuditBtn" in html
     assert "coreCorrectionsBtn" in html
     assert "handleCoreCorrections" in js
+    assert "Execution Safety / Pre-Live Hardening" in html
+    assert "executionSafetyAuditBtn" in html
+    assert "netRrAuditBtn" in html
+    assert "handleExecutionSafety" in js
+    assert "handleNetRrAudit" in js
     assert "workerHealthAuditBtn" in html
     assert "dashboardDataBindingAuditBtn" in html
 
@@ -131,6 +136,7 @@ def test_dashboard_main_refresh_does_not_call_backup_restore_or_live():
     assert "label-quality-v2" in main_steps
     assert "bitget-cost-model-audit" in main_steps
     assert "margin-mode-audit" in main_steps
+    assert "execution-safety-audit" in main_steps
     assert "worker-health-audit" in main_steps
 
 

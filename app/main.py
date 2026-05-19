@@ -13,6 +13,7 @@ from .database import Database
 from .daily_summary import DailyResearchSummary
 from .edge_guard import EdgeGuard
 from .execution_engine import ExecutionEngine
+from .execution_safety import build_effective_balance_for_risk, reconcile_pending_executions
 from .feature_logger import FeatureLogger
 from .full_research_report import END_MARKER, START_MARKER, FullResearchReporter
 from .health_server import HealthState, start_health_server
@@ -56,6 +57,9 @@ def main() -> None:
     logger = setup_logger()
     db = Database(config, logger)
     db.initialize()
+    pending_execution_state = reconcile_pending_executions(db, mode=config.mode)
+    if pending_execution_state.get("pending_count", 0):
+        logger.warning("Pending executions require review before new live execution: %s", pending_execution_state)
     training_pulse = TrainingPulse() if config.enable_training_pulse else None
     telegram_notifier = TelegramNotifier(config, logger)
     telegram = TelegramAlerts(config, logger)
@@ -496,15 +500,23 @@ def main() -> None:
                                 block_reason="live_balance_refresh_failed",
                             )
                         continue
-                effective_balance = balance * 0.5 if news.reduce_risk else balance
+                balance_state = build_effective_balance_for_risk(
+                    balance=balance,
+                    available_balance=available_balance,
+                    used_margin=used_margin,
+                    reduce_risk=news.reduce_risk,
+                    source="fresh_live_balance" if config.can_send_real_orders else "paper_or_dry",
+                )
                 risk = risk_manager.validate_signal(
                     selected_signal,
-                    balance=effective_balance,
-                    available_balance=available_balance,
+                    balance=balance_state.balance,
+                    available_balance=balance_state.available_balance,
                     open_positions=open_positions,
                     daily_pnl=daily_pnl,
                     weekly_pnl=weekly_pnl,
                     rules=rules,
+                    balance_source=balance_state.source,
+                    balance_timestamp=balance_state.balance_timestamp,
                 )
                 if not risk.approved:
                     logger.info("RiskManager bloquea %s: %s", selected_signal.symbol, risk.reason)

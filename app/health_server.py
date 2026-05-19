@@ -88,6 +88,10 @@ def start_health_server(
                 "/api/training/cost-model-inventory",
                 "/api/training/margin-mode-audit",
                 "/api/training/core-corrections",
+                "/api/training/execution-safety-audit",
+                "/api/training/net-rr-audit",
+                "/api/training/dynamic-exit-policy-audit",
+                "/api/training/structural-stop-audit",
                 "/api/training/shadow-experiments",
                 "/api/training/evolution-score",
                 "/api/training/mfe-mae-diagnostic",
@@ -214,6 +218,18 @@ def start_health_server(
                 return
             if path == "/api/training/core-corrections":
                 self._send_json(_core_corrections(config, db, query))
+                return
+            if path == "/api/training/execution-safety-audit":
+                self._send_json(_execution_safety_audit(config, db, query))
+                return
+            if path == "/api/training/net-rr-audit":
+                self._send_json(_net_rr_audit(config, db, query))
+                return
+            if path == "/api/training/dynamic-exit-policy-audit":
+                self._send_json(_dynamic_exit_policy_audit(config, db, query))
+                return
+            if path == "/api/training/structural-stop-audit":
+                self._send_json(_structural_stop_audit(config, db, query))
                 return
             if path == "/api/training/shadow-experiments":
                 self._send_json(_shadow_experiments(config, db, query))
@@ -729,6 +745,40 @@ def _margin_mode_audit(config: Any | None, db: Any | None, query: dict[str, list
 
 def _core_corrections(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
     return _lab_payload(config, db, query, "core corrections unavailable", ".core_corrections", "CoreCorrections")
+
+
+def _execution_safety_audit(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
+    del query
+    if config is None:
+        return {"error": "execution safety audit unavailable", "final_recommendation": "NO LIVE"}
+    try:
+        from .execution_safety import ExecutionSafetyAudit
+
+        text = ExecutionSafetyAudit(config, db).to_text()
+    except Exception as exc:
+        return {"error": str(exc)[:300], "final_recommendation": "NO LIVE"}
+    return _text_payload("execution_safety_audit", text)
+
+
+def _net_rr_audit(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
+    del config, db
+    from .execution_safety import net_rr_audit_text
+
+    return _text_payload("net_rr_audit", net_rr_audit_text(hours=_query_int(query, "hours", 24)))
+
+
+def _dynamic_exit_policy_audit(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
+    del config, db
+    from .execution_safety import dynamic_exit_policy_audit_text
+
+    return _text_payload("dynamic_exit_policy_audit", dynamic_exit_policy_audit_text(hours=_query_int(query, "hours", 24)))
+
+
+def _structural_stop_audit(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
+    del config, db
+    from .execution_safety import structural_stop_audit_text
+
+    return _text_payload("structural_stop_audit", structural_stop_audit_text(hours=_query_int(query, "hours", 24)))
 
 
 def _shadow_experiments(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
@@ -1302,6 +1352,17 @@ def _lab_payload(
     }
     payload["final_recommendation"] = "NO LIVE"
     _cache_dashboard_lab(cache_key, payload, "ok", payload["cache"]["duration_ms"])
+    return payload
+
+
+def _text_payload(key: str, text: str) -> dict[str, Any]:
+    payload = {
+        "text": text,
+        "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "final_recommendation": "NO LIVE",
+    }
+    payload["cache"] = {"key": key, "created_at": payload["generated_at"], "duration_ms": 0, "status": "ok"}
+    _cache_dashboard_lab(key, payload, "ok", 0)
     return payload
 
 

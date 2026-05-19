@@ -728,6 +728,76 @@ class ResearchLab:
 
         return candidate_incubator_smoke_text(self.config)
 
+    def execution_safety_audit(self) -> str:
+        from .execution_safety import ExecutionSafetyAudit
+
+        return ExecutionSafetyAudit(self.config, self.db).to_text()
+
+    def net_rr_audit(self, hours: int = 24) -> str:
+        from .execution_safety import net_rr_audit_text
+
+        return net_rr_audit_text(hours=hours)
+
+    def dynamic_exit_policy_audit(self, hours: int = 24) -> str:
+        from .execution_safety import dynamic_exit_policy_audit_text
+
+        return dynamic_exit_policy_audit_text(hours=hours)
+
+    def structural_stop_audit(self, hours: int = 24) -> str:
+        from .execution_safety import structural_stop_audit_text
+
+        return structural_stop_audit_text(hours=hours)
+
+    def execution_safety_smoke_test(self) -> str:
+        from .execution_safety import execution_safety_smoke_text
+
+        return execution_safety_smoke_text(self.config)
+
+    def net_rr_smoke_test(self) -> str:
+        from .net_rr import net_rr_smoke_text
+
+        return net_rr_smoke_text()
+
+    def dynamic_exit_policy_smoke_test(self) -> str:
+        from .dynamic_exit_policy import dynamic_exit_policy_smoke_text
+
+        return dynamic_exit_policy_smoke_text()
+
+    def structural_stop_smoke_test(self) -> str:
+        from .structural_stop import structural_stop_smoke_text
+
+        return structural_stop_smoke_text()
+
+    def fresh_balance_risk_smoke_test(self) -> str:
+        from .execution_safety import fresh_balance_risk_smoke_text
+
+        return fresh_balance_risk_smoke_text()
+
+    def execution_idempotency_smoke_test(self) -> str:
+        from .execution_safety import execution_idempotency_smoke_text
+
+        return execution_idempotency_smoke_text()
+
+    def emergency_failsafe_smoke_test(self) -> str:
+        from .execution_safety import emergency_failsafe_smoke_text
+
+        return emergency_failsafe_smoke_text()
+
+    def circuit_breaker_magnitude_smoke_test(self) -> str:
+        from .execution_safety import circuit_breaker_magnitude_smoke_text
+
+        return circuit_breaker_magnitude_smoke_text()
+
+    def clock_drift_smoke_test(self) -> str:
+        from .execution_safety import clock_drift_smoke_text
+
+        return clock_drift_smoke_text()
+
+    def config_hardening_smoke_test(self) -> str:
+        from .execution_safety import config_hardening_smoke_text
+
+        return config_hardening_smoke_text(self.config)
+
     def decision_ledger_audit(self, hours: int = 24) -> str:
         from .decision_ledger_audit import DecisionLedgerAudit
 
@@ -1525,6 +1595,20 @@ def main() -> None:
             "labeler-guard-smoke-test",
             "duplicate-guard-smoke-test",
             "candidate-actionability-smoke-test",
+            "execution-safety-audit",
+            "net-rr-audit",
+            "dynamic-exit-policy-audit",
+            "structural-stop-audit",
+            "execution-safety-smoke-test",
+            "net-rr-smoke-test",
+            "dynamic-exit-policy-smoke-test",
+            "structural-stop-smoke-test",
+            "fresh-balance-risk-smoke-test",
+            "execution-idempotency-smoke-test",
+            "emergency-failsafe-smoke-test",
+            "circuit-breaker-magnitude-smoke-test",
+            "clock-drift-smoke-test",
+            "config-hardening-smoke-test",
             "shadow-experiments",
             "evolution-score",
             "mfe-mae-diagnostic",
@@ -1749,6 +1833,34 @@ def main() -> None:
         print(lab.duplicate_guard_smoke_test())
     elif args.command == "candidate-actionability-smoke-test":
         print(lab.candidate_actionability_smoke_test())
+    elif args.command == "execution-safety-audit":
+        print(lab.execution_safety_audit())
+    elif args.command == "net-rr-audit":
+        print(lab.net_rr_audit(hours=args.hours))
+    elif args.command == "dynamic-exit-policy-audit":
+        print(lab.dynamic_exit_policy_audit(hours=args.hours))
+    elif args.command == "structural-stop-audit":
+        print(lab.structural_stop_audit(hours=args.hours))
+    elif args.command == "execution-safety-smoke-test":
+        print(lab.execution_safety_smoke_test())
+    elif args.command == "net-rr-smoke-test":
+        print(lab.net_rr_smoke_test())
+    elif args.command == "dynamic-exit-policy-smoke-test":
+        print(lab.dynamic_exit_policy_smoke_test())
+    elif args.command == "structural-stop-smoke-test":
+        print(lab.structural_stop_smoke_test())
+    elif args.command == "fresh-balance-risk-smoke-test":
+        print(lab.fresh_balance_risk_smoke_test())
+    elif args.command == "execution-idempotency-smoke-test":
+        print(lab.execution_idempotency_smoke_test())
+    elif args.command == "emergency-failsafe-smoke-test":
+        print(lab.emergency_failsafe_smoke_test())
+    elif args.command == "circuit-breaker-magnitude-smoke-test":
+        print(lab.circuit_breaker_magnitude_smoke_test())
+    elif args.command == "clock-drift-smoke-test":
+        print(lab.clock_drift_smoke_test())
+    elif args.command == "config-hardening-smoke-test":
+        print(lab.config_hardening_smoke_test())
     elif args.command == "shadow-experiments":
         print(lab.shadow_experiments(hours=args.hours))
     elif args.command == "evolution-score":

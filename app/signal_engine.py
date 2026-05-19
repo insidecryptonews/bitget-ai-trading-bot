@@ -3,10 +3,13 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from .config import BotConfig
+from .dynamic_exit_policy import propose_dynamic_tp_sl
 from .indicators import has_enough_data, latest_row, trend_bias
 from .market_data import MarketSnapshot
+from .net_rr import calculate_net_rr
 from .regime_detector import MarketRegime
 from .strategy_engine import StrategyEngine, StrategyType
+from .structural_stop import calculate_structural_stop
 from .utils import clamp, safe_float
 
 
@@ -32,6 +35,15 @@ class Signal:
     invalidation_level: float = 0.0
     estimated_fees: float = 0.0
     estimated_slippage: float = 0.0
+    gross_rr: float = 0.0
+    net_rr: float = 0.0
+    rr_cost_adjusted: bool = False
+    cost_breakdown: dict = field(default_factory=dict)
+    rr_warning: str = ""
+    minimum_winrate_required_from_net_rr: float = 0.0
+    stop_quality: str = ""
+    whipsaw_risk: float = 0.0
+    dynamic_exit_candidate: dict = field(default_factory=dict)
 
 
 class SignalEngine:
@@ -134,7 +146,26 @@ class SignalEngine:
             score += 15 if volume_rel > 1.8 else 10
             confirmations.append("volumen relativo alto")
 
-        stop_loss = self._calculate_stop(proposed_side, entry, atr, row5)
+        support = safe_float(row5.get("support_recent"))
+        resistance = safe_float(row5.get("resistance_recent"))
+        normalized_atr = safe_float(row5.get("normalized_atr"))
+        stop_result = calculate_structural_stop(
+            side=proposed_side,
+            entry=entry,
+            atr=atr,
+            support=support,
+            resistance=resistance,
+            regime=market_regime.regime,
+            volatility=normalized_atr,
+            config=self.config,
+        )
+        stop_loss = stop_result.stop_loss
+        if stop_result.stop_quality in {"TOO_TIGHT_REJECT", "TOO_WIDE_REJECT", "INVALID_INPUT"}:
+            return self.no_trade(symbol, f"No trade: stop estructural invalido ({stop_result.stop_quality})", warnings=[stop_result.reason])
+        if stop_result.stop_quality:
+            confirmations.append(f"stop_quality={stop_result.stop_quality}")
+        if stop_result.whipsaw_risk >= 0.8:
+            warnings.append("alto riesgo de whipsaw en stop")
         min_stop_distance = max(entry * self.config.min_stop_distance_pct, atr)
         if abs(entry - stop_loss) < min_stop_distance:
             stop_loss = entry - min_stop_distance if proposed_side == "LONG" else entry + min_stop_distance
@@ -144,13 +175,40 @@ class SignalEngine:
             return self.no_trade(symbol, "No trade: falta stop lógico", warnings=["sin stop lógico"])
         take_profit_1 = entry + risk_per_unit * 1.6 if proposed_side == "LONG" else entry - risk_per_unit * 1.6
         take_profit_2 = entry + risk_per_unit * 2.4 if proposed_side == "LONG" else entry - risk_per_unit * 2.4
-        risk_reward = abs(take_profit_1 - entry) / risk_per_unit
+        gross_risk_reward = abs(take_profit_1 - entry) / risk_per_unit
+        rr_result = calculate_net_rr(
+            entry=entry,
+            stop_loss=stop_loss,
+            take_profit_1=take_profit_1,
+            side=proposed_side,
+            slippage_bps=self.config.net_edge_slippage_bps,
+            funding_rate=snapshot.funding_rate,
+            min_net_rr=self.config.min_risk_reward,
+        )
+        risk_reward = rr_result.net_rr
         if risk_reward >= 1.8:
             score += 10
-            confirmations.append("R:R mayor a 1.8")
+            confirmations.append("R:R neto mayor a 1.8")
         elif risk_reward < self.config.min_risk_reward:
             score -= 20
-            warnings.append("R:R insuficiente")
+            warnings.append("R:R neto insuficiente")
+        if rr_result.gross_rr > rr_result.net_rr + 0.15:
+            warnings.append("R:R bruto cae al ajustar fees/slippage")
+        dynamic_exit = propose_dynamic_tp_sl(
+            symbol=symbol,
+            side=proposed_side,
+            regime=market_regime.regime,
+            entry=entry,
+            atr=atr,
+            support=support,
+            resistance=resistance,
+            volatility=normalized_atr,
+            score=decision.confidence,
+            context={"strategy_type": decision.strategy_type},
+        )
+        if dynamic_exit.prefer_no_trade:
+            score -= 8
+            warnings.append("dynamic_exit_shadow prefiere no trade en este regimen")
 
         if decision.strategy_type in {StrategyType.BREAKOUT, StrategyType.SUPPORT_RESISTANCE_REJECTION}:
             score += 10
@@ -172,7 +230,6 @@ class SignalEngine:
 
         score += market_regime.score_adjustment
 
-        normalized_atr = safe_float(row5.get("normalized_atr"))
         if normalized_atr > 0.025:
             score -= 25
             warnings.append("ATR extremo")
@@ -228,14 +285,25 @@ class SignalEngine:
             warnings=warnings,
             timeframe_alignment=f"5m={bias5},15m={bias15},1h={bias1h}",
             invalidation_level=stop_loss,
+            gross_rr=gross_risk_reward,
+            net_rr=rr_result.net_rr,
+            rr_cost_adjusted=rr_result.rr_cost_adjusted,
+            cost_breakdown=rr_result.cost_breakdown,
+            rr_warning=rr_result.rr_warning,
+            minimum_winrate_required_from_net_rr=rr_result.minimum_winrate_required_from_net_rr,
+            stop_quality=stop_result.stop_quality,
+            whipsaw_risk=stop_result.whipsaw_risk,
+            dynamic_exit_candidate=dynamic_exit.as_dict(),
         )
 
     @staticmethod
     def _calculate_stop(side: str, entry: float, atr: float, row) -> float:
-        if side == "LONG":
-            support = safe_float(row.get("support_recent"))
-            structure_stop = support if support and support < entry else entry - atr * 1.4
-            return min(entry - atr * 1.1, structure_stop)
-        resistance = safe_float(row.get("resistance_recent"))
-        structure_stop = resistance if resistance and resistance > entry else entry + atr * 1.4
-        return max(entry + atr * 1.1, structure_stop)
+        result = calculate_structural_stop(
+            side=side,
+            entry=entry,
+            atr=atr,
+            support=safe_float(row.get("support_recent")),
+            resistance=safe_float(row.get("resistance_recent")),
+            regime=str(row.get("market_regime") or ""),
+        )
+        return result.stop_loss

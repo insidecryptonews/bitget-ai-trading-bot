@@ -25,6 +25,7 @@
         <button type="button" class="nav-link nav-item" data-target="pipeline-cost">Pipeline & Costs</button>
         <button type="button" class="nav-link nav-item" data-target="time-death">Time Death</button>
         <button type="button" class="nav-link nav-item" data-target="exit-calibration">Exit Calibration</button>
+        <button type="button" class="nav-link nav-item" data-target="execution-safety">Execution Safety</button>
         <button type="button" class="nav-link nav-item" data-target="pre-move">Pre-Move</button>
         <button type="button" class="nav-link nav-item" data-target="runtime">Runtime</button>
         <button type="button" class="nav-link nav-item" data-target="data-vault">Data Vault</button>
@@ -62,6 +63,7 @@
         <button type="button" class="mobile-nav-item" data-target="edge-policy">Edge</button>
         <button type="button" class="mobile-nav-item" data-target="score-incubator">Score</button>
         <button type="button" class="mobile-nav-item" data-target="pipeline-cost">Costs</button>
+        <button type="button" class="mobile-nav-item" data-target="execution-safety">Safety</button>
         <button type="button" class="mobile-nav-item" data-target="time-death">TIME</button>
         <button type="button" class="mobile-nav-item" data-target="reports">Exports</button>
       </nav>
@@ -427,6 +429,83 @@
           <details class="report-details">
             <summary>Ver salida tecnica Exit Calibration</summary>
             <pre id="exitCalibrationOutput">Sin cargar todavia.</pre>
+          </details>
+        </section>
+
+        <section id="execution-safety" class="section">
+          <div class="section-title">
+            <div>
+              <span class="eyebrow">Pre-live hardening</span>
+              <h2>Execution Safety / Pre-Live Hardening</h2>
+            </div>
+            <p>Research/shadow only. No real orders, no paper filter, no sizing/leverage/margin changes.</p>
+          </div>
+          <div class="decision-grid">
+            <article class="decision-card info">
+              <span class="panel-label">Net R:R adjusted</span>
+              <strong id="netRrState">not loaded</strong>
+              <p>Gross R:R is shown separately from fee/slippage-adjusted R:R.</p>
+            </article>
+            <article class="decision-card info">
+              <span class="panel-label">Dynamic exit policy</span>
+              <strong id="dynamicExitState">SHADOW_READY</strong>
+              <p>Fixed TP vs dynamic TP stays research-only.</p>
+            </article>
+            <article class="decision-card warning">
+              <span class="panel-label">Stop quality</span>
+              <strong id="stopQualityState">not loaded</strong>
+              <p>Structural stop, ATR fallback and whipsaw risk are audited.</p>
+            </article>
+            <article class="decision-card info">
+              <span class="panel-label">Fresh balance before risk</span>
+              <strong id="freshBalanceState">NOT_LIVE_ONLY</strong>
+              <p>Future live path refreshes balance before validation.</p>
+            </article>
+            <article class="decision-card info">
+              <span class="panel-label">Idempotency</span>
+              <strong id="idempotencyState">not loaded</strong>
+              <p>PENDING_EXECUTION blocks duplicate live starts until reconcile.</p>
+            </article>
+            <article class="decision-card warning">
+              <span class="panel-label">Emergency failsafe</span>
+              <strong id="emergencyFailsafeState">not loaded</strong>
+              <p>Stop placement and emergency close have retry/critical states.</p>
+            </article>
+            <article class="decision-card info">
+              <span class="panel-label">Circuit breaker magnitude</span>
+              <strong id="circuitMagnitudeState">not loaded</strong>
+              <p>Micro-loss streaks are separated from real drawdown stops.</p>
+            </article>
+            <article class="decision-card warning">
+              <span class="panel-label">Clock drift</span>
+              <strong id="clockDriftState">UNKNOWN</strong>
+              <p>Exchange time check is a pre-live blocker if drift is high.</p>
+            </article>
+            <article class="decision-card info">
+              <span class="panel-label">Config hardening</span>
+              <strong id="configHardeningState">not loaded</strong>
+              <p>Dangerous risk/leverage/margin parameters are blocked.</p>
+            </article>
+          </div>
+          <div class="visual-grid">
+            <article class="panel chart-panel">
+              <div class="panel-head"><h3>Gross vs net R:R</h3></div>
+              <div id="netRrChart" class="chart-body"></div>
+            </article>
+            <article class="panel chart-panel">
+              <div class="panel-head"><h3>Execution safety status</h3></div>
+              <div id="executionSafetyChart" class="chart-body"></div>
+            </article>
+          </div>
+          <div class="lab-actions">
+            <button id="executionSafetyAuditBtn" class="btn btn-secondary">Execution safety audit</button>
+            <button id="netRrAuditBtn" class="btn btn-secondary">Net R:R audit</button>
+            <button id="dynamicExitPolicyAuditBtn" class="btn btn-secondary">Dynamic exit audit</button>
+            <button id="structuralStopAuditBtn" class="btn btn-secondary">Structural stop audit</button>
+          </div>
+          <details class="report-details">
+            <summary>Ver salida tecnica Execution Safety</summary>
+            <pre id="executionSafetyOutput">Sin cargar todavia.</pre>
           </details>
         </section>
 

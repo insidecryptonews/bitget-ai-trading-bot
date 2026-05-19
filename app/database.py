@@ -12,6 +12,42 @@ from .config import BotConfig, PROJECT_ROOT
 from .utils import iso_utc, json_dumps, safe_float, sanitize
 
 
+SIGNAL_OBSERVATION_RESEARCH_COLUMNS = {
+    "shadow_strategy": "INTEGER DEFAULT 0",
+    "strategy_variant_id": "INTEGER",
+    "variant_params_json": "TEXT",
+    "original_side": "TEXT",
+    "original_strategy_type": "TEXT",
+    "score_bucket": "TEXT",
+    "kronos_predicted_return_pct": "REAL",
+    "kronos_direction": "TEXT",
+    "kronos_confidence_score": "REAL",
+    "kronos_disagreement": "INTEGER",
+    "kronos_prediction_id": "INTEGER",
+}
+SIGNAL_PATH_METRIC_RESEARCH_COLUMNS = {
+    "source": "TEXT",
+    "probe_key": "TEXT",
+    "reject_reason": "TEXT",
+    "priority": "INTEGER DEFAULT 0",
+    "catalyst_active": "INTEGER DEFAULT 0",
+    "catalyst_id": "TEXT",
+    "catalyst_category": "TEXT",
+    "catalyst_direction": "TEXT",
+    "catalyst_severity": "TEXT",
+}
+VIRTUAL_STRATEGY_SUMMARY_RESEARCH_COLUMNS = {"created_at": "TEXT"}
+
+
+def validate_alter_table_column(table: str, name: str, spec: str) -> bool:
+    allowed = {
+        "signal_observations": SIGNAL_OBSERVATION_RESEARCH_COLUMNS,
+        "signal_path_metrics": SIGNAL_PATH_METRIC_RESEARCH_COLUMNS,
+        "virtual_strategy_summary": VIRTUAL_STRATEGY_SUMMARY_RESEARCH_COLUMNS,
+    }.get(table, {})
+    return allowed.get(name) == spec
+
+
 class Database:
     def __init__(self, config: BotConfig, logger) -> None:
         self.config = config
@@ -164,6 +200,23 @@ class Database:
                 key TEXT PRIMARY KEY,
                 value TEXT,
                 updated_at TEXT NOT NULL
+            )
+            """,
+        )
+        self._execute(
+            conn,
+            """
+            CREATE TABLE IF NOT EXISTS execution_intents (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                client_oid TEXT UNIQUE,
+                symbol TEXT,
+                side TEXT,
+                status TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                mode TEXT,
+                order_payload_sanitized TEXT,
+                error_sanitized TEXT
             )
             """,
         )
@@ -693,60 +746,39 @@ class Database:
         self._create_indexes(conn)
 
     def _ensure_research_columns(self, conn: Any) -> None:
-        columns = {
-            "shadow_strategy": "INTEGER DEFAULT 0",
-            "strategy_variant_id": "INTEGER",
-            "variant_params_json": "TEXT",
-            "original_side": "TEXT",
-            "original_strategy_type": "TEXT",
-            "score_bucket": "TEXT",
-            "kronos_predicted_return_pct": "REAL",
-            "kronos_direction": "TEXT",
-            "kronos_confidence_score": "REAL",
-            "kronos_disagreement": "INTEGER",
-            "kronos_prediction_id": "INTEGER",
-        }
+        columns = SIGNAL_OBSERVATION_RESEARCH_COLUMNS
         if self._use_postgres:
             for name, spec in columns.items():
+                self._assert_allowed_research_column("signal_observations", name, spec)
                 self._execute(conn, f"ALTER TABLE signal_observations ADD COLUMN IF NOT EXISTS {name} {spec}")
+            self._assert_allowed_research_column("virtual_strategy_summary", "created_at", "TEXT")
             self._execute(conn, "ALTER TABLE virtual_strategy_summary ADD COLUMN IF NOT EXISTS created_at TEXT")
-            for name, spec in {
-                "source": "TEXT",
-                "probe_key": "TEXT",
-                "reject_reason": "TEXT",
-                "priority": "INTEGER DEFAULT 0",
-                "catalyst_active": "INTEGER DEFAULT 0",
-                "catalyst_id": "TEXT",
-                "catalyst_category": "TEXT",
-                "catalyst_direction": "TEXT",
-                "catalyst_severity": "TEXT",
-            }.items():
+            for name, spec in SIGNAL_PATH_METRIC_RESEARCH_COLUMNS.items():
+                self._assert_allowed_research_column("signal_path_metrics", name, spec)
                 self._execute(conn, f"ALTER TABLE signal_path_metrics ADD COLUMN IF NOT EXISTS {name} {spec}")
             return
         cur = conn.execute("PRAGMA table_info(signal_observations)")
         existing = {row["name"] if isinstance(row, sqlite3.Row) else row[1] for row in cur.fetchall()}
         for name, spec in columns.items():
             if name not in existing:
+                self._assert_allowed_research_column("signal_observations", name, spec)
                 conn.execute(f"ALTER TABLE signal_observations ADD COLUMN {name} {spec}")
         cur = conn.execute("PRAGMA table_info(virtual_strategy_summary)")
         existing_summary = {row["name"] if isinstance(row, sqlite3.Row) else row[1] for row in cur.fetchall()}
         if "created_at" not in existing_summary:
+            self._assert_allowed_research_column("virtual_strategy_summary", "created_at", "TEXT")
             conn.execute("ALTER TABLE virtual_strategy_summary ADD COLUMN created_at TEXT")
         cur = conn.execute("PRAGMA table_info(signal_path_metrics)")
         existing_path_metrics = {row["name"] if isinstance(row, sqlite3.Row) else row[1] for row in cur.fetchall()}
-        for name, spec in {
-            "source": "TEXT",
-            "probe_key": "TEXT",
-            "reject_reason": "TEXT",
-            "priority": "INTEGER DEFAULT 0",
-            "catalyst_active": "INTEGER DEFAULT 0",
-            "catalyst_id": "TEXT",
-            "catalyst_category": "TEXT",
-            "catalyst_direction": "TEXT",
-            "catalyst_severity": "TEXT",
-        }.items():
+        for name, spec in SIGNAL_PATH_METRIC_RESEARCH_COLUMNS.items():
             if name not in existing_path_metrics:
+                self._assert_allowed_research_column("signal_path_metrics", name, spec)
                 conn.execute(f"ALTER TABLE signal_path_metrics ADD COLUMN {name} {spec}")
+
+    @staticmethod
+    def _assert_allowed_research_column(table: str, name: str, spec: str) -> None:
+        if not validate_alter_table_column(table, name, spec):
+            raise ValueError(f"Blocked dynamic ALTER TABLE for {table}.{name}")
 
     def _create_indexes(self, conn: Any) -> None:
         indexes = [
@@ -784,6 +816,8 @@ class Database:
             "CREATE INDEX IF NOT EXISTS idx_events_timestamp_type ON events(timestamp, event_type)",
             "CREATE INDEX IF NOT EXISTS idx_signal_observations_timestamp ON signal_observations(timestamp)",
             "CREATE INDEX IF NOT EXISTS idx_signal_observations_score_time ON signal_observations(confidence_score, timestamp)",
+            "CREATE INDEX IF NOT EXISTS idx_execution_intents_status ON execution_intents(status, updated_at)",
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_execution_intents_client_oid ON execution_intents(client_oid)",
         ]
         for sql in indexes:
             self._execute(conn, sql)
@@ -795,6 +829,73 @@ class Database:
                 "INSERT INTO events(timestamp, level, event_type, message, payload_json) VALUES (?, ?, ?, ?, ?)",
                 (iso_utc(), level, event_type, message, json_dumps(payload or {})),
             )
+
+    def record_execution_intent(
+        self,
+        *,
+        client_oid: str,
+        symbol: str,
+        side: str,
+        mode: str,
+        order_payload_sanitized: Any | None = None,
+        status: str = "PENDING_EXECUTION",
+        error_sanitized: str = "",
+    ) -> int:
+        payload = sanitize(json_dumps(order_payload_sanitized or {}))
+        now = iso_utc()
+        sql = """
+            INSERT INTO execution_intents(
+                client_oid, symbol, side, status, created_at, updated_at, mode, order_payload_sanitized, error_sanitized
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """
+        if self._use_postgres:
+            sql = sql.replace("?", "%s") + " RETURNING id"
+        with self._connect() as conn:
+            cur = conn.execute(sql, (client_oid, symbol, side, status, now, now, mode, payload, sanitize(error_sanitized)))
+            return self._inserted_id(cur)
+
+    def update_execution_intent(
+        self,
+        client_oid: str,
+        *,
+        status: str,
+        order_payload_sanitized: Any | None = None,
+        error_sanitized: str = "",
+    ) -> None:
+        payload = sanitize(json_dumps(order_payload_sanitized or {})) if order_payload_sanitized is not None else None
+        if payload is None:
+            sql = "UPDATE execution_intents SET status = ?, updated_at = ?, error_sanitized = ? WHERE client_oid = ?"
+            params = (status, iso_utc(), sanitize(error_sanitized), client_oid)
+        else:
+            sql = """
+                UPDATE execution_intents
+                SET status = ?, updated_at = ?, order_payload_sanitized = ?, error_sanitized = ?
+                WHERE client_oid = ?
+            """
+            params = (status, iso_utc(), payload, sanitize(error_sanitized), client_oid)
+        if self._use_postgres:
+            sql = sql.replace("?", "%s")
+        with self._connect() as conn:
+            conn.execute(sql, params)
+
+    def fetch_execution_intent(self, client_oid: str) -> dict[str, Any] | None:
+        sql = "SELECT * FROM execution_intents WHERE client_oid = ? LIMIT 1"
+        if self._use_postgres:
+            sql = sql.replace("?", "%s")
+        with self._connect() as conn:
+            row = conn.execute(sql, (client_oid,)).fetchone()
+            return self._row_to_dict(row) if row is not None else None
+
+    def fetch_pending_execution_intents(self) -> list[dict[str, Any]]:
+        sql = """
+            SELECT *
+            FROM execution_intents
+            WHERE status IN ('PENDING_EXECUTION', 'SENT', 'UNKNOWN')
+            ORDER BY updated_at ASC
+        """
+        with self._connect() as conn:
+            return self._fetchall_dicts(conn.execute(sql))
 
     def record_latency_metric(
         self,

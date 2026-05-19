@@ -53,6 +53,8 @@ class RiskDecision:
     block_reason: str = ""
     warnings: list[str] | None = None
     signal: Signal | None = None
+    balance_source: str = ""
+    balance_timestamp: str = ""
 
 
 class RiskManager:
@@ -87,6 +89,8 @@ class RiskManager:
         rules: InstrumentRules | None = None,
         isolated_verified: bool = True,
         auto_margin_off_verified: bool = True,
+        balance_source: str = "",
+        balance_timestamp: str = "",
     ) -> RiskDecision:
         open_positions = open_positions or []
         available_balance = balance if available_balance is None else available_balance
@@ -100,14 +104,28 @@ class RiskManager:
             weekly_pnl=weekly_pnl,
             isolated_verified=isolated_verified,
             auto_margin_off_verified=auto_margin_off_verified,
+            balance_source=balance_source,
+            balance_timestamp=balance_timestamp,
         )
         if early_block:
             return early_block
 
         if rules is None:
-            return RiskDecision(False, "Reglas reales de instrumento no disponibles", block_reason="missing_instrument_rules")
+            return RiskDecision(
+                False,
+                "Reglas reales de instrumento no disponibles",
+                block_reason="missing_instrument_rules",
+                balance_source=balance_source,
+                balance_timestamp=balance_timestamp,
+            )
         if not rules.is_active:
-            return RiskDecision(False, f"Instrumento no activo: {rules.symbol_status}", block_reason="instrument_not_active")
+            return RiskDecision(
+                False,
+                f"Instrumento no activo: {rules.symbol_status}",
+                block_reason="instrument_not_active",
+                balance_source=balance_source,
+                balance_timestamp=balance_timestamp,
+            )
 
         leverage = self._initial_leverage(signal, rules)
         sizing = self.calculate_position_size(
@@ -117,6 +135,8 @@ class RiskManager:
             rules=rules,
             leverage=leverage,
             open_positions=open_positions,
+            balance_source=balance_source,
+            balance_timestamp=balance_timestamp,
         )
         if not sizing.approved:
             self._log_sizing(signal.symbol, signal.side, sizing)
@@ -158,6 +178,8 @@ class RiskManager:
         rules: InstrumentRules,
         leverage: int,
         open_positions: list[dict] | None = None,
+        balance_source: str = "",
+        balance_timestamp: str = "",
     ) -> RiskDecision:
         open_positions = open_positions or []
         risk_amount = balance * self.config.max_risk_per_trade
@@ -206,6 +228,8 @@ class RiskManager:
             max_total_margin_allowed_after_buffer=max_total_margin_allowed_after_buffer,
             open_positions_count=len(open_positions),
             max_open_positions_allowed=max_positions_allowed,
+            balance_source=balance_source,
+            balance_timestamp=balance_timestamp,
         )
 
         if self.config.use_fixed_trade_margin and float(self.config.trade_margin_usdt) > float(self.config.max_trade_margin_usdt):
@@ -449,37 +473,39 @@ class RiskManager:
         weekly_pnl: float,
         isolated_verified: bool,
         auto_margin_off_verified: bool,
+        balance_source: str = "",
+        balance_timestamp: str = "",
     ) -> RiskDecision | None:
         if signal.side == "NO_TRADE":
-            return RiskDecision(False, signal.reason, block_reason="no_trade")
+            return RiskDecision(False, signal.reason, block_reason="no_trade", balance_source=balance_source, balance_timestamp=balance_timestamp)
         if self.config.margin_mode != "isolated":
-            return RiskDecision(False, "margin_mode != isolated", block_reason="margin_mode_not_isolated")
+            return RiskDecision(False, "margin_mode != isolated", block_reason="margin_mode_not_isolated", balance_source=balance_source, balance_timestamp=balance_timestamp)
         if self.config.force_isolated_margin and not isolated_verified:
-            return RiskDecision(False, "FORCE_ISOLATED_MARGIN=true y no se verifico isolated", block_reason="isolated_not_verified")
+            return RiskDecision(False, "FORCE_ISOLATED_MARGIN=true y no se verifico isolated", block_reason="isolated_not_verified", balance_source=balance_source, balance_timestamp=balance_timestamp)
         if self.config.auto_margin:
-            return RiskDecision(False, "AUTO_MARGIN debe estar false/off", block_reason="auto_margin_enabled")
+            return RiskDecision(False, "AUTO_MARGIN debe estar false/off", block_reason="auto_margin_enabled", balance_source=balance_source, balance_timestamp=balance_timestamp)
         if not auto_margin_off_verified:
-            return RiskDecision(False, "AUTO_MARGIN=false pero no se pudo verificar off", block_reason="auto_margin_off_not_verified")
+            return RiskDecision(False, "AUTO_MARGIN=false pero no se pudo verificar off", block_reason="auto_margin_off_not_verified", balance_source=balance_source, balance_timestamp=balance_timestamp)
         if balance < self.config.stop_trading_below_balance_usdt:
-            return RiskDecision(False, f"Balance {balance:.2f} < {self.config.stop_trading_below_balance_usdt:.2f} USDT", block_reason="low_balance")
+            return RiskDecision(False, f"Balance {balance:.2f} < {self.config.stop_trading_below_balance_usdt:.2f} USDT", block_reason="low_balance", balance_source=balance_source, balance_timestamp=balance_timestamp)
         if self.cooldown_until and datetime.now(timezone.utc) < self.cooldown_until:
-            return RiskDecision(False, f"Cooldown activo hasta {self.cooldown_until.isoformat()}", block_reason="cooldown")
+            return RiskDecision(False, f"Cooldown activo hasta {self.cooldown_until.isoformat()}", block_reason="cooldown", balance_source=balance_source, balance_timestamp=balance_timestamp)
         if self.api_failure_count >= 3:
-            return RiskDecision(False, "API fallando repetidamente; trading pausado", block_reason="api_failures")
+            return RiskDecision(False, "API fallando repetidamente; trading pausado", block_reason="api_failures", balance_source=balance_source, balance_timestamp=balance_timestamp)
         if self.config.require_stop_loss and signal.stop_loss <= 0:
-            return RiskDecision(False, "Bloqueado: toda operacion necesita stop loss", block_reason="missing_stop_loss")
+            return RiskDecision(False, "Bloqueado: toda operacion necesita stop loss", block_reason="missing_stop_loss", balance_source=balance_source, balance_timestamp=balance_timestamp)
         if self.config.require_take_profit and (signal.take_profit_1 <= 0 or signal.take_profit_2 <= 0):
-            return RiskDecision(False, "Bloqueado: toda operacion necesita take profit", block_reason="missing_take_profit")
+            return RiskDecision(False, "Bloqueado: toda operacion necesita take profit", block_reason="missing_take_profit", balance_source=balance_source, balance_timestamp=balance_timestamp)
         if signal.risk_reward_ratio < self.config.min_risk_reward:
-            return RiskDecision(False, f"R:R {signal.risk_reward_ratio:.2f} < {self.config.min_risk_reward:.2f}", block_reason="low_rr")
+            return RiskDecision(False, f"R:R neto {signal.risk_reward_ratio:.2f} < {self.config.min_risk_reward:.2f}", block_reason="low_rr", balance_source=balance_source, balance_timestamp=balance_timestamp)
         if daily_pnl <= -(balance * self.config.max_daily_loss):
-            return RiskDecision(False, "Circuit breaker: perdida diaria maxima alcanzada", block_reason="daily_loss")
+            return RiskDecision(False, "Circuit breaker: perdida diaria maxima alcanzada", block_reason="daily_loss", balance_source=balance_source, balance_timestamp=balance_timestamp)
         if weekly_pnl <= -(balance * self.config.max_weekly_loss):
-            return RiskDecision(False, "Circuit breaker: perdida semanal maxima alcanzada", block_reason="weekly_loss")
+            return RiskDecision(False, "Circuit breaker: perdida semanal maxima alcanzada", block_reason="weekly_loss", balance_source=balance_source, balance_timestamp=balance_timestamp)
         if len(open_positions) >= self._max_positions_for_balance(balance):
-            return RiskDecision(False, "Maximo de posiciones abiertas alcanzado", block_reason="max_positions")
+            return RiskDecision(False, "Maximo de posiciones abiertas alcanzado", block_reason="max_positions", balance_source=balance_source, balance_timestamp=balance_timestamp)
         if any(p.get("symbol") == signal.symbol for p in open_positions):
-            return RiskDecision(False, f"Ya existe una posicion abierta en {signal.symbol}", block_reason="symbol_position_exists")
+            return RiskDecision(False, f"Ya existe una posicion abierta en {signal.symbol}", block_reason="symbol_position_exists", balance_source=balance_source, balance_timestamp=balance_timestamp)
         return None
 
     def _decision_base(
@@ -503,6 +529,8 @@ class RiskManager:
         max_total_margin_allowed_after_buffer: float,
         open_positions_count: int,
         max_open_positions_allowed: int,
+        balance_source: str = "",
+        balance_timestamp: str = "",
     ) -> dict:
         return {
             "risk_amount": risk_amount,
@@ -529,6 +557,8 @@ class RiskManager:
             "max_open_positions_allowed": max_open_positions_allowed,
             "risk_amount_estimated": risk_amount,
             "risk_pct_estimated": risk_amount / max(balance, 1e-9),
+            "balance_source": balance_source,
+            "balance_timestamp": balance_timestamp,
         }
 
     def _select_margin(self, max_margin_per_trade: float, max_margin_by_free_balance: float) -> float:

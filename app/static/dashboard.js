@@ -19,6 +19,7 @@
     { name: "Candidate Incubator", url: "/api/training/candidate-incubator?hours=24", target: "scoreIncubatorOutput", append: true, handler: handleCandidateIncubator },
     { name: "Training Data Integrity", url: "/api/training/training-data-integrity?hours=24", target: "scoreIncubatorOutput", append: true },
     { name: "Core Corrections", url: "/api/training/core-corrections?hours=24", target: "pipelineCostOutput", handler: handleCoreCorrections },
+    { name: "Execution Safety", url: "/api/training/execution-safety-audit", target: "executionSafetyOutput", handler: handleExecutionSafety },
     { name: "Data Pipeline Diagnosis", url: "/api/training/data-pipeline-diagnosis?hours=24", target: "pipelineCostOutput", handler: handleDataPipelineDiagnosis },
     { name: "Label Quality V2", url: "/api/training/label-quality-v2?hours=24", target: "pipelineCostOutput", append: true, handler: handleLabelQualityV2 },
     { name: "Bitget Cost Model", url: "/api/training/bitget-cost-model-audit?hours=24", target: "pipelineCostOutput", append: true, handler: handleBitgetCostModel },
@@ -583,6 +584,63 @@
     setText("marginModeState", status);
   }
 
+  function handleExecutionSafety(payload, text) {
+    const net = safeText((text.match(/net_rr_adjusted:\s*(\S+)/i) || [])[1], "OK");
+    const dynamic = safeText((text.match(/dynamic_exit_policy:\s*(\S+)/i) || [])[1], "SHADOW_READY");
+    const stop = safeText((text.match(/stop_quality:\s*(\S+)/i) || [])[1], "OK");
+    const balance = safeText((text.match(/fresh_balance_before_risk:\s*(\S+)/i) || [])[1], "NOT_LIVE_ONLY");
+    const idempotency = safeText((text.match(/idempotency:\s*(\S+)/i) || [])[1], "OK");
+    const emergency = safeText((text.match(/emergency_stop_failsafe:\s*(\S+)/i) || [])[1], "OK");
+    const circuit = safeText((text.match(/circuit_breaker_magnitude:\s*(\S+)/i) || [])[1], "OK");
+    const clock = safeText((text.match(/clock_drift:\s*(\S+)/i) || [])[1], "UNKNOWN");
+    const hardening = safeText((text.match(/config_hardening:\s*(\S+)/i) || [])[1], "OK");
+    setText("netRrState", net);
+    setText("dynamicExitState", dynamic);
+    setText("stopQualityState", stop);
+    setText("freshBalanceState", balance);
+    setText("idempotencyState", idempotency);
+    setText("emergencyFailsafeState", emergency);
+    setText("circuitMagnitudeState", circuit);
+    setText("clockDriftState", clock);
+    setText("configHardeningState", hardening);
+    setHtml("executionSafetyChart", renderHorizontalBarChart([
+      { label: "Net RR", value: net === "OK" ? 1 : 0.4, color: net === "OK" ? "green" : "orange", display: net },
+      { label: "Idempotency", value: idempotency === "OK" ? 1 : 0.5, color: idempotency === "OK" ? "green" : "orange", display: idempotency },
+      { label: "Failsafe", value: emergency === "OK" ? 1 : 0.5, color: emergency === "OK" ? "green" : "orange", display: emergency },
+      { label: "Clock", value: clock === "BAD" ? 1 : 0.4, color: clock === "BAD" ? "red" : "orange", display: clock },
+    ]));
+  }
+
+  function handleNetRrAudit(payload, text) {
+    const gross = num((text.match(/gross_rr:\s*([0-9.]+)/i) || [])[1]);
+    const net = num((text.match(/net_rr:\s*([0-9.]+)/i) || [])[1]);
+    const warning = safeText((text.match(/rr_warning:\s*(\S+)/i) || [])[1], "UNKNOWN");
+    setText("netRrState", warning === "OK" ? "OK" : "WARNING");
+    setHtml("netRrChart", renderHorizontalBarChart([
+      { label: "Gross RR", value: gross, color: "blue", display: fmt(gross, 2) },
+      { label: "Net RR", value: net, color: net >= 1.4 ? "green" : "orange", display: fmt(net, 2) },
+    ]));
+  }
+
+  function handleDynamicExitAudit(payload, text) {
+    const trendTp1 = safeText((text.match(/trend_tp1_r:\s*([0-9.]+)/i) || [])[1], "2.0");
+    setText("dynamicExitState", /DISABLED_SHADOW_ONLY/i.test(text) ? "SHADOW_READY" : "CHECK");
+    setHtml("executionSafetyChart", renderHorizontalBarChart([
+      { label: "Trend TP1 R", value: num(trendTp1), color: "blue", display: `${trendTp1}R` },
+      { label: "Research only", value: 1, color: "green", display: "disabled" },
+    ]));
+  }
+
+  function handleStructuralStopAudit(payload, text) {
+    const quality = safeText((text.match(/stop_quality:\s*(\S+)/i) || [])[1], "UNKNOWN");
+    const whipsaw = num((text.match(/whipsaw_risk:\s*([0-9.]+)/i) || [])[1]);
+    setText("stopQualityState", quality);
+    setHtml("executionSafetyChart", renderHorizontalBarChart([
+      { label: "Stop quality", value: quality === "STRUCTURAL_VALID" || quality === "ATR_FALLBACK" ? 1 : 0.5, color: quality.includes("REJECT") ? "red" : "green", display: quality },
+      { label: "Whipsaw", value: whipsaw, color: whipsaw > 0.75 ? "orange" : "blue", display: fmt(whipsaw, 2) },
+    ]));
+  }
+
   function handleTimeDeath(payload, text) {
     const time = extractPercent(text, "TIME%");
     const tp = extractPercent(text, "TP%");
@@ -760,6 +818,10 @@
       ["costModelInventoryBtn", "/api/training/cost-model-inventory", "pipelineCostOutput", handleCostInventory, true],
       ["bitgetCostModelAuditBtn", "/api/training/bitget-cost-model-audit?hours=24", "pipelineCostOutput", handleBitgetCostModel, true],
       ["marginModeAuditBtn", "/api/training/margin-mode-audit", "pipelineCostOutput", handleMarginMode, true],
+      ["executionSafetyAuditBtn", "/api/training/execution-safety-audit", "executionSafetyOutput", handleExecutionSafety],
+      ["netRrAuditBtn", "/api/training/net-rr-audit?hours=24", "executionSafetyOutput", handleNetRrAudit, true],
+      ["dynamicExitPolicyAuditBtn", "/api/training/dynamic-exit-policy-audit?hours=24", "executionSafetyOutput", handleDynamicExitAudit, true],
+      ["structuralStopAuditBtn", "/api/training/structural-stop-audit?hours=24", "executionSafetyOutput", handleStructuralStopAudit, true],
       ["edgeGuardBtn", "/api/training/edge-guard?hours=24", "edgePolicyOutput", handleEdgeGuard, true],
       ["paperPolicyOrchestratorBtn", "/api/training/paper-policy-orchestrator?hours=24", "edgePolicyOutput", handleOrchestrator, true],
       ["netEdgeLabBtn", "/api/training/net-edge-lab?hours=24", "edgePolicyOutput", null, true],
