@@ -23,7 +23,12 @@ def test_dashboard_ui_v3_structure_is_real_app_shell():
     assert "signalBarChart" in html
     assert "Reports & Exports" in html
     assert "Score & Incubator" in html
+    assert "Data Pipeline & Cost Diagnostics" in html
+    assert "Pipeline & Costs" in html
+    assert "Bitget fees" in html
     assert "scoreMonotonicityChart" in html
+    assert "pipelineDuplicateChart" in html
+    assert "costSensitivityChart" in html
     assert "candidateIncubatorBtn" in html
     assert "Exit Label Calibration V2" in html
     assert "Time Death" in html
@@ -40,6 +45,10 @@ def test_dashboard_ui_v3_structure_is_real_app_shell():
     assert "labelsReady" in js
     assert "pendingText" in js
     assert "trainingDataIntegrityBtn" in html
+    assert "dataPipelineDiagnosisBtn" in html
+    assert "labelQualityV2Btn" in html
+    assert "bitgetCostModelAuditBtn" in html
+    assert "marginModeAuditBtn" in html
     assert "workerHealthAuditBtn" in html
     assert "dashboardDataBindingAuditBtn" in html
 
@@ -114,6 +123,10 @@ def test_dashboard_main_refresh_does_not_call_backup_restore_or_live():
     assert "post-migration-backup" not in main_steps
     assert "LIVE_TRADING=true" not in main_steps
     assert "training-data-integrity" in main_steps
+    assert "data-pipeline-diagnosis" in main_steps
+    assert "label-quality-v2" in main_steps
+    assert "bitget-cost-model-audit" in main_steps
+    assert "margin-mode-audit" in main_steps
     assert "worker-health-audit" in main_steps
 
 

@@ -22,6 +22,7 @@
         <button type="button" class="nav-link nav-item" data-target="signals">Signals</button>
         <button type="button" class="nav-link nav-item" data-target="edge-policy">Edge & Policy</button>
         <button type="button" class="nav-link nav-item" data-target="score-incubator">Score & Incubator</button>
+        <button type="button" class="nav-link nav-item" data-target="pipeline-cost">Pipeline & Costs</button>
         <button type="button" class="nav-link nav-item" data-target="time-death">Time Death</button>
         <button type="button" class="nav-link nav-item" data-target="exit-calibration">Exit Calibration</button>
         <button type="button" class="nav-link nav-item" data-target="pre-move">Pre-Move</button>
@@ -60,6 +61,7 @@
         <button type="button" class="mobile-nav-item" data-target="overview">Overview</button>
         <button type="button" class="mobile-nav-item" data-target="edge-policy">Edge</button>
         <button type="button" class="mobile-nav-item" data-target="score-incubator">Score</button>
+        <button type="button" class="mobile-nav-item" data-target="pipeline-cost">Costs</button>
         <button type="button" class="mobile-nav-item" data-target="time-death">TIME</button>
         <button type="button" class="mobile-nav-item" data-target="reports">Exports</button>
       </nav>
@@ -262,6 +264,68 @@
           <details class="report-details">
             <summary>Ver salida tecnica Score & Incubator</summary>
             <pre id="scoreIncubatorOutput">Sin cargar todavia.</pre>
+          </details>
+        </section>
+
+        <section id="pipeline-cost" class="section">
+          <div class="section-title">
+            <div>
+              <span class="eyebrow">Read-only diagnostics</span>
+              <h2>Data Pipeline & Cost Diagnostics</h2>
+            </div>
+            <p>Audita duplicados, relaciones, labels, costes Bitget USDT-M y margin mode. No escribe DB ni toca ejecucion.</p>
+          </div>
+          <div class="decision-grid">
+            <article class="decision-card warning">
+              <span class="panel-label">Pipeline</span>
+              <strong id="pipelineStatusState">not loaded</strong>
+              <p id="pipelineProblemText">Distingue duplicado real, densidad benigna y falsos positivos.</p>
+            </article>
+            <article class="decision-card warning">
+              <span class="panel-label">Cost model</span>
+              <strong id="costModelState">not loaded</strong>
+              <p id="costModelProblemText">USDT-M VIP0: maker 0.02%, taker 0.06%. Funding no es coste fijo.</p>
+            </article>
+            <article class="decision-card info">
+              <span class="panel-label">Margin mode</span>
+              <strong id="marginModeState">not loaded</strong>
+              <p>ISOLATED requerido. CROSS debe bloquear cualquier fase futura.</p>
+            </article>
+          </div>
+          <div class="visual-grid">
+            <article class="panel chart-panel">
+              <div class="panel-head"><h3>Duplicate diagnosis</h3></div>
+              <div id="pipelineDuplicateChart" class="chart-body"></div>
+            </article>
+            <article class="panel chart-panel">
+              <div class="panel-head"><h3>Label quality</h3></div>
+              <div id="labelQualityChart" class="chart-body"></div>
+            </article>
+            <article class="panel chart-panel">
+              <div class="panel-head"><h3>Cost sensitivity</h3></div>
+              <div id="costSensitivityChart" class="chart-body"></div>
+            </article>
+            <article class="panel chart-panel">
+              <div class="panel-head"><h3>Bitget fees</h3></div>
+              <div class="metric-list">
+                <div class="metric-row"><span>Product</span><strong>USDT-M Futures</strong></div>
+                <div class="metric-row"><span>Maker VIP0</span><strong>0.02%</strong></div>
+                <div class="metric-row"><span>Taker VIP0</span><strong>0.06%</strong></div>
+                <div class="metric-row"><span>Funding</span><strong>timestamp + direction</strong></div>
+              </div>
+            </article>
+          </div>
+          <div class="lab-actions">
+            <button id="dataPipelineDiagnosisBtn" class="btn btn-secondary">Data pipeline diagnosis 24h</button>
+            <button id="relationRepairAuditBtn" class="btn btn-secondary">Relation repair audit 24h</button>
+            <button id="labelQualityV2Btn" class="btn btn-secondary">Label quality V2 24h</button>
+            <button id="costModelInventoryBtn" class="btn btn-secondary">Cost model inventory</button>
+            <button id="bitgetCostModelAuditBtn" class="btn btn-secondary">Bitget cost model 24h</button>
+            <button id="marginModeAuditBtn" class="btn btn-secondary">Margin mode audit</button>
+          </div>
+          <details class="report-details">
+            <summary>Ver salida tecnica Pipeline & Costs</summary>
+            <pre id="pipelineCostOutput">Sin cargar todavia.</pre>
           </details>
         </section>
 

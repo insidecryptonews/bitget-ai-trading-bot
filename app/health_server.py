@@ -81,6 +81,12 @@ def start_health_server(
                 "/api/training/worker-health-audit",
                 "/api/training/data-vault-audit",
                 "/api/training/dashboard-data-binding-audit",
+                "/api/training/data-pipeline-diagnosis",
+                "/api/training/relation-repair-audit",
+                "/api/training/label-quality-v2",
+                "/api/training/bitget-cost-model-audit",
+                "/api/training/cost-model-inventory",
+                "/api/training/margin-mode-audit",
                 "/api/training/shadow-experiments",
                 "/api/training/evolution-score",
                 "/api/training/mfe-mae-diagnostic",
@@ -186,6 +192,24 @@ def start_health_server(
                 return
             if path == "/api/training/dashboard-data-binding-audit":
                 self._send_json(_dashboard_data_binding_audit(config, db, query))
+                return
+            if path == "/api/training/data-pipeline-diagnosis":
+                self._send_json(_data_pipeline_diagnosis(config, db, query))
+                return
+            if path == "/api/training/relation-repair-audit":
+                self._send_json(_relation_repair_audit(config, db, query))
+                return
+            if path == "/api/training/label-quality-v2":
+                self._send_json(_label_quality_v2(config, db, query))
+                return
+            if path == "/api/training/bitget-cost-model-audit":
+                self._send_json(_bitget_cost_model_audit(config, db, query))
+                return
+            if path == "/api/training/cost-model-inventory":
+                self._send_json(_cost_model_inventory(config, db, query))
+                return
+            if path == "/api/training/margin-mode-audit":
+                self._send_json(_margin_mode_audit(config, db, query))
                 return
             if path == "/api/training/shadow-experiments":
                 self._send_json(_shadow_experiments(config, db, query))
@@ -652,6 +676,51 @@ def _data_vault_audit(config: Any | None, db: Any | None, query: dict[str, list[
 
 def _dashboard_data_binding_audit(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
     return _lab_payload(config, db, query, "dashboard data binding audit unavailable", ".dashboard_data_binding_audit", "DashboardDataBindingAudit")
+
+
+def _data_pipeline_diagnosis(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
+    return _lab_payload(config, db, query, "data pipeline diagnosis unavailable", ".data_pipeline_diagnosis", "DataPipelineDiagnosis")
+
+
+def _relation_repair_audit(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
+    return _lab_payload(config, db, query, "relation repair audit unavailable", ".relation_repair_audit", "RelationRepairAudit")
+
+
+def _label_quality_v2(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
+    return _lab_payload(config, db, query, "label quality v2 unavailable", ".label_quality_v2", "LabelQualityV2")
+
+
+def _bitget_cost_model_audit(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
+    return _lab_payload(config, db, query, "bitget cost model audit unavailable", ".bitget_cost_model_audit", "BitgetCostModelAudit")
+
+
+def _cost_model_inventory(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
+    del query
+    if config is None or db is None:
+        return {"error": "cost model inventory unavailable", "final_recommendation": "NO LIVE"}
+    started = time.perf_counter()
+    try:
+        from .bitget_cost_model_audit import BitgetCostModelAudit
+
+        lab = BitgetCostModelAudit(config, db)
+        payload = lab.inventory()
+        payload["text"] = lab.inventory_text()
+    except Exception as exc:
+        return {"error": str(exc)[:300], "final_recommendation": "NO LIVE"}
+    payload = dict(payload)
+    payload["generated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    payload["cache"] = {
+        "key": "cost_model_inventory",
+        "created_at": payload["generated_at"],
+        "duration_ms": int((time.perf_counter() - started) * 1000),
+        "status": "ok",
+    }
+    payload["final_recommendation"] = "NO LIVE"
+    return payload
+
+
+def _margin_mode_audit(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
+    return _lab_payload(config, db, query, "margin mode audit unavailable", ".margin_mode_audit", "MarginModeAudit")
 
 
 def _shadow_experiments(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:

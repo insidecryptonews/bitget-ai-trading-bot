@@ -183,6 +183,8 @@ def _normalize_row(row: dict[str, Any], path: dict[str, Any]) -> dict[str, Any]:
         "mfe": safe_float(row.get("max_favorable_excursion") if row.get("max_favorable_excursion") is not None else path.get("max_favorable_pct")),
         "mae": safe_float(row.get("max_adverse_excursion") if row.get("max_adverse_excursion") is not None else path.get("max_adverse_pct")),
         "bars": safe_float(row.get("bars_to_outcome") if row.get("bars_to_outcome") is not None else path.get("bars_tracked")),
+        "funding_rate": safe_float(row.get("funding_rate")),
+        "spread_pct": safe_float(row.get("spread_pct")),
     }
 
 

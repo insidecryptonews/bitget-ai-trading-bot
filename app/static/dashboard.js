@@ -18,6 +18,10 @@
     { name: "Score Calibration", url: "/api/training/score-calibration?hours=24", target: "scoreIncubatorOutput", handler: handleScoreCalibration },
     { name: "Candidate Incubator", url: "/api/training/candidate-incubator?hours=24", target: "scoreIncubatorOutput", append: true, handler: handleCandidateIncubator },
     { name: "Training Data Integrity", url: "/api/training/training-data-integrity?hours=24", target: "scoreIncubatorOutput", append: true },
+    { name: "Data Pipeline Diagnosis", url: "/api/training/data-pipeline-diagnosis?hours=24", target: "pipelineCostOutput", handler: handleDataPipelineDiagnosis },
+    { name: "Label Quality V2", url: "/api/training/label-quality-v2?hours=24", target: "pipelineCostOutput", append: true, handler: handleLabelQualityV2 },
+    { name: "Bitget Cost Model", url: "/api/training/bitget-cost-model-audit?hours=24", target: "pipelineCostOutput", append: true, handler: handleBitgetCostModel },
+    { name: "Margin Mode Audit", url: "/api/training/margin-mode-audit", target: "pipelineCostOutput", append: true, handler: handleMarginMode },
     { name: "Worker Health Audit", url: "/api/training/worker-health-audit", target: "runtimeOutput", append: true },
     { name: "Dashboard Data Binding", url: "/api/training/dashboard-data-binding-audit", target: "runtimeOutput", append: true },
     { name: "Edge Guard", url: "/api/training/edge-guard?hours=24", target: "edgePolicyOutput", append: true, handler: handleEdgeGuard },
@@ -508,6 +512,62 @@
       </tr>`).join(""));
   }
 
+  function handleDataPipelineDiagnosis(payload, text) {
+    const status = safeText(payload.dangerous_duplicate_status || (text.match(/dangerous_duplicate_status:\s*(\S+)/i) || [])[1], "UNKNOWN");
+    const falsePositive = safeText(payload.audit_false_positive_status || (text.match(/audit_false_positive_status:\s*(\S+)/i) || [])[1], "UNKNOWN");
+    setText("pipelineStatusState", status);
+    setText("pipelineProblemText", `false_positive_audit=${falsePositive}. No DB writes.`);
+    setHtml("pipelineDuplicateChart", renderHorizontalBarChart([
+      { label: "Exact duplicates", value: num(payload.exact_duplicate_count), color: status === "BAD" ? "red" : "orange", display: safeText(payload.exact_duplicate_count, 0) },
+      { label: "Conflicting labels", value: num(payload.conflicting_labels), color: "red", display: safeText(payload.conflicting_labels, 0) },
+      { label: "Benign density", value: num(payload.benign_minute_bucket_density), color: "blue", display: fmt(payload.benign_minute_bucket_density, 1) },
+    ]));
+  }
+
+  function handleRelationRepair(payload, text) {
+    const status = safeText(payload.relation_health_status || (text.match(/relation_health_status:\s*(\S+)/i) || [])[1], "UNKNOWN");
+    setText("pipelineStatusState", status);
+    setText("pipelineProblemText", `relation_health_status=${status}. unsafe actions not taken.`);
+  }
+
+  function handleLabelQualityV2(payload, text) {
+    const status = safeText(payload.label_quality_status || (text.match(/label_quality_status:\s*(\S+)/i) || [])[1], "UNKNOWN");
+    setHtml("labelQualityChart", renderHorizontalBarChart([
+      { label: "missed TP", value: num(payload.missed_tp_labels), color: "orange", display: safeText(payload.missed_tp_labels, 0) },
+      { label: "missed SL", value: num(payload.missed_sl_labels), color: "red", display: safeText(payload.missed_sl_labels, 0) },
+      { label: "TIME mismatch", value: num(payload.inconsistent_time_labels), color: "red", display: safeText(payload.inconsistent_time_labels, 0) },
+      { label: "path mismatch", value: num(payload.path_metric_label_mismatch), color: "orange", display: safeText(payload.path_metric_label_mismatch, 0) },
+    ]));
+    if (status !== "OK") {
+      setText("pipelineStatusState", status);
+    }
+  }
+
+  function handleBitgetCostModel(payload, text) {
+    const status = safeText(payload.cost_model_status || (text.match(/cost_model_status:\s*(\S+)/i) || [])[1], "UNKNOWN");
+    const funding = safeText(payload.funding_model_status || (text.match(/funding_model_status:\s*(\S+)/i) || [])[1], "UNKNOWN");
+    setText("costModelState", status);
+    setText("costModelProblemText", `funding=${funding}; USDT-M maker/taker, no spot fees.`);
+    const summary = payload.cost_sensitivity_summary || {};
+    setHtml("costSensitivityChart", renderHorizontalBarChart([
+      { label: "Gross edge", value: num(summary.gross_edge_groups), color: "blue", display: safeText(summary.gross_edge_groups, 0) },
+      { label: "Net negative", value: num(summary.gross_edge_net_negative), color: "red", display: safeText(summary.gross_edge_net_negative, 0) },
+      { label: "Changed under low cost", value: num(summary.changed_positive_under_maker_maker_or_zero_slippage), color: "orange", display: safeText(summary.changed_positive_under_maker_maker_or_zero_slippage, 0) },
+    ]));
+  }
+
+  function handleCostInventory(payload, text) {
+    const maker = safeText(payload.maker_fee_assumption, "2");
+    const taker = safeText(payload.taker_fee_assumption, "6");
+    setText("costModelState", "INVENTORIED");
+    setText("costModelProblemText", `bot maker=${maker}bps taker=${taker}bps; compare USDT-M VIP0.`);
+  }
+
+  function handleMarginMode(payload, text) {
+    const status = safeText(payload.margin_mode_status || (text.match(/margin_mode_status:\s*(\S+)/i) || [])[1], "UNKNOWN");
+    setText("marginModeState", status);
+  }
+
   function handleTimeDeath(payload, text) {
     const time = extractPercent(text, "TIME%");
     const tp = extractPercent(text, "TP%");
@@ -678,6 +738,12 @@
       ["scoreCalibrationBtn", "/api/training/score-calibration?hours=24", "scoreIncubatorOutput", handleScoreCalibration],
       ["candidateIncubatorBtn", "/api/training/candidate-incubator?hours=24", "scoreIncubatorOutput", handleCandidateIncubator, true],
       ["trainingDataIntegrityBtn", "/api/training/training-data-integrity?hours=24", "scoreIncubatorOutput", null, true],
+      ["dataPipelineDiagnosisBtn", "/api/training/data-pipeline-diagnosis?hours=24", "pipelineCostOutput", handleDataPipelineDiagnosis],
+      ["relationRepairAuditBtn", "/api/training/relation-repair-audit?hours=24", "pipelineCostOutput", handleRelationRepair, true],
+      ["labelQualityV2Btn", "/api/training/label-quality-v2?hours=24", "pipelineCostOutput", handleLabelQualityV2, true],
+      ["costModelInventoryBtn", "/api/training/cost-model-inventory", "pipelineCostOutput", handleCostInventory, true],
+      ["bitgetCostModelAuditBtn", "/api/training/bitget-cost-model-audit?hours=24", "pipelineCostOutput", handleBitgetCostModel, true],
+      ["marginModeAuditBtn", "/api/training/margin-mode-audit", "pipelineCostOutput", handleMarginMode, true],
       ["edgeGuardBtn", "/api/training/edge-guard?hours=24", "edgePolicyOutput", handleEdgeGuard, true],
       ["paperPolicyOrchestratorBtn", "/api/training/paper-policy-orchestrator?hours=24", "edgePolicyOutput", handleOrchestrator, true],
       ["netEdgeLabBtn", "/api/training/net-edge-lab?hours=24", "edgePolicyOutput", null, true],

@@ -638,6 +638,61 @@ class ResearchLab:
 
         return DashboardDataBindingSmokeTest(self.config, self.db, self.logger).to_text()
 
+    def data_pipeline_diagnosis(self, hours: int = 24) -> str:
+        from .data_pipeline_diagnosis import DataPipelineDiagnosis
+
+        return DataPipelineDiagnosis(self.config, self.db).to_text(hours=hours)
+
+    def data_pipeline_diagnosis_smoke_test(self) -> str:
+        from .data_pipeline_diagnosis import DataPipelineDiagnosisSmokeTest
+
+        return DataPipelineDiagnosisSmokeTest(self.config, self.db, self.logger).to_text()
+
+    def relation_repair_audit(self, hours: int = 24) -> str:
+        from .relation_repair_audit import RelationRepairAudit
+
+        return RelationRepairAudit(self.config, self.db).to_text(hours=hours)
+
+    def relation_repair_audit_smoke_test(self) -> str:
+        from .relation_repair_audit import RelationRepairAuditSmokeTest
+
+        return RelationRepairAuditSmokeTest(self.config, self.db, self.logger).to_text()
+
+    def label_quality_v2(self, hours: int = 24) -> str:
+        from .label_quality_v2 import LabelQualityV2
+
+        return LabelQualityV2(self.config, self.db).to_text(hours=hours)
+
+    def label_quality_v2_smoke_test(self) -> str:
+        from .label_quality_v2 import LabelQualityV2SmokeTest
+
+        return LabelQualityV2SmokeTest(self.config, self.db, self.logger).to_text()
+
+    def cost_model_inventory(self) -> str:
+        from .bitget_cost_model_audit import BitgetCostModelAudit
+
+        return BitgetCostModelAudit(self.config, self.db).inventory_text()
+
+    def bitget_cost_model_audit(self, hours: int = 24) -> str:
+        from .bitget_cost_model_audit import BitgetCostModelAudit
+
+        return BitgetCostModelAudit(self.config, self.db).to_text(hours=hours)
+
+    def bitget_cost_model_smoke_test(self) -> str:
+        from .bitget_cost_model_audit import BitgetCostModelSmokeTest
+
+        return BitgetCostModelSmokeTest(self.config, self.db, self.logger).to_text()
+
+    def margin_mode_audit(self) -> str:
+        from .margin_mode_audit import MarginModeAudit
+
+        return MarginModeAudit(self.config, self.db).to_text()
+
+    def margin_mode_audit_smoke_test(self) -> str:
+        from .margin_mode_audit import MarginModeAuditSmokeTest
+
+        return MarginModeAuditSmokeTest(self.config, self.db, self.logger).to_text()
+
     def decision_ledger_audit(self, hours: int = 24) -> str:
         from .decision_ledger_audit import DecisionLedgerAudit
 
@@ -1417,6 +1472,17 @@ def main() -> None:
             "data-vault-audit",
             "dashboard-data-binding-audit",
             "dashboard-data-binding-smoke-test",
+            "data-pipeline-diagnosis",
+            "data-pipeline-diagnosis-smoke-test",
+            "relation-repair-audit",
+            "relation-repair-audit-smoke-test",
+            "label-quality-v2",
+            "label-quality-v2-smoke-test",
+            "cost-model-inventory",
+            "bitget-cost-model-audit",
+            "bitget-cost-model-smoke-test",
+            "margin-mode-audit",
+            "margin-mode-audit-smoke-test",
             "shadow-experiments",
             "evolution-score",
             "mfe-mae-diagnostic",
@@ -1605,6 +1671,28 @@ def main() -> None:
         print(lab.dashboard_data_binding_audit())
     elif args.command == "dashboard-data-binding-smoke-test":
         print(lab.dashboard_data_binding_smoke_test())
+    elif args.command == "data-pipeline-diagnosis":
+        print(lab.data_pipeline_diagnosis(hours=args.hours))
+    elif args.command == "data-pipeline-diagnosis-smoke-test":
+        print(lab.data_pipeline_diagnosis_smoke_test())
+    elif args.command == "relation-repair-audit":
+        print(lab.relation_repair_audit(hours=args.hours))
+    elif args.command == "relation-repair-audit-smoke-test":
+        print(lab.relation_repair_audit_smoke_test())
+    elif args.command == "label-quality-v2":
+        print(lab.label_quality_v2(hours=args.hours))
+    elif args.command == "label-quality-v2-smoke-test":
+        print(lab.label_quality_v2_smoke_test())
+    elif args.command == "cost-model-inventory":
+        print(lab.cost_model_inventory())
+    elif args.command == "bitget-cost-model-audit":
+        print(lab.bitget_cost_model_audit(hours=args.hours))
+    elif args.command == "bitget-cost-model-smoke-test":
+        print(lab.bitget_cost_model_smoke_test())
+    elif args.command == "margin-mode-audit":
+        print(lab.margin_mode_audit())
+    elif args.command == "margin-mode-audit-smoke-test":
+        print(lab.margin_mode_audit_smoke_test())
     elif args.command == "shadow-experiments":
         print(lab.shadow_experiments(hours=args.hours))
     elif args.command == "evolution-score":
