@@ -1,0 +1,79 @@
+AUDITORIA POST-FASE 7 — bitget-ai-trading-bot — RESUMEN EJECUTIVO
+Commits: Fase 6 = 2b0d030 / Fase 7 = 866692a (origin/main)
+Estado: PAPER / RESEARCH / SHADOW (verificado read-only)
+
+VEREDICTO FINAL: NEEDS_FIXES_BEFORE_NEXT_PHASE
+
+¿Avanzar a la siguiente fase research?  NO (3 issues CRITICAL de validez).
+¿Activar paper filter?                   NO (label_quality BAD, benchmark roto).
+¿Activar live trading?                   NO (correctamente bloqueado por defaults).
+
+TOP 10 RIESGOS
+01 [CRITICAL] Lookahead bias en row_return() — operational_intelligence_utils.py:75-84
+   Si falta `return_pct` usa MFE/MAE (ex-post) como retorno + piso de 0.15.
+   Contamina TODO el stack analítico de Fase 7.
+02 [CRITICAL] simple_breakout_baseline 0.8347 es un ORÁCULO, no edge real
+   strategy_research_library.py:144-145 — filtra mfe>=0.8 y usa mfe como return.
+   Demostrado empíricamente: el "0.83" desaparece cuando hay return_pct real.
+03 [CRITICAL] Exit Policy V3 simula con MFE × capture_ratios hardcodeados
+   exit_policy_v3.py:118-180 — todas las políticas multiplican MFE conocido
+   ex-post por 0.72/0.68/0.45. No es backtest, es aritmética optimista.
+04 [HIGH] Walk-forward NO es walk-forward — walk_forward_validator.py:73-77
+   Single split 50/25/25. Sin ventanas rodantes. Stability binaria. No detecta
+   overfit confiablemente.
+05 [HIGH] Anti-overfit fórmula sospechosa — anti_overfit_matrix_v2.py:87
+   `avg_cost_bps / 100` parece debería ser `/ 10000`. COST_SENSITIVE_EDGE se
+   activa por coincidencia de escala, no por correcta conversión bps→fracción.
+06 [HIGH] LABEL_QUALITY_UNRELIABLE trivial — sólo flaggea si MFE=0 Y MAE=0 en
+   primeros 50 rows. No detecta duplicados/orphan/timestamp issues reales.
+07 [HIGH] Tests verdes pero ciegos — 24/24 PASS pero todos inyectan return_pct
+   explícito, nunca ejercitan el fallback peligroso con MFE/MAE.
+08 [MEDIUM] TOO_SPECIFIC_SYMBOL flag se dispara siempre que samples<750
+   anti_overfit_matrix_v2.py:93 — contamina todos los grupos pequeños sin
+   evidencia real de overfit.
+09 [MEDIUM] runtime_optimization_proposal.py huérfano (46 líneas, sin tests,
+   sin integración en research_lab/dashboard_pro). Riesgo de aplicar
+   propuestas no validadas si humanos las leen del health_server.
+10 [LOW] PAPER_CANDIDATE_DISABLED no chequea label_quality antes de activar.
+   Hoy bloqueado por defaults, pero state machine sin defensa adicional.
+
+TOP 10 FIXES (orden de impacto)
+01 Eliminar fallback MFE/MAE en row_return(). Si falta return_pct → devolver
+   0.0 con flag o excepción. No inventar retornos con datos ex-post.
+02 Reescribir simple_breakout_baseline como regla EJECUTABLE: filtrar por
+   features conocidas en entrada (volatility, range_compression), no por MFE.
+03 Reescribir exit_policy_v3.simulate_exit_policy() como simulación bar-by-bar
+   sobre OHLCV histórico (no MFE × capture).
+04 Implementar walk-forward real con ≥5 ventanas rodantes y re-fit por fold.
+05 Auditar fórmula COST_SENSITIVE_EDGE: cambiar /100 → /10000 o documentar.
+06 Reforzar label_quality_unreliable: chequear duplicados, orphans, timestamp
+   monotonicity, % de filas sin return_pct. Si >20% faltan → bloquear.
+07 Test específico del path peligroso: rows SIN return_pct deben bloquear,
+   no rellenarse con MFE.
+08 Reemplazar TOO_SPECIFIC_SYMBOL por test estadístico (permutación) en vez
+   de threshold de samples.
+09 Marcar runtime_optimization_proposal.py como experimental o eliminarlo.
+10 Guardrail en candidate_promotion_v2._state(): si label_quality_status!=OK
+   o data_quality_status!=OK, forzar NEED_MORE_DATA aun con net_EV positivo.
+
+STATUS POR ÁREA
+security_status                  SAFE_PAPER_ONLY
+phase6_regression_status         PASS
+phase7_implementation_status     COMPLETE_BUT_STATISTICALLY_FLAWED
+exit_policy_status               BAD
+sudden_move_status               WARNING
+walk_forward_status              WARNING
+anti_overfit_status              WARNING
+candidate_promotion_status       OK (defaults seguros pero alimentado mal)
+data_quality_status              WARNING
+label_quality_status             BAD
+cost_model_status                OK (12 bps round-trip correcto)
+benchmark_status                 BAD
+simple_breakout_baseline_status  SUSPECTED_LOOKAHEAD (confirmado empírico)
+dashboard_status                 OK (100% read-only verificado)
+tests_status                     PARTIAL
+live_allowed                     false
+paper_filter_allowed             false
+final_recommendation             NO LIVE
+
+Informe completo: AUDITORIA_POST_FASE7.md

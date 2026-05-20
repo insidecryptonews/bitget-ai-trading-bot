@@ -1,0 +1,156 @@
+{
+  "audit_metadata": {
+    "audit_date": "2026-05-20",
+    "auditor_role": "senior_algorithmic_trading_execution_safety_python_backend_risk_systems_backtesting_walk_forward_anti_overfit_edge_detection",
+    "repo": "insidecryptonews/bitget-ai-trading-bot",
+    "phase6_commit": "2b0d030",
+    "phase7_commit": "866692a",
+    "current_branch": "main",
+    "phase_state_observed": "PAPER_RESEARCH_SHADOW",
+    "audit_mode": "READ_ONLY_NO_COMMITS_NO_PUSH",
+    "smoke_tests_executed": [
+      "net-rr-smoke-test",
+      "strategy-research-library-smoke-test",
+      "walk-forward-smoke-test",
+      "anti-overfit-v2-smoke-test",
+      "candidate-promotion-v2-smoke-test"
+    ],
+    "pytest_result": "24_passed_in_0.27s",
+    "compileall_result": "OK"
+  },
+
+  "security_status": "SAFE_PAPER_ONLY",
+  "phase6_regression_status": "PASS",
+  "phase7_status": "COMPLETE_BUT_STATISTICALLY_FLAWED",
+  "phase7_implementation_status": "COMPLETE_BUT_STATISTICALLY_FLAWED",
+  "exit_policy_status": "BAD",
+  "sudden_move_status": "WARNING",
+  "walk_forward_status": "WARNING",
+  "anti_overfit_status": "WARNING",
+  "candidate_promotion_status": "OK",
+  "data_quality_status": "WARNING",
+  "label_quality_status": "BAD",
+  "cost_model_status": "OK",
+  "funding_model_status": "OK",
+  "double_counting_risk": "OK",
+  "net_EV_reliability": "BAD",
+  "benchmark_status": "BAD",
+  "simple_breakout_baseline_status": "SUSPECTED_LOOKAHEAD",
+  "bot_vs_baseline_status": "INVALID_COMPARISON",
+  "dashboard_status": "OK",
+  "report_status": "OK",
+  "runtime_status": "OK",
+  "latency_risk": "LOW",
+  "rate_limit_risk": "LOW",
+  "concurrency_bugs": "NONE_DETECTED",
+  "tests_status": "PARTIAL",
+
+  "live_path_reachable_currently": false,
+  "can_send_real_orders_current": false,
+  "live_allowed": false,
+  "paper_filter_allowed": false,
+  "paper_filter_enabled": false,
+  "live_trading": false,
+  "dry_run": true,
+  "paper_trading": true,
+  "enable_paper_policy_filter": false,
+  "paper_policy_filter_mode": "shadow",
+  "margin_mode_isolated_enforced": true,
+  "cross_margin_blocked": true,
+  "worker_lightweight_mode_default": true,
+
+  "phase7_modules_verified": {
+    "operational_intelligence_py": { "present": true, "lines": 90, "tests": true, "side_effects": "none" },
+    "operational_intelligence_utils_py": { "present": true, "lines": 220, "tests": "indirect", "side_effects": "none" },
+    "exit_policy_v3_py": { "present": true, "lines": 278, "tests": true, "side_effects": "none" },
+    "exit_policy_v3_backtest_py": { "present": true, "lines": 156, "tests": true, "side_effects": "none" },
+    "sudden_move_detector_py": { "present": true, "lines": 152, "tests": true, "side_effects": "none" },
+    "pre_move_intelligence_v2_py": { "present": true, "lines": 159, "tests": true, "side_effects": "none" },
+    "walk_forward_validator_py": { "present": true, "lines": 143, "tests": true, "side_effects": "none" },
+    "anti_overfit_matrix_v2_py": { "present": true, "lines": 125, "tests": true, "side_effects": "none" },
+    "candidate_promotion_v2_py": { "present": true, "lines": 148, "tests": true, "side_effects": "none" },
+    "shadow_strategy_simulator_py": { "present": true, "lines": 138, "tests": true, "side_effects": "none" },
+    "strategy_research_library_py": { "present": true, "lines": 179, "tests": true, "side_effects": "none" },
+    "runtime_optimization_proposal_py": { "present": true, "lines": 46, "tests": false, "side_effects": "none", "orphan": true }
+  },
+
+  "phase6_modules_verified": {
+    "net_rr_py": { "present": true, "lines": 146, "tests": true, "smoke_pass": true },
+    "structural_stop_py": { "present": true, "lines": 114, "tests": true, "smoke_pass": true },
+    "execution_safety_py": { "present": true, "lines": 396, "tests": "indirect", "smoke_pass": true },
+    "risk_manager_py_phase6_changes": { "present": true, "tests": true },
+    "execution_engine_py_phase6_changes": { "present": true, "tests": true, "pending_execution_idempotency": true },
+    "database_py_sql_whitelist": { "present": true, "tests": true }
+  },
+
+  "critical_findings": [
+    {
+      "id": "F7-001",
+      "severity": "CRITICAL",
+      "file": "app/operational_intelligence_utils.py",
+      "line": "75-84",
+      "function": "row_return",
+      "description": "Lookahead bias: fallback usa MFE/MAE como retorno realizado cuando falta return_pct",
+      "blocks_paper_filter": true
+    },
+    {
+      "id": "F7-002",
+      "severity": "CRITICAL",
+      "file": "app/strategy_research_library.py",
+      "line": "144-145",
+      "function": "evaluate_benchmark",
+      "description": "Survivorship bias: simple_breakout_baseline filtra mfe>=0.8 ex-post haciendo el net_EV de 0.8347 un oraculo",
+      "blocks_paper_filter": true
+    },
+    {
+      "id": "F7-003",
+      "severity": "CRITICAL",
+      "file": "app/exit_policy_v3.py",
+      "line": "118-180",
+      "function": "simulate_exit_policy",
+      "description": "Exit policies usan MFE conocido ex-post * capture_ratios hardcodeados en vez de simulacion bar-by-bar",
+      "blocks_paper_filter": true
+    }
+  ],
+
+  "high_findings_count": 4,
+  "medium_findings_count": 2,
+  "low_findings_count": 1,
+  "info_findings_count": 2,
+  "verified_safe_count": 13,
+
+  "red_team_results": {
+    "live_path_reachable": false,
+    "paper_filter_accidentally_activatable": false,
+    "candidate_promotion_can_trade": false,
+    "can_send_real_orders_buggy": false,
+    "balance_stale_exposure": "mitigated_by_phase6",
+    "position_without_stop": "mitigated_by_phase6",
+    "emergency_close_no_retry": "mitigated_by_phase6",
+    "pending_execution_stuck": "mitigated_by_reconcile",
+    "reconcile_duplicates_trades": "no_clientoid_idempotent",
+    "worker_lock_race": "theoretical_ttl_mitigated",
+    "dashboard_dangerous_writes": "no_only_get",
+    "sql_injection_future": "mitigated_by_whitelist",
+    "config_dangerous_accepted": "mitigated_by_hardening",
+    "lookahead_bias": "CONFIRMED_F7-001",
+    "survivorship_bias": "CONFIRMED_F7-002",
+    "overfit_single_split": "CONFIRMED_F7-004",
+    "tests_falsely_green": "CONFIRMED_F7-007",
+    "cost_double_counting": "not_detected",
+    "funding_wrong_side": "not_detected",
+    "funding_always_applied": "not_detected",
+    "simple_breakout_baseline_artificially_inflated": "CONFIRMED_F7-002"
+  },
+
+  "blockers": {
+    "for_next_research_phase": ["F7-001", "F7-002", "F7-003"],
+    "for_paper_filter_activation": ["F7-001", "F7-002", "F7-003", "F7-004", "F7-006", "F7-010", "label_quality_BAD"],
+    "for_live_activation": ["all_phase7_critical_findings", "walk_forward_real_implementation", "external_audit", "long_paper_validation"]
+  },
+
+  "verdict": "B_NEEDS_FIXES_BEFORE_NEXT_PHASE",
+  "verdict_explanation": "Fase 6 esta solida (sin regresion). Seguridad operacional intacta (no hay ruta live alcanzable). Fase 7 esta arquitectonicamente completa y safe (read-only) pero contiene 3 issues CRITICAL de validez estadistica que invalidan sus metricas como evidencia de edge: (1) lookahead en row_return cuando falta return_pct, (2) survivorship en simple_breakout_baseline (mfe>=0.8 filter), (3) simulacion con MFE en exit_policy_v3. El simple_breakout_baseline net_EV=0.8347 NO es un edge real - es un oraculo. Demostrado empiricamente.",
+
+  "final_recommendation": "NO LIVE"
+}
