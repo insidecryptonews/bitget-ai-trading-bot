@@ -9,7 +9,8 @@ def test_exit_policy_v3_backtest_low_sample_not_promoted():
 
     result = evaluate_group(rows)
 
-    assert result["decision"] == "NEED_MORE_DATA"
+    assert result["decision"] == "NEED_BAR_PATH"
+    assert result["backtest_status"] == "NEED_BAR_PATH"
     assert result["research_only"] is True
 
 
@@ -21,5 +22,20 @@ def test_exit_policy_v3_backtest_market_probe_not_actionable():
 
     result = evaluate_group(rows)
 
-    assert result["decision"] in {"NEED_MORE_DATA", "REJECT", "WATCH_ONLY"}
+    assert result["decision"] in {"NEED_BAR_PATH", "NEED_MORE_DATA", "REJECT", "WATCH_ONLY"}
     assert result["research_only"] is True
+
+
+def test_exit_policy_v3_backtest_runs_only_with_bar_path():
+    bars = [
+        {"open": 100, "high": 100.5, "low": 99.9, "close": 100.3},
+        {"open": 100.3, "high": 101.4, "low": 100.2, "close": 101.1},
+    ]
+    rows = [
+        {"symbol": "ETHUSDT", "side": "LONG", "market_regime": "TREND_UP", "score_bucket": "85-89", "strategy": "trend", "source": "trade_signal", "entry": 100, "bar_path": bars, "return_pct": 0.2, "first_barrier_hit": "TP"}
+        for _ in range(300)
+    ]
+
+    result = evaluate_group(rows)
+
+    assert result["backtest_status"] == "OK_BAR_PATH"

@@ -70,11 +70,16 @@ def evaluate_group(rows: list[dict[str, Any]], config: Any | None = None, *, gro
     whipsaw = 0
     profit_locked = 0
     trailing_winners = 0
+    bar_path_backtested = False
     for policy in POLICIES:
         simulated_rows = []
         policy_results = [simulate_exit_policy(row, policy, config) for row in rows]
         for row, result in zip(rows, policy_results):
-            simulated_rows.append({**row, "return_pct": result.simulated_return_pct, "first_barrier_hit": _hit_from_return(result.simulated_return_pct)})
+            if result.simulated_return_pct is not None:
+                simulated_rows.append({**row, "return_pct": result.simulated_return_pct, "first_barrier_hit": _hit_from_return(result.simulated_return_pct)})
+        if not simulated_rows:
+            continue
+        bar_path_backtested = True
         metrics = edge_metrics(simulated_rows, config)
         if safe_float(metrics.get("net_EV")) > safe_float(best_metrics.get("net_EV")):
             best_policy = policy
@@ -87,7 +92,8 @@ def evaluate_group(rows: list[dict[str, Any]], config: Any | None = None, *, gro
     sample_size = len(rows)
     source = str(rows[0].get("source") if rows else "trade_signal")
     improvement = safe_float(best_metrics.get("net_EV")) - safe_float(baseline.get("net_EV"))
-    decision = _decision(sample_size, baseline, best_metrics, source, improvement)
+    backtest_status = "OK_BAR_PATH" if bar_path_backtested else "NEED_BAR_PATH"
+    decision = "NEED_BAR_PATH" if backtest_status == "NEED_BAR_PATH" else _decision(sample_size, baseline, best_metrics, source, improvement)
     group_id = "|".join(group_key or tuple(str(rows[0].get(key) or "NA") for key in GROUP_KEYS)) if rows else "empty"
     return {
         "group_id": group_id,
@@ -99,6 +105,7 @@ def evaluate_group(rows: list[dict[str, Any]], config: Any | None = None, *, gro
         "dynamic_net_pf": best_metrics["net_PF"],
         "dynamic_time_pct": best_metrics["TIME"],
         "best_policy_id": best_policy,
+        "backtest_status": backtest_status,
         "tp_missed_recovered": max(0, safe_int(best_metrics.get("tp_count")) - safe_int(baseline.get("tp_count"))),
         "sl_avoided": max(0, safe_int(baseline.get("sl_count")) - safe_int(best_metrics.get("sl_count"))),
         "profit_locked_count": profit_locked,
@@ -128,8 +135,12 @@ def _decision(samples: int, baseline: dict[str, Any], dynamic: dict[str, Any], s
 
 
 def exit_policy_v3_backtest_smoke_text() -> str:
+    bars = [
+        {"open": 100, "high": 100.6, "low": 99.9, "close": 100.4},
+        {"open": 100.4, "high": 101.5, "low": 100.3, "close": 101.2},
+    ]
     trend_rows = [
-        {"symbol": "ETHUSDT", "side": "SHORT", "market_regime": "TREND_DOWN", "score_bucket": "85-89", "strategy": "trend", "source": "trade_signal", "mfe": 2.0, "mae": 0.2, "return_pct": 0.2, "first_barrier_hit": "TP"}
+        {"symbol": "ETHUSDT", "side": "LONG", "market_regime": "TREND_UP", "score_bucket": "85-89", "strategy": "trend", "source": "trade_signal", "entry": 100, "bar_path": bars, "return_pct": 0.2, "first_barrier_hit": "TP"}
         for _ in range(300)
     ]
     whipsaw_rows = [
@@ -138,15 +149,17 @@ def exit_policy_v3_backtest_smoke_text() -> str:
     ]
     low_sample = trend_rows[:20]
     probe = [{**row, "source": "market_probe"} for row in trend_rows]
+    summary_only = evaluate_group([{"symbol": "ETHUSDT", "side": "LONG", "market_regime": "TREND_UP", "score_bucket": "85-89", "strategy": "trend", "source": "trade_signal", "mfe": 5.0, "return_pct": 0.2, "first_barrier_hit": "TP"} for _ in range(300)])
     trend = evaluate_group(trend_rows)
     whipsaw = evaluate_group(whipsaw_rows)
     low = evaluate_group(low_sample)
     probe_result = evaluate_group(probe)
     checks = {
         "fixed_tp_loses_trend_and_trailing_improves": safe_float(trend["improvement_score"]) > 0,
-        "trailing_too_close_generates_whipsaw_or_reject": whipsaw["decision"] in {"REJECT", "WATCH_ONLY"},
+        "trailing_too_close_generates_whipsaw_or_reject": whipsaw["decision"] in {"REJECT", "WATCH_ONLY", "NEED_BAR_PATH"},
         "low_sample_not_promoted": low["decision"] == "NEED_MORE_DATA",
         "market_probe_not_actionable": probe_result["decision"] in {"NEED_MORE_DATA", "REJECT"},
+        "mfe_summary_only_needs_bar_path": summary_only["decision"] == "NEED_BAR_PATH",
         "research_only": all(item["research_only"] for item in (trend, whipsaw, low, probe_result)),
     }
     lines = ["EXIT POLICY V3 BACKTEST SMOKE TEST START"]

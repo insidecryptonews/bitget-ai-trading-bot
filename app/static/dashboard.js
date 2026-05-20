@@ -658,6 +658,7 @@
     setText("opsPromotionState", Object.keys(counts).length ? `${Object.keys(counts).length} states` : "not loaded");
     setText("opsSimulatorState", best.strategy_id ? safeText(best.recommendation || "research") : "not loaded");
     setText("opsStrategyState", `${safeText(strategy.tested_hypotheses || 0)} hypotheses`);
+    setText("opsStatValidityState", safeText(payload.statistical_validity_status || "INVALID_METRICS_BLOCKED"));
     setHtml("opsPromotionChart", Object.keys(counts).length ? renderHorizontalBarChart(Object.entries(counts).map(([label, value]) => ({
       label,
       value,
@@ -893,6 +894,8 @@
       ["candidatePromotionV2Btn", "/api/training/candidate-promotion-v2?hours=24", "operationalIntelligenceOutput", handleCandidatePromotionV2, true],
       ["shadowStrategySimulatorBtn", "/api/training/shadow-strategy-simulator?hours=72", "operationalIntelligenceOutput", handleShadowSimulator, true],
       ["strategyResearchLibraryBtn", "/api/training/strategy-research-library?hours=72", "operationalIntelligenceOutput", null, true],
+      ["realStrategyBacktesterBtn", "/api/training/real-strategy-backtest?hours=72", "operationalIntelligenceOutput", null, true],
+      ["duplicateModuleAuditBtn", "/api/training/duplicate-module-audit", "operationalIntelligenceOutput", null, true],
       ["edgeGuardBtn", "/api/training/edge-guard?hours=24", "edgePolicyOutput", handleEdgeGuard, true],
       ["paperPolicyOrchestratorBtn", "/api/training/paper-policy-orchestrator?hours=24", "edgePolicyOutput", handleOrchestrator, true],
       ["netEdgeLabBtn", "/api/training/net-edge-lab?hours=24", "edgePolicyOutput", null, true],

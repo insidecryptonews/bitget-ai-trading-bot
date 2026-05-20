@@ -15,6 +15,20 @@ from .utils import safe_float, safe_int
 FINAL_RECOMMENDATION = "NO LIVE"
 LOW_SAMPLE_SOFT = 250
 LOW_SAMPLE_HARD = 750
+REALIZED_RETURN_KEYS = ("return_pct", "realized_return_pct", "net_return_pct")
+EXPOST_RETURN_KEYS = (
+    "mfe",
+    "mae",
+    "max_favorable_excursion",
+    "max_favorable_pct",
+    "max_adverse_excursion",
+    "max_adverse_pct",
+    "first_barrier_hit",
+    "label",
+    "outcome",
+    "final_return_pct",
+    "simulated_return_pct",
+)
 
 
 def load_operational_rows(db: Any, *, hours: int = 24, limit: int = 50000) -> list[dict[str, Any]]:
@@ -42,6 +56,7 @@ def normalize_row(row: dict[str, Any]) -> dict[str, Any]:
     elif not source:
         source = "trade_signal"
     hit = hit_class(row.get("first_barrier_hit") or row.get("label") or row.get("outcome"))
+    realized_return = extract_realized_return(row)
     return {
         "observation_id": row.get("observation_id") or row.get("id"),
         "timestamp": row.get("timestamp") or row.get("created_at") or row.get("label_timestamp"),
@@ -53,7 +68,9 @@ def normalize_row(row: dict[str, Any]) -> dict[str, Any]:
         "source": source,
         "strategy": str(row.get("strategy") or row.get("strategy_type") or "NA"),
         "first_barrier_hit": hit,
-        "return_pct": row_return(row),
+        "return_pct": realized_return,
+        "return_source": realized_return_source(row),
+        "ex_post_fields_present_but_blocked": has_expost_return_fields(row) and realized_return is None,
         "mfe": first_float(row, "mfe", "max_favorable_excursion", "max_favorable_pct"),
         "mae": abs(first_float(row, "mae", "max_adverse_excursion", "max_adverse_pct")),
         "bars": first_float(row, "bars", "bars_to_outcome", "bars_tracked", "holding_bars"),
@@ -72,16 +89,50 @@ def first_float(row: dict[str, Any], *keys: str) -> float:
     return 0.0
 
 
-def row_return(row: dict[str, Any]) -> float:
-    for key in ("return_pct", "realized_return_pct", "final_return_pct", "simulated_return_pct"):
+def extract_realized_return(row: dict[str, Any]) -> float | None:
+    """Return only an actual realized return field.
+
+    MFE/MAE, labels, TP/SL/TIME outcomes and final path summaries are ex-post
+    information. They are deliberately not used as realized return fallback.
+    """
+
+    if not isinstance(row, dict):
+        return None
+    for key in REALIZED_RETURN_KEYS:
         if row.get(key) is not None:
-            return safe_float(row.get(key))
+            value = safe_float(row.get(key))
+            if math.isfinite(value):
+                return value
+    return None
+
+
+def realized_return_source(row: dict[str, Any]) -> str:
+    if not isinstance(row, dict):
+        return "missing"
+    for key in REALIZED_RETURN_KEYS:
+        if row.get(key) is not None:
+            return key
+    return "missing"
+
+
+def has_expost_return_fields(row: dict[str, Any]) -> bool:
+    if not isinstance(row, dict):
+        return False
+    return any(row.get(key) is not None for key in EXPOST_RETURN_KEYS)
+
+
+def row_return(row: dict[str, Any], allow_expost_fallback: bool = False) -> float | None:
+    realized = extract_realized_return(row)
+    if realized is not None or not allow_expost_fallback:
+        return realized
+    # Explicit legacy-only fallback for one-off diagnostics. Production/research
+    # metrics keep allow_expost_fallback=False to block lookahead contamination.
     hit = hit_class(row.get("first_barrier_hit") or row.get("label"))
-    if hit == "TP":
-        return max(0.15, first_float(row, "mfe", "max_favorable_pct"))
-    if hit == "SL":
-        return -max(0.15, abs(first_float(row, "mae", "max_adverse_pct")))
-    return 0.0
+    if hit == "TP" and first_float(row, "mfe", "max_favorable_pct") > 0:
+        return first_float(row, "mfe", "max_favorable_pct")
+    if hit == "SL" and first_float(row, "mae", "max_adverse_pct") > 0:
+        return -abs(first_float(row, "mae", "max_adverse_pct"))
+    return None
 
 
 def hit_class(value: Any) -> str:
@@ -118,11 +169,34 @@ def max_drawdown(values: Iterable[float]) -> float:
     return abs(worst)
 
 
-def edge_metrics(rows: list[dict[str, Any]], config: Any | None = None) -> dict[str, Any]:
+def edge_metrics(rows: list[dict[str, Any]], config: Any | None = None, *, require_realized_return: bool = True) -> dict[str, Any]:
     costs = cost_config(config)
-    samples = len(rows)
-    returns = [row_return(row) for row in rows]
-    hits = Counter(hit_class(row.get("first_barrier_hit")) for row in rows)
+    rows_total = len(rows)
+    return_rows: list[dict[str, Any]] = []
+    returns: list[float] = []
+    source_counts: Counter[str] = Counter()
+    expost_blocked = 0
+    for row in rows:
+        realized = extract_realized_return(row)
+        source_counts[realized_return_source(row)] += 1
+        if realized is None:
+            if has_expost_return_fields(row):
+                expost_blocked += 1
+            continue
+        return_rows.append(row)
+        returns.append(realized)
+    samples = len(return_rows)
+    rows_missing = rows_total - samples
+    missing_pct = rows_missing / max(rows_total, 1)
+    if require_realized_return and rows_total and samples == 0:
+        edge_status = "NEED_REALIZED_RETURN"
+    elif require_realized_return and missing_pct > 0.5:
+        edge_status = "LOW_RETURN_COVERAGE"
+    elif require_realized_return and expost_blocked and rows_missing:
+        edge_status = "INVALID_LOOKAHEAD_BLOCKED"
+    else:
+        edge_status = "OK"
+    hits = Counter(hit_class(row.get("first_barrier_hit")) for row in return_rows)
     breakdowns = [
         explain_cost_breakdown(
             source=str(row.get("source") or "trade_signal"),
@@ -136,17 +210,25 @@ def edge_metrics(rows: list[dict[str, Any]], config: Any | None = None) -> dict[
             outcome=str(row.get("first_barrier_hit") or ""),
             already_includes_costs=bool(row.get("already_includes_costs")),
         )
-        for row in rows
+        for row in return_rows
     ]
     net = calculate_net_metrics_for_returns(returns, breakdowns)
-    mfes = [safe_float(row.get("mfe")) for row in rows]
-    maes = [abs(safe_float(row.get("mae"))) for row in rows]
+    mfes = [safe_float(row.get("mfe")) for row in return_rows]
+    maes = [abs(safe_float(row.get("mae"))) for row in return_rows]
     time_ratio = hits["TIME"] / max(samples, 1)
     tp_ratio = hits["TP"] / max(samples, 1)
     sl_ratio = hits["SL"] / max(samples, 1)
     avg_cost_bps = sum(item.total_cost_bps for item in breakdowns) / max(len(breakdowns), 1)
     actionability = Counter(item.actionability for item in breakdowns).most_common(1)[0][0] if breakdowns else "UNKNOWN"
     return {
+        "rows_total": rows_total,
+        "rows_with_realized_return": samples,
+        "rows_missing_realized_return": rows_missing,
+        "missing_realized_return_pct": missing_pct,
+        "returns_source_counts": dict(source_counts),
+        "ex_post_fields_present_but_blocked": expost_blocked,
+        "edge_metrics_status": edge_status,
+        "metric_reliability": metric_reliability(samples),
         "samples": samples,
         "tp_count": hits["TP"],
         "sl_count": hits["SL"],
@@ -178,7 +260,18 @@ def confidence_class(samples: int) -> str:
     return "LOW"
 
 
+def metric_reliability(samples: int) -> str:
+    if samples < 100:
+        return "LOW_SAMPLE"
+    if samples < 500:
+        return "MEDIUM_SAMPLE"
+    return "OK"
+
+
 def conservative_decision(metrics: dict[str, Any], *, source: str = "trade_signal") -> str:
+    edge_status = str(metrics.get("edge_metrics_status") or "OK")
+    if edge_status != "OK":
+        return "NEED_MORE_DATA" if edge_status in {"NEED_REALIZED_RETURN", "LOW_RETURN_COVERAGE"} else "REJECT_INVALID_METRICS"
     samples = safe_int(metrics.get("samples"))
     net_ev = safe_float(metrics.get("net_EV"))
     net_pf = safe_float(metrics.get("net_PF"))
@@ -196,6 +289,32 @@ def conservative_decision(metrics: dict[str, Any], *, source: str = "trade_signa
     if samples < LOW_SAMPLE_HARD:
         return "RESEARCH_POCKET"
     return "SHADOW_CANDIDATE"
+
+
+def return_coverage_report(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    total = len(rows)
+    with_return = sum(1 for row in rows if extract_realized_return(row) is not None)
+    with_mfe_mae = sum(1 for row in rows if row.get("mfe") is not None or row.get("mae") is not None)
+    expost_blocked = sum(1 for row in rows if extract_realized_return(row) is None and has_expost_return_fields(row))
+    missing_pct = (total - with_return) / max(total, 1)
+    if total == 0:
+        status = "NEED_DATA"
+    elif with_return == 0:
+        status = "BAD_NO_REALIZED_RETURNS"
+    elif missing_pct > 0.5:
+        status = "WARNING_LOW_COVERAGE"
+    else:
+        status = "OK"
+    return {
+        "rows_total": total,
+        "rows_with_return_pct": with_return,
+        "rows_missing_return_pct": total - with_return,
+        "missing_return_pct": missing_pct,
+        "rows_with_mfe_mae": with_mfe_mae,
+        "rows_where_expost_fields_blocked": expost_blocked,
+        "return_quality_status": status,
+        "final_recommendation": FINAL_RECOMMENDATION,
+    }
 
 
 def safe_float_text(value: Any, digits: int = 4) -> str:

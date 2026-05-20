@@ -268,6 +268,12 @@ def start_health_server(
             if path == "/api/training/strategy-research-library":
                 self._send_json(_strategy_research_library(config, db, query))
                 return
+            if path == "/api/training/real-strategy-backtest":
+                self._send_json(_real_strategy_backtest(config, db, query))
+                return
+            if path == "/api/training/duplicate-module-audit":
+                self._send_json(_duplicate_module_audit(config, db, query))
+                return
             if path == "/api/training/runtime-optimization-proposal":
                 self._send_json(_runtime_optimization_proposal(config, db, query))
                 return
@@ -855,6 +861,21 @@ def _shadow_strategy_simulator(config: Any | None, db: Any | None, query: dict[s
 
 def _strategy_research_library(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
     return _lab_payload(config, db, query, "strategy research library unavailable", ".strategy_research_library", "StrategyResearchLibrary")
+
+
+def _real_strategy_backtest(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
+    from .real_strategy_backtester import real_strategy_backtest_text
+
+    hours = _query_int(query, "hours", 72)
+    text = real_strategy_backtest_text(config, db, hours=hours)
+    return _text_payload("real_strategy_backtester", text)
+
+
+def _duplicate_module_audit(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
+    del config, db, query
+    from .duplicate_module_audit import duplicate_module_audit_text
+
+    return _text_payload("duplicate_module_audit", duplicate_module_audit_text())
 
 
 def _runtime_optimization_proposal(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:

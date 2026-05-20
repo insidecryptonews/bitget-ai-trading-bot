@@ -57,7 +57,7 @@ class AntiOverfitMatrixV2:
 def evaluate_overfit_group(group_key: tuple[str, ...], rows: list[dict[str, Any]], config: Any | None = None) -> dict[str, Any]:
     metrics = edge_metrics(rows, config)
     flags = overfit_flags(group_key, rows, metrics)
-    if flags & {"COST_SENSITIVE_EDGE", "LOW_SAMPLE_EDGE", "MARKET_PROBE_EDGE_ONLY", "TIME_DEATH_EDGE_FAKE", "LABEL_QUALITY_UNRELIABLE"}:
+    if flags & {"COST_SENSITIVE_EDGE", "LOW_SAMPLE_EDGE", "MARKET_PROBE_EDGE_ONLY", "TIME_DEATH_EDGE_FAKE", "LABEL_QUALITY_UNRELIABLE", "MISSING_RETURN_EDGE_INVALID", "LABEL_QUALITY_BLOCKER"}:
         decision = "REJECT_OVERFIT"
     elif safe_float(metrics.get("net_EV")) > 0 and safe_int(metrics.get("samples")) >= 750 and not flags:
         decision = "SHADOW_CANDIDATE"
@@ -82,26 +82,33 @@ def overfit_flags(group_key: tuple[str, ...], rows: list[dict[str, Any]], metric
     symbol, _side, regime, bucket, source = (list(group_key) + [""] * 5)[:5]
     flags: set[str] = set()
     samples = safe_int(metrics.get("samples"))
+    edge_status = str(metrics.get("edge_metrics_status") or "OK")
+    missing_return_pct = safe_float(metrics.get("missing_realized_return_pct"))
+    if edge_status != "OK":
+        flags.add("MISSING_RETURN_EDGE_INVALID")
+    if missing_return_pct > 0.2:
+        flags.add("LABEL_QUALITY_BLOCKER")
     if samples < 250 and safe_float(metrics.get("net_EV")) > 0:
         flags.add("LOW_SAMPLE_EDGE")
+    elif samples < 250:
+        flags.add("LOW_SAMPLE")
     if source == "market_probe" and safe_float(metrics.get("net_EV")) > 0:
         flags.add("MARKET_PROBE_EDGE_ONLY")
     if regime == "CHOPPY_MARKET" and safe_float(metrics.get("net_EV")) > 0:
         flags.add("CHOPPY_ONLY_EDGE")
     if safe_float(metrics.get("TIME")) > 0.8 and safe_float(metrics.get("TP")) < 0.1:
         flags.add("TIME_DEATH_EDGE_FAKE")
-    if safe_float(metrics.get("avg_cost_bps")) > 0 and 0 < safe_float(metrics.get("gross_EV")) < safe_float(metrics.get("avg_cost_bps")) / 100.0:
+    # edge_metrics returns EV in percentage points; 12 bps equals 0.12 pct.
+    cost_pct_points = safe_float(metrics.get("avg_cost_bps")) / 100.0
+    if safe_float(metrics.get("avg_cost_bps")) > 0 and 0 < safe_float(metrics.get("gross_EV")) < cost_pct_points:
         flags.add("COST_SENSITIVE_EDGE")
     if samples < 750 and symbol not in {"NA", "UNKNOWN"}:
-        flags.add("TOO_SPECIFIC_SYMBOL")
+        flags.add("LOW_SAMPLE")
+    if symbol not in {"NA", "UNKNOWN"} and len({str(row.get("symbol") or symbol) for row in rows}) == 1 and samples < 750:
+        flags.add("SYMBOL_CONCENTRATION_RISK")
     if bucket not in {"0-49", "50-59", "60-69", "70-74", "75-79", "80-84", "85-89", "90-94", "95-100"}:
         flags.add("TOO_SPECIFIC_SCORE_BUCKET")
-    if any(
-        ("mfe" in row or "mae" in row or "max_favorable_pct" in row or "max_adverse_pct" in row)
-        and safe_float(row.get("mfe")) == 0
-        and safe_float(row.get("mae")) == 0
-        for row in rows[:50]
-    ):
+    if missing_return_pct > 0.5 or any(str(row.get("label_quality_status") or "").upper() == "BAD" for row in rows[:50]):
         flags.add("LABEL_QUALITY_UNRELIABLE")
     return flags
 

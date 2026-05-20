@@ -558,7 +558,22 @@
             <article class="decision-card info">
               <span class="panel-label">Strategy Library</span>
               <strong id="opsStrategyState">not loaded</strong>
-              <p>Hipotesis conocidas se tratan como research, no como verdad.</p>
+              <p>Benchmarks invalidos por falta de features/returns se bloquean, no se venden como edge.</p>
+            </article>
+            <article class="decision-card danger">
+              <span class="panel-label">Statistical validity</span>
+              <strong id="opsStatValidityState">INVALID_METRICS_BLOCKED</strong>
+              <p>MFE/MAE no cuentan como retorno realizado. Sin return_pct real, no hay edge valido.</p>
+            </article>
+            <article class="decision-card warning">
+              <span class="panel-label">Real backtester</span>
+              <strong id="opsRealBacktesterState">not loaded</strong>
+              <p>Debe llamar SignalEngine vela a vela, entrada en open i+1 y peor caso same-bar.</p>
+            </article>
+            <article class="decision-card warning">
+              <span class="panel-label">Sample reliability</span>
+              <strong>NO HYPE</strong>
+              <p>PF infinito, Sharpe dudoso o muestras &lt;100 no promocionan candidatos.</p>
             </article>
             <article class="decision-card danger">
               <span class="panel-label">Final recommendation</span>
@@ -594,6 +609,8 @@
             <button id="candidatePromotionV2Btn" class="btn btn-secondary">Candidate promotion V2</button>
             <button id="shadowStrategySimulatorBtn" class="btn btn-secondary">Shadow simulator 72h</button>
             <button id="strategyResearchLibraryBtn" class="btn btn-secondary">Strategy library</button>
+            <button id="realStrategyBacktesterBtn" class="btn btn-secondary">Real strategy backtester</button>
+            <button id="duplicateModuleAuditBtn" class="btn btn-secondary">Duplicate module audit</button>
           </div>
           <details class="report-details">
             <summary>Ver salida tecnica Operational Intelligence</summary>

@@ -6,7 +6,7 @@ from .anti_overfit_matrix_v2 import AntiOverfitMatrixV2
 from .candidate_promotion_v2 import CandidatePromotionV2
 from .exit_policy_v3 import ExitPolicyV3
 from .exit_policy_v3_backtest import ExitPolicyV3Backtest
-from .operational_intelligence_utils import FINAL_RECOMMENDATION, safe_float_text
+from .operational_intelligence_utils import FINAL_RECOMMENDATION, load_operational_rows, return_coverage_report, safe_float_text
 from .pre_move_intelligence_v2 import PreMoveIntelligenceV2
 from .shadow_strategy_simulator import ShadowStrategySimulator
 from .strategy_research_library import StrategyResearchLibrary
@@ -29,6 +29,7 @@ class OperationalIntelligenceAudit:
         promotion = CandidatePromotionV2(self.config, self.db).build(hours=hours)
         simulator = ShadowStrategySimulator(self.config, self.db).build(hours=max(hours, 72))
         strategy = StrategyResearchLibrary(self.config, self.db).build(hours=max(hours, 72))
+        coverage = return_coverage_report(load_operational_rows(self.db, hours=hours))
         return {
             "hours": hours,
             "exit_policy_v3_status": exit_policy.get("exit_policy_v3_status"),
@@ -49,6 +50,8 @@ class OperationalIntelligenceAudit:
                 "best_baseline": (strategy.get("best_baseline") or {}).get("benchmark_id", "none"),
                 "bot_vs_baseline": strategy.get("bot_vs_baseline", {}),
             },
+            "return_coverage": coverage,
+            "statistical_validity_status": "INVALID_METRICS_BLOCKED" if coverage.get("return_quality_status") != "OK" else "OK",
             "paper_filter_enabled": False,
             "live_allowed": False,
             "research_only": True,
@@ -73,6 +76,9 @@ class OperationalIntelligenceAudit:
             f"shadow_simulator_best_policy: {best.get('strategy_id', 'none')}",
             f"shadow_simulator_best_net_ev: {safe_float_text(best.get('net_ev'))}",
             f"strategy_research_summary: {payload['strategy_research_summary']}",
+            f"return_coverage_status: {payload['return_coverage'].get('return_quality_status')}",
+            f"missing_return_pct: {safe_float_text(payload['return_coverage'].get('missing_return_pct'), 3)}",
+            f"statistical_validity_status: {payload['statistical_validity_status']}",
             "paper_filter_enabled=false",
             "live_allowed=false",
             "research_only: true",

@@ -6,7 +6,7 @@ def test_shadow_strategy_without_edge_not_promoted():
 
     result = simulate_strategy(rows, "regime_adaptive_exit")
 
-    assert result["recommendation"] == "REJECT"
+    assert result["recommendation"] == "NEED_BAR_PATH"
     assert result["research_only"] is True
 
 
@@ -15,4 +15,16 @@ def test_shadow_strategy_drawdown_blocks_promotion():
 
     result = simulate_strategy(rows, "trailing_stop_atr")
 
+    assert result["recommendation"] == "NEED_BAR_PATH"
+
+
+def test_shadow_strategy_with_bar_path_can_reject_bad_edge():
+    rows = [
+        {"symbol": "BTCUSDT", "side": "LONG", "market_regime": "RANGE", "source": "trade_signal", "entry": 100, "bar_path": [{"open": 100, "high": 100.2, "low": 99.0, "close": 99.3}], "return_pct": -0.4, "first_barrier_hit": "SL"}
+        for _ in range(300)
+    ]
+
+    result = simulate_strategy(rows, "regime_adaptive_exit")
+
+    assert result["backtest_status"] == "OK_BAR_PATH"
     assert result["recommendation"] in {"REJECT", "REJECT_DRAWDOWN"}

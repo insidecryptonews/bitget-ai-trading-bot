@@ -59,6 +59,10 @@ def test_dashboard_ui_v3_structure_is_real_app_shell():
     assert "handleNetRrAudit" in js
     assert "workerHealthAuditBtn" in html
     assert "dashboardDataBindingAuditBtn" in html
+    assert "INVALID_METRICS_BLOCKED" in html
+    assert "realStrategyBacktesterBtn" in html
+    assert "duplicateModuleAuditBtn" in html
+    assert "MFE/MAE no cuentan como retorno realizado" in html
 
 
 def test_dashboard_ui_v3_has_no_dangerous_primary_actions():

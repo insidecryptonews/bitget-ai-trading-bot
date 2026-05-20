@@ -16,3 +16,11 @@ def test_walk_forward_low_sample_needs_more_data():
     rows = [{"return_pct": 0.5, "first_barrier_hit": "TP", "timestamp": f"2026-01-01T00:{i:02d}:00+00:00"} for i in range(40)]
 
     assert validate_group(rows)["decision"] == "NEED_MORE_DATA"
+
+
+def test_walk_forward_missing_returns_invalid():
+    rows = [{"mfe": 2.0, "first_barrier_hit": "TP", "timestamp": f"2026-01-01T{i//60:02d}:{i%60:02d}:00+00:00"} for i in range(400)]
+
+    result = validate_group(rows, min_folds=3, min_samples_per_fold=20)
+
+    assert result["walk_forward_status"] == "INVALID_MISSING_RETURNS"

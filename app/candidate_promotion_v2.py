@@ -90,6 +90,9 @@ def promote_group(group_key: tuple[str, ...], rows: list[dict[str, Any]], config
         "net_EV": metrics["net_EV"],
         "net_PF": metrics["net_PF"],
         "gross_PF": metrics["gross_PF"],
+        "edge_metrics_status": metrics.get("edge_metrics_status"),
+        "missing_realized_return_pct": metrics.get("missing_realized_return_pct"),
+        "walk_forward_status": wf.get("walk_forward_status"),
         "walk_forward_decision": wf["decision"],
         "anti_overfit_decision": anti["decision"],
         "anti_overfit_flags": anti["flags"],
@@ -106,6 +109,11 @@ def _state(metrics: dict[str, Any], wf: dict[str, Any], anti: dict[str, Any], so
     net_ev = safe_float(metrics.get("net_EV"))
     net_pf = safe_float(metrics.get("net_PF"))
     time_ratio = safe_float(metrics.get("TIME"))
+    edge_status = str(metrics.get("edge_metrics_status") or "OK")
+    if edge_status != "OK":
+        return "REJECT_INVALID_METRICS", f"realized_return_quality_{edge_status.lower()}"
+    if safe_float(metrics.get("missing_realized_return_pct")) > 0.20:
+        return "REJECT_INVALID_METRICS", "missing_realized_return_too_high"
     if source == "market_probe":
         return ("NEED_MORE_DATA_NOT_ACTIONABLE", "market_probe_not_actionable") if net_ev > 0 else ("REJECT_BAD_EDGE", "market_probe_negative_edge")
     if samples < 250:
@@ -116,6 +124,8 @@ def _state(metrics: dict[str, Any], wf: dict[str, Any], anti: dict[str, Any], so
         return "REJECT_BAD_EDGE", "net_ev_or_net_pf_failed"
     if str(anti.get("decision")) == "REJECT_OVERFIT":
         return "REJECT_OVERFIT", "anti_overfit_flags"
+    if str(wf.get("walk_forward_status")) not in {"OK_ROLLING"}:
+        return "NEED_MORE_DATA", f"walk_forward_{str(wf.get('walk_forward_status') or 'not_ready').lower()}"
     if str(wf.get("decision")) in {"OVERFIT_REJECT", "REJECT"}:
         return "REJECT_OVERFIT", "walk_forward_failed"
     if samples < 750:

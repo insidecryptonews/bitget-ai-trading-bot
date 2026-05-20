@@ -10,9 +10,19 @@ def test_strategy_library_low_sample_and_market_probe_not_actionable():
 
 
 def test_strategy_library_benchmark_comparison_exists():
-    rows = [{"market_regime": "TREND_DOWN", "source": "trade_signal", "return_pct": 0.5, "first_barrier_hit": "TP"} for _ in range(20)]
+    rows = [{"market_regime": "TREND_DOWN", "source": "trade_signal", "return_pct": 0.5, "first_barrier_hit": "TP", "momentum": 1.0} for _ in range(20)]
 
     benchmark = evaluate_benchmark("simple_momentum_baseline", rows)
 
     assert benchmark["benchmark_id"] == "simple_momentum_baseline"
     assert "net_EV" in benchmark
+    assert benchmark["benchmark_status"] == "OK"
+
+
+def test_simple_breakout_needs_ex_ante_features_not_mfe():
+    rows = [{"mfe": 99.0, "return_pct": 1.0, "first_barrier_hit": "TP"} for _ in range(50)]
+
+    benchmark = evaluate_benchmark("simple_breakout_baseline", rows)
+
+    assert benchmark["benchmark_status"] == "NEED_FEATURES"
+    assert benchmark["benchmark_uses_expost_fields"] is False

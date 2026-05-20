@@ -1,33 +1,56 @@
-from app.exit_policy_v3 import simulate_exit_policy
+from app.exit_policy_v3 import simulate_exit_policy, simulate_exit_policy_bar_by_bar
 
 
-def test_trailing_leaves_trend_more_room_research_only():
-    row = {"side": "SHORT", "market_regime": "TREND_DOWN", "mfe": 2.0, "mae": 0.2, "return_pct": 0.2, "first_barrier_hit": "TP"}
+def test_mfe_summary_only_needs_bar_path():
+    row = {"side": "LONG", "market_regime": "TREND_UP", "mfe": 5.0, "mae": 0.1, "first_barrier_hit": "TP"}
+
+    result = simulate_exit_policy(row, "trailing_stop_atr")
+
+    assert result.backtest_status == "NEED_BAR_PATH"
+    assert result.simulated_net_ev is None
+    assert result.decision == "NEED_BAR_PATH"
+
+
+def test_bar_path_trailing_is_plausible_and_research_only():
+    row = {
+        "side": "LONG",
+        "market_regime": "TREND_UP",
+        "entry": 100.0,
+        "bar_path": [
+            {"open": 100, "high": 100.5, "low": 99.9, "close": 100.4},
+            {"open": 100.4, "high": 101.4, "low": 100.3, "close": 101.1},
+        ],
+    }
 
     result = simulate_exit_policy(row, "regime_adaptive_exit")
 
     assert result.research_only is True
-    assert result.expected_capture_ratio >= 0.65
-    assert result.simulated_exit_reason == "REGIME_ADAPTIVE_TREND"
+    assert result.backtest_status == "OK_BAR_PATH"
+    assert result.simulated_return_pct is not None
 
 
-def test_range_uses_shorter_targets_and_choppy_no_trade():
-    range_row = {"side": "LONG", "market_regime": "RANGE", "mfe": 0.8, "mae": 0.3, "return_pct": 0.0, "first_barrier_hit": "TIME"}
-    choppy_row = {"side": "LONG", "market_regime": "CHOPPY_MARKET", "mfe": 0.3, "mae": 0.7, "return_pct": -0.4, "first_barrier_hit": "SL"}
+def test_same_bar_stop_before_tp_worst_case():
+    result = simulate_exit_policy_bar_by_bar(
+        entry=100.0,
+        side="LONG",
+        bars=[{"open": 100, "high": 102.5, "low": 98.5, "close": 101}],
+        policy_config={"tp_pct": 2.0, "sl_pct": 1.0},
+    )
 
-    range_result = simulate_exit_policy(range_row, "regime_adaptive_exit")
-    choppy_result = simulate_exit_policy(choppy_row, "regime_adaptive_exit")
-
-    assert range_result.dynamic_tp1 <= range_result.fixed_tp
-    assert choppy_result.simulated_exit_reason == "CHOPPY_RESEARCH_NO_TRADE"
+    assert result["exit_reason"] == "STOP_LOSS"
+    assert result["same_bar_stop_tp_rule"] == "STOP_BEFORE_TP"
+    assert result["realized_return_pct"] < 0
 
 
-def test_break_even_and_profit_lock_do_not_apply_real_exits():
-    row = {"side": "LONG", "market_regime": "TREND_UP", "mfe": 1.5, "mae": 0.2, "return_pct": -0.2, "first_barrier_hit": "SL"}
+def test_no_lookahead_future_bars_after_exit_do_not_change_result():
+    bars = [{"open": 100, "high": 102.5, "low": 98.5, "close": 101}]
+    base = simulate_exit_policy_bar_by_bar(entry=100.0, side="LONG", bars=bars, policy_config={"tp_pct": 2.0, "sl_pct": 1.0})
+    with_future = simulate_exit_policy_bar_by_bar(
+        entry=100.0,
+        side="LONG",
+        bars=bars + [{"open": 101, "high": 110, "low": 100, "close": 109}],
+        policy_config={"tp_pct": 2.0, "sl_pct": 1.0},
+    )
 
-    be = simulate_exit_policy(row, "break_even_after_mfe")
-    lock = simulate_exit_policy({**row, "return_pct": 0.1}, "profit_lock_after_mfe")
-
-    assert be.simulated_return_pct >= 0
-    assert lock.simulated_return_pct >= 0.25
-    assert be.research_only and lock.research_only
+    assert with_future["exit_bar_index"] == base["exit_bar_index"]
+    assert with_future["realized_return_pct"] == base["realized_return_pct"]

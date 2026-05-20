@@ -58,22 +58,94 @@ class WalkForwardValidator:
         return "\n".join(lines)
 
 
-def validate_group(rows: list[dict[str, Any]], config: Any | None = None, *, group_key: tuple[str, ...] | None = None) -> dict[str, Any]:
+def validate_group(
+    rows: list[dict[str, Any]],
+    config: Any | None = None,
+    *,
+    group_key: tuple[str, ...] | None = None,
+    train_size: int | None = None,
+    validation_size: int | None = None,
+    forward_size: int | None = None,
+    step_size: int | None = None,
+    min_folds: int = 5,
+    min_samples_per_fold: int = 20,
+) -> dict[str, Any]:
     ordered = sorted(rows, key=lambda row: str(row.get("timestamp") or ""))
     n = len(ordered)
-    train = ordered[: max(1, int(n * 0.50))]
-    validation = ordered[max(1, int(n * 0.50)): max(2, int(n * 0.75))]
-    forward = ordered[max(2, int(n * 0.75)):]
-    train_m = edge_metrics(train, config)
-    val_m = edge_metrics(validation, config)
-    fwd_m = edge_metrics(forward, config)
-    stability = _stability(train_m, val_m, fwd_m)
-    degradation = _degradation(train_m, fwd_m)
-    decision = _decision(n, train_m, val_m, fwd_m, stability, degradation)
     candidate_id = "|".join(group_key or tuple(str(rows[0].get(key) or "NA") for key in GROUP_KEYS)) if rows else "empty"
+    if n < min_samples_per_fold * 3:
+        empty_m = edge_metrics(ordered, config)
+        return _result(candidate_id, n, empty_m, empty_m, empty_m, 0.0, 0.0, "NEED_MORE_DATA", "NEED_MORE_DATA", 0, 0, [])
+    train_n = train_size or max(min_samples_per_fold, int(n * 0.25))
+    val_n = validation_size or max(min_samples_per_fold, int(n * 0.10))
+    fwd_n = forward_size or max(min_samples_per_fold, int(n * 0.10))
+    step_n = step_size or fwd_n
+    folds: list[dict[str, Any]] = []
+    start = 0
+    while start + train_n + val_n + fwd_n <= n:
+        train = ordered[start:start + train_n]
+        validation = ordered[start + train_n:start + train_n + val_n]
+        forward = ordered[start + train_n + val_n:start + train_n + val_n + fwd_n]
+        train_m = edge_metrics(train, config)
+        val_m = edge_metrics(validation, config)
+        fwd_m = edge_metrics(forward, config)
+        if "NEED_REALIZED_RETURN" in {train_m.get("edge_metrics_status"), val_m.get("edge_metrics_status"), fwd_m.get("edge_metrics_status")}:
+            return _result(candidate_id, n, train_m, val_m, fwd_m, 0.0, 0.0, "INVALID_MISSING_RETURNS", "INVALID_MISSING_RETURNS", len(folds), len(folds), folds)
+        folds.append({"train": train_m, "validation": val_m, "forward": fwd_m})
+        start += step_n
+    if len(folds) < min_folds:
+        sample_m = edge_metrics(ordered, config)
+        status = "NEED_MORE_FOLDS" if folds else "NEED_MORE_DATA"
+        return _result(candidate_id, n, sample_m, sample_m, sample_m, 0.0, 0.0, status, status, len(folds), len(folds), folds)
+    valid_folds = [
+        fold for fold in folds
+        if fold["train"].get("edge_metrics_status") == "OK"
+        and fold["validation"].get("edge_metrics_status") == "OK"
+        and fold["forward"].get("edge_metrics_status") == "OK"
+    ]
+    if len(valid_folds) < 3:
+        sample_m = edge_metrics(ordered, config)
+        return _result(candidate_id, n, sample_m, sample_m, sample_m, 0.0, 0.0, "INVALID_MISSING_RETURNS", "INVALID_MISSING_RETURNS", len(folds), len(valid_folds), folds)
+    train_ev = sum(safe_float(f["train"].get("net_EV")) for f in valid_folds) / len(valid_folds)
+    val_ev = sum(safe_float(f["validation"].get("net_EV")) for f in valid_folds) / len(valid_folds)
+    fwd_ev_values = [safe_float(f["forward"].get("net_EV")) for f in valid_folds]
+    fwd_ev = sum(fwd_ev_values) / len(fwd_ev_values)
+    positive_forward = sum(1 for value in fwd_ev_values if value > 0)
+    stability = positive_forward / max(len(valid_folds), 1)
+    degradation = max(0.0, (train_ev - fwd_ev) / max(abs(train_ev), 0.0001)) if train_ev > 0 else 0.0
+    aggregate_train = {**valid_folds[-1]["train"], "net_EV": train_ev}
+    aggregate_val = {**valid_folds[-1]["validation"], "net_EV": val_ev}
+    aggregate_fwd = {
+        **valid_folds[-1]["forward"],
+        "net_EV": fwd_ev,
+        "net_PF": sum(safe_float(f["forward"].get("net_PF")) for f in valid_folds) / len(valid_folds),
+        "TIME": sum(safe_float(f["forward"].get("TIME")) for f in valid_folds) / len(valid_folds),
+        "confidence": valid_folds[-1]["forward"].get("confidence"),
+    }
+    decision = _rolling_decision(n, aggregate_train, aggregate_val, aggregate_fwd, stability, degradation, len(folds), len(valid_folds))
+    status = "OK_ROLLING" if decision not in {"OVERFIT_REJECT", "REJECT"} else "OVERFIT_REJECT" if decision == "OVERFIT_REJECT" else "OK_ROLLING"
+    return _result(candidate_id, n, aggregate_train, aggregate_val, aggregate_fwd, stability, degradation, decision, status, len(folds), len(valid_folds), folds)
+
+
+def _result(
+    candidate_id: str,
+    sample_count: int,
+    train_m: dict[str, Any],
+    val_m: dict[str, Any],
+    fwd_m: dict[str, Any],
+    stability: float,
+    degradation: float,
+    decision: str,
+    status: str,
+    folds_total: int,
+    folds_valid: int,
+    folds: list[dict[str, Any]],
+) -> dict[str, Any]:
+    fwd_values = [safe_float(fold["forward"].get("net_EV")) for fold in folds if "forward" in fold]
+    positive_forward = sum(1 for value in fwd_values if value > 0)
     return {
         "candidate_id": candidate_id,
-        "sample_count": n,
+        "sample_count": sample_count,
         "train_net_ev": train_m["net_EV"],
         "validation_net_ev": val_m["net_EV"],
         "forward_net_ev": fwd_m["net_EV"],
@@ -84,6 +156,13 @@ def validate_group(rows: list[dict[str, Any]], config: Any | None = None, *, gro
         "forward_time_pct": fwd_m["TIME"],
         "stability_score": stability,
         "degradation_pct": degradation,
+        "folds_total": folds_total,
+        "folds_valid": folds_valid,
+        "folds_positive_forward": positive_forward,
+        "mean_forward_net_ev": sum(fwd_values) / max(len(fwd_values), 1),
+        "median_forward_net_ev": sorted(fwd_values)[len(fwd_values) // 2] if fwd_values else 0.0,
+        "worst_forward_net_ev": min(fwd_values) if fwd_values else 0.0,
+        "walk_forward_status": status,
         "overfit_risk": "HIGH" if decision in {"REJECT", "OVERFIT_REJECT"} else "LOW" if stability >= 0.67 else "MEDIUM",
         "confidence": fwd_m["confidence"],
         "decision": decision,
@@ -116,6 +195,20 @@ def _decision(samples: int, train: dict[str, Any], validation: dict[str, Any], f
     if samples < 750:
         return "RESEARCH_POCKET" if stability >= 0.67 else "WATCH_ONLY"
     return "SHADOW_CANDIDATE" if stability >= 0.67 else "WATCH_ONLY"
+
+
+def _rolling_decision(samples: int, train: dict[str, Any], validation: dict[str, Any], forward: dict[str, Any], stability: float, degradation: float, folds_total: int, folds_valid: int) -> str:
+    if folds_valid < 3:
+        return "NEED_MORE_DATA"
+    if safe_float(train.get("net_EV")) > 0 and safe_float(forward.get("net_EV")) <= 0:
+        return "OVERFIT_REJECT"
+    if safe_float(validation.get("net_EV")) <= 0 or safe_float(forward.get("net_EV")) <= 0 or stability < 0.5:
+        return "REJECT"
+    if degradation > 0.75:
+        return "OVERFIT_REJECT"
+    if samples < 750 or folds_total < 5:
+        return "RESEARCH_POCKET" if stability >= 0.6 else "WATCH_ONLY"
+    return "SHADOW_CANDIDATE" if stability >= 0.6 else "WATCH_ONLY"
 
 
 def walk_forward_smoke_text() -> str:

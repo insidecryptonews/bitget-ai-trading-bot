@@ -1139,6 +1139,26 @@ class ResearchLab:
 
         return strategy_research_library_smoke_text()
 
+    def real_strategy_backtest(self, hours: int = 72) -> str:
+        from .real_strategy_backtester import real_strategy_backtest_text
+
+        return real_strategy_backtest_text(self.config, self.db, hours=hours)
+
+    def real_strategy_backtester_smoke_test(self) -> str:
+        from .real_strategy_backtester import real_strategy_backtester_smoke_text
+
+        return real_strategy_backtester_smoke_text(self.config)
+
+    def duplicate_module_audit(self) -> str:
+        from .duplicate_module_audit import duplicate_module_audit_text
+
+        return duplicate_module_audit_text()
+
+    def duplicate_module_audit_smoke_test(self) -> str:
+        from .duplicate_module_audit import duplicate_module_audit_smoke_text
+
+        return duplicate_module_audit_smoke_text()
+
     def build_markdown_report(
         self,
         dataset: list[dict[str, Any]] | None = None,
@@ -1712,6 +1732,10 @@ def main() -> None:
             "operational-intelligence-audit",
             "strategy-research-library-smoke-test",
             "strategy-research-library",
+            "real-strategy-backtester-smoke-test",
+            "real-strategy-backtest",
+            "duplicate-module-audit-smoke-test",
+            "duplicate-module-audit",
             "shadow-experiments",
             "evolution-score",
             "mfe-mae-diagnostic",
@@ -1998,6 +2022,14 @@ def main() -> None:
         print(lab.strategy_research_library_smoke_test())
     elif args.command == "strategy-research-library":
         print(lab.strategy_research_library(hours=args.hours))
+    elif args.command == "real-strategy-backtester-smoke-test":
+        print(lab.real_strategy_backtester_smoke_test())
+    elif args.command == "real-strategy-backtest":
+        print(lab.real_strategy_backtest(hours=args.hours))
+    elif args.command == "duplicate-module-audit-smoke-test":
+        print(lab.duplicate_module_audit_smoke_test())
+    elif args.command == "duplicate-module-audit":
+        print(lab.duplicate_module_audit())
     elif args.command == "shadow-experiments":
         print(lab.shadow_experiments(hours=args.hours))
     elif args.command == "evolution-score":

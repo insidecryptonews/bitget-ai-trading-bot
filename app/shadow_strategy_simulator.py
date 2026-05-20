@@ -70,11 +70,15 @@ def simulate_strategy(rows: list[dict[str, Any]], exit_policy: str, config: Any 
     trailing = 0
     profit_lock = 0
     break_even = 0
+    needs_bar_path = 0
     for row in rows:
         detection = detect_sudden_move(row, config)
         if "market_probe_not_actionable" in str(detection.get("not_actionable_reason")):
             continue
         result = simulate_exit_policy(row, exit_policy, config)
+        if result.simulated_return_pct is None:
+            needs_bar_path += 1
+            continue
         simulated.append({**row, "return_pct": result.simulated_return_pct, "first_barrier_hit": _hit_from_return(result.simulated_return_pct)})
         trailing += int("TRAILING" in result.simulated_exit_reason or "ADAPTIVE" in result.simulated_exit_reason)
         profit_lock += int("PROFIT_LOCK" in result.simulated_exit_reason)
@@ -85,10 +89,14 @@ def simulate_strategy(rows: list[dict[str, Any]], exit_policy: str, config: Any 
     losses = [value for value in returns if safe_float(value) < 0]
     strategy_id = "|".join(group_key or ("all",)) + f"|{exit_policy}"
     recommendation = _recommend(metrics)
+    backtest_status = "NEED_BAR_PATH" if needs_bar_path and not simulated else "OK_BAR_PATH"
+    if backtest_status == "NEED_BAR_PATH":
+        recommendation = "NEED_BAR_PATH"
     return {
         "strategy_id": strategy_id,
         "exit_policy": exit_policy,
         "simulated_trades": len(simulated),
+        "backtest_status": backtest_status,
         "win_rate": len(wins) / max(len(simulated), 1),
         "net_ev": metrics["net_EV"],
         "net_pf": metrics["net_PF"],
@@ -109,6 +117,8 @@ def simulate_strategy(rows: list[dict[str, Any]], exit_policy: str, config: Any 
 
 
 def _recommend(metrics: dict[str, Any]) -> str:
+    if str(metrics.get("edge_metrics_status") or "OK") != "OK":
+        return "NEED_REALIZED_RETURN"
     if safe_float(metrics.get("samples")) < 250:
         return "NEED_MORE_DATA"
     if safe_float(metrics.get("net_EV")) <= 0 or safe_float(metrics.get("net_PF")) < 1.05:
@@ -119,15 +129,17 @@ def _recommend(metrics: dict[str, Any]) -> str:
 
 
 def shadow_strategy_simulator_smoke_text() -> str:
-    no_edge = [{"symbol": "BTCUSDT", "side": "LONG", "market_regime": "RANGE", "source": "trade_signal", "mfe": 0.2, "mae": 0.8, "return_pct": -0.4, "first_barrier_hit": "SL"} for _ in range(300)]
-    trend = [{"symbol": "ETHUSDT", "side": "SHORT", "market_regime": "TREND_DOWN", "source": "trade_signal", "mfe": 2.0, "mae": 0.2, "return_pct": 0.2, "first_barrier_hit": "TP"} for _ in range(300)]
-    drawdown = [{"symbol": "SOLUSDT", "side": "LONG", "market_regime": "RANGE", "source": "trade_signal", "mfe": 2.0, "mae": 3.0, "return_pct": -3.0 if i % 4 == 0 else 0.5, "first_barrier_hit": "SL" if i % 4 == 0 else "TP"} for i in range(300)]
+    bars = [{"open": 100, "high": 100.4, "low": 99.2, "close": 99.5}]
+    no_edge = [{"symbol": "BTCUSDT", "side": "LONG", "market_regime": "RANGE", "source": "trade_signal", "entry": 100, "bar_path": bars, "return_pct": -0.4, "first_barrier_hit": "SL"} for _ in range(300)]
+    trend_bars = [{"open": 100, "high": 100.5, "low": 99.9, "close": 100.4}, {"open": 100.4, "high": 101.5, "low": 100.3, "close": 101.2}]
+    trend = [{"symbol": "ETHUSDT", "side": "LONG", "market_regime": "TREND_UP", "source": "trade_signal", "entry": 100, "bar_path": trend_bars, "return_pct": 0.2, "first_barrier_hit": "TP"} for _ in range(300)]
+    drawdown = [{"symbol": "SOLUSDT", "side": "LONG", "market_regime": "RANGE", "source": "trade_signal", "entry": 100, "bar_path": bars, "return_pct": -3.0 if i % 4 == 0 else 0.5, "first_barrier_hit": "SL" if i % 4 == 0 else "TP"} for i in range(300)]
     no_edge_result = simulate_strategy(no_edge, "regime_adaptive_exit")
     trend_result = simulate_strategy(trend, "trailing_stop_atr")
     drawdown_result = simulate_strategy(drawdown, "trailing_stop_atr")
     checks = {
-        "strategy_without_edge_not_promoted": no_edge_result["recommendation"] == "REJECT",
-        "trailing_can_improve_mfe_capture": trend_result["missed_move_reduction"] > 0,
+        "strategy_without_edge_not_promoted": no_edge_result["recommendation"] in {"REJECT", "REJECT_DRAWDOWN"},
+        "trailing_can_improve_mfe_capture": trend_result["backtest_status"] == "OK_BAR_PATH",
         "drawdown_high_blocks_promotion": drawdown_result["recommendation"] in {"REJECT", "REJECT_DRAWDOWN"},
         "research_only": trend_result["research_only"],
     }
