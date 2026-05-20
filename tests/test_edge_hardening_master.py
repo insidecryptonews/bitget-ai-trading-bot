@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import time
+import urllib.error
+import urllib.request
 
 from app.anti_overfit_gate import AntiOverfitGate
 from app.config import BotConfig
@@ -20,6 +23,27 @@ class DummyLogger:
 
     def warning(self, *args, **kwargs):
         pass
+
+
+def wait_for_server_ready(port: int, timeout: float = 5.0) -> None:
+    deadline = time.time() + timeout
+    last_exc: Exception | None = None
+    while time.time() < deadline:
+        try:
+            with urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=0.4) as response:
+                if response.status == 200:
+                    return
+        except (OSError, urllib.error.URLError) as exc:
+            last_exc = exc
+            time.sleep(0.05)
+    raise AssertionError(f"health server did not become ready on port {port}: {last_exc}")
+
+
+def shutdown_health_server(thread) -> None:
+    server = getattr(thread, "server_box", {}).get("server") if hasattr(thread, "server_box") else None
+    if server is not None:
+        server.shutdown()
+        server.server_close()
 
 
 def cfg(tmp_path, **kwargs):
@@ -150,7 +174,6 @@ def test_smoke_tests_pass_and_do_not_change_safety(tmp_path):
 
 def test_dashboard_new_endpoints_return_safe_json(tmp_path):
     import socket
-    import urllib.request
 
     config = cfg(tmp_path)
     db = make_db(tmp_path, config)
@@ -160,18 +183,38 @@ def test_dashboard_new_endpoints_return_safe_json(tmp_path):
         port = sock.getsockname()[1]
     thread = start_health_server(HealthState("paper"), port, DummyLogger(), config=config, db=db)
     assert thread.is_alive()
-    for path in (
-        "/api/training/net-edge-lab?hours=24",
-        "/api/training/anti-overfit-gate?hours=24",
-        "/api/training/ev-slippage-calibration-gate?hours=24",
-        "/api/training/policy-stability-matrix?hours=24",
-        "/api/training/candidate-ranking?hours=24",
-        "/api/training/decision-ledger-audit?hours=24",
-        "/api/training/sizing-safety-lab?hours=24",
-        "/api/training/fast-runtime-readiness?hours=24",
-        "/api/training/websocket-migration-plan?hours=24",
-    ):
-        body = urllib.request.urlopen(f"http://127.0.0.1:{port}{path}", timeout=5).read().decode("utf-8")
-        assert "NO LIVE" in body
-        assert "SECRET" not in body
-        assert "PASSWORD" not in body
+    try:
+        wait_for_server_ready(port)
+        for path in (
+            "/api/training/net-edge-lab?hours=24",
+            "/api/training/anti-overfit-gate?hours=24",
+            "/api/training/ev-slippage-calibration-gate?hours=24",
+            "/api/training/policy-stability-matrix?hours=24",
+            "/api/training/candidate-ranking?hours=24",
+            "/api/training/decision-ledger-audit?hours=24",
+            "/api/training/sizing-safety-lab?hours=24",
+            "/api/training/fast-runtime-readiness?hours=24",
+            "/api/training/websocket-migration-plan?hours=24",
+        ):
+            body = urllib.request.urlopen(f"http://127.0.0.1:{port}{path}", timeout=5).read().decode("utf-8")
+            assert "NO LIVE" in body
+            assert "SECRET" not in body
+            assert "PASSWORD" not in body
+    finally:
+        shutdown_health_server(thread)
+
+
+def test_dashboard_server_waits_until_ready(tmp_path):
+    import socket
+
+    config = cfg(tmp_path)
+    db = make_db(tmp_path, config)
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+    thread = start_health_server(HealthState("paper"), port, DummyLogger(), config=config, db=db)
+    try:
+        wait_for_server_ready(port)
+        assert thread.is_alive()
+    finally:
+        shutdown_health_server(thread)

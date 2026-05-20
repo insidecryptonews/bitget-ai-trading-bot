@@ -240,17 +240,56 @@ def _max_drawdown(values: list[float]) -> float:
 
 
 def real_strategy_backtest_text(config: Any, db: Any, *, hours: int = 72) -> str:
-    del db
+    from .ohlcv_replay_loader import OhlcvReplayLoader
+
+    loader_result = OhlcvReplayLoader(db).audit(config=config, hours=hours)
+    if loader_result.status != "OK":
+        data = loader_result.to_dict()
+        lines = [
+            "REAL STRATEGY BACKTESTER START",
+            f"hours: {hours}",
+            "status: NEED_DATA",
+            "uses_signal_engine: false",
+            "no_lookahead_status: NOT_RUN",
+            "entry_model: signal_close_i_entry_next_open_i+1",
+            "stop_tp_same_bar_rule: STOP_BEFORE_TP",
+            "min_order_rule: BLOCK_BELOW_MIN_NOTIONAL",
+            f"ohlcv_loader_status: {data['status']}",
+            f"ohlcv_table: {data['table'] or 'none'}",
+            f"missing_columns: {', '.join(data['missing_columns']) if data['missing_columns'] else 'none'}",
+            f"warnings: {', '.join(data['warnings']) if data['warnings'] else 'none'}",
+            "limitations: local OHLCV candle replay data unavailable or invalid; no MFE/MAE fallback used",
+            "final_recommendation: NO LIVE",
+            "REAL STRATEGY BACKTESTER END",
+        ]
+        return "\n".join(lines)
+
+    symbol, frame = next(iter(loader_result.frames_by_symbol.items()))
+    result = RealStrategyBacktester(config).run(
+        symbol,
+        frame,
+        min_order_value_usdt=float(getattr(config, "min_trade_margin_usdt", 5.0)),
+        notional_usdt=float(getattr(config, "trade_margin_usdt", 12.0)) * max(1, int(getattr(config, "default_leverage", 1))),
+    )
+    summary = result.summary()
     lines = [
         "REAL STRATEGY BACKTESTER START",
         f"hours: {hours}",
-        "status: NEED_DATA",
-        "uses_signal_engine: not_run_without_local_ohlcv_loader",
-        "no_lookahead_status: NOT_RUN",
-        "entry_model: signal_close_i_entry_next_open_i+1",
-        "stop_tp_same_bar_rule: STOP_BEFORE_TP",
-        "min_order_rule: BLOCK_BELOW_MIN_NOTIONAL",
-        "limitations: local DB candle replay loader not available in this command; unit tests validate engine path",
+        f"status: {summary['status']}",
+        f"uses_signal_engine: {str(summary['uses_signal_engine']).lower()}",
+        f"no_lookahead_status: {summary['no_lookahead_status']}",
+        f"entry_model: {summary['entry_model']}",
+        f"stop_tp_same_bar_rule: {summary['stop_tp_same_bar_rule']}",
+        f"min_order_rule: {summary['min_order_rule']}",
+        f"ohlcv_loader_status: {loader_result.status}",
+        f"ohlcv_table: {loader_result.table}",
+        f"symbol_tested: {symbol}",
+        f"trades: {summary['trades']}",
+        f"blocked_min_notional: {summary['blocked_min_notional']}",
+        f"net_ev: {summary['net_ev']:.6f}",
+        f"net_pf: {summary['net_pf']:.4f}",
+        f"same_bar_stop_tp_count: {summary['same_bar_stop_tp_count']}",
+        "limitations: local replay only; research/shadow; no exchange calls; no paper/live activation",
         "final_recommendation: NO LIVE",
         "REAL STRATEGY BACKTESTER END",
     ]

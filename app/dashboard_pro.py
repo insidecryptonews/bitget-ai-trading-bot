@@ -6,6 +6,7 @@ import json
 import re
 import subprocess
 import time
+from concurrent.futures import ThreadPoolExecutor, TimeoutError
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
@@ -92,6 +93,7 @@ class ReportSection:
     text: str
     status: str
     duration_ms: int
+    warning: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return sanitize_json_for_dashboard(
@@ -100,6 +102,7 @@ class ReportSection:
                 "status": self.status,
                 "duration_ms": self.duration_ms,
                 "text": self.text,
+                "warning": self.warning,
             }
         )
 
@@ -147,6 +150,7 @@ class DashboardProReporter:
             ("Return Coverage", lambda: lab.operational_intelligence_audit(hours=hours)),
             ("Real Strategy Backtester", lambda: lab.real_strategy_backtest(hours=max(hours, 72))),
             ("Backtester No-Lookahead", lambda: lab.real_strategy_backtest(hours=max(hours, 72))),
+            ("OHLCV Replay Loader", lambda: lab.ohlcv_replay_loader_audit(hours=max(hours, 72))),
             ("Duplicate Module Audit", lambda: lab.duplicate_module_audit()),
             ("Quant Metrics Reliability", lambda: "QUANT METRICS RELIABILITY START\n12bps_fraction: 0.0012\npf_inf_low_sample: LOW_SAMPLE\nsample_less_than_100: LOW_SAMPLE\nfinal_recommendation: NO LIVE\nQUANT METRICS RELIABILITY END"),
             ("Exit Policy V3", lambda: lab.exit_policy_v3_backtest(hours=hours)),
@@ -185,9 +189,12 @@ class DashboardProReporter:
             ("Data Vault Status", lambda: lab.data_vault_status()),
         ]
         started = time.perf_counter()
-        rendered = [self._run_section(name, callback) for name, callback in sections]
+        timeout_seconds = max(2.0, float(getattr(self.config, "full_research_section_timeout_seconds", 10) or 10))
+        rendered = [self._run_section(name, callback, timeout_seconds=timeout_seconds) for name, callback in sections]
         duration_ms = int((time.perf_counter() - started) * 1000)
         text = self.to_text(rendered, hours=hours, duration_ms=duration_ms)
+        warnings = [section.warning for section in rendered if section.warning]
+        report_status = "PARTIAL_REPORT" if any(section.status in {"error", "timeout"} for section in rendered) else "OK"
         return sanitize_json_for_dashboard(
             {
                 "generated_at": _iso_now(),
@@ -195,6 +202,9 @@ class DashboardProReporter:
                 "git_version": _git_version(),
                 "duration_ms": duration_ms,
                 "approx_size_bytes": len(text.encode("utf-8")),
+                "report_status": report_status,
+                "warnings": warnings,
+                "section_timings": {section.name: section.duration_ms for section in rendered},
                 "sections": [section.to_dict() for section in rendered],
                 "text": text,
                 "final_recommendation": "NO LIVE",
@@ -214,65 +224,48 @@ class DashboardProReporter:
             ("Candidate Ranking 24h", lambda: lab.candidate_ranking(hours=hours)),
             ("Score Calibration 24h", lambda: lab.score_calibration(hours=hours)),
             ("Candidate Incubator 24h", lambda: lab.candidate_incubator(hours=hours)),
-            ("Core Corrections", lambda: lab.core_corrections(hours=hours)),
-            ("Corrected Cost Model", lambda: lab.cost_model_inventory()),
-            ("Funding Model", lambda: lab.funding_model_smoke_test()),
-            ("Labeler Guards", lambda: lab.labeler_guard_smoke_test()),
-            ("Duplicate Guards", lambda: lab.duplicate_guard_smoke_test()),
-            ("Candidate Actionability", lambda: lab.candidate_actionability_smoke_test()),
             ("Execution Safety", lambda: lab.execution_safety_audit()),
-            ("Net RR", lambda: lab.net_rr_audit(hours=hours)),
-            ("Dynamic Exit Shadow", lambda: lab.dynamic_exit_policy_audit(hours=hours)),
-            ("Stop Quality", lambda: lab.structural_stop_audit(hours=hours)),
-            ("Idempotency", lambda: lab.execution_idempotency_smoke_test()),
-            ("Emergency Failsafe", lambda: lab.emergency_failsafe_smoke_test()),
-            ("Circuit Breaker Magnitude", lambda: lab.circuit_breaker_magnitude_smoke_test()),
-            ("Clock Drift", lambda: lab.clock_drift_smoke_test()),
-            ("Config Hardening", lambda: lab.config_hardening_smoke_test()),
             ("Operational Intelligence", lambda: lab.operational_intelligence_audit(hours=hours)),
-            ("Statistical Validity", lambda: lab.operational_intelligence_audit(hours=hours)),
-            ("Return Coverage", lambda: lab.operational_intelligence_audit(hours=hours)),
             ("Real Strategy Backtester", lambda: lab.real_strategy_backtest(hours=max(hours, 72))),
-            ("Duplicate Module Audit", lambda: lab.duplicate_module_audit()),
-            ("Quant Metrics Reliability", lambda: "QUANT METRICS RELIABILITY START\n12bps_fraction: 0.0012\npf_inf_low_sample: LOW_SAMPLE\nfinal_recommendation: NO LIVE\nQUANT METRICS RELIABILITY END"),
-            ("Exit Policy V3", lambda: lab.exit_policy_v3_backtest(hours=hours)),
-            ("Sudden Move Detector", lambda: lab.sudden_move_detector(hours=hours)),
-            ("Pre-Move Intelligence V2", lambda: lab.pre_move_v2(hours=hours)),
-            ("Walk Forward Validation", lambda: lab.walk_forward_validator(hours=max(hours, 72))),
-            ("Anti Overfit Matrix V2", lambda: lab.anti_overfit_v2(hours=max(hours, 72))),
+            ("OHLCV Replay Loader", lambda: lab.ohlcv_replay_loader_audit(hours=max(hours, 72))),
             ("Candidate Promotion V2", lambda: lab.candidate_promotion_v2(hours=hours)),
-            ("Shadow Strategy Simulator", lambda: lab.shadow_strategy_simulator(hours=max(hours, 72))),
             ("Strategy Research Library", lambda: lab.strategy_research_library(hours=max(hours, 72))),
-            ("Training Data Integrity 24h", lambda: lab.training_data_integrity(hours=hours)),
             ("Data Pipeline Diagnosis 24h", lambda: lab.data_pipeline_diagnosis(hours=hours)),
-            ("Relation Repair Audit 24h", lambda: lab.relation_repair_audit(hours=hours)),
             ("Label Quality V2 24h", lambda: lab.label_quality_v2(hours=hours)),
             ("Bitget Cost Model Audit 24h", lambda: lab.bitget_cost_model_audit(hours=hours)),
-            ("Margin Mode Audit", lambda: lab.margin_mode_audit()),
             ("Worker Health Audit", lambda: lab.worker_health_audit()),
             ("Data Vault Audit", lambda: lab.data_vault_audit()),
-            ("Dashboard Data Binding Audit", lambda: lab.dashboard_data_binding_audit()),
             ("Edge Guard 24h", lambda: lab.edge_guard(hours=hours)),
             ("Paper Policy Orchestrator 24h", lambda: lab.paper_policy_orchestrator(hours=hours)),
             ("Time Death Autopsy 24h", lambda: lab.time_death_autopsy(hours=hours)),
-            ("Exit Label Calibration V2 24h", lambda: lab.exit_label_calibration_v2(hours=hours)),
-            ("Pre-Move Pattern Miner 24h", lambda: lab.pre_move_pattern_miner(hours=hours)),
             ("Data Vault Status", lambda: lab.data_vault_status()),
         ]
         started = time.perf_counter()
-        rendered = [self._run_section(name, callback) for name, callback in sections]
+        rendered = [self._run_section(name, callback, timeout_seconds=3.0) for name, callback in sections]
         duration_ms = int((time.perf_counter() - started) * 1000)
+        warnings = [section.warning for section in rendered if section.warning]
+        report_status = "PARTIAL_REPORT" if any(section.status in {"error", "timeout"} for section in rendered) else "OK"
         lines = [
             "DASHBOARD PRO SHORT REPORT START",
             f"timestamp: {_iso_now()}",
             f"hours: {hours}",
             f"git_version: {_git_version()}",
             f"duration_ms: {duration_ms}",
+            f"report_status: {report_status}",
+            f"warnings: {', '.join(warnings) if warnings else 'none'}",
             "final_recommendation: NO LIVE",
             "",
         ]
         for section in rendered:
-            lines.extend([f"[{section.name}]", section.text.strip()[:2500] or "not_loaded", ""])
+            lines.extend(
+                [
+                    f"[{section.name}]",
+                    f"status: {section.status}",
+                    f"duration_ms: {section.duration_ms}",
+                    section.text.strip()[:2500] or "not_loaded",
+                    "",
+                ]
+            )
         lines.append("DASHBOARD PRO SHORT REPORT END")
         text = sanitize_text_for_dashboard("\n".join(lines))
         return sanitize_json_for_dashboard(
@@ -282,6 +275,9 @@ class DashboardProReporter:
                 "git_version": _git_version(),
                 "duration_ms": duration_ms,
                 "approx_size_bytes": len(text.encode("utf-8")),
+                "report_status": report_status,
+                "warnings": warnings,
+                "section_timings": {section.name: section.duration_ms for section in rendered},
                 "sections": [section.to_dict() for section in rendered],
                 "text": text,
                 "final_recommendation": "NO LIVE",
@@ -313,16 +309,44 @@ class DashboardProReporter:
         lines.append("DASHBOARD PRO FULL REPORT END")
         return sanitize_text_for_dashboard("\n".join(lines))
 
-    def _run_section(self, name: str, callback: Callable[[], str]) -> ReportSection:
+    def _run_section(self, name: str, callback: Callable[[], str], *, timeout_seconds: float | None = None) -> ReportSection:
         started = time.perf_counter()
+        warning = ""
         try:
-            text = callback()
+            if timeout_seconds is None or timeout_seconds <= 0:
+                text = callback()
+            else:
+                executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"dashboard-report-{name[:12]}")
+                future = executor.submit(callback)
+                try:
+                    text = future.result(timeout=timeout_seconds)
+                except TimeoutError:
+                    future.cancel()
+                    text = f"SECTION_TIMEOUT: {name}"
+                    status = "timeout"
+                    warning = f"SECTION_TIMEOUT: {name}"
+                    return ReportSection(
+                        name=name,
+                        text=sanitize_text_for_dashboard(text),
+                        status=status,
+                        duration_ms=int((time.perf_counter() - started) * 1000),
+                        warning=warning,
+                    )
+                finally:
+                    executor.shutdown(wait=False, cancel_futures=True)
             status = "ok"
         except Exception as exc:
             text = f"ERROR_SANITIZED: {sanitize_text_for_dashboard(type(exc).__name__)}"
             status = "error"
+            warning = f"SECTION_ERROR: {name}"
         duration_ms = int((time.perf_counter() - started) * 1000)
-        return ReportSection(name=name, text=sanitize_text_for_dashboard(text), status=status, duration_ms=duration_ms)
+        return ReportSection(
+            name=name,
+            text=sanitize_text_for_dashboard(text),
+            status=status,
+            duration_ms=duration_ms,
+            warning=warning,
+        )
 
     def _safety_section(self) -> str:
         lines = [

@@ -39,6 +39,7 @@ STATIC_DIR = Path(__file__).resolve().parent / "static"
 DASHBOARD_PATH = STATIC_DIR / "dashboard.html"
 _DASHBOARD_LAB_CACHE: dict[str, dict[str, Any]] = {}
 _DASHBOARD_FULL_REPORT_CACHE: dict[str, dict[str, Any]] = {}
+_DASHBOARD_SHORT_REPORT_CACHE: dict[str, dict[str, Any]] = {}
 
 
 def start_health_server(
@@ -149,6 +150,9 @@ def start_health_server(
                 "/api/training/vps-preflight",
                 "/api/training/fast-runtime-plan",
                 "/api/training/worker-lock-status",
+                "/api/training/real-strategy-backtest",
+                "/api/training/ohlcv-replay-loader-audit",
+                "/api/training/duplicate-module-audit",
                 "/api/training/full-report",
                 "/api/training/export/full.txt",
                 "/api/training/export/full.json",
@@ -270,6 +274,9 @@ def start_health_server(
                 return
             if path == "/api/training/real-strategy-backtest":
                 self._send_json(_real_strategy_backtest(config, db, query))
+                return
+            if path == "/api/training/ohlcv-replay-loader-audit":
+                self._send_json(_ohlcv_replay_loader_audit(config, db, query))
                 return
             if path == "/api/training/duplicate-module-audit":
                 self._send_json(_duplicate_module_audit(config, db, query))
@@ -529,14 +536,23 @@ def start_health_server(
         def log_message(self, format: str, *args: Any) -> None:
             return
 
+    server_ready = threading.Event()
+    server_box: dict[str, HTTPServer] = {}
+
     def run() -> None:
         try:
-            HTTPServer(("0.0.0.0", port), Handler).serve_forever()
+            httpd = HTTPServer(("0.0.0.0", port), Handler)
+            server_box["server"] = httpd
+            server_ready.set()
+            httpd.serve_forever()
         except OSError as exc:
+            server_ready.set()
             logger.warning("Health server no pudo iniciar en puerto %s: %s", port, exc)
 
     thread = threading.Thread(target=run, name="health-server", daemon=True)
     thread.start()
+    setattr(thread, "server_ready", server_ready)
+    setattr(thread, "server_box", server_box)
     logger.info("Health server listo en /health puerto %s", port)
     return thread
 
@@ -869,6 +885,14 @@ def _real_strategy_backtest(config: Any | None, db: Any | None, query: dict[str,
     hours = _query_int(query, "hours", 72)
     text = real_strategy_backtest_text(config, db, hours=hours)
     return _text_payload("real_strategy_backtester", text)
+
+
+def _ohlcv_replay_loader_audit(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
+    from .ohlcv_replay_loader import ohlcv_replay_loader_audit_text
+
+    hours = _query_int(query, "hours", 72)
+    text = ohlcv_replay_loader_audit_text(config, db, hours=hours)
+    return _text_payload("ohlcv_replay_loader_audit", text)
 
 
 def _duplicate_module_audit(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
@@ -1523,15 +1547,30 @@ def _dashboard_short_report(config: Any | None, db: Any | None, query: dict[str,
     hours = _query_int(query, "hours", 24)
     if config is None or db is None:
         return {"error": "short report unavailable", "hours": hours, "final_recommendation": "NO LIVE"}
+    cache_key = f"short:{hours}"
+    force = (query.get("force") or ["0"])[0] in {"1", "true", "yes"}
+    cached = _DASHBOARD_SHORT_REPORT_CACHE.get(cache_key)
+    if cached and not force and time.time() - float(cached.get("cached_at_epoch", 0.0) or 0.0) < 120:
+        payload = dict(cached.get("payload") or {})
+        payload["cache_hit"] = True
+        return payload
     try:
         from .dashboard_pro import build_dashboard_short_report
 
-        return build_dashboard_short_report(config, db, hours=hours)
+        payload = build_dashboard_short_report(config, db, hours=hours)
+        payload["cache_hit"] = False
+        _DASHBOARD_SHORT_REPORT_CACHE[cache_key] = {"cached_at_epoch": time.time(), "payload": payload}
+        while len(_DASHBOARD_SHORT_REPORT_CACHE) > 20:
+            oldest = sorted(_DASHBOARD_SHORT_REPORT_CACHE.items(), key=lambda item: float(item[1].get("cached_at_epoch", 0.0) or 0.0))[0][0]
+            _DASHBOARD_SHORT_REPORT_CACHE.pop(oldest, None)
+        return payload
     except Exception as exc:
         return {
             "error": str(exc)[:300],
             "text": f"DASHBOARD PRO SHORT REPORT START\nERROR_SANITIZED: {type(exc).__name__}\nfinal_recommendation: NO LIVE\nDASHBOARD PRO SHORT REPORT END",
             "hours": hours,
+            "report_status": "ERROR",
+            "warnings": [f"SHORT_REPORT_ERROR: {type(exc).__name__}"],
             "final_recommendation": "NO LIVE",
         }
 

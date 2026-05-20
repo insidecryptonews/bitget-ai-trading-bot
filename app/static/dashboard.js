@@ -813,7 +813,9 @@
       state.lastReportGeneratedAt = new Date().toLocaleString("es-ES");
       $("fullReportPreview").textContent = text;
       const copied = await copyText(text);
-      $("reportStatus").textContent = `short report ${copied ? "copied" : "generated"} - ${Math.round(performance.now() - started)} ms - ${(text.length / 1024).toFixed(1)} KB`;
+      const match = text.match(/report_status:\s*([A-Z_]+)/i);
+      const reportStatus = match ? ` ${match[1].toUpperCase()}` : "";
+      $("reportStatus").textContent = `short report${reportStatus} ${copied ? "copied" : "generated"} - ${Math.round(performance.now() - started)} ms - ${(text.length / 1024).toFixed(1)} KB`;
     } catch (error) {
       $("reportStatus").textContent = `short report error: ${error.message}`;
     } finally {

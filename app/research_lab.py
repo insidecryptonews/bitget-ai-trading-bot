@@ -1053,6 +1053,37 @@ class ResearchLab:
 
         return DashboardUiV3SmokeTest(self.config, self.db, self.logger).to_text()
 
+    def dashboard_report_timeout_smoke_test(self) -> str:
+        import time
+
+        from .dashboard_pro import DashboardProReporter
+
+        reporter = DashboardProReporter(self.config, self.db, self.logger)
+        timeout_section = reporter._run_section("slow_section", lambda: (time.sleep(0.08) or "late"), timeout_seconds=0.01)
+        secret_section = reporter._run_section("secret_section", lambda: "API_KEY=abc123\nfinal_recommendation: NO LIVE", timeout_seconds=1.0)
+        checks = {
+            "timeout_returns_partial_section": timeout_section.status == "timeout" and "SECTION_TIMEOUT" in timeout_section.text,
+            "warning_recorded": "SECTION_TIMEOUT" in timeout_section.warning,
+            "secrets_sanitized": "abc123" not in secret_section.text and "***" in secret_section.text,
+            "final_recommendation_no_live": "NO LIVE" in secret_section.text,
+        }
+        lines = ["DASHBOARD REPORT TIMEOUT SMOKE TEST START"]
+        lines.extend(f"{key}: {str(value).lower()}" for key, value in checks.items())
+        lines.extend(
+            [
+                "report_status_if_timeout: PARTIAL_REPORT",
+                "backup_restore_live_executed: false",
+                "LIVE_TRADING=false",
+                "DRY_RUN=true",
+                "PAPER_TRADING=true",
+                "ENABLE_PAPER_POLICY_FILTER=false",
+                "final_recommendation: NO LIVE",
+                f"result: {'PASS' if all(checks.values()) else 'FAIL'}",
+                "DASHBOARD REPORT TIMEOUT SMOKE TEST END",
+            ]
+        )
+        return "\n".join(lines)
+
     def exit_policy_v3_backtest(self, hours: int = 24) -> str:
         from .exit_policy_v3_backtest import ExitPolicyV3Backtest
 
@@ -1148,6 +1179,16 @@ class ResearchLab:
         from .real_strategy_backtester import real_strategy_backtester_smoke_text
 
         return real_strategy_backtester_smoke_text(self.config)
+
+    def ohlcv_replay_loader_audit(self, hours: int = 72) -> str:
+        from .ohlcv_replay_loader import ohlcv_replay_loader_audit_text
+
+        return ohlcv_replay_loader_audit_text(self.config, self.db, hours=hours)
+
+    def ohlcv_replay_loader_smoke_test(self) -> str:
+        from .ohlcv_replay_loader import ohlcv_replay_loader_smoke_text
+
+        return ohlcv_replay_loader_smoke_text()
 
     def duplicate_module_audit(self) -> str:
         from .duplicate_module_audit import duplicate_module_audit_text
@@ -1734,6 +1775,8 @@ def main() -> None:
             "strategy-research-library",
             "real-strategy-backtester-smoke-test",
             "real-strategy-backtest",
+            "ohlcv-replay-loader-smoke-test",
+            "ohlcv-replay-loader-audit",
             "duplicate-module-audit-smoke-test",
             "duplicate-module-audit",
             "shadow-experiments",
@@ -1806,6 +1849,7 @@ def main() -> None:
             "research-modules-audit",
             "bot-integrity-audit-smoke-test",
             "dashboard-ui-v3-smoke-test",
+            "dashboard-report-timeout-smoke-test",
         ],
     )
     parser.add_argument("--limit", type=int, default=None, help="Maximo de labels a procesar en phase2-persist.")
@@ -2026,6 +2070,10 @@ def main() -> None:
         print(lab.real_strategy_backtester_smoke_test())
     elif args.command == "real-strategy-backtest":
         print(lab.real_strategy_backtest(hours=args.hours))
+    elif args.command == "ohlcv-replay-loader-smoke-test":
+        print(lab.ohlcv_replay_loader_smoke_test())
+    elif args.command == "ohlcv-replay-loader-audit":
+        print(lab.ohlcv_replay_loader_audit(hours=args.hours))
     elif args.command == "duplicate-module-audit-smoke-test":
         print(lab.duplicate_module_audit_smoke_test())
     elif args.command == "duplicate-module-audit":
@@ -2182,6 +2230,8 @@ def main() -> None:
         print(lab.bot_integrity_audit_smoke_test())
     elif args.command == "dashboard-ui-v3-smoke-test":
         print(lab.dashboard_ui_v3_smoke_test())
+    elif args.command == "dashboard-report-timeout-smoke-test":
+        print(lab.dashboard_report_timeout_smoke_test())
 
 
 if __name__ == "__main__":
