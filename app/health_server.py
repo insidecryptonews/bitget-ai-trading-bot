@@ -92,6 +92,16 @@ def start_health_server(
                 "/api/training/net-rr-audit",
                 "/api/training/dynamic-exit-policy-audit",
                 "/api/training/structural-stop-audit",
+                "/api/training/operational-intelligence-audit",
+                "/api/training/exit-policy-v3-backtest",
+                "/api/training/sudden-move-detector",
+                "/api/training/pre-move-v2",
+                "/api/training/walk-forward-validator",
+                "/api/training/anti-overfit-v2",
+                "/api/training/candidate-promotion-v2",
+                "/api/training/shadow-strategy-simulator",
+                "/api/training/strategy-research-library",
+                "/api/training/runtime-optimization-proposal",
                 "/api/training/shadow-experiments",
                 "/api/training/evolution-score",
                 "/api/training/mfe-mae-diagnostic",
@@ -230,6 +240,36 @@ def start_health_server(
                 return
             if path == "/api/training/structural-stop-audit":
                 self._send_json(_structural_stop_audit(config, db, query))
+                return
+            if path == "/api/training/operational-intelligence-audit":
+                self._send_json(_operational_intelligence_audit(config, db, query))
+                return
+            if path == "/api/training/exit-policy-v3-backtest":
+                self._send_json(_exit_policy_v3_backtest(config, db, query))
+                return
+            if path == "/api/training/sudden-move-detector":
+                self._send_json(_sudden_move_detector(config, db, query))
+                return
+            if path == "/api/training/pre-move-v2":
+                self._send_json(_pre_move_v2(config, db, query))
+                return
+            if path == "/api/training/walk-forward-validator":
+                self._send_json(_walk_forward_validator(config, db, query))
+                return
+            if path == "/api/training/anti-overfit-v2":
+                self._send_json(_anti_overfit_v2(config, db, query))
+                return
+            if path == "/api/training/candidate-promotion-v2":
+                self._send_json(_candidate_promotion_v2(config, db, query))
+                return
+            if path == "/api/training/shadow-strategy-simulator":
+                self._send_json(_shadow_strategy_simulator(config, db, query))
+                return
+            if path == "/api/training/strategy-research-library":
+                self._send_json(_strategy_research_library(config, db, query))
+                return
+            if path == "/api/training/runtime-optimization-proposal":
+                self._send_json(_runtime_optimization_proposal(config, db, query))
                 return
             if path == "/api/training/shadow-experiments":
                 self._send_json(_shadow_experiments(config, db, query))
@@ -779,6 +819,46 @@ def _structural_stop_audit(config: Any | None, db: Any | None, query: dict[str, 
     from .execution_safety import structural_stop_audit_text
 
     return _text_payload("structural_stop_audit", structural_stop_audit_text(hours=_query_int(query, "hours", 24)))
+
+
+def _operational_intelligence_audit(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
+    return _lab_payload(config, db, query, "operational intelligence unavailable", ".operational_intelligence", "OperationalIntelligenceAudit")
+
+
+def _exit_policy_v3_backtest(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
+    return _lab_payload(config, db, query, "exit policy v3 backtest unavailable", ".exit_policy_v3_backtest", "ExitPolicyV3Backtest")
+
+
+def _sudden_move_detector(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
+    return _lab_payload(config, db, query, "sudden move detector unavailable", ".sudden_move_detector", "SuddenMoveDetector")
+
+
+def _pre_move_v2(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
+    return _lab_payload(config, db, query, "pre-move v2 unavailable", ".pre_move_intelligence_v2", "PreMoveIntelligenceV2")
+
+
+def _walk_forward_validator(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
+    return _lab_payload(config, db, query, "walk-forward validator unavailable", ".walk_forward_validator", "WalkForwardValidator")
+
+
+def _anti_overfit_v2(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
+    return _lab_payload(config, db, query, "anti overfit v2 unavailable", ".anti_overfit_matrix_v2", "AntiOverfitMatrixV2")
+
+
+def _candidate_promotion_v2(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
+    return _lab_payload(config, db, query, "candidate promotion v2 unavailable", ".candidate_promotion_v2", "CandidatePromotionV2")
+
+
+def _shadow_strategy_simulator(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
+    return _lab_payload(config, db, query, "shadow strategy simulator unavailable", ".shadow_strategy_simulator", "ShadowStrategySimulator")
+
+
+def _strategy_research_library(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
+    return _lab_payload(config, db, query, "strategy research library unavailable", ".strategy_research_library", "StrategyResearchLibrary")
+
+
+def _runtime_optimization_proposal(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
+    return _lab_payload(config, db, query, "runtime optimization proposal unavailable", ".runtime_optimization_proposal", "RuntimeOptimizationProposal")
 
 
 def _shadow_experiments(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:

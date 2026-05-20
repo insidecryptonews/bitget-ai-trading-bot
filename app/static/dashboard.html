@@ -26,6 +26,7 @@
         <button type="button" class="nav-link nav-item" data-target="time-death">Time Death</button>
         <button type="button" class="nav-link nav-item" data-target="exit-calibration">Exit Calibration</button>
         <button type="button" class="nav-link nav-item" data-target="execution-safety">Execution Safety</button>
+        <button type="button" class="nav-link nav-item" data-target="operational-intelligence">Operational Intel</button>
         <button type="button" class="nav-link nav-item" data-target="pre-move">Pre-Move</button>
         <button type="button" class="nav-link nav-item" data-target="runtime">Runtime</button>
         <button type="button" class="nav-link nav-item" data-target="data-vault">Data Vault</button>
@@ -64,6 +65,7 @@
         <button type="button" class="mobile-nav-item" data-target="score-incubator">Score</button>
         <button type="button" class="mobile-nav-item" data-target="pipeline-cost">Costs</button>
         <button type="button" class="mobile-nav-item" data-target="execution-safety">Safety</button>
+        <button type="button" class="mobile-nav-item" data-target="operational-intelligence">Ops</button>
         <button type="button" class="mobile-nav-item" data-target="time-death">TIME</button>
         <button type="button" class="mobile-nav-item" data-target="reports">Exports</button>
       </nav>
@@ -506,6 +508,96 @@
           <details class="report-details">
             <summary>Ver salida tecnica Execution Safety</summary>
             <pre id="executionSafetyOutput">Sin cargar todavia.</pre>
+          </details>
+        </section>
+
+        <section id="operational-intelligence" class="section">
+          <div class="section-title">
+            <div>
+              <span class="eyebrow">Fase 7 research</span>
+              <h2>Operational Intelligence / Fase 7</h2>
+            </div>
+            <p>Exit intelligence, sudden move, walk-forward y strategy research. Todo shadow/read-only.</p>
+          </div>
+          <div class="decision-grid">
+            <article class="decision-card info">
+              <span class="panel-label">Exit Policy V3</span>
+              <strong id="opsExitPolicyState">not loaded</strong>
+              <p>Break-even, profit lock, trailing y time decay solo simulados.</p>
+            </article>
+            <article class="decision-card warning">
+              <span class="panel-label">Trailing / Profit Lock</span>
+              <strong id="opsTrailingCount">0</strong>
+              <p>Candidatos shadow, sin aplicar exits reales.</p>
+            </article>
+            <article class="decision-card info">
+              <span class="panel-label">Sudden Move</span>
+              <strong id="opsSuddenState">not loaded</strong>
+              <p>Patrones bruscos no accionan por si solos.</p>
+            </article>
+            <article class="decision-card warning">
+              <span class="panel-label">Walk-forward</span>
+              <strong id="opsWalkForwardState">not loaded</strong>
+              <p>Train bueno y forward malo se rechaza como overfit.</p>
+            </article>
+            <article class="decision-card warning">
+              <span class="panel-label">Anti-overfit V2</span>
+              <strong id="opsAntiOverfitState">not loaded</strong>
+              <p>Bloquea edge cost-sensitive, low sample y market_probe only.</p>
+            </article>
+            <article class="decision-card info">
+              <span class="panel-label">Candidate Promotion V2</span>
+              <strong id="opsPromotionState">not loaded</strong>
+              <p>PAPER_CANDIDATE_DISABLED no activa filtro paper.</p>
+            </article>
+            <article class="decision-card info">
+              <span class="panel-label">Shadow Simulator</span>
+              <strong id="opsSimulatorState">not loaded</strong>
+              <p>Simula politica completa sin abrir posiciones.</p>
+            </article>
+            <article class="decision-card info">
+              <span class="panel-label">Strategy Library</span>
+              <strong id="opsStrategyState">not loaded</strong>
+              <p>Hipotesis conocidas se tratan como research, no como verdad.</p>
+            </article>
+            <article class="decision-card danger">
+              <span class="panel-label">Final recommendation</span>
+              <strong>NO LIVE</strong>
+              <p>Paper filter off. No slots/leverage/margin/sizing touched.</p>
+            </article>
+          </div>
+          <div class="visual-grid">
+            <article class="panel chart-panel">
+              <div class="panel-head"><h3>Promotion states</h3></div>
+              <div id="opsPromotionChart" class="chart-body"></div>
+            </article>
+            <article class="panel chart-panel">
+              <div class="panel-head"><h3>Walk-forward / overfit</h3></div>
+              <div id="opsWalkForwardChart" class="chart-body"></div>
+            </article>
+            <article class="panel chart-panel">
+              <div class="panel-head"><h3>Sudden move patterns</h3></div>
+              <div id="opsSuddenChart" class="chart-body"></div>
+            </article>
+            <article class="panel chart-panel">
+              <div class="panel-head"><h3>Shadow simulation</h3></div>
+              <div id="opsSimulatorChart" class="chart-body"></div>
+            </article>
+          </div>
+          <div class="lab-actions">
+            <button id="operationalIntelligenceBtn" class="btn btn-secondary">Operational audit 24h</button>
+            <button id="exitPolicyV3BacktestBtn" class="btn btn-secondary">Exit Policy V3 backtest</button>
+            <button id="suddenMoveDetectorBtn" class="btn btn-secondary">Sudden move detector</button>
+            <button id="preMoveV2Btn" class="btn btn-secondary">Pre-Move V2</button>
+            <button id="walkForwardValidatorBtn" class="btn btn-secondary">Walk-forward 72h</button>
+            <button id="antiOverfitV2Btn" class="btn btn-secondary">Anti-overfit V2</button>
+            <button id="candidatePromotionV2Btn" class="btn btn-secondary">Candidate promotion V2</button>
+            <button id="shadowStrategySimulatorBtn" class="btn btn-secondary">Shadow simulator 72h</button>
+            <button id="strategyResearchLibraryBtn" class="btn btn-secondary">Strategy library</button>
+          </div>
+          <details class="report-details">
+            <summary>Ver salida tecnica Operational Intelligence</summary>
+            <pre id="operationalIntelligenceOutput">Sin cargar todavia.</pre>
           </details>
         </section>
 

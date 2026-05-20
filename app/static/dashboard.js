@@ -20,6 +20,7 @@
     { name: "Training Data Integrity", url: "/api/training/training-data-integrity?hours=24", target: "scoreIncubatorOutput", append: true },
     { name: "Core Corrections", url: "/api/training/core-corrections?hours=24", target: "pipelineCostOutput", handler: handleCoreCorrections },
     { name: "Execution Safety", url: "/api/training/execution-safety-audit", target: "executionSafetyOutput", handler: handleExecutionSafety },
+    { name: "Operational Intelligence", url: "/api/training/operational-intelligence-audit?hours=24", target: "operationalIntelligenceOutput", handler: handleOperationalIntelligence },
     { name: "Data Pipeline Diagnosis", url: "/api/training/data-pipeline-diagnosis?hours=24", target: "pipelineCostOutput", handler: handleDataPipelineDiagnosis },
     { name: "Label Quality V2", url: "/api/training/label-quality-v2?hours=24", target: "pipelineCostOutput", append: true, handler: handleLabelQualityV2 },
     { name: "Bitget Cost Model", url: "/api/training/bitget-cost-model-audit?hours=24", target: "pipelineCostOutput", append: true, handler: handleBitgetCostModel },
@@ -383,6 +384,10 @@
       { label: "SHORT events", value: 0, color: "red", display: "manual" },
     ]));
     setHtml("exitCalibrationChart", renderEmptyState("Exit calibration manual"));
+    setHtml("opsPromotionChart", renderEmptyState("Operational intelligence manual"));
+    setHtml("opsWalkForwardChart", renderEmptyState("Walk-forward manual"));
+    setHtml("opsSuddenChart", renderEmptyState("Sudden move manual"));
+    setHtml("opsSimulatorChart", renderEmptyState("Shadow simulator manual"));
   }
 
   async function runLab(buttonId, url, outputId, handler, append = false) {
@@ -641,6 +646,63 @@
     ]));
   }
 
+  function handleOperationalIntelligence(payload, text) {
+    const counts = payload.candidate_promotion_state_counts || {};
+    const best = payload.shadow_simulator_best_policy || {};
+    const strategy = payload.strategy_research_summary || {};
+    setText("opsExitPolicyState", safeText(payload.exit_policy_v3_status || (text.match(/exit_policy_v3_status:\s*(\S+)/i) || [])[1], "NEED_DATA"));
+    setText("opsTrailingCount", safeText(payload.trailing_profit_lock_candidate_count || (text.match(/trailing_profit_lock_candidate_count:\s*(\d+)/i) || [])[1], 0));
+    setText("opsSuddenState", `${safeText(payload.sudden_move_patterns_found || 0)} patterns`);
+    setText("opsWalkForwardState", `${safeText(payload.walk_forward_stable_candidates || 0)} stable / ${safeText(payload.walk_forward_overfit_rejected || 0)} rejected`);
+    setText("opsAntiOverfitState", safeText(payload.anti_overfit_status || "UNKNOWN"));
+    setText("opsPromotionState", Object.keys(counts).length ? `${Object.keys(counts).length} states` : "not loaded");
+    setText("opsSimulatorState", best.strategy_id ? safeText(best.recommendation || "research") : "not loaded");
+    setText("opsStrategyState", `${safeText(strategy.tested_hypotheses || 0)} hypotheses`);
+    setHtml("opsPromotionChart", Object.keys(counts).length ? renderHorizontalBarChart(Object.entries(counts).map(([label, value]) => ({
+      label,
+      value,
+      color: label.includes("REJECT") ? "red" : label.includes("NEED") ? "orange" : "blue",
+      display: value,
+    }))) : renderEmptyState("Sin estados cargados"));
+    setHtml("opsWalkForwardChart", renderHorizontalBarChart([
+      { label: "stable", value: num(payload.walk_forward_stable_candidates), color: "green", display: safeText(payload.walk_forward_stable_candidates, 0) },
+      { label: "overfit/reject", value: num(payload.walk_forward_overfit_rejected), color: "red", display: safeText(payload.walk_forward_overfit_rejected, 0) },
+      { label: "anti-overfit rejects", value: num(payload.anti_overfit_rejects), color: "orange", display: safeText(payload.anti_overfit_rejects, 0) },
+    ]));
+    setHtml("opsSuddenChart", renderHorizontalBarChart([
+      { label: "patterns", value: num(payload.sudden_move_patterns_found), color: "blue", display: safeText(payload.sudden_move_patterns_found, 0) },
+      { label: "false positive risk", value: num(payload.sudden_move_false_positive_risk), color: "orange", display: safeText(payload.sudden_move_false_positive_risk, 0) },
+      { label: "pre-move patterns", value: num(payload.pre_move_patterns_found), color: "purple", display: safeText(payload.pre_move_patterns_found, 0) },
+    ]));
+    setHtml("opsSimulatorChart", renderHorizontalBarChart([
+      { label: "best net EV", value: Math.max(0, num(best.net_ev)), color: num(best.net_ev) > 0 ? "green" : "red", display: fmt(best.net_ev, 4) },
+      { label: "best net PF", value: Math.max(0, num(best.net_pf)), color: num(best.net_pf) > 1 ? "green" : "orange", display: fmt(best.net_pf, 2) },
+    ]));
+  }
+
+  function handleCandidatePromotionV2(payload, text) {
+    const counts = payload.candidate_promotion_state_counts || {};
+    handleOperationalIntelligence({ candidate_promotion_state_counts: counts, shadow_simulator_best_policy: {}, strategy_research_summary: {} }, text);
+    setText("opsPromotionState", Object.keys(counts).length ? `${Object.keys(counts).length} states` : "no candidates");
+  }
+
+  function handleShadowSimulator(payload, text) {
+    const best = payload.best_simulated_policy || {};
+    setText("opsSimulatorState", best.strategy_id ? safeText(best.recommendation || "research") : "not loaded");
+    setHtml("opsSimulatorChart", renderHorizontalBarChart([
+      { label: "best net EV", value: Math.max(0, num(best.net_ev)), color: num(best.net_ev) > 0 ? "green" : "red", display: fmt(best.net_ev, 4) },
+      { label: "best net PF", value: Math.max(0, num(best.net_pf)), color: num(best.net_pf) > 1 ? "green" : "orange", display: fmt(best.net_pf, 2) },
+    ]));
+  }
+
+  function handleSuddenMoveDetector(payload, text) {
+    setText("opsSuddenState", `${safeText(payload.patterns_found || 0)} patterns`);
+    setHtml("opsSuddenChart", renderHorizontalBarChart([
+      { label: "patterns", value: num(payload.patterns_found), color: "blue", display: safeText(payload.patterns_found, 0) },
+      { label: "false positive risk", value: num(payload.false_positive_risk_count), color: "orange", display: safeText(payload.false_positive_risk_count, 0) },
+    ]));
+  }
+
   function handleTimeDeath(payload, text) {
     const time = extractPercent(text, "TIME%");
     const tp = extractPercent(text, "TP%");
@@ -822,6 +884,15 @@
       ["netRrAuditBtn", "/api/training/net-rr-audit?hours=24", "executionSafetyOutput", handleNetRrAudit, true],
       ["dynamicExitPolicyAuditBtn", "/api/training/dynamic-exit-policy-audit?hours=24", "executionSafetyOutput", handleDynamicExitAudit, true],
       ["structuralStopAuditBtn", "/api/training/structural-stop-audit?hours=24", "executionSafetyOutput", handleStructuralStopAudit, true],
+      ["operationalIntelligenceBtn", "/api/training/operational-intelligence-audit?hours=24", "operationalIntelligenceOutput", handleOperationalIntelligence],
+      ["exitPolicyV3BacktestBtn", "/api/training/exit-policy-v3-backtest?hours=24", "operationalIntelligenceOutput", null, true],
+      ["suddenMoveDetectorBtn", "/api/training/sudden-move-detector?hours=24", "operationalIntelligenceOutput", handleSuddenMoveDetector, true],
+      ["preMoveV2Btn", "/api/training/pre-move-v2?hours=24", "operationalIntelligenceOutput", null, true],
+      ["walkForwardValidatorBtn", "/api/training/walk-forward-validator?hours=72", "operationalIntelligenceOutput", null, true],
+      ["antiOverfitV2Btn", "/api/training/anti-overfit-v2?hours=72", "operationalIntelligenceOutput", null, true],
+      ["candidatePromotionV2Btn", "/api/training/candidate-promotion-v2?hours=24", "operationalIntelligenceOutput", handleCandidatePromotionV2, true],
+      ["shadowStrategySimulatorBtn", "/api/training/shadow-strategy-simulator?hours=72", "operationalIntelligenceOutput", handleShadowSimulator, true],
+      ["strategyResearchLibraryBtn", "/api/training/strategy-research-library?hours=72", "operationalIntelligenceOutput", null, true],
       ["edgeGuardBtn", "/api/training/edge-guard?hours=24", "edgePolicyOutput", handleEdgeGuard, true],
       ["paperPolicyOrchestratorBtn", "/api/training/paper-policy-orchestrator?hours=24", "edgePolicyOutput", handleOrchestrator, true],
       ["netEdgeLabBtn", "/api/training/net-edge-lab?hours=24", "edgePolicyOutput", null, true],

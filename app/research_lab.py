@@ -1053,6 +1053,92 @@ class ResearchLab:
 
         return DashboardUiV3SmokeTest(self.config, self.db, self.logger).to_text()
 
+    def exit_policy_v3_backtest(self, hours: int = 24) -> str:
+        from .exit_policy_v3_backtest import ExitPolicyV3Backtest
+
+        return ExitPolicyV3Backtest(self.config, self.db).to_text(hours=hours)
+
+    def exit_policy_v3_smoke_test(self) -> str:
+        from .exit_policy_v3 import exit_policy_v3_smoke_text
+        from .exit_policy_v3_backtest import exit_policy_v3_backtest_smoke_text
+
+        return exit_policy_v3_smoke_text() + "\n\n" + exit_policy_v3_backtest_smoke_text()
+
+    def sudden_move_detector(self, hours: int = 24) -> str:
+        from .sudden_move_detector import SuddenMoveDetector
+
+        return SuddenMoveDetector(self.config, self.db).to_text(hours=hours)
+
+    def sudden_move_smoke_test(self) -> str:
+        from .sudden_move_detector import sudden_move_smoke_text
+
+        return sudden_move_smoke_text()
+
+    def pre_move_v2(self, hours: int = 24) -> str:
+        from .pre_move_intelligence_v2 import PreMoveIntelligenceV2
+
+        return PreMoveIntelligenceV2(self.config, self.db).to_text(hours=hours)
+
+    def pre_move_v2_smoke_test(self) -> str:
+        from .pre_move_intelligence_v2 import pre_move_v2_smoke_text
+
+        return pre_move_v2_smoke_text()
+
+    def walk_forward_validator(self, hours: int = 72) -> str:
+        from .walk_forward_validator import WalkForwardValidator
+
+        return WalkForwardValidator(self.config, self.db).to_text(hours=hours)
+
+    def walk_forward_smoke_test(self) -> str:
+        from .walk_forward_validator import walk_forward_smoke_text
+
+        return walk_forward_smoke_text()
+
+    def anti_overfit_v2(self, hours: int = 72) -> str:
+        from .anti_overfit_matrix_v2 import AntiOverfitMatrixV2
+
+        return AntiOverfitMatrixV2(self.config, self.db).to_text(hours=hours)
+
+    def anti_overfit_v2_smoke_test(self) -> str:
+        from .anti_overfit_matrix_v2 import anti_overfit_v2_smoke_text
+
+        return anti_overfit_v2_smoke_text()
+
+    def candidate_promotion_v2(self, hours: int = 24) -> str:
+        from .candidate_promotion_v2 import CandidatePromotionV2
+
+        return CandidatePromotionV2(self.config, self.db).to_text(hours=hours)
+
+    def candidate_promotion_v2_smoke_test(self) -> str:
+        from .candidate_promotion_v2 import candidate_promotion_v2_smoke_text
+
+        return candidate_promotion_v2_smoke_text()
+
+    def shadow_strategy_simulator(self, hours: int = 72) -> str:
+        from .shadow_strategy_simulator import ShadowStrategySimulator
+
+        return ShadowStrategySimulator(self.config, self.db).to_text(hours=hours)
+
+    def shadow_strategy_simulator_smoke_test(self) -> str:
+        from .shadow_strategy_simulator import shadow_strategy_simulator_smoke_text
+
+        return shadow_strategy_simulator_smoke_text()
+
+    def operational_intelligence_audit(self, hours: int = 24) -> str:
+        from .operational_intelligence import OperationalIntelligenceAudit
+
+        return OperationalIntelligenceAudit(self.config, self.db).to_text(hours=hours)
+
+    def strategy_research_library(self, hours: int = 72) -> str:
+        from .strategy_research_library import StrategyResearchLibrary
+
+        return StrategyResearchLibrary(self.config, self.db).to_text(hours=hours)
+
+    def strategy_research_library_smoke_test(self) -> str:
+        from .strategy_research_library import strategy_research_library_smoke_text
+
+        return strategy_research_library_smoke_text()
+
     def build_markdown_report(
         self,
         dataset: list[dict[str, Any]] | None = None,
@@ -1609,6 +1695,23 @@ def main() -> None:
             "circuit-breaker-magnitude-smoke-test",
             "clock-drift-smoke-test",
             "config-hardening-smoke-test",
+            "exit-policy-v3-smoke-test",
+            "exit-policy-v3-backtest",
+            "sudden-move-smoke-test",
+            "sudden-move-detector",
+            "pre-move-v2-smoke-test",
+            "pre-move-v2",
+            "walk-forward-smoke-test",
+            "walk-forward-validator",
+            "anti-overfit-v2-smoke-test",
+            "anti-overfit-v2",
+            "candidate-promotion-v2-smoke-test",
+            "candidate-promotion-v2",
+            "shadow-strategy-simulator-smoke-test",
+            "shadow-strategy-simulator",
+            "operational-intelligence-audit",
+            "strategy-research-library-smoke-test",
+            "strategy-research-library",
             "shadow-experiments",
             "evolution-score",
             "mfe-mae-diagnostic",
@@ -1861,6 +1964,40 @@ def main() -> None:
         print(lab.clock_drift_smoke_test())
     elif args.command == "config-hardening-smoke-test":
         print(lab.config_hardening_smoke_test())
+    elif args.command == "exit-policy-v3-smoke-test":
+        print(lab.exit_policy_v3_smoke_test())
+    elif args.command == "exit-policy-v3-backtest":
+        print(lab.exit_policy_v3_backtest(hours=args.hours))
+    elif args.command == "sudden-move-smoke-test":
+        print(lab.sudden_move_smoke_test())
+    elif args.command == "sudden-move-detector":
+        print(lab.sudden_move_detector(hours=args.hours))
+    elif args.command == "pre-move-v2-smoke-test":
+        print(lab.pre_move_v2_smoke_test())
+    elif args.command == "pre-move-v2":
+        print(lab.pre_move_v2(hours=args.hours))
+    elif args.command == "walk-forward-smoke-test":
+        print(lab.walk_forward_smoke_test())
+    elif args.command == "walk-forward-validator":
+        print(lab.walk_forward_validator(hours=args.hours))
+    elif args.command == "anti-overfit-v2-smoke-test":
+        print(lab.anti_overfit_v2_smoke_test())
+    elif args.command == "anti-overfit-v2":
+        print(lab.anti_overfit_v2(hours=args.hours))
+    elif args.command == "candidate-promotion-v2-smoke-test":
+        print(lab.candidate_promotion_v2_smoke_test())
+    elif args.command == "candidate-promotion-v2":
+        print(lab.candidate_promotion_v2(hours=args.hours))
+    elif args.command == "shadow-strategy-simulator-smoke-test":
+        print(lab.shadow_strategy_simulator_smoke_test())
+    elif args.command == "shadow-strategy-simulator":
+        print(lab.shadow_strategy_simulator(hours=args.hours))
+    elif args.command == "operational-intelligence-audit":
+        print(lab.operational_intelligence_audit(hours=args.hours))
+    elif args.command == "strategy-research-library-smoke-test":
+        print(lab.strategy_research_library_smoke_test())
+    elif args.command == "strategy-research-library":
+        print(lab.strategy_research_library(hours=args.hours))
     elif args.command == "shadow-experiments":
         print(lab.shadow_experiments(hours=args.hours))
     elif args.command == "evolution-score":
