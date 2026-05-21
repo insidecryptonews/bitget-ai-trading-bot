@@ -742,6 +742,25 @@ class Database:
             )
             """,
         )
+        self._execute(
+            conn,
+            """
+            CREATE TABLE IF NOT EXISTS ohlcv_candles (
+                symbol TEXT NOT NULL,
+                timeframe TEXT NOT NULL,
+                timestamp TEXT NOT NULL,
+                open REAL NOT NULL,
+                high REAL NOT NULL,
+                low REAL NOT NULL,
+                close REAL NOT NULL,
+                volume REAL NOT NULL,
+                quote_volume REAL DEFAULT 0,
+                source TEXT NOT NULL DEFAULT 'bitget_rest_v2',
+                ingested_at TEXT NOT NULL,
+                PRIMARY KEY (symbol, timeframe, timestamp)
+            )
+            """,
+        )
         self._ensure_research_columns(conn)
         self._create_indexes(conn)
 
@@ -818,6 +837,8 @@ class Database:
             "CREATE INDEX IF NOT EXISTS idx_signal_observations_score_time ON signal_observations(confidence_score, timestamp)",
             "CREATE INDEX IF NOT EXISTS idx_execution_intents_status ON execution_intents(status, updated_at)",
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_execution_intents_client_oid ON execution_intents(client_oid)",
+            "CREATE INDEX IF NOT EXISTS idx_ohlcv_candles_symbol_tf_ts ON ohlcv_candles(symbol, timeframe, timestamp)",
+            "CREATE INDEX IF NOT EXISTS idx_ohlcv_candles_ingested ON ohlcv_candles(ingested_at)",
         ]
         for sql in indexes:
             self._execute(conn, sql)
@@ -1968,6 +1989,147 @@ class Database:
             sql = sql.replace("?", "%s")
         with self._connect() as conn:
             return self._fetchall_dicts(conn.execute(sql, params))
+
+    def insert_ohlcv_batch(self, rows: list[dict[str, Any]]) -> dict[str, int]:
+        """Idempotent bulk insert into ohlcv_candles.
+
+        Returns counts for inserted vs duplicate (already present) vs rejected
+        (sanity check failed). Safe to re-run; composite PK prevents duplicates.
+        """
+        inserted = 0
+        skipped = 0
+        rejected = 0
+        if not rows:
+            return {"inserted": 0, "skipped": 0, "rejected": 0}
+        now = iso_utc()
+        prepared: list[tuple[Any, ...]] = []
+        for row in rows:
+            symbol = str(row.get("symbol") or "").upper()
+            timeframe = str(row.get("timeframe") or "").lower()
+            timestamp = row.get("timestamp")
+            try:
+                open_p = float(row["open"])
+                high_p = float(row["high"])
+                low_p = float(row["low"])
+                close_p = float(row["close"])
+                volume = float(row.get("volume") or 0.0)
+                quote_volume = float(row.get("quote_volume") or 0.0)
+            except (KeyError, TypeError, ValueError):
+                rejected += 1
+                continue
+            if not symbol or not timeframe or timestamp is None:
+                rejected += 1
+                continue
+            if high_p < max(open_p, close_p) or low_p > min(open_p, close_p):
+                rejected += 1
+                continue
+            if volume < 0 or any(value <= 0 for value in (open_p, high_p, low_p, close_p)):
+                rejected += 1
+                continue
+            prepared.append(
+                (
+                    symbol,
+                    timeframe,
+                    str(timestamp),
+                    open_p,
+                    high_p,
+                    low_p,
+                    close_p,
+                    volume,
+                    quote_volume,
+                    str(row.get("source") or "bitget_rest_v2"),
+                    now,
+                )
+            )
+        if not prepared:
+            return {"inserted": 0, "skipped": 0, "rejected": rejected}
+        if self._use_postgres:
+            sql = (
+                "INSERT INTO ohlcv_candles"
+                " (symbol, timeframe, timestamp, open, high, low, close, volume, quote_volume, source, ingested_at)"
+                " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
+                " ON CONFLICT (symbol, timeframe, timestamp) DO NOTHING"
+            )
+        else:
+            sql = (
+                "INSERT OR IGNORE INTO ohlcv_candles"
+                " (symbol, timeframe, timestamp, open, high, low, close, volume, quote_volume, source, ingested_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+            )
+        with self._connect() as conn:
+            cursor = conn.cursor() if hasattr(conn, "cursor") else None
+            if cursor is not None:
+                cursor.executemany(sql, prepared)
+                affected = getattr(cursor, "rowcount", -1)
+            else:
+                affected = -1
+                for params in prepared:
+                    conn.execute(sql, params)
+        if affected is None or affected < 0:
+            inserted = len(prepared)
+        else:
+            inserted = int(affected)
+        skipped = len(prepared) - inserted
+        if skipped < 0:
+            skipped = 0
+        return {"inserted": inserted, "skipped": skipped, "rejected": rejected}
+
+    def get_latest_ohlcv_timestamp(self, symbol: str, timeframe: str) -> str | None:
+        sql = (
+            "SELECT MAX(timestamp) AS ts FROM ohlcv_candles"
+            " WHERE symbol = ? AND timeframe = ?"
+        )
+        if self._use_postgres:
+            sql = sql.replace("?", "%s")
+        with self._connect() as conn:
+            row = conn.execute(sql, (symbol.upper(), timeframe.lower())).fetchone()
+            value = self._row_value(row, "ts", 0, None) if row is not None else None
+            return str(value) if value else None
+
+    def count_ohlcv_rows(self, symbol: str | None = None, timeframe: str | None = None) -> int:
+        clauses: list[str] = []
+        params: list[Any] = []
+        if symbol:
+            clauses.append("symbol = ?")
+            params.append(symbol.upper())
+        if timeframe:
+            clauses.append("timeframe = ?")
+            params.append(timeframe.lower())
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        sql = f"SELECT COUNT(*) AS count FROM ohlcv_candles{where}"
+        if self._use_postgres:
+            sql = sql.replace("?", "%s")
+        with self._connect() as conn:
+            row = conn.execute(sql, tuple(params)).fetchone()
+            return int(self._row_value(row, "count", 0, 0) or 0)
+
+    def fetch_ohlcv_range(
+        self,
+        symbol: str,
+        timeframe: str,
+        *,
+        since_iso: str | None = None,
+        until_iso: str | None = None,
+        limit: int = 200000,
+    ) -> list[dict[str, Any]]:
+        clauses = ["symbol = ?", "timeframe = ?"]
+        params: list[Any] = [symbol.upper(), timeframe.lower()]
+        if since_iso:
+            clauses.append("timestamp >= ?")
+            params.append(since_iso)
+        if until_iso:
+            clauses.append("timestamp <= ?")
+            params.append(until_iso)
+        sql = (
+            "SELECT symbol, timeframe, timestamp, open, high, low, close, volume, quote_volume"
+            f" FROM ohlcv_candles WHERE {' AND '.join(clauses)}"
+            " ORDER BY timestamp ASC LIMIT ?"
+        )
+        params.append(max(1, int(limit or 200000)))
+        if self._use_postgres:
+            sql = sql.replace("?", "%s")
+        with self._connect() as conn:
+            return self._fetchall_dicts(conn.execute(sql, tuple(params)))
 
     def insert_table_row_if_missing(self, table: str, row: dict[str, Any]) -> str:
         table = _safe_identifier(table)

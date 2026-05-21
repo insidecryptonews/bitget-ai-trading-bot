@@ -191,6 +191,34 @@ class BitgetClient:
             },
         ) or []
 
+    def get_history_candles(
+        self,
+        symbol: str,
+        granularity: str,
+        *,
+        start_ms: int | None = None,
+        end_ms: int | None = None,
+        limit: int = 200,
+    ) -> list[list[str]]:
+        """Fetch historical candles via Bitget v2 history endpoint.
+
+        Per Bitget docs the history endpoint accepts startTime/endTime in
+        milliseconds and limit up to 200. Times are inclusive of startTime,
+        exclusive of endTime in our usage so callers can paginate by setting
+        end_ms = next batch start_ms.
+        """
+        params: dict[str, Any] = {
+            "symbol": symbol,
+            "granularity": granularity,
+            "limit": min(max(1, int(limit or 200)), 200),
+            "productType": self.config.product_type,
+        }
+        if start_ms is not None:
+            params["startTime"] = int(start_ms)
+        if end_ms is not None:
+            params["endTime"] = int(end_ms)
+        return self.public_get("/api/v2/mix/market/history-candles", params=params) or []
+
     def get_account(self, symbol: str = "BTCUSDT") -> dict[str, Any]:
         return self.private_get(
             "/api/v2/mix/account/account",
