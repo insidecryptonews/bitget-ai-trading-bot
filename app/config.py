@@ -152,6 +152,10 @@ class BotConfig:
     edge_guard_decay_recent_weight: float = 0.65
     edge_guard_max_recent_pf_drop: float = 0.35
     enable_paper_policy_filter: bool = False
+    # Phase 7.3B: Candidate Shadow Monitor — disabled by default.
+    # Even when True, only WRITES shadow rows. No order placement.
+    enable_candidate_shadow_monitor: bool = False
+    # Phase 7.3C/D research labs do NOT have runtime flags — pure library + CLI.
     paper_policy_filter_mode: str = "shadow"
     paper_policy_min_validation_pf: float = 1.2
     paper_policy_min_samples: int = 500
@@ -512,6 +516,7 @@ def load_config(load_dotenv_file: bool = True) -> BotConfig:
         edge_guard_decay_recent_weight=env_float(os.getenv("EDGE_GUARD_DECAY_RECENT_WEIGHT"), 0.65),
         edge_guard_max_recent_pf_drop=env_float(os.getenv("EDGE_GUARD_MAX_RECENT_PF_DROP"), 0.35),
         enable_paper_policy_filter=env_bool(os.getenv("ENABLE_PAPER_POLICY_FILTER"), False),
+        enable_candidate_shadow_monitor=env_bool(os.getenv("ENABLE_CANDIDATE_SHADOW_MONITOR"), False),
         paper_policy_filter_mode=os.getenv("PAPER_POLICY_FILTER_MODE", "shadow"),
         paper_policy_min_validation_pf=env_float(os.getenv("PAPER_POLICY_MIN_VALIDATION_PF"), 1.2),
         paper_policy_min_samples=env_int(os.getenv("PAPER_POLICY_MIN_SAMPLES"), 500),

@@ -761,6 +761,67 @@ class Database:
             )
             """,
         )
+        self._execute(
+            conn,
+            """
+            CREATE TABLE IF NOT EXISTS shadow_candidates (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at TEXT NOT NULL,
+                signal_timestamp TEXT NOT NULL,
+                observation_id INTEGER,
+                symbol TEXT NOT NULL,
+                side TEXT NOT NULL,
+                regime TEXT NOT NULL,
+                score INTEGER DEFAULT 0,
+                score_bucket TEXT DEFAULT '',
+                timeframe TEXT DEFAULT '5m',
+                strategy TEXT DEFAULT '',
+                source TEXT DEFAULT 'trade_signal',
+                setup_key TEXT NOT NULL,
+                entry_price REAL DEFAULT 0,
+                stop_loss REAL DEFAULT 0,
+                take_profit_1 REAL DEFAULT 0,
+                take_profit_2 REAL DEFAULT 0,
+                expected_move_pct REAL DEFAULT 0,
+                expected_move_to_cost_ratio REAL DEFAULT 0,
+                status TEXT NOT NULL DEFAULT 'PENDING',
+                outcome TEXT DEFAULT '',
+                exit_reason TEXT DEFAULT '',
+                gross_return_pct REAL DEFAULT 0,
+                net_return_pct REAL DEFAULT 0,
+                total_cost_bps REAL DEFAULT 0,
+                bars_to_outcome INTEGER DEFAULT 0,
+                mfe REAL DEFAULT 0,
+                mae REAL DEFAULT 0,
+                evaluated_at TEXT DEFAULT '',
+                notes TEXT DEFAULT ''
+            )
+            """,
+        )
+        self._execute(
+            conn,
+            """
+            CREATE TABLE IF NOT EXISTS signal_outcomes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at TEXT NOT NULL,
+                observation_id INTEGER NOT NULL,
+                setup_key TEXT NOT NULL,
+                outcome_class TEXT NOT NULL,
+                suggested_fix TEXT DEFAULT '',
+                realized_return_pct REAL DEFAULT 0,
+                net_return_pct REAL DEFAULT 0,
+                total_cost_pct REAL DEFAULT 0,
+                mfe REAL DEFAULT 0,
+                mae REAL DEFAULT 0,
+                first_barrier_hit TEXT DEFAULT '',
+                expected_move_pct REAL DEFAULT 0,
+                expected_move_to_cost_ratio REAL DEFAULT 0,
+                operated INTEGER DEFAULT 0,
+                has_label INTEGER DEFAULT 0,
+                notes TEXT DEFAULT ''
+            )
+            """,
+        )
         self._ensure_research_columns(conn)
         self._create_indexes(conn)
 
@@ -839,6 +900,13 @@ class Database:
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_execution_intents_client_oid ON execution_intents(client_oid)",
             "CREATE INDEX IF NOT EXISTS idx_ohlcv_candles_symbol_tf_ts ON ohlcv_candles(symbol, timeframe, timestamp)",
             "CREATE INDEX IF NOT EXISTS idx_ohlcv_candles_ingested ON ohlcv_candles(ingested_at)",
+            "CREATE INDEX IF NOT EXISTS idx_shadow_candidates_symbol_side_regime ON shadow_candidates(symbol, side, regime)",
+            "CREATE INDEX IF NOT EXISTS idx_shadow_candidates_status ON shadow_candidates(status)",
+            "CREATE INDEX IF NOT EXISTS idx_shadow_candidates_setup_key ON shadow_candidates(setup_key)",
+            "CREATE INDEX IF NOT EXISTS idx_shadow_candidates_signal_timestamp ON shadow_candidates(signal_timestamp)",
+            "CREATE INDEX IF NOT EXISTS idx_signal_outcomes_observation_id ON signal_outcomes(observation_id)",
+            "CREATE INDEX IF NOT EXISTS idx_signal_outcomes_setup_key ON signal_outcomes(setup_key)",
+            "CREATE INDEX IF NOT EXISTS idx_signal_outcomes_outcome_class ON signal_outcomes(outcome_class)",
         ]
         for sql in indexes:
             self._execute(conn, sql)
@@ -2126,6 +2194,192 @@ class Database:
             " ORDER BY timestamp ASC LIMIT ?"
         )
         params.append(max(1, int(limit or 200000)))
+        if self._use_postgres:
+            sql = sql.replace("?", "%s")
+        with self._connect() as conn:
+            return self._fetchall_dicts(conn.execute(sql, tuple(params)))
+
+    def find_shadow_candidate_id(
+        self,
+        *,
+        observation_id: int,
+        setup_key: str,
+        signal_timestamp: str = "",
+        symbol: str = "",
+        side: str = "",
+        source: str = "",
+    ) -> int:
+        """Idempotency lookup. Returns existing row id or 0.
+
+        Strategy:
+        - If observation_id > 0: match by (observation_id, setup_key).
+        - Otherwise: composite fallback (signal_timestamp, symbol, side, setup_key, source).
+        """
+        if int(observation_id or 0) > 0:
+            sql = "SELECT id FROM shadow_candidates WHERE observation_id = ? AND setup_key = ? LIMIT 1"
+            params: tuple[Any, ...] = (int(observation_id), str(setup_key))
+        else:
+            sql = (
+                "SELECT id FROM shadow_candidates "
+                "WHERE observation_id = 0 AND signal_timestamp = ? AND symbol = ? "
+                "AND side = ? AND setup_key = ? AND source = ? LIMIT 1"
+            )
+            params = (str(signal_timestamp), str(symbol).upper(), str(side).upper(), str(setup_key), str(source))
+        if self._use_postgres:
+            sql = sql.replace("?", "%s")
+        with self._connect() as conn:
+            row = conn.execute(sql, params).fetchone()
+            return int(self._row_value(row, "id", 0, 0) or 0) if row is not None else 0
+
+    def record_shadow_candidate(self, payload: dict[str, Any]) -> int:
+        """Insert a shadow candidate row idempotently.
+
+        Returns the row id — either the existing id if a duplicate is detected
+        by the idempotency guard, or the new id on insert.
+        """
+        observation_id = int(payload.get("observation_id") or 0)
+        setup_key = str(payload.get("setup_key") or "")
+        existing = self.find_shadow_candidate_id(
+            observation_id=observation_id,
+            setup_key=setup_key,
+            signal_timestamp=str(payload.get("signal_timestamp") or ""),
+            symbol=str(payload.get("symbol") or ""),
+            side=str(payload.get("side") or ""),
+            source=str(payload.get("source") or ""),
+        )
+        if existing > 0:
+            return existing
+        columns = (
+            "created_at", "signal_timestamp", "observation_id", "symbol", "side",
+            "regime", "score", "score_bucket", "timeframe", "strategy", "source",
+            "setup_key", "entry_price", "stop_loss", "take_profit_1", "take_profit_2",
+            "expected_move_pct", "expected_move_to_cost_ratio", "status",
+        )
+        values = tuple(payload.get(col) for col in columns)
+        placeholders = ", ".join(["?"] * len(columns))
+        sql = f"INSERT INTO shadow_candidates({', '.join(columns)}) VALUES ({placeholders})"
+        if self._use_postgres:
+            sql = sql.replace("?", "%s") + " RETURNING id"
+        with self._connect() as conn:
+            cur = conn.execute(sql, values)
+            return self._inserted_id(cur)
+
+    def update_shadow_candidate_outcome(self, candidate_id: int, payload: dict[str, Any]) -> None:
+        allowed = {
+            "outcome", "exit_reason", "gross_return_pct", "net_return_pct",
+            "total_cost_bps", "bars_to_outcome", "mfe", "mae", "evaluated_at",
+            "status", "notes",
+        }
+        updates = {key: value for key, value in payload.items() if key in allowed}
+        if not updates:
+            return
+        set_clause = ", ".join(f"{key} = ?" for key in updates)
+        sql = f"UPDATE shadow_candidates SET {set_clause} WHERE id = ?"
+        params = list(updates.values()) + [int(candidate_id)]
+        if self._use_postgres:
+            sql = sql.replace("?", "%s")
+        with self._connect() as conn:
+            conn.execute(sql, tuple(params))
+
+    def fetch_shadow_candidates(
+        self,
+        *,
+        symbol: str | None = None,
+        side: str | None = None,
+        regime: str | None = None,
+        status: str | None = None,
+        since_iso: str | None = None,
+        limit: int = 1000,
+    ) -> list[dict[str, Any]]:
+        clauses: list[str] = []
+        params: list[Any] = []
+        if symbol:
+            clauses.append("symbol = ?")
+            params.append(symbol.upper())
+        if side:
+            clauses.append("side = ?")
+            params.append(side.upper())
+        if regime:
+            clauses.append("regime = ?")
+            params.append(regime.upper())
+        if status:
+            clauses.append("status = ?")
+            params.append(status.upper())
+        if since_iso:
+            clauses.append("signal_timestamp >= ?")
+            params.append(since_iso)
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        sql = f"SELECT * FROM shadow_candidates{where} ORDER BY signal_timestamp DESC LIMIT ?"
+        params.append(max(1, int(limit or 1000)))
+        if self._use_postgres:
+            sql = sql.replace("?", "%s")
+        with self._connect() as conn:
+            return self._fetchall_dicts(conn.execute(sql, tuple(params)))
+
+    def count_shadow_candidates(self, *, since_iso: str | None = None, status: str | None = None) -> int:
+        clauses: list[str] = []
+        params: list[Any] = []
+        if since_iso:
+            clauses.append("signal_timestamp >= ?")
+            params.append(since_iso)
+        if status:
+            clauses.append("status = ?")
+            params.append(status.upper())
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        sql = f"SELECT COUNT(*) AS count FROM shadow_candidates{where}"
+        if self._use_postgres:
+            sql = sql.replace("?", "%s")
+        with self._connect() as conn:
+            row = conn.execute(sql, tuple(params)).fetchone()
+            return int(self._row_value(row, "count", 0, 0) or 0)
+
+    def find_signal_outcome_id(self, *, observation_id: int, setup_key: str) -> int:
+        """Idempotency lookup for signal_outcomes."""
+        if int(observation_id or 0) <= 0 or not setup_key:
+            return 0
+        sql = "SELECT id FROM signal_outcomes WHERE observation_id = ? AND setup_key = ? LIMIT 1"
+        params = (int(observation_id), str(setup_key))
+        if self._use_postgres:
+            sql = sql.replace("?", "%s")
+        with self._connect() as conn:
+            row = conn.execute(sql, params).fetchone()
+            return int(self._row_value(row, "id", 0, 0) or 0) if row is not None else 0
+
+    def record_signal_outcome(self, payload: dict[str, Any]) -> int:
+        """Insert a signal_outcome idempotently by (observation_id, setup_key)."""
+        observation_id = int(payload.get("observation_id") or 0)
+        setup_key = str(payload.get("setup_key") or "")
+        existing = self.find_signal_outcome_id(observation_id=observation_id, setup_key=setup_key)
+        if existing > 0:
+            return existing
+        columns = (
+            "created_at", "observation_id", "setup_key", "outcome_class",
+            "suggested_fix", "realized_return_pct", "net_return_pct",
+            "total_cost_pct", "mfe", "mae", "first_barrier_hit",
+            "expected_move_pct", "expected_move_to_cost_ratio",
+            "operated", "has_label", "notes",
+        )
+        values = tuple(payload.get(col) for col in columns)
+        placeholders = ", ".join(["?"] * len(columns))
+        sql = f"INSERT INTO signal_outcomes({', '.join(columns)}) VALUES ({placeholders})"
+        if self._use_postgres:
+            sql = sql.replace("?", "%s") + " RETURNING id"
+        with self._connect() as conn:
+            cur = conn.execute(sql, values)
+            return self._inserted_id(cur)
+
+    def fetch_signal_outcomes(self, *, outcome_class: str | None = None, setup_key: str | None = None, limit: int = 5000) -> list[dict[str, Any]]:
+        clauses: list[str] = []
+        params: list[Any] = []
+        if outcome_class:
+            clauses.append("outcome_class = ?")
+            params.append(outcome_class.upper())
+        if setup_key:
+            clauses.append("setup_key = ?")
+            params.append(setup_key)
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        sql = f"SELECT * FROM signal_outcomes{where} ORDER BY id DESC LIMIT ?"
+        params.append(max(1, int(limit or 5000)))
         if self._use_postgres:
             sql = sql.replace("?", "%s")
         with self._connect() as conn:
