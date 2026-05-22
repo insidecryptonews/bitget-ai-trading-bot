@@ -482,6 +482,11 @@ def main() -> None:
                             block_reason="missing_instrument_rules",
                         )
                     continue
+                # Default-safe initialization: used_margin must be defined for
+                # both paper/dry and live paths. In paper/dry we honour any
+                # margin already reserved by PaperTrader for open positions;
+                # in live mode the refresh below will overwrite this value.
+                used_margin = float(getattr(paper_trader, "reserved_margin", 0.0) or 0.0) if paper_trader else 0.0
                 if config.can_send_real_orders:
                     balance, available_balance, used_margin, balance_ok = _refresh_live_account_balance(
                         config,

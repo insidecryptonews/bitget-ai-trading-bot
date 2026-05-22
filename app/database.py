@@ -76,6 +76,19 @@ class Database:
             with self._connect() as conn:
                 self._create_tables(conn)
 
+    # Hotfix Phase 7.3: SQLite stability hardening.
+    # - timeout=30.0      → connect() waits up to 30s for the file lock to clear
+    # - PRAGMA busy_timeout=30000 → SQL-level wait for locked tables/pages
+    # - PRAGMA journal_mode=WAL   → readers do NOT block writers and vice versa
+    # - PRAGMA synchronous=NORMAL → safe with WAL, fewer fsyncs
+    # These four lines together resolve the "database is locked" errors seen in
+    # production when reports/backups run concurrently with signal_observation
+    # writes. WAL mode persists between connections; once set on the file it
+    # stays until explicitly changed.
+    _SQLITE_CONNECT_TIMEOUT_SECONDS = 30.0
+    _SQLITE_BUSY_TIMEOUT_MS = 30000
+    _sqlite_wal_initialised = False
+
     @contextmanager
     def _connect(self) -> Iterator[Any]:
         if self._use_postgres:
@@ -84,9 +97,20 @@ class Database:
             with self._postgres.connect(self.config.database_url, **connect_kwargs) as conn:
                 yield conn
         else:
-            conn = sqlite3.connect(self.sqlite_path)
+            conn = sqlite3.connect(self.sqlite_path, timeout=self._SQLITE_CONNECT_TIMEOUT_SECONDS)
             conn.row_factory = sqlite3.Row
             try:
+                # Per-connection busy_timeout; WAL is file-wide so we set it once.
+                try:
+                    conn.execute(f"PRAGMA busy_timeout = {int(self._SQLITE_BUSY_TIMEOUT_MS)}")
+                    if not Database._sqlite_wal_initialised:
+                        conn.execute("PRAGMA journal_mode = WAL")
+                        conn.execute("PRAGMA synchronous = NORMAL")
+                        Database._sqlite_wal_initialised = True
+                except sqlite3.OperationalError:
+                    # Non-fatal: if the pragma cannot be applied (e.g. read-only
+                    # filesystem), the connection still works in legacy mode.
+                    pass
                 yield conn
                 conn.commit()
             finally:
