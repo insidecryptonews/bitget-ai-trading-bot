@@ -26,6 +26,7 @@ class WorkerHealthAudit:
 
     def build(self, *, hours: int = 24) -> dict[str, Any]:
         processes = _worker_processes()
+        distinct_pids = _distinct_python_app_main_pids(processes)
         lock = _safe(lambda: worker_lock_status_payload(self.config, self.db), {})
         latest_activity = _latest_activity(self.db)
         age = _age_seconds(latest_activity.get("timestamp"))
@@ -33,8 +34,19 @@ class WorkerHealthAudit:
         latency = _latency_window(self.db)
         db_size = _db_size_mb(self.db)
         memory = _memory_mb()
-        duplicate_status = "BAD" if len(processes) > 1 else "OK"
         lock_status = str(lock.get("lock_status") or "unknown")
+        # Worker duplicate audit fix: worker_lock is the source of truth.
+        # Process count alone is unreliable — pgrep / Get-CimInstance can
+        # surface helper processes, tmux/bash wrappers, multiprocessing
+        # children, or stale shell echoes that all contain "app.main" in
+        # their command line. Trust the lock first, downgrade to OK
+        # whenever the lock confirms a single owner.
+        duplicate_status, duplicate_reason = _classify_duplicate_status(
+            distinct_pids=distinct_pids,
+            lock_status=lock_status,
+            lock_acquired=bool(lock.get("acquired", False)),
+            warning=str(lock.get("warning_if_duplicate_worker") or ""),
+        )
         stale = age is not None and age > 900
         cycle_error_rate = _cycle_error_rate(event_counts)
         api_error_status = "BAD" if event_counts.get("training_api_429", 0) > 0 else "WARNING" if event_counts.get("training_api_error", 0) > 0 else "OK"
@@ -46,6 +58,8 @@ class WorkerHealthAudit:
             "worker_processes": processes[:5],
             "worker_lock_status": lock,
             "duplicate_worker_status": duplicate_status,
+            "duplicate_worker_reason": duplicate_reason,
+            "distinct_python_app_main_pids": distinct_pids,
             "last_scan_age_seconds": age if age is not None else "unknown",
             "latest_activity_source": latest_activity.get("source", "unknown"),
             "cycle_error_rate": cycle_error_rate,
@@ -279,9 +293,57 @@ def _safe(callback: Any, default: Any) -> Any:
         return default
 
 
+def _distinct_python_app_main_pids(process_lines: list[str]) -> int:
+    """Best-effort dedup of process listing into distinct PIDs."""
+    import re
+    pids: set[str] = set()
+    for line in process_lines or []:
+        match = re.match(r"^\s*(\d+)\b", str(line))
+        if match:
+            pids.add(match.group(1))
+            continue
+        # PowerShell output may not include leading PID; fall back to identifying
+        # python.*app.main commands. We still treat each unique line as a
+        # candidate, but we never count the same line twice.
+        normalised = " ".join(str(line).split())
+        if "app.main" in normalised:
+            pids.add(normalised)
+    return len(pids)
+
+
+def _classify_duplicate_status(
+    *,
+    distinct_pids: int,
+    lock_status: str,
+    lock_acquired: bool,
+    warning: str,
+) -> tuple[str, str]:
+    """Trust worker_lock as source of truth.
+
+    Process count alone can be misleading (tmux/bash wrappers, multiprocessing
+    children). BAD only when the lock itself reports a duplicate.
+    """
+    if lock_status == "blocked_duplicate":
+        return "BAD", "lock_reports_blocked_duplicate"
+    if "duplicate_worker_detected" in warning:
+        return "BAD", "lock_warning_duplicate_worker_detected"
+    if distinct_pids > 1 and lock_status in {"missing", "expired"}:
+        # We see multiple python processes AND the lock is not actively held by
+        # a single owner — likely a real race condition we should surface.
+        return "WARNING", "multiple_python_app_main_pids_without_active_lock"
+    if distinct_pids > 1 and lock_acquired:
+        # Multiple processes detected but the lock is owned cleanly. Probably
+        # a counting artefact (tmux/multiprocessing). Surface as informational.
+        return "OK", "process_count_high_but_lock_owned_single_instance"
+    return "OK", "single_or_zero_python_app_main_processes_detected"
+
+
 def _classify_simulated(*, processes: list[str], lock: dict[str, Any]) -> str:
-    if len(processes) > 1 or str(lock.get("lock_status")) == "blocked_duplicate":
+    if str(lock.get("lock_status")) == "blocked_duplicate":
         return "BAD"
+    distinct = _distinct_python_app_main_pids(processes)
+    if distinct > 1 and not lock.get("acquired", False):
+        return "WARNING"
     return "OK"
 
 
