@@ -84,12 +84,15 @@ def test_classify_duplicate_status_ok_when_lock_owned():
     assert status == "OK"
 
 
-def test_classify_duplicate_status_ok_even_with_multiple_pids_if_lock_owned():
+def test_classify_duplicate_status_warning_when_multiple_real_pids_even_if_lock_owned():
+    """After the Phase 7.4A-2 hotfix the audit pre-filters tmux/bash wrappers.
+    If we STILL see multiple real Python PIDs the lock-owned case is suspicious
+    (possible race), so we surface WARNING instead of OK."""
     status, reason = _classify_duplicate_status(
         distinct_pids=3, lock_status="owned", lock_acquired=True, warning="",
     )
-    assert status == "OK"
-    assert "process_count_high_but_lock_owned_single_instance" in reason
+    assert status == "WARNING"
+    assert "multiple_python_app_main_pids_lock_acquired" in reason
 
 
 def test_classify_duplicate_status_bad_when_lock_blocked_duplicate():

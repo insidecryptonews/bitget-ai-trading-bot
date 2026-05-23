@@ -212,7 +212,32 @@ class DashboardProReporter:
             }
         )
 
-    def build_short(self, *, hours: int = 24) -> dict[str, Any]:
+    # Heavy sections that should NOT run inside the short report. They query
+    # large tables (5GB+ in production) and reliably time out at 3s. They are
+    # available in the full report instead. Listed here as a single source of
+    # truth so tests can assert the contract.
+    SHORT_REPORT_HEAVY_SECTIONS: tuple[str, ...] = (
+        "Operational Intelligence",
+        "Strategy Research Library",
+        "Data Pipeline Diagnosis 24h",
+        "Label Quality V2 24h",
+        "Bitget Cost Model Audit 24h",
+        "Edge Guard 24h",
+        "Paper Policy Orchestrator 24h",
+        "Time Death Autopsy 24h",
+    )
+
+    def build_short(self, *, hours: int = 24, include_heavy: bool = False) -> dict[str, Any]:
+        """Short dashboard report.
+
+        Heavy sections (listed in `SHORT_REPORT_HEAVY_SECTIONS`) are SKIPPED by
+        default with status `skipped_heavy` and a clear text marker. They are
+        not the same as timeouts — they were never attempted. The full report
+        (`build`) runs them with adequate timeouts.
+
+        Set `include_heavy=True` only when you have a reason (e.g. an ad-hoc
+        debugging run) and accept that the short report may take longer.
+        """
         from .research_lab import ResearchLab
 
         lab = ResearchLab(self.db, self.config, self.logger)
@@ -241,9 +266,17 @@ class DashboardProReporter:
             ("Data Vault Status", lambda: lab.data_vault_status()),
         ]
         started = time.perf_counter()
-        rendered = [self._run_section(name, callback, timeout_seconds=3.0) for name, callback in sections]
+        heavy = set(self.SHORT_REPORT_HEAVY_SECTIONS)
+        rendered: list[ReportSection] = []
+        for name, callback in sections:
+            if not include_heavy and name in heavy:
+                rendered.append(self._skip_heavy_section(name))
+            else:
+                rendered.append(self._run_section(name, callback, timeout_seconds=3.0))
         duration_ms = int((time.perf_counter() - started) * 1000)
         warnings = [section.warning for section in rendered if section.warning]
+        # Skipping heavy sections is INTENTIONAL and must NOT mark the whole
+        # report as PARTIAL_REPORT. Only true errors/timeouts trigger that.
         report_status = "PARTIAL_REPORT" if any(section.status in {"error", "timeout"} for section in rendered) else "OK"
         lines = [
             "DASHBOARD PRO SHORT REPORT START",
@@ -308,6 +341,28 @@ class DashboardProReporter:
             )
         lines.append("DASHBOARD PRO FULL REPORT END")
         return sanitize_text_for_dashboard("\n".join(lines))
+
+    def _skip_heavy_section(self, name: str) -> ReportSection:
+        """Return a placeholder for a heavy section intentionally skipped in short mode.
+
+        Status is `skipped_heavy` (not `timeout`/`error`), so the overall
+        `report_status` stays `OK`. The section text explains where the data
+        lives instead.
+        """
+        text = (
+            f"SKIPPED_HEAVY_SECTION: {name}\n"
+            "Heavy sections are excluded from the short report to keep latency under control.\n"
+            "Run the full report (build()) to include this section, or invoke the underlying\n"
+            "CLI directly via `python -m app.research_lab <command>`.\n"
+            "final_recommendation: NO LIVE"
+        )
+        return ReportSection(
+            name=name,
+            text=sanitize_text_for_dashboard(text),
+            status="skipped_heavy",
+            duration_ms=0,
+            warning="",
+        )
 
     def _run_section(self, name: str, callback: Callable[[], str], *, timeout_seconds: float | None = None) -> ReportSection:
         started = time.perf_counter()
@@ -426,8 +481,15 @@ def full_report_text(config: Any, db: Any, *, hours: int = 24, logger: Any | Non
     return str(build_dashboard_full_report(config, db, hours=hours, logger=logger).get("text") or "")
 
 
-def build_dashboard_short_report(config: Any, db: Any, *, hours: int = 24, logger: Any | None = None) -> dict[str, Any]:
-    return DashboardProReporter(config, db, logger).build_short(hours=hours)
+def build_dashboard_short_report(
+    config: Any,
+    db: Any,
+    *,
+    hours: int = 24,
+    include_heavy: bool = False,
+    logger: Any | None = None,
+) -> dict[str, Any]:
+    return DashboardProReporter(config, db, logger).build_short(hours=hours, include_heavy=include_heavy)
 
 
 def export_csv(config: Any, db: Any, kind: str, *, hours: int = 24, limit: int = 1000) -> tuple[str, str]:

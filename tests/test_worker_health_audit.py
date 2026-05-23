@@ -3,11 +3,25 @@ from app.worker_health_audit import WorkerHealthAuditSmokeTest, _classify_simula
 
 
 def test_worker_health_classifies_duplicate_and_stale_without_actions():
-    assert _classify_simulated(processes=["python -m app.main"], lock={"lock_status": "owned", "acquired": True}) == "OK"
+    # Single real Python app.main + lock owned → OK
     assert _classify_simulated(
-        processes=["python -m app.main", "python -m app.main"],
+        processes=["1234 python -m app.main"],
+        lock={"lock_status": "owned", "acquired": True},
+    ) == "OK"
+    # Two distinct PIDs + blocked_duplicate → BAD (real conflict)
+    assert _classify_simulated(
+        processes=["1234 python -m app.main", "5678 python -m app.main"],
         lock={"lock_status": "blocked_duplicate", "acquired": False},
     ) == "BAD"
+    # tmux/bash wrappers must be filtered out — single real worker = OK
+    assert _classify_simulated(
+        processes=[
+            "1234 tmux new-session -d 'python -m app.main'",
+            "1235 bash -c 'python -m app.main'",
+            "1236 .venv/bin/python -m app.main",
+        ],
+        lock={"lock_status": "owned", "acquired": True},
+    ) == "OK"
     assert _classify_stale(1800) == "WARNING"
 
 
