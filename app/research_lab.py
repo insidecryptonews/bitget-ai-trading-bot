@@ -1194,6 +1194,86 @@ class ResearchLab:
             self.config, self.db, hours=hours, symbols=symbols, timeframe=timeframe,
         )
 
+    def real_strategy_backtest_breakdown(
+        self,
+        hours: int = 72,
+        symbols: list[str] | None = None,
+        timeframe: str = "5m",
+        group_by: str = "symbol",
+        min_trades: int = 30,
+        top_n: int = 25,
+    ) -> str:
+        """Deep breakdown of multi-symbol backtester output by any dimension."""
+        from .backtest_breakdown import run_breakdown_text
+
+        return run_breakdown_text(
+            self.config, self.db,
+            hours=hours, symbols=symbols, timeframe=timeframe,
+            group_by=group_by, min_trades=min_trades, top_n=top_n,
+        )
+
+    def final_policy_builder(
+        self,
+        hours: int = 72,
+        symbols: list[str] | None = None,
+        timeframe: str = "5m",
+        group_by: str = "symbol,side,regime,score_bucket",
+        min_trades: int = 100,
+        folds: int = 4,
+        data_quality_status: str = "OK",
+        label_quality_status: str = "OK",
+    ) -> str:
+        """Build a candidate policy from the multi-symbol breakdown + walk-forward.
+
+        Never auto-activates anything. Returns the policy as text + JSON-renderable.
+        """
+        from .backtest_breakdown import collect_trade_records, build_breakdown, parse_group_by
+        from .walk_forward_runner import build_walk_forward, WF_PASS
+        from .final_research_policy_builder import (
+            PolicyBuildInput, build_policy, render_policy_text,
+        )
+
+        tokens = parse_group_by(group_by)
+        records = collect_trade_records(
+            self.config, self.db, hours=hours, symbols=symbols, timeframe=timeframe,
+        )
+        breakdown = build_breakdown(
+            records, group_by=tokens, min_trades=min_trades, top_n=25,
+            hours=hours, timeframe=timeframe,
+        )
+        wf = build_walk_forward(records, folds=folds, min_trades_per_setup=min_trades)
+        wf_status = wf.overall_status
+        policy = build_policy(PolicyBuildInput(
+            breakdown=breakdown,
+            data_quality_status=data_quality_status,
+            label_quality_status=label_quality_status,
+            walk_forward_status=wf_status,
+        ))
+        return render_policy_text(policy)
+
+    def trade_replay_export(
+        self,
+        symbol: str = "BTCUSDT",
+        hours: int = 72,
+        timeframe: str = "5m",
+        max_candles: int = 1200,
+        max_trades: int = 200,
+    ) -> str:
+        """Emit a JSON payload with OHLCV candles + simulated trades for a symbol.
+
+        Intended for a future chart/UI consumer. NO exchange calls, NO real orders.
+        """
+        from .trade_replay_export import (
+            build_replay_payload, export_replay_json,
+        )
+
+        payload = build_replay_payload(
+            self.config, self.db,
+            symbol=symbol, hours=hours, timeframe=timeframe,
+            max_candles=max_candles, max_trades=max_trades,
+        )
+        return export_replay_json(payload)
+
     def real_strategy_backtester_smoke_test(self) -> str:
         from .real_strategy_backtester import real_strategy_backtester_smoke_text
 
@@ -1795,6 +1875,9 @@ def main() -> None:
             "real-strategy-backtester-smoke-test",
             "real-strategy-backtest",
             "real-strategy-backtest-multi",
+            "real-strategy-backtest-breakdown",
+            "final-policy-builder",
+            "trade-replay-export",
             "ohlcv-replay-loader-smoke-test",
             "ohlcv-replay-loader-audit",
             "duplicate-module-audit-smoke-test",
@@ -1892,6 +1975,14 @@ def main() -> None:
     parser.add_argument("--dry-run", action="store_true", help="Fuerza data-import dry-run.")
     parser.add_argument("--upload", action="store_true", help="Sube data-export si external storage esta configurado.")
     parser.add_argument("--timeframe", default="5m", help="OHLCV timeframe para real-strategy-backtest-multi (default: 5m).")
+    parser.add_argument("--group-by", default="symbol", help="Group-by tokens for real-strategy-backtest-breakdown (comma-separated, e.g. 'symbol,side,regime').")
+    parser.add_argument("--min-trades", type=int, default=30, help="Min trades for breakdown/policy gate.")
+    parser.add_argument("--top", type=int, default=25, help="Top-N groups to surface in breakdown.")
+    parser.add_argument("--folds", type=int, default=4, help="Folds for walk-forward in final-policy-builder.")
+    parser.add_argument("--data-quality-status", default="OK", help="Data quality status (OK/WARNING/BAD) passed to final-policy-builder.")
+    parser.add_argument("--label-quality-status", default="OK", help="Label quality status (OK/WARNING/BAD) passed to final-policy-builder.")
+    parser.add_argument("--max-candles", type=int, default=1200, help="Max candles for trade-replay-export.")
+    parser.add_argument("--max-trades", type=int, default=200, help="Max trades for trade-replay-export.")
     args = parser.parse_args()
     config = load_config()
     logger = setup_logger()
@@ -2097,6 +2188,38 @@ def main() -> None:
             hours=args.hours,
             symbols=symbols_arg,
             timeframe=args.timeframe,
+        ))
+    elif args.command == "real-strategy-backtest-breakdown":
+        symbols_arg = [s.strip() for s in (args.symbols or "").split(",") if s.strip()] or None
+        print(lab.real_strategy_backtest_breakdown(
+            hours=args.hours,
+            symbols=symbols_arg,
+            timeframe=args.timeframe,
+            group_by=args.group_by,
+            min_trades=args.min_trades,
+            top_n=args.top,
+        ))
+    elif args.command == "final-policy-builder":
+        symbols_arg = [s.strip() for s in (args.symbols or "").split(",") if s.strip()] or None
+        print(lab.final_policy_builder(
+            hours=args.hours,
+            symbols=symbols_arg,
+            timeframe=args.timeframe,
+            group_by=args.group_by,
+            min_trades=args.min_trades,
+            folds=args.folds,
+            data_quality_status=args.data_quality_status,
+            label_quality_status=args.label_quality_status,
+        ))
+    elif args.command == "trade-replay-export":
+        symbols_arg = [s.strip() for s in (args.symbols or "").split(",") if s.strip()]
+        symbol = symbols_arg[0] if symbols_arg else "BTCUSDT"
+        print(lab.trade_replay_export(
+            symbol=symbol,
+            hours=args.hours,
+            timeframe=args.timeframe,
+            max_candles=args.max_candles,
+            max_trades=args.max_trades,
         ))
     elif args.command == "ohlcv-replay-loader-smoke-test":
         print(lab.ohlcv_replay_loader_smoke_test())

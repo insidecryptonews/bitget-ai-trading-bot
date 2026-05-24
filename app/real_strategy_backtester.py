@@ -60,6 +60,9 @@ class RealBacktestResult:
         fees = sum(trade.fee_cost_bps for trade in self.trades)
         slippage = sum(trade.slippage_cost_bps for trade in self.trades)
         funding = sum(trade.funding_component_bps for trade in self.trades)
+        gross_profit_sum = sum(wins)
+        gross_loss_sum = abs(sum(losses))
+        total_pnl_sum = sum(returns)
         return {
             "status": self.status,
             "uses_signal_engine": self.uses_signal_engine,
@@ -72,7 +75,7 @@ class RealBacktestResult:
             "win_rate": len(wins) / max(len(returns), 1),
             "gross_ev": sum(gross) / max(len(gross), 1),
             "net_ev": sum(returns) / max(len(returns), 1),
-            "net_pf": sum(wins) / abs(sum(losses)) if losses else 999.0 if wins else 0.0,
+            "net_pf": gross_profit_sum / gross_loss_sum if gross_loss_sum > 0 else 999.0 if gross_profit_sum > 0 else 0.0,
             "avg_win": sum(wins) / max(len(wins), 1),
             "avg_loss": sum(losses) / max(len(losses), 1),
             "max_drawdown": _max_drawdown(returns),
@@ -84,6 +87,12 @@ class RealBacktestResult:
             "time_pct": sum(1 for trade in self.trades if trade.exit_reason == "HORIZON_CLOSE") / max(len(self.trades), 1),
             "same_bar_stop_tp_count": sum(1 for trade in self.trades if trade.same_bar_worst_case_applied),
             "same_bar_worst_case_applied": any(trade.same_bar_worst_case_applied for trade in self.trades),
+            # Aggregation-debug fields (used by multi-symbol aggregator):
+            "gross_profit_sum": gross_profit_sum,
+            "gross_loss_sum": gross_loss_sum,
+            "total_pnl_sum": total_pnl_sum,
+            "avg_trade_pnl": total_pnl_sum / max(len(returns), 1),
+            "trades_counted": len(returns),
             "final_recommendation": self.final_recommendation,
         }
 
@@ -330,6 +339,10 @@ def _empty_summary_row(symbol: str, status: str, warnings: str = "") -> dict[str
         "time_pct": 0.0,
         "same_bar_stop_tp_count": 0,
         "max_drawdown": 0.0,
+        "gross_profit_sum": 0.0,
+        "gross_loss_sum": 0.0,
+        "total_pnl_sum": 0.0,
+        "avg_trade_pnl": 0.0,
         "status": status,
         "ohlcv_rows": 0,
         "warnings": warnings,
@@ -371,7 +384,7 @@ def real_strategy_backtest_multi(
             load_result = loader.load_ohlcv(
                 symbols=[symbol], timeframe=timeframe, since=since,
             )
-        except Exception as exc:
+        except Exception as exc:  # pragma: no cover - defensive
             per_symbol.append(_empty_summary_row(symbol, "LOADER_ERROR", warnings=str(exc)[:200]))
             continue
 
@@ -412,6 +425,10 @@ def real_strategy_backtest_multi(
             "time_pct": float(summary["time_pct"]),
             "same_bar_stop_tp_count": int(summary["same_bar_stop_tp_count"]),
             "max_drawdown": float(summary["max_drawdown"]),
+            "gross_profit_sum": float(summary.get("gross_profit_sum", 0.0)),
+            "gross_loss_sum": float(summary.get("gross_loss_sum", 0.0)),
+            "total_pnl_sum": float(summary.get("total_pnl_sum", 0.0)),
+            "avg_trade_pnl": float(summary.get("avg_trade_pnl", 0.0)),
             "status": str(summary["status"]),
             "ohlcv_rows": int(len(frame)),
             "warnings": "",
@@ -446,8 +463,21 @@ def real_strategy_backtest_multi(
 
 
 def _aggregate_total(per_symbol: list[dict[str, Any]]) -> dict[str, Any]:
+    """Correct PF aggregation across symbols.
+
+    Phase 7.4A-6 fix: the old version computed PF using
+    `sum(net_ev > 0) / sum(net_ev < 0)` over symbol-level averages, which
+    yielded PF=0 when ALL symbols were net-negative even if individual trades
+    inside those symbols had positive P&L. The fix sums each symbol's
+    `gross_profit_sum` and `gross_loss_sum` (which come from the per-trade
+    distribution), then divides those at the aggregate level — same definition
+    of PF as the per-symbol layer.
+    """
     trades_total = sum(r["trades"] for r in per_symbol)
     blocked_total = sum(r["blocked_min_notional"] for r in per_symbol)
+    gross_profit_total = sum(r.get("gross_profit_sum", 0.0) for r in per_symbol)
+    gross_loss_total = sum(r.get("gross_loss_sum", 0.0) for r in per_symbol)
+    total_pnl_total = sum(r.get("total_pnl_sum", 0.0) for r in per_symbol)
     if trades_total <= 0:
         return {
             "trades": trades_total,
@@ -459,32 +489,44 @@ def _aggregate_total(per_symbol: list[dict[str, Any]]) -> dict[str, Any]:
             "sl_pct": 0.0,
             "time_pct": 0.0,
             "same_bar_stop_tp_count": 0,
+            "gross_profit_sum": 0.0,
+            "gross_loss_sum": 0.0,
+            "total_pnl_sum": 0.0,
+            "avg_trade_pnl": 0.0,
+            "trades_counted": 0,
         }
-    # Trade-weighted aggregation: each per-symbol average × its trade count,
-    # divided by total trades. Avoids treating low-sample symbols equal weight.
+    # Trade-weighted averages for rate-type metrics.
     weighted = {
-        "net_ev": sum(r["net_ev"] * r["trades"] for r in per_symbol) / trades_total,
         "win_rate": sum(r["win_rate"] * r["trades"] for r in per_symbol) / trades_total,
         "tp_pct": sum(r["tp_pct"] * r["trades"] for r in per_symbol) / trades_total,
         "sl_pct": sum(r["sl_pct"] * r["trades"] for r in per_symbol) / trades_total,
         "time_pct": sum(r["time_pct"] * r["trades"] for r in per_symbol) / trades_total,
     }
-    # PF total: sum gains / sum |losses| across symbols, weighted by trades.
-    # We approximate using net_ev × trades: if symbol's net_ev>0 it contributes
-    # to gains, otherwise to losses.
-    gains = sum(r["net_ev"] * r["trades"] for r in per_symbol if r["net_ev"] > 0)
-    losses = abs(sum(r["net_ev"] * r["trades"] for r in per_symbol if r["net_ev"] < 0))
-    pf_total = gains / losses if losses > 0 else (999.0 if gains > 0 else 0.0)
+    # PF total: sum of all trades' gains / sum of all trades' |losses|.
+    # This is the same formula used per-symbol — just summed across symbols.
+    net_pf_total = (
+        gross_profit_total / gross_loss_total
+        if gross_loss_total > 0
+        else (999.0 if gross_profit_total > 0 else 0.0)
+    )
+    # Net EV total: total realized PnL / total trades (the true average per trade).
+    net_ev_total = total_pnl_total / trades_total
     return {
         "trades": trades_total,
         "blocked_min_notional": blocked_total,
-        "net_ev": weighted["net_ev"],
-        "net_pf": pf_total,
+        "net_ev": net_ev_total,
+        "net_pf": net_pf_total,
         "win_rate": weighted["win_rate"],
         "tp_pct": weighted["tp_pct"],
         "sl_pct": weighted["sl_pct"],
         "time_pct": weighted["time_pct"],
         "same_bar_stop_tp_count": sum(r["same_bar_stop_tp_count"] for r in per_symbol),
+        # Debug/diagnostic fields exposed in the aggregate.
+        "gross_profit_sum": gross_profit_total,
+        "gross_loss_sum": gross_loss_total,
+        "total_pnl_sum": total_pnl_total,
+        "avg_trade_pnl": net_ev_total,
+        "trades_counted": trades_total,
     }
 
 
