@@ -1175,6 +1175,25 @@ class ResearchLab:
 
         return real_strategy_backtest_text(self.config, self.db, hours=hours)
 
+    def real_strategy_backtest_multi(
+        self,
+        hours: int = 72,
+        symbols: list[str] | None = None,
+        timeframe: str = "5m",
+    ) -> str:
+        """Multi-symbol real strategy backtester CLI entry point.
+
+        Runs the SignalEngine vela-by-vela against persisted OHLCV for every
+        requested symbol, returning a per-symbol breakdown plus aggregated TOTAL.
+        Missing data on any symbol is reported as NEED_DATA without crashing.
+        Pure research/offline: never sends orders or touches the exchange.
+        """
+        from .real_strategy_backtester import real_strategy_backtest_multi_text
+
+        return real_strategy_backtest_multi_text(
+            self.config, self.db, hours=hours, symbols=symbols, timeframe=timeframe,
+        )
+
     def real_strategy_backtester_smoke_test(self) -> str:
         from .real_strategy_backtester import real_strategy_backtester_smoke_text
 
@@ -1775,6 +1794,7 @@ def main() -> None:
             "strategy-research-library",
             "real-strategy-backtester-smoke-test",
             "real-strategy-backtest",
+            "real-strategy-backtest-multi",
             "ohlcv-replay-loader-smoke-test",
             "ohlcv-replay-loader-audit",
             "duplicate-module-audit-smoke-test",
@@ -1871,6 +1891,7 @@ def main() -> None:
     parser.add_argument("--apply", action="store_true", help="Aplica data-import. Sin esto, import es dry-run.")
     parser.add_argument("--dry-run", action="store_true", help="Fuerza data-import dry-run.")
     parser.add_argument("--upload", action="store_true", help="Sube data-export si external storage esta configurado.")
+    parser.add_argument("--timeframe", default="5m", help="OHLCV timeframe para real-strategy-backtest-multi (default: 5m).")
     args = parser.parse_args()
     config = load_config()
     logger = setup_logger()
@@ -2070,6 +2091,13 @@ def main() -> None:
         print(lab.real_strategy_backtester_smoke_test())
     elif args.command == "real-strategy-backtest":
         print(lab.real_strategy_backtest(hours=args.hours))
+    elif args.command == "real-strategy-backtest-multi":
+        symbols_arg = [s.strip() for s in (args.symbols or "").split(",") if s.strip()] or None
+        print(lab.real_strategy_backtest_multi(
+            hours=args.hours,
+            symbols=symbols_arg,
+            timeframe=args.timeframe,
+        ))
     elif args.command == "ohlcv-replay-loader-smoke-test":
         print(lab.ohlcv_replay_loader_smoke_test())
     elif args.command == "ohlcv-replay-loader-audit":
