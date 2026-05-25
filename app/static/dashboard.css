@@ -994,3 +994,138 @@ td {
     text-align: left;
   }
 }
+
+/* Phase 7B — Research Cockpit, Trade Replay, Cost Stress, Exit Labs ------- */
+
+.replay-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: flex-end;
+  margin: 14px 0;
+}
+
+.replay-controls label {
+  display: flex;
+  flex-direction: column;
+  font-size: 12px;
+  color: var(--muted);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  gap: 4px;
+}
+
+.replay-controls input,
+.replay-controls select {
+  min-width: 100px;
+  max-width: 180px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--panel-2);
+  color: var(--text);
+  font-size: 14px;
+}
+
+.replay-chart {
+  position: relative;
+  min-height: 220px;
+  padding: 12px;
+  overflow-x: auto;
+  /* The chart is a simple inline-SVG; keep its viewbox visible. */
+}
+
+.replay-chart svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+  min-height: 220px;
+  overflow: visible;
+}
+
+.replay-chart .replay-empty {
+  display: flex;
+  height: 100%;
+  align-items: center;
+  justify-content: center;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+/* Compact, scroll-friendly tables for cockpit/replay/cost/exit labs. */
+table.compact {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12.5px;
+}
+
+table.compact thead th {
+  position: sticky;
+  top: 0;
+  background: var(--panel-2);
+  color: var(--muted);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+}
+
+table.compact tbody td {
+  padding: 6px 8px;
+  border-bottom: 1px solid rgba(149, 169, 202, 0.08);
+  white-space: nowrap;
+  max-width: 220px;
+  text-overflow: ellipsis;
+  overflow: hidden;
+}
+
+table.compact tbody tr:hover {
+  background: rgba(90, 183, 255, 0.05);
+}
+
+.table-shell {
+  overflow-x: auto;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--panel);
+  margin-top: 8px;
+}
+
+.truncate-id {
+  display: inline-block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: bottom;
+}
+
+.cockpit-kpis .kpi-card {
+  padding: 12px 14px;
+}
+
+.cockpit-kpis .kpi-card strong {
+  font-size: 15px;
+  line-height: 1.3;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 720px) {
+  .replay-controls {
+    gap: 10px;
+  }
+  .replay-controls input,
+  .replay-controls select {
+    min-width: 90px;
+    max-width: 100%;
+  }
+  table.compact {
+    font-size: 12px;
+  }
+  table.compact tbody td {
+    max-width: 160px;
+  }
+}

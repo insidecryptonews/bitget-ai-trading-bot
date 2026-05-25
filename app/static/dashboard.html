@@ -18,11 +18,15 @@
       </div>
       <nav class="side-nav">
         <button type="button" class="nav-link nav-item active" data-target="overview">Overview</button>
+        <button type="button" class="nav-link nav-item" data-target="research-cockpit">Research Cockpit</button>
+        <button type="button" class="nav-link nav-item" data-target="trade-replay">Trade Replay</button>
         <button type="button" class="nav-link nav-item" data-target="paper-monitor">Paper Monitor</button>
         <button type="button" class="nav-link nav-item" data-target="signals">Signals</button>
-        <button type="button" class="nav-link nav-item" data-target="edge-policy">Edge & Policy</button>
-        <button type="button" class="nav-link nav-item" data-target="score-incubator">Score & Incubator</button>
-        <button type="button" class="nav-link nav-item" data-target="pipeline-cost">Pipeline & Costs</button>
+        <button type="button" class="nav-link nav-item" data-target="edge-policy">Edge &amp; Policy</button>
+        <button type="button" class="nav-link nav-item" data-target="cost-stress">Cost Stress</button>
+        <button type="button" class="nav-link nav-item" data-target="exit-labs">Exit Labs</button>
+        <button type="button" class="nav-link nav-item" data-target="score-incubator">Score &amp; Incubator</button>
+        <button type="button" class="nav-link nav-item" data-target="pipeline-cost">Pipeline &amp; Costs</button>
         <button type="button" class="nav-link nav-item" data-target="time-death">Time Death</button>
         <button type="button" class="nav-link nav-item" data-target="exit-calibration">Exit Calibration</button>
         <button type="button" class="nav-link nav-item" data-target="execution-safety">Execution Safety</button>
@@ -30,7 +34,7 @@
         <button type="button" class="nav-link nav-item" data-target="pre-move">Pre-Move</button>
         <button type="button" class="nav-link nav-item" data-target="runtime">Runtime</button>
         <button type="button" class="nav-link nav-item" data-target="data-vault">Data Vault</button>
-        <button type="button" class="nav-link nav-item" data-target="reports">Reports & Exports</button>
+        <button type="button" class="nav-link nav-item" data-target="reports">Reports &amp; Exports</button>
       </nav>
       <div class="sidebar-footer">
         <span class="status-dot safe"></span>
@@ -61,11 +65,14 @@
 
       <nav class="mobile-nav" aria-label="Navegacion compacta">
         <button type="button" class="mobile-nav-item" data-target="overview">Overview</button>
+        <button type="button" class="mobile-nav-item" data-target="research-cockpit">Cockpit</button>
+        <button type="button" class="mobile-nav-item" data-target="trade-replay">Replay</button>
         <button type="button" class="mobile-nav-item" data-target="edge-policy">Edge</button>
+        <button type="button" class="mobile-nav-item" data-target="cost-stress">Stress</button>
+        <button type="button" class="mobile-nav-item" data-target="exit-labs">Exits</button>
         <button type="button" class="mobile-nav-item" data-target="score-incubator">Score</button>
         <button type="button" class="mobile-nav-item" data-target="pipeline-cost">Costs</button>
         <button type="button" class="mobile-nav-item" data-target="execution-safety">Safety</button>
-        <button type="button" class="mobile-nav-item" data-target="operational-intelligence">Ops</button>
         <button type="button" class="mobile-nav-item" data-target="time-death">TIME</button>
         <button type="button" class="mobile-nav-item" data-target="reports">Exports</button>
       </nav>
@@ -131,6 +138,195 @@
               <div id="timeDeathMiniChart" class="chart-body"></div>
             </article>
           </div>
+        </section>
+
+        <section id="research-cockpit" class="section">
+          <div class="section-title">
+            <div>
+              <span class="eyebrow">Phase 7B / compact status</span>
+              <h2>Research Cockpit</h2>
+            </div>
+            <p>Estado compacto del bot. Modo PAPER, edge research, no live, no auto-promocion.</p>
+          </div>
+          <div class="cockpit-kpis kpi-grid compact" id="cockpitKpis">
+            <article class="panel kpi-card"><span class="panel-label">Mode</span><strong id="cockpitMode">paper</strong></article>
+            <article class="panel kpi-card"><span class="panel-label">Git commit</span><strong id="cockpitGit" class="truncate-id">unknown</strong></article>
+            <article class="panel kpi-card"><span class="panel-label">Health</span><strong id="cockpitHealth">UNKNOWN</strong></article>
+            <article class="panel kpi-card"><span class="panel-label">Open positions</span><strong id="cockpitOpenPositions">0</strong></article>
+            <article class="panel kpi-card"><span class="panel-label">OHLCV status</span><strong id="cockpitOhlcvStatus">UNKNOWN</strong></article>
+            <article class="panel kpi-card"><span class="panel-label">OHLCV rows</span><strong id="cockpitOhlcvRows">0</strong></article>
+            <article class="panel kpi-card"><span class="panel-label">Backtest decision</span><strong id="cockpitBacktest" class="truncate-id">UNKNOWN</strong></article>
+            <article class="panel kpi-card"><span class="panel-label">Policy decision</span><strong id="cockpitPolicy" class="truncate-id">UNKNOWN</strong></article>
+            <article class="panel kpi-card"><span class="panel-label">Policy ready for paper</span><strong id="cockpitPolicyReady">false</strong></article>
+            <article class="panel kpi-card"><span class="panel-label">Final recommendation</span><strong id="cockpitFinal">NO LIVE</strong></article>
+          </div>
+          <div class="lab-actions">
+            <button id="cockpitRefreshBtn" class="btn btn-primary">Refrescar cockpit</button>
+            <button id="cockpitCopyJsonBtn" class="btn btn-secondary">Copiar JSON cockpit</button>
+          </div>
+          <article class="panel">
+            <div class="panel-head"><h3>Safety flags</h3></div>
+            <div class="table-shell">
+              <table class="compact">
+                <thead><tr><th>flag</th><th>value</th></tr></thead>
+                <tbody id="cockpitSafetyFlagsRows"><tr><td colspan="2">Sin cargar todavia.</td></tr></tbody>
+              </table>
+            </div>
+          </article>
+          <details class="report-details">
+            <summary>Ver texto plano cockpit</summary>
+            <pre id="cockpitOutput">Sin cargar todavia.</pre>
+          </details>
+        </section>
+
+        <section id="trade-replay" class="section">
+          <div class="section-title">
+            <div>
+              <span class="eyebrow">Phase 7B / simulated trades</span>
+              <h2>Trade Replay</h2>
+            </div>
+            <p>Candles reales + trades simulados (entry/exit/SL/TP/MFE/MAE). Sin ordenes reales. Sin llamadas a Bitget.</p>
+          </div>
+          <div class="replay-controls">
+            <label>Symbol
+              <input id="replaySymbol" type="text" value="BTCUSDT" maxlength="20">
+            </label>
+            <label>Hours
+              <input id="replayHours" type="number" min="6" max="720" value="72">
+            </label>
+            <label>Timeframe
+              <select id="replayTimeframe">
+                <option value="5m" selected>5m</option>
+                <option value="15m">15m</option>
+                <option value="1h">1h</option>
+                <option value="4h">4h</option>
+              </select>
+            </label>
+            <label>Max trades
+              <input id="replayMaxTrades" type="number" min="10" max="500" value="50">
+            </label>
+            <button id="replayRefreshBtn" class="btn btn-primary">Cargar replay</button>
+          </div>
+          <div class="replay-meta kpi-grid compact" id="replayMeta">
+            <article class="panel kpi-card"><span class="panel-label">Symbol</span><strong id="replaySymbolDisplay">-</strong></article>
+            <article class="panel kpi-card"><span class="panel-label">Candles</span><strong id="replayCandleCount">0</strong></article>
+            <article class="panel kpi-card"><span class="panel-label">Trades</span><strong id="replayTradeCount">0</strong></article>
+            <article class="panel kpi-card"><span class="panel-label">Wins</span><strong id="replayWinCount">0</strong></article>
+            <article class="panel kpi-card"><span class="panel-label">Losses</span><strong id="replayLossCount">0</strong></article>
+            <article class="panel kpi-card"><span class="panel-label">First candle</span><strong id="replayFirstCandle">-</strong></article>
+            <article class="panel kpi-card"><span class="panel-label">Last candle</span><strong id="replayLastCandle">-</strong></article>
+          </div>
+          <article class="panel chart-panel">
+            <div class="panel-head"><h3>Price &amp; trade markers</h3><span class="badge badge-info">simulated</span></div>
+            <div id="replayChart" class="chart-body replay-chart">Sin datos cargados.</div>
+          </article>
+          <article class="panel">
+            <div class="panel-head">
+              <h3>Trades</h3>
+              <span class="badge badge-muted" id="replayTradesBadge">Read-only</span>
+            </div>
+            <div class="table-shell">
+              <table class="compact">
+                <thead>
+                  <tr>
+                    <th>entry_time</th><th>side</th><th>entry</th><th>exit_time</th><th>exit</th>
+                    <th>SL</th><th>TP</th><th>outcome</th><th>net_pct</th><th>MFE%</th><th>MAE%</th><th>bars</th>
+                  </tr>
+                </thead>
+                <tbody id="replayTradesRows"><tr><td colspan="12">Sin datos cargados.</td></tr></tbody>
+              </table>
+            </div>
+          </article>
+          <details class="report-details">
+            <summary>Ver salida tecnica replay</summary>
+            <pre id="replayOutput">Sin cargar todavia.</pre>
+          </details>
+        </section>
+
+        <section id="cost-stress" class="section">
+          <div class="section-title">
+            <div>
+              <span class="eyebrow">Phase 7B / fee scenarios</span>
+              <h2>Cost Stress</h2>
+            </div>
+            <p>Re-evaluacion de net EV a 0.18% / 0.22% / 0.25% / maker_maker_audit. Solo research.</p>
+          </div>
+          <div class="replay-controls">
+            <label>Hours
+              <input id="costStressHours" type="number" min="24" max="720" value="720">
+            </label>
+            <label>Symbols (csv)
+              <input id="costStressSymbols" type="text" maxlength="120" placeholder="BTCUSDT,ETHUSDT" value="">
+            </label>
+            <button id="costStressRefreshBtn" class="btn btn-primary">Ejecutar cost stress</button>
+          </div>
+          <article class="panel">
+            <div class="panel-head">
+              <h3>Cost scenarios</h3>
+              <span id="costStressStatusBadge" class="badge badge-muted">UNKNOWN</span>
+            </div>
+            <div class="table-shell">
+              <table class="compact">
+                <thead>
+                  <tr><th>scenario</th><th>cost_pct</th><th>trades</th><th>net_ev</th><th>net_pf</th><th>win_rate</th></tr>
+                </thead>
+                <tbody id="costStressRows"><tr><td colspan="6">Sin datos cargados.</td></tr></tbody>
+              </table>
+            </div>
+          </article>
+          <details class="report-details">
+            <summary>Ver salida tecnica cost stress</summary>
+            <pre id="costStressOutput">Sin cargar todavia.</pre>
+          </details>
+        </section>
+
+        <section id="exit-labs" class="section">
+          <div class="section-title">
+            <div>
+              <span class="eyebrow">Phase 7B / bar-by-bar</span>
+              <h2>Exit Labs</h2>
+            </div>
+            <p>Profit Lock / Fast Exit / Time Death Reducer. Read-only, sin lookahead, STOP_BEFORE_TP, entry next open i+1.</p>
+          </div>
+          <div class="replay-controls">
+            <label>Symbol
+              <input id="exitLabSymbol" type="text" value="BTCUSDT" maxlength="20">
+            </label>
+            <label>Hours
+              <input id="exitLabHours" type="number" min="24" max="720" value="168">
+            </label>
+            <label>Timeframe
+              <select id="exitLabTimeframe">
+                <option value="5m" selected>5m</option>
+                <option value="15m">15m</option>
+                <option value="1h">1h</option>
+              </select>
+            </label>
+            <button id="profitLockLabBtn" class="btn btn-secondary">Profit Lock</button>
+            <button id="fastExitLabBtn" class="btn btn-secondary">Fast Exit</button>
+            <button id="timeDeathReducerLabBtn" class="btn btn-secondary">Time Death Reducer</button>
+          </div>
+          <article class="panel">
+            <div class="panel-head">
+              <h3>Policy comparisons</h3>
+              <span id="exitLabBestBadge" class="badge badge-muted">no best yet</span>
+            </div>
+            <div class="table-shell">
+              <table class="compact">
+                <thead>
+                  <tr>
+                    <th>policy</th><th>trades</th><th>net_ev</th><th>net_pf</th><th>delta_ev</th>
+                    <th>TP%</th><th>SL%</th><th>TIME%</th><th>PL%</th><th>FE%</th><th>avg_bars</th><th>decision</th>
+                  </tr>
+                </thead>
+                <tbody id="exitLabRows"><tr><td colspan="12">Sin datos cargados.</td></tr></tbody>
+              </table>
+            </div>
+          </article>
+          <details class="report-details">
+            <summary>Ver salida tecnica exit labs</summary>
+            <pre id="exitLabOutput">Sin cargar todavia.</pre>
+          </details>
         </section>
 
         <section id="paper-monitor" class="section">

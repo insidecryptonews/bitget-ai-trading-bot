@@ -234,6 +234,15 @@ class DashboardProReporter:
         "Candidate Promotion V2",
     )
 
+    # Phase 7B — "soft" sections whose timeout/error must NOT degrade the
+    # whole short report to PARTIAL_REPORT. They are best-effort summaries
+    # that can be re-run via the full report or the matching CLI command.
+    # We still attempt them (unlike heavy-skipped), but use a tight timeout
+    # and a `limited_summary` status when they exceed it.
+    SHORT_REPORT_SOFT_SECTIONS: tuple[str, ...] = (
+        "Candidate Incubator 24h",
+    )
+
     def build_short(self, *, hours: int = 24, include_heavy: bool = False) -> dict[str, Any]:
         """Short dashboard report.
 
@@ -274,16 +283,29 @@ class DashboardProReporter:
         ]
         started = time.perf_counter()
         heavy = set(self.SHORT_REPORT_HEAVY_SECTIONS)
+        soft = set(self.SHORT_REPORT_SOFT_SECTIONS)
         rendered: list[ReportSection] = []
         for name, callback in sections:
             if not include_heavy and name in heavy:
                 rendered.append(self._skip_heavy_section(name))
+            elif name in soft:
+                # Phase 7B anti-regression: Candidate Incubator (and any other
+                # soft section) must never tumble the short report. On timeout
+                # or error it degrades to `limited_summary` — visible to the
+                # operator but not classified as PARTIAL_REPORT.
+                rendered.append(
+                    self._run_section(
+                        name, callback, timeout_seconds=3.0, soft=True,
+                    )
+                )
             else:
                 rendered.append(self._run_section(name, callback, timeout_seconds=3.0))
         duration_ms = int((time.perf_counter() - started) * 1000)
         warnings = [section.warning for section in rendered if section.warning]
         # Skipping heavy sections is INTENTIONAL and must NOT mark the whole
-        # report as PARTIAL_REPORT. Only true errors/timeouts trigger that.
+        # report as PARTIAL_REPORT. `limited_summary` from soft sections is
+        # also explicitly excluded. Only true errors/timeouts on non-soft
+        # sections trigger PARTIAL_REPORT.
         report_status = "PARTIAL_REPORT" if any(section.status in {"error", "timeout"} for section in rendered) else "OK"
         lines = [
             "DASHBOARD PRO SHORT REPORT START",
@@ -371,7 +393,14 @@ class DashboardProReporter:
             warning="",
         )
 
-    def _run_section(self, name: str, callback: Callable[[], str], *, timeout_seconds: float | None = None) -> ReportSection:
+    def _run_section(
+        self,
+        name: str,
+        callback: Callable[[], str],
+        *,
+        timeout_seconds: float | None = None,
+        soft: bool = False,
+    ) -> ReportSection:
         started = time.perf_counter()
         warning = ""
         try:
@@ -384,9 +413,23 @@ class DashboardProReporter:
                     text = future.result(timeout=timeout_seconds)
                 except TimeoutError:
                     future.cancel()
-                    text = f"SECTION_TIMEOUT: {name}"
-                    status = "timeout"
-                    warning = f"SECTION_TIMEOUT: {name}"
+                    # Soft sections (Candidate Incubator, etc.) degrade to a
+                    # limited_summary; non-soft sections keep the timeout
+                    # classification so the report flags PARTIAL_REPORT.
+                    if soft:
+                        text = (
+                            f"LIMITED_SUMMARY: {name}\n"
+                            "soft_section_timeout_below_3s\n"
+                            "use_full_report_or_dedicated_cli_for_full_results\n"
+                            f"command: python -m app.research_lab {name.lower().split()[0].replace('candidate','candidate-')}\n"
+                            "final_recommendation: NO LIVE"
+                        )
+                        status = "limited_summary"
+                        warning = f"SOFT_SECTION_LIMITED: {name}"
+                    else:
+                        text = f"SECTION_TIMEOUT: {name}"
+                        status = "timeout"
+                        warning = f"SECTION_TIMEOUT: {name}"
                     return ReportSection(
                         name=name,
                         text=sanitize_text_for_dashboard(text),
@@ -399,8 +442,12 @@ class DashboardProReporter:
             status = "ok"
         except Exception as exc:
             text = f"ERROR_SANITIZED: {sanitize_text_for_dashboard(type(exc).__name__)}"
-            status = "error"
-            warning = f"SECTION_ERROR: {name}"
+            if soft:
+                status = "limited_summary"
+                warning = f"SOFT_SECTION_LIMITED: {name}"
+            else:
+                status = "error"
+                warning = f"SECTION_ERROR: {name}"
         duration_ms = int((time.perf_counter() - started) * 1000)
         return ReportSection(
             name=name,

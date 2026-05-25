@@ -153,6 +153,13 @@ def start_health_server(
                 "/api/training/real-strategy-backtest",
                 "/api/training/ohlcv-replay-loader-audit",
                 "/api/training/duplicate-module-audit",
+                "/api/training/research-cockpit",
+                "/api/training/cost-stress",
+                "/api/training/profit-lock-lab",
+                "/api/training/fast-exit-lab",
+                "/api/training/time-death-reducer-lab",
+                "/api/training/trade-replay",
+                "/api/training/final-policy-builder",
                 "/api/training/full-report",
                 "/api/training/export/full.txt",
                 "/api/training/export/full.json",
@@ -424,6 +431,27 @@ def start_health_server(
                 return
             if path == "/api/training/worker-lock-status":
                 self._send_json(_worker_lock_status(config, db, query))
+                return
+            if path == "/api/training/research-cockpit":
+                self._send_json(_research_cockpit(config, db, query))
+                return
+            if path == "/api/training/cost-stress":
+                self._send_json(_cost_stress(config, db, query))
+                return
+            if path == "/api/training/profit-lock-lab":
+                self._send_json(_profit_lock_lab(config, db, query))
+                return
+            if path == "/api/training/fast-exit-lab":
+                self._send_json(_fast_exit_lab(config, db, query))
+                return
+            if path == "/api/training/time-death-reducer-lab":
+                self._send_json(_time_death_reducer_lab(config, db, query))
+                return
+            if path == "/api/training/trade-replay":
+                self._send_json(_trade_replay(config, db, query))
+                return
+            if path == "/api/training/final-policy-builder":
+                self._send_json(_final_policy_builder(config, db, query))
                 return
             if path == "/api/training/full-report":
                 payload = _dashboard_full_report(config, db, query)
@@ -1508,6 +1536,269 @@ def _cache_dashboard_lab(key: str, payload: dict[str, Any], status: str, duratio
     while len(_DASHBOARD_LAB_CACHE) > 80:
         oldest = sorted(_DASHBOARD_LAB_CACHE.items(), key=lambda item: str(item[1].get("created_at") or ""))[0][0]
         _DASHBOARD_LAB_CACHE.pop(oldest, None)
+
+
+def _research_cockpit(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
+    """Phase 7B — Research Cockpit JSON payload."""
+    del query
+    if config is None or db is None:
+        return {
+            "error": "research cockpit unavailable",
+            "final_recommendation": "NO LIVE",
+            "research_only": True,
+            "paper_filter_enabled": False,
+            "can_send_real_orders": False,
+        }
+    try:
+        from .research_cockpit import build_cockpit_state, export_cockpit_json, render_cockpit_text
+
+        state = build_cockpit_state(config, db, mode="paper")
+        payload = state.as_dict()
+        payload["text"] = render_cockpit_text(state)
+        payload["json"] = export_cockpit_json(state)
+        payload["final_recommendation"] = "NO LIVE"
+        payload["research_only"] = True
+        payload["paper_filter_enabled"] = False
+        payload["can_send_real_orders"] = False
+        return payload
+    except Exception as exc:
+        return {
+            "error": str(exc)[:300],
+            "final_recommendation": "NO LIVE",
+            "research_only": True,
+            "paper_filter_enabled": False,
+            "can_send_real_orders": False,
+        }
+
+
+def _cost_stress(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
+    """Phase 7B — Cost Stress evaluation under multiple fee scenarios."""
+    hours = _query_int(query, "hours", 720)
+    timeframe = (query.get("timeframe") or ["5m"])[0]
+    symbols_arg = (query.get("symbols") or [""])[0]
+    symbols = [s.strip().upper() for s in symbols_arg.split(",") if s.strip()] or None
+    if config is None or db is None:
+        return {
+            "error": "cost stress unavailable",
+            "final_recommendation": "NO LIVE",
+            "research_only": True,
+            "can_send_real_orders": False,
+        }
+    try:
+        from .backtest_breakdown import collect_trade_records
+        from .cost_stress import evaluate_cost_stress, render_cost_stress_text
+
+        records = collect_trade_records(config, db, hours=hours, symbols=symbols, timeframe=timeframe)
+        grosses = [r.gross_return_pct for r in records]
+        report = evaluate_cost_stress(grosses)
+        return {
+            "hours": hours,
+            "timeframe": timeframe,
+            "symbols": symbols or [],
+            "trades": int(report.trades),
+            "scenarios": [
+                {
+                    "name": s.name,
+                    "cost_pct": s.cost_pct,
+                    "net_ev": s.net_ev,
+                    "net_pf": s.net_pf,
+                    "win_rate": s.win_rate,
+                    "trades": s.trades,
+                }
+                for s in report.scenarios
+            ],
+            "cost_stress_status": report.cost_stress_status,
+            "reasons": list(report.reasons),
+            "text": render_cost_stress_text(report),
+            "research_only": True,
+            "paper_filter_enabled": False,
+            "can_send_real_orders": False,
+            "final_recommendation": "NO LIVE",
+        }
+    except Exception as exc:
+        return {
+            "error": str(exc)[:300],
+            "final_recommendation": "NO LIVE",
+            "research_only": True,
+            "can_send_real_orders": False,
+        }
+
+
+def _exit_lab_run(
+    config: Any | None,
+    db: Any | None,
+    query: dict[str, list[str]],
+    runner: str,
+) -> dict[str, Any]:
+    hours = _query_int(query, "hours", 720)
+    timeframe = (query.get("timeframe") or ["5m"])[0]
+    symbol = (query.get("symbol") or ["BTCUSDT"])[0].upper()
+    if config is None or db is None:
+        return {
+            "error": f"{runner} unavailable",
+            "final_recommendation": "NO LIVE",
+            "research_only": True,
+            "can_send_real_orders": False,
+        }
+    try:
+        from . import exit_labs as exit_labs_mod
+
+        func = getattr(exit_labs_mod, runner)
+        report = func(config, db, symbol=symbol, hours=hours, timeframe=timeframe)
+        best_policy = ""
+        best_delta = 0.0
+        for c in report.comparisons:
+            if c.policy_name == "baseline":
+                continue
+            if c.decision == "IMPROVES_BASELINE" and c.delta_ev_vs_baseline > best_delta:
+                best_policy = c.policy_name
+                best_delta = c.delta_ev_vs_baseline
+        return {
+            "lab_name": report.lab_name,
+            "symbol": report.symbol,
+            "hours": report.hours,
+            "timeframe": report.timeframe,
+            "baseline_trades": report.baseline_trades,
+            "baseline_net_ev": report.baseline_net_ev,
+            "comparisons": [c.as_dict() for c in report.comparisons],
+            "best_policy": best_policy,
+            "best_delta_ev": best_delta,
+            "no_lookahead_status": report.no_lookahead_status,
+            "stop_tp_same_bar_rule": report.stop_tp_same_bar_rule,
+            "text": exit_labs_mod.render_exit_lab_text(report),
+            "research_only": True,
+            "paper_filter_enabled": False,
+            "can_send_real_orders": False,
+            "final_recommendation": "NO LIVE",
+        }
+    except Exception as exc:
+        return {
+            "error": str(exc)[:300],
+            "final_recommendation": "NO LIVE",
+            "research_only": True,
+            "can_send_real_orders": False,
+        }
+
+
+def _profit_lock_lab(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
+    return _exit_lab_run(config, db, query, "run_profit_lock_lab")
+
+
+def _fast_exit_lab(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
+    return _exit_lab_run(config, db, query, "run_fast_exit_lab")
+
+
+def _time_death_reducer_lab(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
+    return _exit_lab_run(config, db, query, "run_time_death_reducer_lab")
+
+
+def _trade_replay(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
+    """Phase 7B — Trade Replay JSON for the dashboard chart view."""
+    hours = _query_int(query, "hours", 72)
+    timeframe = (query.get("timeframe") or ["5m"])[0]
+    symbol = (query.get("symbol") or ["BTCUSDT"])[0].upper()
+    max_candles = _query_int(query, "max_candles", 600)
+    max_trades = _query_int(query, "max_trades", 200)
+    if config is None or db is None:
+        return {
+            "error": "trade replay unavailable",
+            "final_recommendation": "NO LIVE",
+            "research_only": True,
+            "can_send_real_orders": False,
+        }
+    try:
+        from .trade_replay_export import build_replay_payload, render_replay_summary
+
+        payload_obj = build_replay_payload(
+            config, db,
+            symbol=symbol, hours=hours, timeframe=timeframe,
+            max_candles=max_candles, max_trades=max_trades,
+        )
+        payload = payload_obj.as_dict()
+        payload["text"] = render_replay_summary(payload_obj)
+        payload["research_only"] = True
+        payload["paper_filter_enabled"] = False
+        payload["can_send_real_orders"] = False
+        payload["final_recommendation"] = "NO LIVE"
+        return payload
+    except Exception as exc:
+        return {
+            "error": str(exc)[:300],
+            "final_recommendation": "NO LIVE",
+            "research_only": True,
+            "can_send_real_orders": False,
+        }
+
+
+def _final_policy_builder(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
+    """Phase 7B — final research policy builder with optional enriched gates."""
+    hours = _query_int(query, "hours", 720)
+    timeframe = (query.get("timeframe") or ["5m"])[0]
+    enriched_flag = (query.get("enriched") or ["0"])[0] in {"1", "true", "yes"}
+    include_cost_stress = (query.get("include_cost_stress") or [str(int(enriched_flag))])[0] in {"1", "true", "yes"} or enriched_flag
+    if config is None or db is None:
+        return {
+            "error": "final policy builder unavailable",
+            "final_recommendation": "NO LIVE",
+            "research_only": True,
+            "can_send_real_orders": False,
+        }
+    try:
+        from .backtest_breakdown import build_breakdown, collect_trade_records
+        from .final_research_policy_builder import (
+            PolicyBuildInput,
+            build_policy,
+            render_policy_text,
+        )
+
+        records = collect_trade_records(config, db, hours=hours, timeframe=timeframe)
+        breakdown = build_breakdown(records, hours=hours, timeframe=timeframe)
+        inputs = PolicyBuildInput(
+            breakdown=breakdown,
+            data_quality_status="UNKNOWN",
+            label_quality_status="UNKNOWN",
+            walk_forward_status="NOT_RUN",
+        )
+        if include_cost_stress:
+            try:
+                from .cost_stress import evaluate_cost_stress
+
+                grosses = [r.gross_return_pct for r in records]
+                stress = evaluate_cost_stress(grosses)
+                inputs.cost_stress_status = stress.cost_stress_status
+                inputs.cost_stress_reasons = list(stress.reasons)
+            except Exception:
+                pass
+        policy = build_policy(inputs)
+        return {
+            "hours": hours,
+            "timeframe": timeframe,
+            "enriched": bool(enriched_flag),
+            "decision": policy.decision,
+            "candidate_policy_id": policy.candidate_policy_id,
+            "reasons": list(policy.reasons),
+            "data_quality_status": policy.data_quality_status,
+            "walk_forward_status": policy.walk_forward_status,
+            "cost_stress_status": inputs.cost_stress_status,
+            "cost_stress_reasons": list(inputs.cost_stress_reasons),
+            "net_ev": policy.net_ev,
+            "net_pf": policy.net_pf,
+            "tp_pct": policy.tp_pct,
+            "sl_pct": policy.sl_pct,
+            "time_pct": policy.time_pct,
+            "text": render_policy_text(policy),
+            "research_only": True,
+            "paper_filter_enabled": False,
+            "can_send_real_orders": False,
+            "final_recommendation": "NO LIVE",
+        }
+    except Exception as exc:
+        return {
+            "error": str(exc)[:300],
+            "final_recommendation": "NO LIVE",
+            "research_only": True,
+            "can_send_real_orders": False,
+        }
 
 
 def _dashboard_full_report(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:

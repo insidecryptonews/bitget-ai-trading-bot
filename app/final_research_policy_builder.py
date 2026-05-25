@@ -88,6 +88,10 @@ class PolicyBuildInput:
     data_quality_status: str = "UNKNOWN"   # OK / WARNING / BAD
     label_quality_status: str = "UNKNOWN"  # OK / WARNING / BAD
     walk_forward_status: str = "NOT_RUN"   # NOT_RUN / FAIL / PASS / NEED_MORE_FOLDS
+    # Phase 7B additions — optional inputs from cost stress / exit labs.
+    cost_stress_status: str = "UNKNOWN"    # PASS / WARN / FAIL / UNKNOWN
+    cost_stress_reasons: list[str] = field(default_factory=list)
+    exit_lab_summary: dict[str, Any] = field(default_factory=dict)
 
 
 def _empty_policy(decision: str, reasons: list[str], data_quality: str = "UNKNOWN", walk_forward: str = "NOT_RUN") -> CandidatePolicy:
@@ -181,6 +185,8 @@ def build_policy(
             continue
         if cand.net_ev < gates.min_net_ev:
             continue
+        if cand.net_pf >= 900 and cand.trades < max(500, gates.min_trades_per_setup * 5):
+            continue
         if cand.net_pf < gates.min_net_pf:
             continue
         if cand.max_drawdown > gates.max_drawdown_pct:
@@ -235,9 +241,64 @@ def build_policy(
             generated_at=iso_utc(),
         )
 
+    # Cost stress gate — Phase 7B.
+    # Paper-ready requires an explicit PASS. WARN/UNKNOWN remain research-only;
+    # they must not be presented as ready for paper.
+    if inputs.cost_stress_status == "FAIL":
+        best = survivors[0]
+        return CandidatePolicy(
+            candidate_policy_id=f"cost_stress_fail_{best.group_key.replace('|','_')[:48]}",
+            allowed_symbols=[], allowed_sides=[], allowed_regimes=[], allowed_score_buckets=[],
+            blocked_setups=blocked_setups,
+            exit_policy_candidate="current_exit",
+            min_trades=best.trades, net_ev=best.net_ev, net_pf=best.net_pf,
+            tp_pct=best.tp_pct, sl_pct=best.sl_pct, time_pct=best.time_pct,
+            max_drawdown=best.max_drawdown,
+            confidence="LOW",
+            decision=NO_EDGE_FOUND,
+            reasons=[
+                "candidates_pass_gross_gates",
+                "cost_stress_status=FAIL",
+                "would_be_negative_with_realistic_costs",
+                *inputs.cost_stress_reasons,
+            ],
+            data_quality_status=inputs.data_quality_status,
+            walk_forward_status=inputs.walk_forward_status,
+            generated_at=iso_utc(),
+        )
+    if inputs.cost_stress_status != "PASS":
+        best = survivors[0]
+        return CandidatePolicy(
+            candidate_policy_id=f"cost_stress_not_pass_{best.group_key.replace('|','_')[:48]}",
+            allowed_symbols=[], allowed_sides=[], allowed_regimes=[], allowed_score_buckets=[],
+            blocked_setups=blocked_setups,
+            exit_policy_candidate="current_exit",
+            min_trades=best.trades, net_ev=best.net_ev, net_pf=best.net_pf,
+            tp_pct=best.tp_pct, sl_pct=best.sl_pct, time_pct=best.time_pct,
+            max_drawdown=best.max_drawdown,
+            confidence="MEDIUM" if inputs.cost_stress_status == "WARN" else "LOW",
+            decision=NEED_MORE_DATA,
+            reasons=[
+                "candidates_pass_gross_gates",
+                f"cost_stress_status={inputs.cost_stress_status}",
+                "promote_to_PAPER_READY_blocked_until_cost_stress_pass",
+                *inputs.cost_stress_reasons,
+            ],
+            data_quality_status=inputs.data_quality_status,
+            walk_forward_status=inputs.walk_forward_status,
+            generated_at=iso_utc(),
+        )
+
     # All gates passed — but we STILL do not auto-activate; flag the policy as
     # ready and the operator must flip the switch manually.
     best = survivors[0]
+    extra_reasons: list[str] = []
+    if inputs.cost_stress_status == "WARN":
+        extra_reasons.append("cost_stress_status=WARN_paper_ok_but_live_caution")
+    if inputs.cost_stress_status == "PASS":
+        extra_reasons.append("cost_stress_status=PASS_survives_022_scenario")
+    if inputs.exit_lab_summary:
+        extra_reasons.append(f"exit_lab_summary_consumed={list(inputs.exit_lab_summary.keys())}")
     return CandidatePolicy(
         candidate_policy_id=f"paper_ready_{best.group_key.replace('|','_')[:48]}",
         allowed_symbols=sorted({_token(g.group_key, 0) for g in survivors}),
@@ -260,6 +321,7 @@ def build_policy(
             "walk_forward_status_pass",
             "data_quality_acceptable",
             "still_requires_human_activation_of_paper_filter",
+            *extra_reasons,
         ],
         data_quality_status=inputs.data_quality_status,
         walk_forward_status=inputs.walk_forward_status,

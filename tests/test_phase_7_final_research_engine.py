@@ -343,6 +343,7 @@ def test_policy_builder_ready_for_paper_when_all_gates_pass():
         data_quality_status="OK",
         label_quality_status="OK",
         walk_forward_status=WF_PASS,
+        cost_stress_status="PASS",
     ))
     assert policy.decision == POLICY_READY_FOR_PAPER
     # Still must NOT auto-activate
@@ -374,6 +375,7 @@ def test_policy_builder_blocks_low_net_ev_below_gate():
         breakdown=breakdown,
         data_quality_status="OK", label_quality_status="OK",
         walk_forward_status=WF_PASS,
+        cost_stress_status="PASS",
     ))
     assert policy.decision == NO_EDGE_FOUND
 
@@ -384,6 +386,7 @@ def test_policy_builder_export_json_is_valid():
         breakdown=breakdown,
         data_quality_status="OK", label_quality_status="OK",
         walk_forward_status=WF_PASS,
+        cost_stress_status="PASS",
     ))
     text = export_policy_json(policy)
     parsed = json.loads(text)
@@ -398,6 +401,7 @@ def test_policy_render_text_marks_no_live():
         breakdown=breakdown,
         data_quality_status="OK", label_quality_status="OK",
         walk_forward_status=WF_PASS,
+        cost_stress_status="PASS",
     ))
     text = render_policy_text(policy)
     assert "POLICY_READY_FOR_PAPER" in text

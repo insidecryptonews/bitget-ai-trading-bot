@@ -932,7 +932,244 @@
       $(buttonId)?.addEventListener("click", () => runLab(buttonId, url, target, handler, append));
     });
 
+    // --- Phase 7B: Research Cockpit + Trade Replay + Cost Stress + Exit Labs ---
+    $("cockpitRefreshBtn")?.addEventListener("click", loadResearchCockpit);
+    $("cockpitCopyJsonBtn")?.addEventListener("click", copyResearchCockpitJson);
+    $("replayRefreshBtn")?.addEventListener("click", loadTradeReplay);
+    $("costStressRefreshBtn")?.addEventListener("click", loadCostStress);
+    $("profitLockLabBtn")?.addEventListener("click", () => loadExitLab("profit-lock-lab"));
+    $("fastExitLabBtn")?.addEventListener("click", () => loadExitLab("fast-exit-lab"));
+    $("timeDeathReducerLabBtn")?.addEventListener("click", () => loadExitLab("time-death-reducer-lab"));
+
     bindSafeNavigation();
+  }
+
+  // Phase 7B helpers ---------------------------------------------------------
+  let lastCockpitJson = "";
+
+  async function loadResearchCockpit() {
+    const button = $("cockpitRefreshBtn");
+    setButtonLoading(button, true);
+    try {
+      const payload = await fetchJson("/api/training/research-cockpit");
+      lastCockpitJson = payload.json || JSON.stringify(payload, null, 2);
+      setText("cockpitMode", payload.mode || "paper");
+      setText("cockpitGit", payload.git_commit_short || "unknown");
+      setText("cockpitHealth", payload.health || "UNKNOWN");
+      setText("cockpitOpenPositions", String(payload.open_positions ?? 0));
+      setText("cockpitOhlcvStatus", payload.ohlcv_status || "UNKNOWN");
+      setText("cockpitOhlcvRows", String(payload.ohlcv_total_rows ?? 0));
+      setText("cockpitBacktest", payload.latest_backtest_decision || "UNKNOWN");
+      setText("cockpitPolicy", payload.latest_policy_decision || "UNKNOWN");
+      setText("cockpitPolicyReady", String(Boolean(payload.policy_ready_for_paper)));
+      setText("cockpitFinal", payload.final_recommendation || "NO LIVE");
+      const rowsTarget = $("cockpitSafetyFlagsRows");
+      if (rowsTarget) {
+        const flags = payload.safety_flags || {};
+        const keys = Object.keys(flags);
+        rowsTarget.innerHTML = keys.length
+          ? keys.map((k) => `<tr><td>${escapeHtml(k)}</td><td>${escapeHtml(flags[k])}</td></tr>`).join("")
+          : "<tr><td colspan=\"2\">No safety flags available.</td></tr>";
+      }
+      setText("cockpitOutput", payload.text || lastCockpitJson);
+    } catch (error) {
+      setText("cockpitOutput", `cockpit error: ${error.message}`);
+    } finally {
+      setButtonLoading(button, false);
+    }
+  }
+
+  function copyResearchCockpitJson() {
+    if (!lastCockpitJson) return;
+    copyText(lastCockpitJson).then(() => {});
+  }
+
+  async function loadTradeReplay() {
+    const button = $("replayRefreshBtn");
+    setButtonLoading(button, true);
+    try {
+      const symbol = ($("replaySymbol")?.value || "BTCUSDT").toUpperCase();
+      const hours = num($("replayHours")?.value, 72);
+      const timeframe = $("replayTimeframe")?.value || "5m";
+      const maxTrades = num($("replayMaxTrades")?.value, 50);
+      const url = `/api/training/trade-replay?symbol=${encodeURIComponent(symbol)}&hours=${hours}&timeframe=${encodeURIComponent(timeframe)}&max_trades=${maxTrades}`;
+      const payload = await fetchJson(url);
+      setText("replaySymbolDisplay", payload.symbol || symbol);
+      const candles = Array.isArray(payload.candles) ? payload.candles : [];
+      const trades = Array.isArray(payload.trades) ? payload.trades : [];
+      setText("replayCandleCount", String(candles.length));
+      setText("replayTradeCount", String(trades.length));
+      const wins = trades.filter((t) => num(t.net_return_pct) > 0).length;
+      const losses = trades.filter((t) => num(t.net_return_pct) < 0).length;
+      setText("replayWinCount", String(wins));
+      setText("replayLossCount", String(losses));
+      setText("replayFirstCandle", candles[0]?.timestamp || "-");
+      setText("replayLastCandle", candles[candles.length - 1]?.timestamp || "-");
+      renderReplayChart(candles, trades);
+      const tableTarget = $("replayTradesRows");
+      if (tableTarget) {
+        if (!trades.length) {
+          tableTarget.innerHTML = "<tr><td colspan=\"12\">No simulated trades for this window.</td></tr>";
+        } else {
+          tableTarget.innerHTML = trades.slice(0, 200).map((t) => `
+            <tr>
+              <td>${escapeHtml(t.entry_time)}</td>
+              <td>${escapeHtml(t.side)}</td>
+              <td>${escapeHtml(fmt(t.entry_price, 4))}</td>
+              <td>${escapeHtml(t.exit_time)}</td>
+              <td>${escapeHtml(fmt(t.exit_price, 4))}</td>
+              <td>${escapeHtml(fmt(t.stop_loss, 4))}</td>
+              <td>${escapeHtml(fmt(t.take_profit_1, 4))}</td>
+              <td>${escapeHtml(t.exit_reason)}</td>
+              <td>${escapeHtml(fmt(t.net_return_pct, 3))}</td>
+              <td>${escapeHtml(fmt(t.mfe_pct, 3))}</td>
+              <td>${escapeHtml(fmt(t.mae_pct, 3))}</td>
+              <td>${escapeHtml(String(t.duration_bars ?? ""))}</td>
+            </tr>
+          `).join("");
+        }
+      }
+      setText("replayOutput", payload.text || JSON.stringify(payload, null, 2).slice(0, 5000));
+    } catch (error) {
+      setText("replayOutput", `replay error: ${error.message}`);
+    } finally {
+      setButtonLoading(button, false);
+    }
+  }
+
+  function renderReplayChart(candles, trades) {
+    const node = $("replayChart");
+    if (!node) return;
+    if (!candles.length) {
+      node.innerHTML = '<div class="replay-empty">No OHLCV candles available for this symbol/timeframe.</div>';
+      return;
+    }
+    const W = Math.max(600, node.clientWidth || 700);
+    const H = 220;
+    const padding = 24;
+    const closes = candles.map((c) => num(c.close));
+    const minPrice = Math.min(...closes);
+    const maxPrice = Math.max(...closes);
+    const range = (maxPrice - minPrice) || 1;
+    const stepX = (W - padding * 2) / Math.max(closes.length - 1, 1);
+    const points = closes.map((p, i) => {
+      const x = padding + i * stepX;
+      const y = padding + (1 - (p - minPrice) / range) * (H - padding * 2);
+      return `${x.toFixed(2)},${y.toFixed(2)}`;
+    }).join(" ");
+    const markers = trades.slice(0, 200).map((t) => {
+      const eIdx = clamp(num(t.entry_index), 0, closes.length - 1);
+      const xIdx = clamp(num(t.exit_index), 0, closes.length - 1);
+      const ex = padding + eIdx * stepX;
+      const ey = padding + (1 - (num(t.entry_price) - minPrice) / range) * (H - padding * 2);
+      const xx = padding + xIdx * stepX;
+      const xy = padding + (1 - (num(t.exit_price) - minPrice) / range) * (H - padding * 2);
+      const entryColor = String(t.side || "").toUpperCase() === "LONG" ? "#2ee59d" : "#a78bfa";
+      const exitColor = num(t.net_return_pct) > 0 ? "#2ee59d" : (num(t.net_return_pct) < 0 ? "#ff4d6d" : "#90a0b7");
+      return `
+        <line x1="${ex.toFixed(2)}" y1="${ey.toFixed(2)}" x2="${xx.toFixed(2)}" y2="${xy.toFixed(2)}" stroke="${exitColor}" stroke-width="1" stroke-opacity="0.45" />
+        <circle cx="${ex.toFixed(2)}" cy="${ey.toFixed(2)}" r="3" fill="${entryColor}" stroke="#0d131d" stroke-width="1"></circle>
+        <polygon points="${xx.toFixed(2)},${(xy-3).toFixed(2)} ${(xx-3).toFixed(2)},${(xy+3).toFixed(2)} ${(xx+3).toFixed(2)},${(xy+3).toFixed(2)}" fill="${exitColor}" stroke="#0d131d" stroke-width="0.8"></polygon>
+      `;
+    }).join("");
+    node.innerHTML = `
+      <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">
+        <polyline points="${points}" fill="none" stroke="#5ab7ff" stroke-width="1.4" stroke-linejoin="round" />
+        <g>${markers}</g>
+      </svg>
+    `;
+  }
+
+  async function loadCostStress() {
+    const button = $("costStressRefreshBtn");
+    setButtonLoading(button, true);
+    try {
+      const hours = num($("costStressHours")?.value, 720);
+      const symbols = ($("costStressSymbols")?.value || "").trim();
+      const url = `/api/training/cost-stress?hours=${hours}${symbols ? `&symbols=${encodeURIComponent(symbols)}` : ""}`;
+      const payload = await fetchJson(url);
+      const status = payload.cost_stress_status || "UNKNOWN";
+      const badge = $("costStressStatusBadge");
+      if (badge) {
+        badge.textContent = status;
+        badge.className = `badge ${status === "PASS" ? "badge-safe" : status === "WARN" ? "badge-info" : status === "FAIL" ? "badge-danger" : "badge-muted"}`;
+      }
+      const rows = $("costStressRows");
+      const scenarios = Array.isArray(payload.scenarios) ? payload.scenarios : [];
+      if (rows) {
+        rows.innerHTML = scenarios.length
+          ? scenarios.map((s) => `
+              <tr>
+                <td>${escapeHtml(s.name)}</td>
+                <td>${escapeHtml(fmt(s.cost_pct, 4))}%</td>
+                <td>${escapeHtml(String(s.trades ?? 0))}</td>
+                <td>${escapeHtml(fmt(s.net_ev, 6))}</td>
+                <td>${escapeHtml(fmt(s.net_pf, 4))}</td>
+                <td>${escapeHtml(pct(s.win_rate))}</td>
+              </tr>
+            `).join("")
+          : "<tr><td colspan=\"6\">No trades available for cost stress.</td></tr>";
+      }
+      setText("costStressOutput", payload.text || JSON.stringify(payload, null, 2).slice(0, 5000));
+    } catch (error) {
+      setText("costStressOutput", `cost stress error: ${error.message}`);
+    } finally {
+      setButtonLoading(button, false);
+    }
+  }
+
+  // Explicit endpoint constants so the source matches the API surface.
+  const EXIT_LAB_ENDPOINTS = {
+    "profit-lock-lab": "/api/training/profit-lock-lab",
+    "fast-exit-lab": "/api/training/fast-exit-lab",
+    "time-death-reducer-lab": "/api/training/time-death-reducer-lab",
+  };
+
+  async function loadExitLab(kind) {
+    const button = $(kind === "profit-lock-lab" ? "profitLockLabBtn"
+      : kind === "fast-exit-lab" ? "fastExitLabBtn" : "timeDeathReducerLabBtn");
+    setButtonLoading(button, true);
+    try {
+      const symbol = ($("exitLabSymbol")?.value || "BTCUSDT").toUpperCase();
+      const hours = num($("exitLabHours")?.value, 168);
+      const timeframe = $("exitLabTimeframe")?.value || "5m";
+      const base = EXIT_LAB_ENDPOINTS[kind] || `/api/training/${kind}`;
+      const url = `${base}?symbol=${encodeURIComponent(symbol)}&hours=${hours}&timeframe=${encodeURIComponent(timeframe)}`;
+      const payload = await fetchJson(url);
+      const comparisons = Array.isArray(payload.comparisons) ? payload.comparisons : [];
+      const rows = $("exitLabRows");
+      if (rows) {
+        rows.innerHTML = comparisons.length
+          ? comparisons.map((c) => `
+              <tr>
+                <td>${escapeHtml(c.policy_name)}</td>
+                <td>${escapeHtml(String(c.trades ?? 0))}</td>
+                <td>${escapeHtml(fmt(c.net_ev, 6))}</td>
+                <td>${escapeHtml(fmt(c.net_pf, 4))}</td>
+                <td>${escapeHtml(fmt(c.delta_ev_vs_baseline, 6))}</td>
+                <td>${escapeHtml(pct(c.tp_pct))}</td>
+                <td>${escapeHtml(pct(c.sl_pct))}</td>
+                <td>${escapeHtml(pct(c.time_pct))}</td>
+                <td>${escapeHtml(pct(c.profit_lock_pct))}</td>
+                <td>${escapeHtml(pct(c.fast_exit_pct))}</td>
+                <td>${escapeHtml(fmt(c.avg_duration_bars, 1))}</td>
+                <td>${escapeHtml(c.decision)}</td>
+              </tr>
+            `).join("")
+          : "<tr><td colspan=\"12\">No simulated trades for this exit lab.</td></tr>";
+      }
+      const badge = $("exitLabBestBadge");
+      if (badge) {
+        const best = payload.best_policy || "no improvement";
+        badge.textContent = best ? `best: ${best}` : "no improvement";
+        badge.className = `badge ${payload.best_policy ? "badge-safe" : "badge-muted"}`;
+      }
+      setText("exitLabOutput", payload.text || JSON.stringify(payload, null, 2).slice(0, 5000));
+    } catch (error) {
+      setText("exitLabOutput", `exit lab error: ${error.message}`);
+    } finally {
+      setButtonLoading(button, false);
+    }
   }
 
   document.addEventListener("DOMContentLoaded", () => {

@@ -56,6 +56,14 @@ class ReplayTrade:
     gross_return_pct: float
     net_return_pct: float
     same_bar_stop_tp_applied: bool
+    # Phase 7B extensions for dashboard/chart consumption.
+    duration_bars: int = 0
+    mfe_pct: float = 0.0
+    mae_pct: float = 0.0
+    score: int = 0
+    regime: str = ""
+    signal_type: str = ""
+    setup_key: str = ""
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -147,6 +155,7 @@ def build_replay_payload(
             exit_row = frame.iloc[min(trade.exit_index, len(frame) - 1)]
         except IndexError:
             continue
+        mfe_pct, mae_pct = _mfe_mae_pct(frame, trade)
         payload.trades.append(ReplayTrade(
             symbol=symbol,
             side=str(trade.side),
@@ -162,9 +171,41 @@ def build_replay_payload(
             gross_return_pct=safe_float(trade.gross_return_pct),
             net_return_pct=safe_float(trade.net_return_pct),
             same_bar_stop_tp_applied=bool(trade.same_bar_worst_case_applied),
+            duration_bars=safe_int(trade.exit_index) - safe_int(trade.entry_index) + 1,
+            mfe_pct=mfe_pct,
+            mae_pct=mae_pct,
+            score=0,
+            regime="",
+            signal_type="",
+            setup_key="",
         ))
 
     return payload
+
+
+def _mfe_mae_pct(frame: pd.DataFrame, trade: Any) -> tuple[float, float]:
+    """Compute MFE/MAE from the actual candles spanning entry..exit indices."""
+    try:
+        entry_price = safe_float(trade.entry_price)
+        if entry_price <= 0:
+            return 0.0, 0.0
+        start = max(0, int(trade.entry_index))
+        end = min(len(frame), int(trade.exit_index) + 1)
+        window = frame.iloc[start:end]
+        if window.empty:
+            return 0.0, 0.0
+        high_max = safe_float(window["high"].max())
+        low_min = safe_float(window["low"].min())
+        side = str(getattr(trade, "side", "")).upper()
+        if side == "LONG":
+            mfe = (high_max - entry_price) / entry_price * 100.0
+            mae = (low_min - entry_price) / entry_price * 100.0
+        else:
+            mfe = (entry_price - low_min) / entry_price * 100.0
+            mae = (entry_price - high_max) / entry_price * 100.0
+        return mfe, mae
+    except Exception:
+        return 0.0, 0.0
 
 
 def export_replay_json(payload: ReplayPayload) -> str:

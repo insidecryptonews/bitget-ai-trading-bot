@@ -1251,6 +1251,51 @@ class ResearchLab:
         ))
         return render_policy_text(policy)
 
+    def cost_stress_summary(
+        self,
+        hours: int = 72,
+        symbols: list[str] | None = None,
+        timeframe: str = "5m",
+    ) -> str:
+        """Re-evaluate the multi-symbol backtester output under stricter costs."""
+        from .backtest_breakdown import collect_trade_records
+        from .cost_stress import evaluate_cost_stress, render_cost_stress_text
+
+        records = collect_trade_records(
+            self.config, self.db, hours=hours, symbols=symbols, timeframe=timeframe,
+        )
+        grosses = [r.gross_return_pct for r in records]
+        report = evaluate_cost_stress(grosses)
+        return render_cost_stress_text(report)
+
+    def profit_lock_lab(self, symbol: str = "BTCUSDT", hours: int = 72, timeframe: str = "5m") -> str:
+        from .exit_labs import run_profit_lock_lab, render_exit_lab_text
+        return render_exit_lab_text(run_profit_lock_lab(self.config, self.db, symbol=symbol, hours=hours, timeframe=timeframe))
+
+    def fast_exit_lab(self, symbol: str = "BTCUSDT", hours: int = 72, timeframe: str = "5m") -> str:
+        from .exit_labs import run_fast_exit_lab, render_exit_lab_text
+        return render_exit_lab_text(run_fast_exit_lab(self.config, self.db, symbol=symbol, hours=hours, timeframe=timeframe))
+
+    def time_death_reducer_lab(self, symbol: str = "BTCUSDT", hours: int = 72, timeframe: str = "5m") -> str:
+        from .exit_labs import run_time_death_reducer_lab, render_exit_lab_text
+        return render_exit_lab_text(run_time_death_reducer_lab(self.config, self.db, symbol=symbol, hours=hours, timeframe=timeframe))
+
+    def research_cockpit(
+        self,
+        latest_backtest_decision: str = "UNKNOWN",
+        latest_breakdown_decision: str = "UNKNOWN",
+        latest_policy_decision: str = "UNKNOWN",
+    ) -> str:
+        from .research_cockpit import build_cockpit_state, render_cockpit_text
+        state = build_cockpit_state(
+            self.config, self.db,
+            mode="paper",
+            latest_backtest_decision=latest_backtest_decision,
+            latest_breakdown_decision=latest_breakdown_decision,
+            latest_policy_decision=latest_policy_decision,
+        )
+        return render_cockpit_text(state)
+
     def trade_replay_export(
         self,
         symbol: str = "BTCUSDT",
@@ -1878,6 +1923,11 @@ def main() -> None:
             "real-strategy-backtest-breakdown",
             "final-policy-builder",
             "trade-replay-export",
+            "cost-stress-summary",
+            "profit-lock-lab",
+            "fast-exit-lab",
+            "time-death-reducer-lab",
+            "research-cockpit",
             "ohlcv-replay-loader-smoke-test",
             "ohlcv-replay-loader-audit",
             "duplicate-module-audit-smoke-test",
@@ -2221,6 +2271,25 @@ def main() -> None:
             max_candles=args.max_candles,
             max_trades=args.max_trades,
         ))
+    elif args.command == "cost-stress-summary":
+        symbols_arg = [s.strip() for s in (args.symbols or "").split(",") if s.strip()] or None
+        print(lab.cost_stress_summary(
+            hours=args.hours, symbols=symbols_arg, timeframe=args.timeframe,
+        ))
+    elif args.command == "profit-lock-lab":
+        symbols_arg = [s.strip() for s in (args.symbols or "").split(",") if s.strip()]
+        symbol = symbols_arg[0] if symbols_arg else "BTCUSDT"
+        print(lab.profit_lock_lab(symbol=symbol, hours=args.hours, timeframe=args.timeframe))
+    elif args.command == "fast-exit-lab":
+        symbols_arg = [s.strip() for s in (args.symbols or "").split(",") if s.strip()]
+        symbol = symbols_arg[0] if symbols_arg else "BTCUSDT"
+        print(lab.fast_exit_lab(symbol=symbol, hours=args.hours, timeframe=args.timeframe))
+    elif args.command == "time-death-reducer-lab":
+        symbols_arg = [s.strip() for s in (args.symbols or "").split(",") if s.strip()]
+        symbol = symbols_arg[0] if symbols_arg else "BTCUSDT"
+        print(lab.time_death_reducer_lab(symbol=symbol, hours=args.hours, timeframe=args.timeframe))
+    elif args.command == "research-cockpit":
+        print(lab.research_cockpit())
     elif args.command == "ohlcv-replay-loader-smoke-test":
         print(lab.ohlcv_replay_loader_smoke_test())
     elif args.command == "ohlcv-replay-loader-audit":
