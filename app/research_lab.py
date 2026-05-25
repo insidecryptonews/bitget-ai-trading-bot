@@ -1229,6 +1229,7 @@ class ResearchLab:
         """
         from .backtest_breakdown import collect_trade_records, build_breakdown, parse_group_by
         from .walk_forward_runner import build_walk_forward, WF_PASS
+        from .cost_stress import evaluate_cost_stress
         from .final_research_policy_builder import (
             PolicyBuildInput, build_policy, render_policy_text,
         )
@@ -1243,11 +1244,21 @@ class ResearchLab:
         )
         wf = build_walk_forward(records, folds=folds, min_trades_per_setup=min_trades)
         wf_status = wf.overall_status
+        stress = evaluate_cost_stress([record.gross_return_pct for record in records])
         policy = build_policy(PolicyBuildInput(
             breakdown=breakdown,
             data_quality_status=data_quality_status,
             label_quality_status=label_quality_status,
             walk_forward_status=wf_status,
+            cost_stress_status=stress.cost_stress_status,
+            cost_stress_reasons=list(stress.reasons),
+            time_exit_autopsy_status="UNKNOWN",
+            dynamic_hold_status="UNKNOWN",
+            profit_protection_status="UNKNOWN",
+            entry_exhaustion_status="UNKNOWN",
+            anti_overfit_status="UNKNOWN",
+            reversal_lab_status="RESEARCH_ONLY",
+            validation_hours=hours,
         ))
         return render_policy_text(policy)
 
@@ -1279,6 +1290,26 @@ class ResearchLab:
     def time_death_reducer_lab(self, symbol: str = "BTCUSDT", hours: int = 72, timeframe: str = "5m") -> str:
         from .exit_labs import run_time_death_reducer_lab, render_exit_lab_text
         return render_exit_lab_text(run_time_death_reducer_lab(self.config, self.db, symbol=symbol, hours=hours, timeframe=timeframe))
+
+    def time_exit_autopsy_v2(self, hours: int = 72, symbols: list[str] | None = None, timeframe: str = "5m") -> str:
+        from .time_exit_autopsy_v2 import time_exit_autopsy_v2_text
+        return time_exit_autopsy_v2_text(self.config, self.db, hours=hours, timeframe=timeframe, symbols=symbols)
+
+    def dynamic_hold_lab(self, hours: int = 72, symbols: list[str] | None = None, timeframe: str = "5m") -> str:
+        from .dynamic_hold_lab import dynamic_hold_lab_text
+        return dynamic_hold_lab_text(self.config, self.db, hours=hours, timeframe=timeframe, symbols=symbols)
+
+    def entry_exhaustion_lab(self, hours: int = 72, symbols: list[str] | None = None, timeframe: str = "5m") -> str:
+        from .entry_exhaustion_lab import entry_exhaustion_lab_text
+        return entry_exhaustion_lab_text(self.config, self.db, hours=hours, timeframe=timeframe, symbols=symbols)
+
+    def reversal_candidate_lab(self, hours: int = 72, symbols: list[str] | None = None, timeframe: str = "5m") -> str:
+        from .reversal_candidate_lab import reversal_candidate_lab_text
+        return reversal_candidate_lab_text(self.config, self.db, hours=hours, timeframe=timeframe, symbols=symbols)
+
+    def exit_policy_v2(self, hours: int = 72, symbols: list[str] | None = None, timeframe: str = "5m") -> str:
+        from .exit_policy_v2 import exit_policy_v2_text
+        return exit_policy_v2_text(self.config, self.db, hours=hours, timeframe=timeframe, symbols=symbols)
 
     def research_cockpit(
         self,
@@ -1927,6 +1958,11 @@ def main() -> None:
             "profit-lock-lab",
             "fast-exit-lab",
             "time-death-reducer-lab",
+            "time-exit-autopsy-v2",
+            "dynamic-hold-lab",
+            "entry-exhaustion-lab",
+            "reversal-candidate-lab",
+            "exit-policy-v2",
             "research-cockpit",
             "ohlcv-replay-loader-smoke-test",
             "ohlcv-replay-loader-audit",
@@ -2288,6 +2324,21 @@ def main() -> None:
         symbols_arg = [s.strip() for s in (args.symbols or "").split(",") if s.strip()]
         symbol = symbols_arg[0] if symbols_arg else "BTCUSDT"
         print(lab.time_death_reducer_lab(symbol=symbol, hours=args.hours, timeframe=args.timeframe))
+    elif args.command == "time-exit-autopsy-v2":
+        symbols_arg = [s.strip() for s in (args.symbols or "").split(",") if s.strip()] or None
+        print(lab.time_exit_autopsy_v2(hours=args.hours, symbols=symbols_arg, timeframe=args.timeframe))
+    elif args.command == "dynamic-hold-lab":
+        symbols_arg = [s.strip() for s in (args.symbols or "").split(",") if s.strip()] or None
+        print(lab.dynamic_hold_lab(hours=args.hours, symbols=symbols_arg, timeframe=args.timeframe))
+    elif args.command == "entry-exhaustion-lab":
+        symbols_arg = [s.strip() for s in (args.symbols or "").split(",") if s.strip()] or None
+        print(lab.entry_exhaustion_lab(hours=args.hours, symbols=symbols_arg, timeframe=args.timeframe))
+    elif args.command == "reversal-candidate-lab":
+        symbols_arg = [s.strip() for s in (args.symbols or "").split(",") if s.strip()] or None
+        print(lab.reversal_candidate_lab(hours=args.hours, symbols=symbols_arg, timeframe=args.timeframe))
+    elif args.command == "exit-policy-v2":
+        symbols_arg = [s.strip() for s in (args.symbols or "").split(",") if s.strip()] or None
+        print(lab.exit_policy_v2(hours=args.hours, symbols=symbols_arg, timeframe=args.timeframe))
     elif args.command == "research-cockpit":
         print(lab.research_cockpit())
     elif args.command == "ohlcv-replay-loader-smoke-test":

@@ -25,6 +25,7 @@
         <button type="button" class="nav-link nav-item" data-target="edge-policy">Edge &amp; Policy</button>
         <button type="button" class="nav-link nav-item" data-target="cost-stress">Cost Stress</button>
         <button type="button" class="nav-link nav-item" data-target="exit-labs">Exit Labs</button>
+        <button type="button" class="nav-link nav-item" data-target="phase8-research">Phase 8 Labs</button>
         <button type="button" class="nav-link nav-item" data-target="score-incubator">Score &amp; Incubator</button>
         <button type="button" class="nav-link nav-item" data-target="pipeline-cost">Pipeline &amp; Costs</button>
         <button type="button" class="nav-link nav-item" data-target="time-death">Time Death</button>
@@ -70,6 +71,7 @@
         <button type="button" class="mobile-nav-item" data-target="edge-policy">Edge</button>
         <button type="button" class="mobile-nav-item" data-target="cost-stress">Stress</button>
         <button type="button" class="mobile-nav-item" data-target="exit-labs">Exits</button>
+        <button type="button" class="mobile-nav-item" data-target="phase8-research">P8</button>
         <button type="button" class="mobile-nav-item" data-target="score-incubator">Score</button>
         <button type="button" class="mobile-nav-item" data-target="pipeline-cost">Costs</button>
         <button type="button" class="mobile-nav-item" data-target="execution-safety">Safety</button>
@@ -326,6 +328,75 @@
           <details class="report-details">
             <summary>Ver salida tecnica exit labs</summary>
             <pre id="exitLabOutput">Sin cargar todavia.</pre>
+          </details>
+        </section>
+
+        <section id="phase8-research" class="section">
+          <div class="section-title">
+            <div>
+              <span class="eyebrow">Phase 8 / counterfactual research</span>
+              <h2>Time Exit / Dynamic Hold / Reversal Labs</h2>
+            </div>
+            <p>Research only. Counterfactual exit analysis. No automatic promotion. 72h can suggest; 720h validates.</p>
+          </div>
+          <div class="phase8-controls replay-controls">
+            <label>Symbols
+              <input id="phase8Symbols" type="text" value="BTCUSDT,ETHUSDT" maxlength="180">
+            </label>
+            <label>Hours
+              <input id="phase8Hours" type="number" min="24" max="720" value="72">
+            </label>
+            <label>Timeframe
+              <select id="phase8Timeframe">
+                <option value="5m" selected>5m</option>
+                <option value="15m">15m</option>
+                <option value="1h">1h</option>
+              </select>
+            </label>
+            <button id="phase8QuickBtn" class="btn btn-primary">Run 72h BTC/ETH</button>
+            <button id="phase8FullBtn" class="btn btn-secondary">Prepare 720h CLI</button>
+          </div>
+          <div class="decision-grid">
+            <article class="decision-card warning">
+              <span class="panel-label">Time Exit Autopsy V2</span>
+              <strong id="phase8TimeExitState">not loaded</strong>
+              <p id="phase8TimeExitText">Premature TIME, missed profit and avoided loss stay counterfactual only.</p>
+            </article>
+            <article class="decision-card info">
+              <span class="panel-label">Dynamic Hold Lab</span>
+              <strong id="phase8HoldState">not loaded</strong>
+              <p id="phase8HoldText">Hold longer only if prefix direction remains valid; punished for exposure and drawdown.</p>
+            </article>
+            <article class="decision-card info">
+              <span class="panel-label">Exit Policy Comparator V2</span>
+              <strong id="phase8ExitPolicyState">not loaded</strong>
+              <p id="phase8ExitPolicyText">Profit lock/trailing/time death policies are compared bar-by-bar.</p>
+            </article>
+            <article class="decision-card warning">
+              <span class="panel-label">Entry Exhaustion</span>
+              <strong id="phase8ExhaustionState">not loaded</strong>
+              <p id="phase8ExhaustionText">Late shorts after dumps and late longs after pumps are research risks, not runtime blocks.</p>
+            </article>
+            <article class="decision-card warning">
+              <span class="panel-label">Reversal Candidate Lab</span>
+              <strong id="phase8ReversalState">not loaded</strong>
+              <p id="phase8ReversalText">No auto flip. Reversal confirmation is measured as counterfactual research.</p>
+            </article>
+            <article class="decision-card danger">
+              <span class="panel-label">Final recommendation</span>
+              <strong>NO LIVE</strong>
+              <p>Current 720h evidence remains negative until proven otherwise.</p>
+            </article>
+          </div>
+          <div class="table-shell">
+            <table class="compact">
+              <thead><tr><th>lab</th><th>trades</th><th>key metric</th><th>status</th><th>note</th></tr></thead>
+              <tbody id="phase8Rows"><tr><td colspan="5">Sin datos cargados.</td></tr></tbody>
+            </table>
+          </div>
+          <details class="report-details">
+            <summary>Ver salida tecnica Phase 8</summary>
+            <pre id="phase8Output">Sin cargar todavia.</pre>
           </details>
         </section>
 

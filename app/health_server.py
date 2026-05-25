@@ -160,6 +160,16 @@ def start_health_server(
                 "/api/training/time-death-reducer-lab",
                 "/api/training/trade-replay",
                 "/api/training/final-policy-builder",
+                "/api/training/time-exit-autopsy-v2",
+                "/api/training/dynamic-hold-lab",
+                "/api/training/entry-exhaustion-lab",
+                "/api/training/reversal-candidate-lab",
+                "/api/training/exit-policy-v2",
+                "/api/time-exit-autopsy-v2",
+                "/api/dynamic-hold-lab",
+                "/api/entry-exhaustion-lab",
+                "/api/reversal-candidate-lab",
+                "/api/exit-policy-v2",
                 "/api/training/full-report",
                 "/api/training/export/full.txt",
                 "/api/training/export/full.json",
@@ -452,6 +462,21 @@ def start_health_server(
                 return
             if path == "/api/training/final-policy-builder":
                 self._send_json(_final_policy_builder(config, db, query))
+                return
+            if path in {"/api/training/time-exit-autopsy-v2", "/api/time-exit-autopsy-v2"}:
+                self._send_json(_phase8_research_endpoint(config, db, query, "time_exit_autopsy_v2"))
+                return
+            if path in {"/api/training/dynamic-hold-lab", "/api/dynamic-hold-lab"}:
+                self._send_json(_phase8_research_endpoint(config, db, query, "dynamic_hold_lab"))
+                return
+            if path in {"/api/training/entry-exhaustion-lab", "/api/entry-exhaustion-lab"}:
+                self._send_json(_phase8_research_endpoint(config, db, query, "entry_exhaustion_lab"))
+                return
+            if path in {"/api/training/reversal-candidate-lab", "/api/reversal-candidate-lab"}:
+                self._send_json(_phase8_research_endpoint(config, db, query, "reversal_candidate_lab"))
+                return
+            if path in {"/api/training/exit-policy-v2", "/api/exit-policy-v2"}:
+                self._send_json(_phase8_research_endpoint(config, db, query, "exit_policy_v2"))
                 return
             if path == "/api/training/full-report":
                 payload = _dashboard_full_report(config, db, query)
@@ -1758,6 +1783,13 @@ def _final_policy_builder(config: Any | None, db: Any | None, query: dict[str, l
             data_quality_status="UNKNOWN",
             label_quality_status="UNKNOWN",
             walk_forward_status="NOT_RUN",
+            time_exit_autopsy_status="UNKNOWN",
+            dynamic_hold_status="UNKNOWN",
+            profit_protection_status="UNKNOWN",
+            entry_exhaustion_status="UNKNOWN",
+            anti_overfit_status="UNKNOWN",
+            reversal_lab_status="RESEARCH_ONLY",
+            validation_hours=hours,
         )
         if include_cost_stress:
             try:
@@ -1781,6 +1813,12 @@ def _final_policy_builder(config: Any | None, db: Any | None, query: dict[str, l
             "walk_forward_status": policy.walk_forward_status,
             "cost_stress_status": inputs.cost_stress_status,
             "cost_stress_reasons": list(inputs.cost_stress_reasons),
+            "time_exit_autopsy_status": inputs.time_exit_autopsy_status,
+            "dynamic_hold_status": inputs.dynamic_hold_status,
+            "profit_protection_status": inputs.profit_protection_status,
+            "entry_exhaustion_status": inputs.entry_exhaustion_status,
+            "anti_overfit_status": inputs.anti_overfit_status,
+            "validation_hours": inputs.validation_hours,
             "net_ev": policy.net_ev,
             "net_pf": policy.net_pf,
             "tp_pct": policy.tp_pct,
@@ -1799,6 +1837,104 @@ def _final_policy_builder(config: Any | None, db: Any | None, query: dict[str, l
             "research_only": True,
             "can_send_real_orders": False,
         }
+
+
+def _phase8_research_endpoint(config: Any | None, db: Any | None, query: dict[str, list[str]], lab_name: str) -> dict[str, Any]:
+    hours = _query_int(query, "hours", 72)
+    timeframe = (query.get("timeframe") or ["5m"])[0]
+    symbols = _query_symbols(query)
+    allow_heavy = _query_bool(query, "allow_heavy", False)
+    symbol_count = len(symbols or [])
+    if not allow_heavy and (hours > 168 or symbol_count > 2):
+        cli_command = _phase8_cli_command(lab_name)
+        symbol_arg = ",".join(symbols or [])
+        command = f"python -m app.research_lab {cli_command} --hours {hours} --timeframe {timeframe}"
+        if symbol_arg:
+            command += f" --symbols {symbol_arg}"
+        return {
+            "status": "HEAVY_RESEARCH_SKIPPED",
+            "skipped_heavy": True,
+            "reason": "phase8_endpoint_heavy_run_blocked_use_cli_or_allow_heavy",
+            "lab_name": lab_name,
+            "requested_hours": hours,
+            "requested_timeframe": timeframe,
+            "requested_symbols": symbols or [],
+            "cli_command": command,
+            "text": (
+                "PHASE 8 HEAVY RESEARCH SKIPPED\n"
+                f"lab: {lab_name}\n"
+                f"requested_hours: {hours}\n"
+                f"requested_symbols: {symbol_arg or 'default'}\n"
+                f"run_cli: {command}\n"
+                "research_only: true\n"
+                "final_recommendation: NO LIVE"
+            ),
+            "research_only": True,
+            "paper_filter_enabled": False,
+            "can_send_real_orders": False,
+            "final_recommendation": "NO LIVE",
+        }
+    if config is None or db is None:
+        return {
+            "error": f"{lab_name} unavailable",
+            "final_recommendation": "NO LIVE",
+            "research_only": True,
+            "paper_filter_enabled": False,
+            "can_send_real_orders": False,
+        }
+    try:
+        if lab_name == "time_exit_autopsy_v2":
+            from .time_exit_autopsy_v2 import render_time_exit_autopsy_v2_text, run_time_exit_autopsy_v2
+            report = run_time_exit_autopsy_v2(config, db, hours=hours, timeframe=timeframe, symbols=symbols)
+            payload = report.as_dict()
+            payload["text"] = render_time_exit_autopsy_v2_text(report)
+        elif lab_name == "dynamic_hold_lab":
+            from .dynamic_hold_lab import render_dynamic_hold_lab_text, run_dynamic_hold_lab
+            report = run_dynamic_hold_lab(config, db, hours=hours, timeframe=timeframe, symbols=symbols)
+            payload = report.as_dict()
+            payload["text"] = render_dynamic_hold_lab_text(report)
+        elif lab_name == "entry_exhaustion_lab":
+            from .entry_exhaustion_lab import render_entry_exhaustion_lab_text, run_entry_exhaustion_lab
+            report = run_entry_exhaustion_lab(config, db, hours=hours, timeframe=timeframe, symbols=symbols)
+            payload = report.as_dict()
+            payload["text"] = render_entry_exhaustion_lab_text(report)
+        elif lab_name == "reversal_candidate_lab":
+            from .reversal_candidate_lab import render_reversal_candidate_lab_text, run_reversal_candidate_lab
+            report = run_reversal_candidate_lab(config, db, hours=hours, timeframe=timeframe, symbols=symbols)
+            payload = report.as_dict()
+            payload["text"] = render_reversal_candidate_lab_text(report)
+        elif lab_name == "exit_policy_v2":
+            from .exit_policy_v2 import render_exit_policy_v2_text, run_exit_policy_v2
+            report = run_exit_policy_v2(config, db, hours=hours, timeframe=timeframe, symbols=symbols)
+            payload = report.as_dict()
+            payload["text"] = render_exit_policy_v2_text(report)
+        else:
+            payload = {"error": "unknown phase8 lab"}
+        payload["research_only"] = True
+        payload["paper_filter_enabled"] = False
+        payload["can_send_real_orders"] = False
+        payload["final_recommendation"] = "NO LIVE"
+        return payload
+    except Exception as exc:
+        return {
+            "error": str(exc)[:300],
+            "lab_name": lab_name,
+            "final_recommendation": "NO LIVE",
+            "research_only": True,
+            "paper_filter_enabled": False,
+            "can_send_real_orders": False,
+        }
+
+
+def _phase8_cli_command(lab_name: str) -> str:
+    mapping = {
+        "time_exit_autopsy_v2": "time-exit-autopsy-v2",
+        "dynamic_hold_lab": "dynamic-hold-lab",
+        "entry_exhaustion_lab": "entry-exhaustion-lab",
+        "reversal_candidate_lab": "reversal-candidate-lab",
+        "exit_policy_v2": "exit-policy-v2",
+    }
+    return mapping.get(lab_name, lab_name.replace("_", "-"))
 
 
 def _dashboard_full_report(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
@@ -1988,6 +2124,19 @@ def _query_int(query: dict[str, list[str]], key: str, default: int) -> int:
         return max(1, int((query.get(key) or [default])[0]))
     except (TypeError, ValueError):
         return default
+
+
+def _query_bool(query: dict[str, list[str]], key: str, default: bool = False) -> bool:
+    raw = (query.get(key) or [default])[0]
+    if isinstance(raw, bool):
+        return raw
+    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _query_symbols(query: dict[str, list[str]]) -> list[str] | None:
+    raw = (query.get("symbols") or [""])[0]
+    symbols = [part.strip().upper() for part in str(raw or "").split(",") if part.strip()]
+    return symbols or None
 
 
 def _public_value(value: Any) -> Any:

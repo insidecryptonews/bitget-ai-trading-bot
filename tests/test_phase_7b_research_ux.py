@@ -259,6 +259,18 @@ def _breakdown_with_candidate() -> BreakdownReport:
     )
 
 
+def _phase8_pass_kwargs() -> dict[str, object]:
+    return {
+        "time_exit_autopsy_status": "PASS",
+        "dynamic_hold_status": "PASS",
+        "profit_protection_status": "PASS",
+        "entry_exhaustion_status": "PASS",
+        "reversal_lab_status": "RESEARCH_ONLY",
+        "anti_overfit_status": "PASS",
+        "validation_hours": 720,
+    }
+
+
 def test_policy_builder_blocks_when_cost_stress_fail():
     policy = build_policy(PolicyBuildInput(
         breakdown=_breakdown_with_candidate(),
@@ -279,6 +291,7 @@ def test_policy_builder_paper_ready_when_cost_stress_pass():
         data_quality_status="OK", label_quality_status="OK",
         walk_forward_status=WF_PASS,
         cost_stress_status="PASS",
+        **_phase8_pass_kwargs(),
     ))
     assert policy.decision == POLICY_READY_FOR_PAPER
     assert any("cost_stress_status=PASS" in r for r in policy.reasons)
@@ -306,6 +319,7 @@ def test_policy_builder_blocks_pf_999_with_low_sample():
         data_quality_status="OK", label_quality_status="OK",
         walk_forward_status=WF_PASS,
         cost_stress_status="PASS",
+        **_phase8_pass_kwargs(),
     ))
     assert policy.decision != POLICY_READY_FOR_PAPER
     assert policy.paper_filter_enabled is False
@@ -345,6 +359,7 @@ def test_policy_builder_exit_lab_summary_propagates_to_reasons():
         walk_forward_status=WF_PASS,
         cost_stress_status="PASS",
         exit_lab_summary={"profit_lock": "applied", "fast_exit": "applied"},
+        **_phase8_pass_kwargs(),
     ))
     assert policy.decision == POLICY_READY_FOR_PAPER
     assert any("exit_lab_summary_consumed" in r for r in policy.reasons)

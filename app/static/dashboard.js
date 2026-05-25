@@ -940,6 +940,8 @@
     $("profitLockLabBtn")?.addEventListener("click", () => loadExitLab("profit-lock-lab"));
     $("fastExitLabBtn")?.addEventListener("click", () => loadExitLab("fast-exit-lab"));
     $("timeDeathReducerLabBtn")?.addEventListener("click", () => loadExitLab("time-death-reducer-lab"));
+    $("phase8QuickBtn")?.addEventListener("click", () => loadPhase8Labs({ hours: 72, symbols: "BTCUSDT,ETHUSDT" }));
+    $("phase8FullBtn")?.addEventListener("click", () => loadPhase8Labs({ hours: 720, symbols: "BTCUSDT,ETHUSDT,SOLUSDT,XRPUSDT,DOGEUSDT,BNBUSDT,LINKUSDT,AVAXUSDT,ADAUSDT,DOTUSDT" }));
 
     bindSafeNavigation();
   }
@@ -1169,6 +1171,106 @@
       setText("exitLabOutput", `exit lab error: ${error.message}`);
     } finally {
       setButtonLoading(button, false);
+    }
+  }
+
+  const PHASE8_ENDPOINTS = [
+    { key: "timeExit", label: "Time Exit Autopsy V2", endpoint: "/api/training/time-exit-autopsy-v2" },
+    { key: "dynamicHold", label: "Dynamic Hold Lab", endpoint: "/api/training/dynamic-hold-lab" },
+    { key: "entryExhaustion", label: "Entry Exhaustion Lab", endpoint: "/api/training/entry-exhaustion-lab" },
+    { key: "reversal", label: "Reversal Candidate Lab", endpoint: "/api/training/reversal-candidate-lab" },
+    { key: "exitPolicy", label: "Exit Policy Comparator V2", endpoint: "/api/training/exit-policy-v2" },
+  ];
+
+  async function loadPhase8Labs(options = {}) {
+    const quickBtn = $("phase8QuickBtn");
+    const fullBtn = $("phase8FullBtn");
+    setButtonLoading(quickBtn, true, "Analizando...");
+    setButtonLoading(fullBtn, true, "Analizando...");
+    const hours = options.hours || num($("phase8Hours")?.value, 72);
+    const symbols = options.symbols || ($("phase8Symbols")?.value || "BTCUSDT,ETHUSDT");
+    const timeframe = $("phase8Timeframe")?.value || "5m";
+    setText("phase8Output", `Running Phase 8 research labs hours=${hours} symbols=${symbols}. Heavy dashboard requests are guarded. Research only. NO LIVE.`);
+    const rows = [];
+    const outputs = [];
+    try {
+      for (const item of PHASE8_ENDPOINTS) {
+        const url = `${item.endpoint}?hours=${hours}&timeframe=${encodeURIComponent(timeframe)}&symbols=${encodeURIComponent(symbols)}`;
+        const payload = await fetchJson(url);
+        outputs.push(payload.text || JSON.stringify(payload, null, 2));
+        rows.push(renderPhase8Row(item.label, payload));
+        updatePhase8Cards(item.key, payload);
+      }
+      setHtml("phase8Rows", rows.join(""));
+      setText("phase8Output", outputs.join("\n\n"));
+    } catch (error) {
+      setText("phase8Output", `phase8 error: ${error.message}`);
+    } finally {
+      setButtonLoading(quickBtn, false);
+      setButtonLoading(fullBtn, false);
+    }
+  }
+
+  function renderPhase8Row(label, payload) {
+    const trades = payload.total_trades ?? payload.baseline_trades ?? payload.trades ?? 0;
+    const metric = payload.premature_time_exit_count !== undefined
+      ? `premature=${payload.premature_time_exit_count} missed_avg=${fmt(payload.missed_profit_average, 4)}`
+      : payload.best_policy
+        ? `best=${payload.best_policy} decision=${payload.best_policy_decision || "research"}`
+        : payload.late_chase_count !== undefined
+          ? `late=${payload.late_chase_count} reversal=${payload.reversal_risk_count}`
+          : payload.reversal_opportunities !== undefined
+            ? `opps=${payload.reversal_opportunities} false=${payload.false_reversal_traps}`
+            : Array.isArray(payload.policies)
+              ? `policies=${payload.policies.length}`
+              : "research";
+    const status = payload.skipped_heavy ? "SKIPPED_HEAVY" : payload.error ? "ERROR" : payload.final_recommendation || "NO LIVE";
+    return `<tr>
+      <td>${escapeHtml(label)}</td>
+      <td>${escapeHtml(String(trades))}</td>
+      <td>${escapeHtml(metric)}</td>
+      <td>${escapeHtml(status)}</td>
+      <td>research_only=${escapeHtml(String(payload.research_only !== false))}; no activation</td>
+    </tr>`;
+  }
+
+  function updatePhase8Cards(key, payload) {
+    if (payload.skipped_heavy) {
+      const skippedText = "Heavy 720h run skipped in dashboard. Use CLI command shown below.";
+      if (key === "timeExit") {
+        setText("phase8TimeExitState", "SKIPPED_HEAVY");
+        setText("phase8TimeExitText", skippedText);
+      } else if (key === "dynamicHold") {
+        setText("phase8HoldState", "SKIPPED_HEAVY");
+        setText("phase8HoldText", skippedText);
+      } else if (key === "entryExhaustion") {
+        setText("phase8ExhaustionState", "SKIPPED_HEAVY");
+        setText("phase8ExhaustionText", skippedText);
+      } else if (key === "reversal") {
+        setText("phase8ReversalState", "SKIPPED_HEAVY");
+        setText("phase8ReversalText", skippedText);
+      } else if (key === "exitPolicy") {
+        setText("phase8ExitPolicyState", "SKIPPED_HEAVY");
+        setText("phase8ExitPolicyText", skippedText);
+      }
+      return;
+    }
+    if (key === "timeExit") {
+      setText("phase8TimeExitState", payload.error ? "ERROR" : `premature=${payload.premature_time_exit_count ?? 0}`);
+      setText("phase8TimeExitText", `TIME trades=${payload.time_horizon_trades ?? 0}, missed_avg=${fmt(payload.missed_profit_average, 4)}. Counterfactual only.`);
+    } else if (key === "dynamicHold") {
+      const best = Array.isArray(payload.policies) ? payload.policies.find((p) => p.decision === "IMPROVES_BASELINE_RESEARCH_ONLY") : null;
+      setText("phase8HoldState", best ? "WATCH_ONLY" : "NEED_MORE_DATA");
+      setText("phase8HoldText", best ? `${best.policy_name} improved in research only.` : "No validated dynamic hold policy loaded or stable yet.");
+    } else if (key === "entryExhaustion") {
+      setText("phase8ExhaustionState", `late=${payload.late_chase_count ?? 0}`);
+      setText("phase8ExhaustionText", `reversal_risk=${payload.reversal_risk_count ?? 0}; no runtime block applied.`);
+    } else if (key === "reversal") {
+      setText("phase8ReversalState", `opps=${payload.reversal_opportunities ?? 0}`);
+      setText("phase8ReversalText", `false traps=${payload.false_reversal_traps ?? 0}; auto_flip=false.`);
+    } else if (key === "exitPolicy") {
+      setText("phase8ExitPolicyState", payload.best_policy || "none");
+      setText("phase8ExitPolicyText", payload.sensitivity_warning || "72h can suggest; 720h validates.");
     }
   }
 

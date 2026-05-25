@@ -336,6 +336,18 @@ def test_policy_builder_blocks_without_walk_forward_pass():
     assert policy.paper_filter_enabled is False
 
 
+def _phase8_pass_kwargs() -> dict[str, object]:
+    return {
+        "time_exit_autopsy_status": "PASS",
+        "dynamic_hold_status": "PASS",
+        "profit_protection_status": "PASS",
+        "entry_exhaustion_status": "PASS",
+        "reversal_lab_status": "RESEARCH_ONLY",
+        "anti_overfit_status": "PASS",
+        "validation_hours": 720,
+    }
+
+
 def test_policy_builder_ready_for_paper_when_all_gates_pass():
     breakdown = _breakdown_with_candidate()
     policy = build_policy(PolicyBuildInput(
@@ -344,6 +356,7 @@ def test_policy_builder_ready_for_paper_when_all_gates_pass():
         label_quality_status="OK",
         walk_forward_status=WF_PASS,
         cost_stress_status="PASS",
+        **_phase8_pass_kwargs(),
     ))
     assert policy.decision == POLICY_READY_FOR_PAPER
     # Still must NOT auto-activate
@@ -376,6 +389,7 @@ def test_policy_builder_blocks_low_net_ev_below_gate():
         data_quality_status="OK", label_quality_status="OK",
         walk_forward_status=WF_PASS,
         cost_stress_status="PASS",
+        **_phase8_pass_kwargs(),
     ))
     assert policy.decision == NO_EDGE_FOUND
 
@@ -387,6 +401,7 @@ def test_policy_builder_export_json_is_valid():
         data_quality_status="OK", label_quality_status="OK",
         walk_forward_status=WF_PASS,
         cost_stress_status="PASS",
+        **_phase8_pass_kwargs(),
     ))
     text = export_policy_json(policy)
     parsed = json.loads(text)
@@ -402,6 +417,7 @@ def test_policy_render_text_marks_no_live():
         data_quality_status="OK", label_quality_status="OK",
         walk_forward_status=WF_PASS,
         cost_stress_status="PASS",
+        **_phase8_pass_kwargs(),
     ))
     text = render_policy_text(policy)
     assert "POLICY_READY_FOR_PAPER" in text

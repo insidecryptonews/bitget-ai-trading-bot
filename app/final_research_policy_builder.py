@@ -92,6 +92,15 @@ class PolicyBuildInput:
     cost_stress_status: str = "UNKNOWN"    # PASS / WARN / FAIL / UNKNOWN
     cost_stress_reasons: list[str] = field(default_factory=list)
     exit_lab_summary: dict[str, Any] = field(default_factory=dict)
+    # Phase 8 research gates. UNKNOWN is blocking for paper readiness; callers
+    # that intentionally prove the gate can pass must set PASS/STABLE_WATCH.
+    time_exit_autopsy_status: str = "UNKNOWN"
+    dynamic_hold_status: str = "UNKNOWN"
+    profit_protection_status: str = "UNKNOWN"
+    entry_exhaustion_status: str = "UNKNOWN"
+    reversal_lab_status: str = "RESEARCH_ONLY"
+    anti_overfit_status: str = "UNKNOWN"
+    validation_hours: int = 0
 
 
 def _empty_policy(decision: str, reasons: list[str], data_quality: str = "UNKNOWN", walk_forward: str = "NOT_RUN") -> CandidatePolicy:
@@ -289,6 +298,43 @@ def build_policy(
             generated_at=iso_utc(),
         )
 
+    phase8_blockers: list[str] = []
+    if inputs.validation_hours < 720:
+        phase8_blockers.append(f"validation_hours={inputs.validation_hours}_below_720")
+    if inputs.time_exit_autopsy_status == "FAIL":
+        phase8_blockers.append("time_exit_autopsy_status=FAIL")
+    if inputs.dynamic_hold_status not in {"PASS", "STABLE_WATCH"}:
+        phase8_blockers.append(f"dynamic_hold_status={inputs.dynamic_hold_status}")
+    if inputs.profit_protection_status not in {"PASS", "NOT_SELECTED"}:
+        phase8_blockers.append(f"profit_protection_status={inputs.profit_protection_status}")
+    if inputs.entry_exhaustion_status == "FAIL":
+        phase8_blockers.append("entry_exhaustion_status=FAIL")
+    if inputs.anti_overfit_status != "PASS":
+        phase8_blockers.append(f"anti_overfit_status={inputs.anti_overfit_status}")
+    if inputs.reversal_lab_status not in {"RESEARCH_ONLY", "PASS", "WATCH"}:
+        phase8_blockers.append(f"reversal_lab_status={inputs.reversal_lab_status}")
+    if phase8_blockers:
+        best = survivors[0]
+        return CandidatePolicy(
+            candidate_policy_id=f"phase8_gates_not_pass_{best.group_key.replace('|','_')[:48]}",
+            allowed_symbols=[], allowed_sides=[], allowed_regimes=[], allowed_score_buckets=[],
+            blocked_setups=blocked_setups,
+            exit_policy_candidate="current_exit",
+            min_trades=best.trades, net_ev=best.net_ev, net_pf=best.net_pf,
+            tp_pct=best.tp_pct, sl_pct=best.sl_pct, time_pct=best.time_pct,
+            max_drawdown=best.max_drawdown,
+            confidence="LOW",
+            decision=NEED_MORE_DATA,
+            reasons=[
+                "candidates_pass_gross_and_cost_gates",
+                "promote_to_PAPER_READY_blocked_until_phase8_research_gates_pass",
+                *phase8_blockers,
+            ],
+            data_quality_status=inputs.data_quality_status,
+            walk_forward_status=inputs.walk_forward_status,
+            generated_at=iso_utc(),
+        )
+
     # All gates passed — but we STILL do not auto-activate; flag the policy as
     # ready and the operator must flip the switch manually.
     best = survivors[0]
@@ -299,6 +345,7 @@ def build_policy(
         extra_reasons.append("cost_stress_status=PASS_survives_022_scenario")
     if inputs.exit_lab_summary:
         extra_reasons.append(f"exit_lab_summary_consumed={list(inputs.exit_lab_summary.keys())}")
+    extra_reasons.append("phase8_research_gates_passed")
     return CandidatePolicy(
         candidate_policy_id=f"paper_ready_{best.group_key.replace('|','_')[:48]}",
         allowed_symbols=sorted({_token(g.group_key, 0) for g in survivors}),

@@ -154,6 +154,11 @@ class DashboardProReporter:
             ("Duplicate Module Audit", lambda: lab.duplicate_module_audit()),
             ("Quant Metrics Reliability", lambda: "QUANT METRICS RELIABILITY START\n12bps_fraction: 0.0012\npf_inf_low_sample: LOW_SAMPLE\nsample_less_than_100: LOW_SAMPLE\nfinal_recommendation: NO LIVE\nQUANT METRICS RELIABILITY END"),
             ("Exit Policy V3", lambda: lab.exit_policy_v3_backtest(hours=hours)),
+            ("Time Exit Autopsy V2", lambda: lab.time_exit_autopsy_v2(hours=hours)),
+            ("Dynamic Hold Lab", lambda: lab.dynamic_hold_lab(hours=hours)),
+            ("Entry Exhaustion Lab", lambda: lab.entry_exhaustion_lab(hours=hours)),
+            ("Reversal Candidate Lab", lambda: lab.reversal_candidate_lab(hours=hours)),
+            ("Exit Policy Comparator V2", lambda: lab.exit_policy_v2(hours=hours)),
             ("Sudden Move Detector", lambda: lab.sudden_move_detector(hours=hours)),
             ("Pre-Move Intelligence V2", lambda: lab.pre_move_v2(hours=hours)),
             ("Walk Forward Validation", lambda: lab.walk_forward_validator(hours=max(hours, 72))),
@@ -269,6 +274,11 @@ class DashboardProReporter:
             ("Operational Intelligence", lambda: lab.operational_intelligence_audit(hours=hours)),
             ("Real Strategy Backtester", lambda: lab.real_strategy_backtest(hours=max(hours, 72))),
             ("OHLCV Summary", self._ohlcv_summary_section),
+            ("Time Exit Autopsy V2", lambda: self._phase8_short_section("time-exit-autopsy-v2")),
+            ("Dynamic Hold Lab", lambda: self._phase8_short_section("dynamic-hold-lab")),
+            ("Entry Exhaustion Lab", lambda: self._phase8_short_section("entry-exhaustion-lab")),
+            ("Reversal Candidate Lab", lambda: self._phase8_short_section("reversal-candidate-lab")),
+            ("Exit Policy Comparator V2", lambda: self._phase8_short_section("exit-policy-v2")),
             ("Candidate Promotion V2", lambda: lab.candidate_promotion_v2(hours=hours)),
             ("Strategy Research Library", lambda: lab.strategy_research_library(hours=max(hours, 72))),
             ("Data Pipeline Diagnosis 24h", lambda: lab.data_pipeline_diagnosis(hours=hours)),
@@ -604,6 +614,21 @@ class DashboardProReporter:
         lines.append("final_recommendation: NO LIVE")
         lines.append("OHLCV SUMMARY END")
         return "\n".join(lines)
+
+    def _phase8_short_section(self, command: str) -> str:
+        return "\n".join(
+            [
+                f"PHASE 8 {command.upper()} SHORT STATUS START",
+                "status: available_cli_only_in_short_report",
+                f"command_72h: python -m app.research_lab {command} --hours 72 --timeframe 5m --symbols BTCUSDT,ETHUSDT",
+                f"command_720h: python -m app.research_lab {command} --hours 720 --timeframe 5m --symbols BTCUSDT,ETHUSDT,SOLUSDT,XRPUSDT,DOGEUSDT,BNBUSDT,LINKUSDT,AVAXUSDT,ADAUSDT,DOTUSDT",
+                "note: short report does not run heavy Phase 8 replay labs; dashboard buttons and CLI run them manually",
+                "research_only: true",
+                "paper_filter_enabled: false",
+                "final_recommendation: NO LIVE",
+                f"PHASE 8 {command.upper()} SHORT STATUS END",
+            ]
+        )
 
 
 def build_dashboard_full_report(config: Any, db: Any, *, hours: int = 24, logger: Any | None = None) -> dict[str, Any]:
