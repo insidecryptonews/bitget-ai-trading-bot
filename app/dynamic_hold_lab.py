@@ -140,6 +140,9 @@ def run_dynamic_hold_lab(
     symbols: str | list[str] | None = None,
 ) -> DynamicHoldReport:
     bundle = load_replay_trade_contexts(config, db, hours=hours, timeframe=timeframe, symbols=symbols)
+    warnings = list(bundle.warnings)
+    if int(bundle.hours) >= 720 and len(bundle.symbols) > 3:
+        warnings.append("heavy_720h_multi_symbol_run_recommend_cli_batches_or_per_symbol")
     baseline_trades = [
         DynamicHoldTrade(
             symbol=ctx.symbol,
@@ -168,7 +171,7 @@ def run_dynamic_hold_lab(
         baseline_trades=baseline_summary.trades,
         policies=results,
         loader_statuses=bundle.loader_statuses,
-        warnings=bundle.warnings,
+        warnings=warnings,
     )
 
 

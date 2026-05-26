@@ -165,11 +165,15 @@ def start_health_server(
                 "/api/training/entry-exhaustion-lab",
                 "/api/training/reversal-candidate-lab",
                 "/api/training/exit-policy-v2",
+                "/api/training/phase8-candidate-validator",
+                "/api/training/phase8-cost-stress",
                 "/api/time-exit-autopsy-v2",
                 "/api/dynamic-hold-lab",
                 "/api/entry-exhaustion-lab",
                 "/api/reversal-candidate-lab",
                 "/api/exit-policy-v2",
+                "/api/phase8-candidate-validator",
+                "/api/phase8-cost-stress",
                 "/api/training/full-report",
                 "/api/training/export/full.txt",
                 "/api/training/export/full.json",
@@ -477,6 +481,12 @@ def start_health_server(
                 return
             if path in {"/api/training/exit-policy-v2", "/api/exit-policy-v2"}:
                 self._send_json(_phase8_research_endpoint(config, db, query, "exit_policy_v2"))
+                return
+            if path in {"/api/training/phase8-candidate-validator", "/api/phase8-candidate-validator"}:
+                self._send_json(_phase8_research_endpoint(config, db, query, "phase8_candidate_validator"))
+                return
+            if path in {"/api/training/phase8-cost-stress", "/api/phase8-cost-stress"}:
+                self._send_json(_phase8_research_endpoint(config, db, query, "phase8_cost_stress"))
                 return
             if path == "/api/training/full-report":
                 payload = _dashboard_full_report(config, db, query)
@@ -1789,6 +1799,7 @@ def _final_policy_builder(config: Any | None, db: Any | None, query: dict[str, l
             entry_exhaustion_status="UNKNOWN",
             anti_overfit_status="UNKNOWN",
             reversal_lab_status="RESEARCH_ONLY",
+            phase8_candidate_validator_status="UNKNOWN",
             validation_hours=hours,
         )
         if include_cost_stress:
@@ -1818,6 +1829,7 @@ def _final_policy_builder(config: Any | None, db: Any | None, query: dict[str, l
             "profit_protection_status": inputs.profit_protection_status,
             "entry_exhaustion_status": inputs.entry_exhaustion_status,
             "anti_overfit_status": inputs.anti_overfit_status,
+            "phase8_candidate_validator_status": inputs.phase8_candidate_validator_status,
             "validation_hours": inputs.validation_hours,
             "net_ev": policy.net_ev,
             "net_pf": policy.net_pf,
@@ -1908,6 +1920,20 @@ def _phase8_research_endpoint(config: Any | None, db: Any | None, query: dict[st
             report = run_exit_policy_v2(config, db, hours=hours, timeframe=timeframe, symbols=symbols)
             payload = report.as_dict()
             payload["text"] = render_exit_policy_v2_text(report)
+        elif lab_name == "phase8_candidate_validator":
+            from .phase8_candidate_validator import render_phase8_validator_text, run_phase8_candidate_validator
+            report = run_phase8_candidate_validator(config, db, hours=hours, timeframe=timeframe, symbols=symbols)
+            payload = report.as_dict()
+            payload["text"] = render_phase8_validator_text(report)
+        elif lab_name == "phase8_cost_stress":
+            from .phase8_candidate_validator import phase8_cost_stress_text
+            policy = (query.get("policy") or ["late_entry_block_plus_dynamic_hold"])[0]
+            text = phase8_cost_stress_text(config, db, hours=hours, timeframe=timeframe, symbols=symbols, policy=policy)
+            payload = {
+                "status": "OK",
+                "policy_name": policy,
+                "text": text,
+            }
         else:
             payload = {"error": "unknown phase8 lab"}
         payload["research_only"] = True
@@ -1933,6 +1959,8 @@ def _phase8_cli_command(lab_name: str) -> str:
         "entry_exhaustion_lab": "entry-exhaustion-lab",
         "reversal_candidate_lab": "reversal-candidate-lab",
         "exit_policy_v2": "exit-policy-v2",
+        "phase8_candidate_validator": "phase8-candidate-validator",
+        "phase8_cost_stress": "phase8-cost-stress",
     }
     return mapping.get(lab_name, lab_name.replace("_", "-"))
 

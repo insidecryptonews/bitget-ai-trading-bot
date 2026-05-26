@@ -1180,6 +1180,7 @@
     { key: "entryExhaustion", label: "Entry Exhaustion Lab", endpoint: "/api/training/entry-exhaustion-lab" },
     { key: "reversal", label: "Reversal Candidate Lab", endpoint: "/api/training/reversal-candidate-lab" },
     { key: "exitPolicy", label: "Exit Policy Comparator V2", endpoint: "/api/training/exit-policy-v2" },
+    { key: "validator", label: "Phase 8 Candidate Validator", endpoint: "/api/training/phase8-candidate-validator" },
   ];
 
   async function loadPhase8Labs(options = {}) {
@@ -1219,11 +1220,13 @@
         ? `best=${payload.best_policy} decision=${payload.best_policy_decision || "research"}`
         : payload.late_chase_count !== undefined
           ? `late=${payload.late_chase_count} reversal=${payload.reversal_risk_count}`
-          : payload.reversal_opportunities !== undefined
-            ? `opps=${payload.reversal_opportunities} false=${payload.false_reversal_traps}`
-            : Array.isArray(payload.policies)
-              ? `policies=${payload.policies.length}`
-              : "research";
+            : payload.reversal_opportunities !== undefined
+              ? `opps=${payload.reversal_opportunities} false=${payload.false_reversal_traps}`
+              : payload.best_candidate_id
+                ? `best=${payload.best_candidate_id} decision=${payload.best_decision}`
+              : Array.isArray(payload.policies)
+                ? `policies=${payload.policies.length}`
+                : "research";
     const status = payload.skipped_heavy ? "SKIPPED_HEAVY" : payload.error ? "ERROR" : payload.final_recommendation || "NO LIVE";
     return `<tr>
       <td>${escapeHtml(label)}</td>
@@ -1252,6 +1255,9 @@
       } else if (key === "exitPolicy") {
         setText("phase8ExitPolicyState", "SKIPPED_HEAVY");
         setText("phase8ExitPolicyText", skippedText);
+      } else if (key === "validator") {
+        setText("phase8ValidatorState", "SKIPPED_HEAVY");
+        setText("phase8ValidatorText", skippedText);
       }
       return;
     }
@@ -1271,6 +1277,9 @@
     } else if (key === "exitPolicy") {
       setText("phase8ExitPolicyState", payload.best_policy || "none");
       setText("phase8ExitPolicyText", payload.sensitivity_warning || "72h can suggest; 720h validates.");
+    } else if (key === "validator") {
+      setText("phase8ValidatorState", payload.best_decision || "NEED_MORE_DATA");
+      setText("phase8ValidatorText", `best=${payload.best_candidate_id || "none"}; paper_filter=false; manual review only.`);
     }
   }
 

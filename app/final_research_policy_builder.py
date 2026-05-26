@@ -100,6 +100,7 @@ class PolicyBuildInput:
     entry_exhaustion_status: str = "UNKNOWN"
     reversal_lab_status: str = "RESEARCH_ONLY"
     anti_overfit_status: str = "UNKNOWN"
+    phase8_candidate_validator_status: str = "UNKNOWN"
     validation_hours: int = 0
 
 
@@ -311,6 +312,8 @@ def build_policy(
         phase8_blockers.append("entry_exhaustion_status=FAIL")
     if inputs.anti_overfit_status != "PASS":
         phase8_blockers.append(f"anti_overfit_status={inputs.anti_overfit_status}")
+    if inputs.phase8_candidate_validator_status not in {"PASS", "PAPER_DEMO_READY_MANUAL_REVIEW_ONLY"}:
+        phase8_blockers.append(f"phase8_candidate_validator_status={inputs.phase8_candidate_validator_status}")
     if inputs.reversal_lab_status not in {"RESEARCH_ONLY", "PASS", "WATCH"}:
         phase8_blockers.append(f"reversal_lab_status={inputs.reversal_lab_status}")
     if phase8_blockers:
@@ -346,6 +349,7 @@ def build_policy(
     if inputs.exit_lab_summary:
         extra_reasons.append(f"exit_lab_summary_consumed={list(inputs.exit_lab_summary.keys())}")
     extra_reasons.append("phase8_research_gates_passed")
+    extra_reasons.append(f"phase8_candidate_validator_status={inputs.phase8_candidate_validator_status}")
     return CandidatePolicy(
         candidate_policy_id=f"paper_ready_{best.group_key.replace('|','_')[:48]}",
         allowed_symbols=sorted({_token(g.group_key, 0) for g in survivors}),

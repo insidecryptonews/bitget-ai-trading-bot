@@ -344,6 +344,7 @@ def _phase8_pass_kwargs() -> dict[str, object]:
         "entry_exhaustion_status": "PASS",
         "reversal_lab_status": "RESEARCH_ONLY",
         "anti_overfit_status": "PASS",
+        "phase8_candidate_validator_status": "PAPER_DEMO_READY_MANUAL_REVIEW_ONLY",
         "validation_hours": 720,
     }
 

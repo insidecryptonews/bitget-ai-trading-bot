@@ -1311,6 +1311,42 @@ class ResearchLab:
         from .exit_policy_v2 import exit_policy_v2_text
         return exit_policy_v2_text(self.config, self.db, hours=hours, timeframe=timeframe, symbols=symbols)
 
+    def phase8_candidate_validator(
+        self,
+        hours: int = 720,
+        symbols: list[str] | None = None,
+        timeframe: str = "5m",
+        min_trades: int = 200,
+        folds: int = 4,
+    ) -> str:
+        from .phase8_candidate_validator import phase8_candidate_validator_text
+        return phase8_candidate_validator_text(
+            self.config,
+            self.db,
+            hours=hours,
+            timeframe=timeframe,
+            symbols=symbols,
+            min_trades=min_trades,
+            folds=folds,
+        )
+
+    def phase8_cost_stress(
+        self,
+        hours: int = 720,
+        symbols: list[str] | None = None,
+        timeframe: str = "5m",
+        policy: str = "late_entry_block_plus_dynamic_hold",
+    ) -> str:
+        from .phase8_candidate_validator import phase8_cost_stress_text
+        return phase8_cost_stress_text(
+            self.config,
+            self.db,
+            hours=hours,
+            timeframe=timeframe,
+            symbols=symbols,
+            policy=policy,
+        )
+
     def research_cockpit(
         self,
         latest_backtest_decision: str = "UNKNOWN",
@@ -1963,6 +1999,8 @@ def main() -> None:
             "entry-exhaustion-lab",
             "reversal-candidate-lab",
             "exit-policy-v2",
+            "phase8-candidate-validator",
+            "phase8-cost-stress",
             "research-cockpit",
             "ohlcv-replay-loader-smoke-test",
             "ohlcv-replay-loader-audit",
@@ -2069,6 +2107,7 @@ def main() -> None:
     parser.add_argument("--label-quality-status", default="OK", help="Label quality status (OK/WARNING/BAD) passed to final-policy-builder.")
     parser.add_argument("--max-candles", type=int, default=1200, help="Max candles for trade-replay-export.")
     parser.add_argument("--max-trades", type=int, default=200, help="Max trades for trade-replay-export.")
+    parser.add_argument("--policy", default="late_entry_block_plus_dynamic_hold", help="Phase 8 policy name for cost stress / validator helpers.")
     args = parser.parse_args()
     config = load_config()
     logger = setup_logger()
@@ -2339,6 +2378,23 @@ def main() -> None:
     elif args.command == "exit-policy-v2":
         symbols_arg = [s.strip() for s in (args.symbols or "").split(",") if s.strip()] or None
         print(lab.exit_policy_v2(hours=args.hours, symbols=symbols_arg, timeframe=args.timeframe))
+    elif args.command == "phase8-candidate-validator":
+        symbols_arg = [s.strip() for s in (args.symbols or "").split(",") if s.strip()] or None
+        print(lab.phase8_candidate_validator(
+            hours=args.hours,
+            symbols=symbols_arg,
+            timeframe=args.timeframe,
+            min_trades=args.min_trades,
+            folds=args.folds,
+        ))
+    elif args.command == "phase8-cost-stress":
+        symbols_arg = [s.strip() for s in (args.symbols or "").split(",") if s.strip()] or None
+        print(lab.phase8_cost_stress(
+            hours=args.hours,
+            symbols=symbols_arg,
+            timeframe=args.timeframe,
+            policy=args.policy,
+        ))
     elif args.command == "research-cockpit":
         print(lab.research_cockpit())
     elif args.command == "ohlcv-replay-loader-smoke-test":
