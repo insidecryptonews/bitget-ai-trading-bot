@@ -283,6 +283,12 @@ class DashboardProReporter:
             ("Exit Policy Comparator V2", lambda: self._phase8_short_section("exit-policy-v2")),
             ("Phase 8 Candidate Validator", lambda: self._phase8_short_section("phase8-candidate-validator")),
             ("Phase 8 Cost Stress", lambda: self._phase8_short_section("phase8-cost-stress")),
+            ("Phase 9 Paper Readiness", lambda: self._phase9_short_section("phase9-paper-readiness")),
+            ("DOT Regime Diagnosis", lambda: self._phase9_short_section("dot-regime-diagnosis")),
+            ("DOT Regime Filter Lab", lambda: self._phase9_short_section("dot-regime-filter-lab")),
+            ("Net Profit Lock Lab", lambda: self._phase9_short_section("net-profit-lock-lab")),
+            ("Fast Signal Shadow", lambda: self._phase9_short_section("fast-signal-shadow")),
+            ("Research Pack", lambda: self._phase9_short_section("research-pack")),
             ("Candidate Promotion V2", lambda: lab.candidate_promotion_v2(hours=hours)),
             ("Strategy Research Library", lambda: lab.strategy_research_library(hours=max(hours, 72))),
             ("Data Pipeline Diagnosis 24h", lambda: lab.data_pipeline_diagnosis(hours=hours)),
@@ -631,6 +637,31 @@ class DashboardProReporter:
                 "paper_filter_enabled: false",
                 "final_recommendation: NO LIVE",
                 f"PHASE 8 {command.upper()} SHORT STATUS END",
+            ]
+        )
+
+    def _phase9_short_section(self, command: str) -> str:
+        if command == "research-pack":
+            cli = "python -m app.research_lab research-pack --hours 24"
+            note = "Research pack is lightweight; it includes no secrets and no database dump."
+        elif command == "fast-signal-shadow":
+            cli = "python -m app.research_lab fast-signal-shadow --hours 72 --timeframe 5m --symbols BTCUSDT,ETHUSDT,DOTUSDT"
+            note = "Fast signal shadow is data-freshness gated and disabled for execution."
+        else:
+            cli = f"python -m app.research_lab {command} --hours 720 --timeframe 5m --symbols DOTUSDT --folds 4"
+            note = "Phase 9 readiness labs are CLI-first; dashboard 720h requests return SKIPPED_HEAVY unless allow_heavy is explicit."
+        return "\n".join(
+            [
+                f"PHASE 9 {command.upper()} SHORT STATUS START",
+                "status: available_cli_only_in_short_report",
+                f"command: {cli}",
+                f"note: {note}",
+                "research_only: true",
+                "paper_filter_enabled: false",
+                "can_send_real_orders: false",
+                "activation: disabled",
+                "final_recommendation: NO LIVE",
+                f"PHASE 9 {command.upper()} SHORT STATUS END",
             ]
         )
 

@@ -167,6 +167,12 @@ def start_health_server(
                 "/api/training/exit-policy-v2",
                 "/api/training/phase8-candidate-validator",
                 "/api/training/phase8-cost-stress",
+                "/api/training/dot-regime-diagnosis",
+                "/api/training/dot-regime-filter-lab",
+                "/api/training/phase9-paper-readiness",
+                "/api/training/net-profit-lock-lab",
+                "/api/training/fast-signal-shadow",
+                "/api/training/research-pack",
                 "/api/time-exit-autopsy-v2",
                 "/api/dynamic-hold-lab",
                 "/api/entry-exhaustion-lab",
@@ -174,6 +180,12 @@ def start_health_server(
                 "/api/exit-policy-v2",
                 "/api/phase8-candidate-validator",
                 "/api/phase8-cost-stress",
+                "/api/dot-regime-diagnosis",
+                "/api/dot-regime-filter-lab",
+                "/api/phase9-paper-readiness",
+                "/api/net-profit-lock-lab",
+                "/api/fast-signal-shadow",
+                "/api/research-pack",
                 "/api/training/full-report",
                 "/api/training/export/full.txt",
                 "/api/training/export/full.json",
@@ -487,6 +499,29 @@ def start_health_server(
                 return
             if path in {"/api/training/phase8-cost-stress", "/api/phase8-cost-stress"}:
                 self._send_json(_phase8_research_endpoint(config, db, query, "phase8_cost_stress"))
+                return
+            if path in {"/api/training/dot-regime-diagnosis", "/api/dot-regime-diagnosis"}:
+                self._send_json(_phase9_research_endpoint(config, db, query, "dot_regime_diagnosis"))
+                return
+            if path in {"/api/training/dot-regime-filter-lab", "/api/dot-regime-filter-lab"}:
+                self._send_json(_phase9_research_endpoint(config, db, query, "dot_regime_filter_lab"))
+                return
+            if path in {"/api/training/phase9-paper-readiness", "/api/phase9-paper-readiness"}:
+                self._send_json(_phase9_research_endpoint(config, db, query, "phase9_paper_readiness"))
+                return
+            if path in {"/api/training/net-profit-lock-lab", "/api/net-profit-lock-lab"}:
+                self._send_json(_phase9_research_endpoint(config, db, query, "net_profit_lock_lab"))
+                return
+            if path in {"/api/training/fast-signal-shadow", "/api/fast-signal-shadow"}:
+                self._send_json(_phase9_research_endpoint(config, db, query, "fast_signal_shadow"))
+                return
+            if path in {"/api/training/research-pack", "/api/research-pack"}:
+                payload = _research_pack_endpoint(config, db, query)
+                fmt = (query.get("format") or ["json"])[0].lower()
+                if fmt == "text":
+                    self._send_text(str(payload.get("text") or ""))
+                else:
+                    self._send_json(payload)
                 return
             if path == "/api/training/full-report":
                 payload = _dashboard_full_report(config, db, query)
@@ -1963,6 +1998,149 @@ def _phase8_cli_command(lab_name: str) -> str:
         "phase8_cost_stress": "phase8-cost-stress",
     }
     return mapping.get(lab_name, lab_name.replace("_", "-"))
+
+
+def _phase9_research_endpoint(config: Any | None, db: Any | None, query: dict[str, list[str]], lab_name: str) -> dict[str, Any]:
+    hours = _query_int(query, "hours", 72)
+    timeframe = (query.get("timeframe") or ["5m"])[0]
+    symbols = _query_symbols(query)
+    allow_heavy = _query_bool(query, "allow_heavy", False)
+    folds = _query_int(query, "folds", 4)
+    min_trades = _query_int(query, "min_trades", 250)
+    symbol_count = len(symbols or [])
+    heavy_symbol_limit = 3 if lab_name == "fast_signal_shadow" else 2
+    if not allow_heavy and (hours > 168 or symbol_count > heavy_symbol_limit):
+        cli_command = _phase9_cli_command(lab_name)
+        symbol_arg = ",".join(symbols or [])
+        command = f"python -m app.research_lab {cli_command} --hours {hours} --timeframe {timeframe}"
+        if symbol_arg:
+            command += f" --symbols {symbol_arg}"
+        if lab_name in {"dot_regime_diagnosis", "dot_regime_filter_lab", "phase9_paper_readiness"}:
+            command += f" --folds {folds}"
+        if lab_name == "phase9_paper_readiness":
+            command += f" --min-trades {min_trades}"
+        return {
+            "status": "HEAVY_RESEARCH_SKIPPED",
+            "skipped_heavy": True,
+            "reason": "phase9_endpoint_heavy_run_blocked_use_cli_or_allow_heavy",
+            "lab_name": lab_name,
+            "requested_hours": hours,
+            "requested_timeframe": timeframe,
+            "requested_symbols": symbols or [],
+            "cli_command": command,
+            "text": (
+                "PHASE 9 HEAVY RESEARCH SKIPPED\n"
+                f"lab: {lab_name}\n"
+                f"requested_hours: {hours}\n"
+                f"requested_symbols: {symbol_arg or 'default'}\n"
+                f"run_cli: {command}\n"
+                "research_only: true\n"
+                "paper_filter_enabled: false\n"
+                "can_send_real_orders: false\n"
+                "activation: disabled\n"
+                "final_recommendation: NO LIVE"
+            ),
+            "research_only": True,
+            "paper_filter_enabled": False,
+            "can_send_real_orders": False,
+            "activation": "disabled",
+            "final_recommendation": "NO LIVE",
+        }
+    if config is None or db is None:
+        return {
+            "error": f"{lab_name} unavailable",
+            "final_recommendation": "NO LIVE",
+            "research_only": True,
+            "paper_filter_enabled": False,
+            "can_send_real_orders": False,
+            "activation": "disabled",
+        }
+    try:
+        if lab_name == "dot_regime_diagnosis":
+            from .dot_regime_diagnosis import render_dot_regime_diagnosis_text, run_dot_regime_diagnosis
+            report = run_dot_regime_diagnosis(config, db, hours=hours, timeframe=timeframe, symbols=symbols, folds=folds)
+            payload = report.as_dict()
+            payload["text"] = render_dot_regime_diagnosis_text(report)
+        elif lab_name == "dot_regime_filter_lab":
+            from .dot_regime_filter_lab import render_dot_regime_filter_lab_text, run_dot_regime_filter_lab
+            report = run_dot_regime_filter_lab(config, db, hours=hours, timeframe=timeframe, symbols=symbols, folds=folds)
+            payload = report.as_dict()
+            payload["text"] = render_dot_regime_filter_lab_text(report)
+        elif lab_name == "phase9_paper_readiness":
+            from .phase9_paper_readiness_validator import render_phase9_paper_readiness_text, run_phase9_paper_readiness
+            report = run_phase9_paper_readiness(
+                config, db, hours=hours, timeframe=timeframe, symbols=symbols, min_trades=min_trades, folds=folds,
+            )
+            payload = report.as_dict()
+            payload["text"] = render_phase9_paper_readiness_text(report)
+        elif lab_name == "net_profit_lock_lab":
+            from .net_profit_lock_lab import render_net_profit_lock_text, run_net_profit_lock_lab
+            report = run_net_profit_lock_lab(config, db, hours=hours, timeframe=timeframe, symbols=symbols)
+            payload = report.as_dict()
+            payload["text"] = render_net_profit_lock_text(report)
+        elif lab_name == "fast_signal_shadow":
+            from .fast_signal_shadow import render_fast_signal_shadow_text, run_fast_signal_shadow
+            report = run_fast_signal_shadow(config, db, hours=hours, timeframe=timeframe, symbols=symbols)
+            payload = report.as_dict()
+            payload["text"] = render_fast_signal_shadow_text(report)
+        else:
+            payload = {"error": "unknown phase9 lab"}
+        payload["research_only"] = True
+        payload["paper_filter_enabled"] = False
+        payload["can_send_real_orders"] = False
+        payload["activation"] = "disabled"
+        payload["final_recommendation"] = "NO LIVE"
+        return payload
+    except Exception as exc:
+        return {
+            "error": str(exc)[:300],
+            "lab_name": lab_name,
+            "final_recommendation": "NO LIVE",
+            "research_only": True,
+            "paper_filter_enabled": False,
+            "can_send_real_orders": False,
+            "activation": "disabled",
+        }
+
+
+def _phase9_cli_command(lab_name: str) -> str:
+    mapping = {
+        "dot_regime_diagnosis": "dot-regime-diagnosis",
+        "dot_regime_filter_lab": "dot-regime-filter-lab",
+        "phase9_paper_readiness": "phase9-paper-readiness",
+        "net_profit_lock_lab": "net-profit-lock-lab",
+        "fast_signal_shadow": "fast-signal-shadow",
+    }
+    return mapping.get(lab_name, lab_name.replace("_", "-"))
+
+
+def _research_pack_endpoint(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
+    hours = _query_int(query, "hours", 24)
+    if config is None or db is None:
+        return {
+            "error": "research pack unavailable",
+            "research_only": True,
+            "paper_filter_enabled": False,
+            "can_send_real_orders": False,
+            "final_recommendation": "NO LIVE",
+        }
+    try:
+        from .research_pack import build_research_pack, render_research_pack_text
+        payload = build_research_pack(config, db, hours=min(hours, 24))
+        payload["text"] = render_research_pack_text(payload)
+        payload["research_only"] = True
+        payload["paper_filter_enabled"] = False
+        payload["can_send_real_orders"] = False
+        payload["final_recommendation"] = "NO LIVE"
+        return payload
+    except Exception as exc:
+        return {
+            "error": str(exc)[:300],
+            "research_only": True,
+            "paper_filter_enabled": False,
+            "can_send_real_orders": False,
+            "final_recommendation": "NO LIVE",
+        }
 
 
 def _dashboard_full_report(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:

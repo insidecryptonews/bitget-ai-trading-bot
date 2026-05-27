@@ -26,6 +26,7 @@
         <button type="button" class="nav-link nav-item" data-target="cost-stress">Cost Stress</button>
         <button type="button" class="nav-link nav-item" data-target="exit-labs">Exit Labs</button>
         <button type="button" class="nav-link nav-item" data-target="phase8-research">Phase 8 Labs</button>
+        <button type="button" class="nav-link nav-item" data-target="phase9-readiness">Phase 9 Readiness</button>
         <button type="button" class="nav-link nav-item" data-target="score-incubator">Score &amp; Incubator</button>
         <button type="button" class="nav-link nav-item" data-target="pipeline-cost">Pipeline &amp; Costs</button>
         <button type="button" class="nav-link nav-item" data-target="time-death">Time Death</button>
@@ -72,6 +73,7 @@
         <button type="button" class="mobile-nav-item" data-target="cost-stress">Stress</button>
         <button type="button" class="mobile-nav-item" data-target="exit-labs">Exits</button>
         <button type="button" class="mobile-nav-item" data-target="phase8-research">P8</button>
+        <button type="button" class="mobile-nav-item" data-target="phase9-readiness">P9</button>
         <button type="button" class="mobile-nav-item" data-target="score-incubator">Score</button>
         <button type="button" class="mobile-nav-item" data-target="pipeline-cost">Costs</button>
         <button type="button" class="mobile-nav-item" data-target="execution-safety">Safety</button>
@@ -402,6 +404,76 @@
           <details class="report-details">
             <summary>Ver salida tecnica Phase 8</summary>
             <pre id="phase8Output">Sin cargar todavia.</pre>
+          </details>
+        </section>
+
+        <section id="phase9-readiness" class="section">
+          <div class="section-title">
+            <div>
+              <span class="eyebrow">Phase 9 / pre-paper readiness</span>
+              <h2>Research Command Center</h2>
+            </div>
+            <p>Preparacion demo/paper manual. Sin activacion automatica. 720h desde dashboard devuelve CLI salvo allow_heavy explicito.</p>
+          </div>
+          <div class="phase9-controls replay-controls">
+            <label>Symbols
+              <input id="phase9Symbols" type="text" value="DOTUSDT" maxlength="180">
+            </label>
+            <label>Hours
+              <input id="phase9Hours" type="number" min="24" max="720" value="72">
+            </label>
+            <label>Timeframe
+              <select id="phase9Timeframe">
+                <option value="5m" selected>5m</option>
+                <option value="15m">15m</option>
+                <option value="1h">1h</option>
+              </select>
+            </label>
+            <button id="phase9QuickBtn" class="btn btn-primary">Run 72h DOT</button>
+            <button id="phase9FullBtn" class="btn btn-secondary">Prepare 720h CLI</button>
+            <button id="researchPackBtn" class="btn btn-secondary">GENERAR PACK PARA CHATGPT</button>
+          </div>
+          <div class="decision-grid">
+            <article class="decision-card warning">
+              <span class="panel-label">Phase 9 Paper Readiness</span>
+              <strong id="phase9ReadinessState">not loaded</strong>
+              <p id="phase9ReadinessText">PAPER_DEMO_READY solo puede ser manual review, nunca activacion.</p>
+            </article>
+            <article class="decision-card info">
+              <span class="panel-label">DOT fold diagnostics</span>
+              <strong id="phase9FoldState">not loaded</strong>
+              <p id="phase9FoldText">Fold 1 negativo debe quedar visible y bloqueante si no pasa gates.</p>
+            </article>
+            <article class="decision-card warning">
+              <span class="panel-label">Cost stress / walk-forward</span>
+              <strong id="phase9GateState">not loaded</strong>
+              <p id="phase9GateText">Cost stress PASS y walk-forward PASS son obligatorios.</p>
+            </article>
+            <article class="decision-card info">
+              <span class="panel-label">Net profit / fees</span>
+              <strong id="phase9NetProfitState">not loaded</strong>
+              <p id="phase9NetProfitText">Verde bruto no cuenta si el neto post-fees no compensa.</p>
+            </article>
+            <article class="decision-card warning">
+              <span class="panel-label">Fast signal shadow</span>
+              <strong id="phase9FastSignalState">not loaded</strong>
+              <p id="phase9FastSignalText">ENTER_NOW queda bloqueado si freshness no es OK.</p>
+            </article>
+            <article class="decision-card danger">
+              <span class="panel-label">Final recommendation</span>
+              <strong>NO LIVE</strong>
+              <p>Paper filter sigue OFF. Candidate shadow monitor sigue OFF.</p>
+            </article>
+          </div>
+          <div class="table-shell">
+            <table class="compact">
+              <thead><tr><th>lab</th><th>status</th><th>key metric</th><th>note</th></tr></thead>
+              <tbody id="phase9Rows"><tr><td colspan="4">Sin datos cargados.</td></tr></tbody>
+            </table>
+          </div>
+          <details class="report-details">
+            <summary>Ver salida tecnica Phase 9 / Research Pack</summary>
+            <pre id="phase9Output">Sin cargar todavia.</pre>
           </details>
         </section>
 

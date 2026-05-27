@@ -942,6 +942,9 @@
     $("timeDeathReducerLabBtn")?.addEventListener("click", () => loadExitLab("time-death-reducer-lab"));
     $("phase8QuickBtn")?.addEventListener("click", () => loadPhase8Labs({ hours: 72, symbols: "BTCUSDT,ETHUSDT" }));
     $("phase8FullBtn")?.addEventListener("click", () => loadPhase8Labs({ hours: 720, symbols: "BTCUSDT,ETHUSDT,SOLUSDT,XRPUSDT,DOGEUSDT,BNBUSDT,LINKUSDT,AVAXUSDT,ADAUSDT,DOTUSDT" }));
+    $("phase9QuickBtn")?.addEventListener("click", () => loadPhase9Labs({ hours: 72, symbols: "DOTUSDT" }));
+    $("phase9FullBtn")?.addEventListener("click", () => loadPhase9Labs({ hours: 720, symbols: "DOTUSDT" }));
+    $("researchPackBtn")?.addEventListener("click", loadResearchPack);
 
     bindSafeNavigation();
   }
@@ -1280,6 +1283,117 @@
     } else if (key === "validator") {
       setText("phase8ValidatorState", payload.best_decision || "NEED_MORE_DATA");
       setText("phase8ValidatorText", `best=${payload.best_candidate_id || "none"}; paper_filter=false; manual review only.`);
+    }
+  }
+
+  const PHASE9_ENDPOINTS = [
+    { key: "readiness", label: "Phase 9 Paper Readiness", endpoint: "/api/training/phase9-paper-readiness" },
+    { key: "diagnosis", label: "DOT Regime Diagnosis", endpoint: "/api/training/dot-regime-diagnosis" },
+    { key: "filter", label: "DOT Regime Filter Lab", endpoint: "/api/training/dot-regime-filter-lab" },
+    { key: "netProfit", label: "Net Profit Lock Lab", endpoint: "/api/training/net-profit-lock-lab" },
+    { key: "fastSignal", label: "Fast Signal Shadow", endpoint: "/api/training/fast-signal-shadow" },
+  ];
+
+  async function loadPhase9Labs(options = {}) {
+    const quickBtn = $("phase9QuickBtn");
+    const fullBtn = $("phase9FullBtn");
+    setButtonLoading(quickBtn, true, "Analizando...");
+    setButtonLoading(fullBtn, true, "Preparando...");
+    const hours = options.hours || num($("phase9Hours")?.value, 72);
+    const symbols = options.symbols || ($("phase9Symbols")?.value || "DOTUSDT");
+    const timeframe = $("phase9Timeframe")?.value || "5m";
+    const rows = [];
+    const outputs = [];
+    setText("phase9Output", `Running Phase 9 research labs hours=${hours} symbols=${symbols}. Heavy runs are CLI-first. Research only. NO LIVE.`);
+    try {
+      for (const item of PHASE9_ENDPOINTS) {
+        const url = `${item.endpoint}?hours=${hours}&timeframe=${encodeURIComponent(timeframe)}&symbols=${encodeURIComponent(symbols)}&folds=4&min_trades=250`;
+        const payload = await fetchJson(url);
+        outputs.push(payload.text || JSON.stringify(payload, null, 2));
+        rows.push(renderPhase9Row(item.label, payload));
+        updatePhase9Cards(item.key, payload);
+      }
+      setHtml("phase9Rows", rows.join(""));
+      setText("phase9Output", outputs.join("\n\n"));
+    } catch (error) {
+      setText("phase9Output", `phase9 error: ${error.message}`);
+    } finally {
+      setButtonLoading(quickBtn, false);
+      setButtonLoading(fullBtn, false);
+    }
+  }
+
+  function renderPhase9Row(label, payload) {
+    const status = payload.skipped_heavy ? "SKIPPED_HEAVY" : payload.best_decision || payload.decision || payload.status || (payload.error ? "ERROR" : "RESEARCH_ONLY");
+    const metric = payload.best_candidate_id
+      ? `best=${payload.best_candidate_id}`
+      : payload.trades_total !== undefined
+        ? `trades=${payload.trades_total}`
+        : payload.contexts_count !== undefined
+          ? `contexts=${payload.contexts_count}`
+          : payload.summary
+            ? JSON.stringify(payload.summary)
+            : payload.cli_command || "research";
+    const note = payload.skipped_heavy
+      ? `run CLI: ${payload.cli_command || "see output"}`
+      : `research_only=${String(payload.research_only !== false)}; paper_filter=false; NO LIVE`;
+    return `<tr>
+      <td>${escapeHtml(label)}</td>
+      <td>${escapeHtml(status)}</td>
+      <td>${escapeHtml(metric)}</td>
+      <td>${escapeHtml(note)}</td>
+    </tr>`;
+  }
+
+  function updatePhase9Cards(key, payload) {
+    if (payload.skipped_heavy) {
+      const skippedText = `720h dashboard run skipped. CLI: ${payload.cli_command || "see output"}`;
+      if (key === "readiness") {
+        setText("phase9ReadinessState", "SKIPPED_HEAVY");
+        setText("phase9ReadinessText", skippedText);
+      } else if (key === "diagnosis" || key === "filter") {
+        setText("phase9FoldState", "SKIPPED_HEAVY");
+        setText("phase9FoldText", skippedText);
+      } else if (key === "netProfit") {
+        setText("phase9NetProfitState", "SKIPPED_HEAVY");
+        setText("phase9NetProfitText", skippedText);
+      } else if (key === "fastSignal") {
+        setText("phase9FastSignalState", "SKIPPED_HEAVY");
+        setText("phase9FastSignalText", skippedText);
+      }
+      return;
+    }
+    if (key === "readiness") {
+      setText("phase9ReadinessState", payload.best_decision || payload.error || "NEED_DATA");
+      setText("phase9ReadinessText", `best=${payload.best_candidate_id || "none"}; paper_filter=false; manual review only.`);
+      setText("phase9GateState", `wf/cost: ${payload.best_decision || "unknown"}`);
+      setText("phase9GateText", "Cost stress, walk-forward, anti-overfit, freshness and sample gates remain mandatory.");
+    } else if (key === "diagnosis") {
+      setText("phase9FoldState", payload.decision || "NEED_DATA");
+      setText("phase9FoldText", `folds=${payload.folds || 0}; trades=${payload.trades_total || 0}; no auto-promotion.`);
+    } else if (key === "filter") {
+      setText("phase9GateState", payload.decision || "FILTER_RESEARCH_ONLY");
+      setText("phase9GateText", `filters=${Array.isArray(payload.results) ? payload.results.length : 0}; paper/demo still disabled.`);
+    } else if (key === "netProfit") {
+      const best = Array.isArray(payload.scenarios) ? payload.scenarios.find((s) => s.scenario === "stress_0_25") || payload.scenarios[0] : null;
+      setText("phase9NetProfitState", best ? fmt(best.net_ev, 6) : "NEED_DATA");
+      setText("phase9NetProfitText", best ? `${best.scenario}: pf=${fmt(best.net_pf, 4)} promotion_eligible=${String(best.promotion_eligible)}` : "No net-profit sample loaded.");
+    } else if (key === "fastSignal") {
+      setText("phase9FastSignalState", payload.summary ? JSON.stringify(payload.summary) : "NEED_DATA");
+      setText("phase9FastSignalText", "ENTER_NOW is still shadow-only and blocked if data freshness is stale.");
+    }
+  }
+
+  async function loadResearchPack() {
+    const button = $("researchPackBtn");
+    setButtonLoading(button, true, "Generando...");
+    try {
+      const text = await fetchText("/api/research-pack?hours=24&format=text");
+      setText("phase9Output", text);
+    } catch (error) {
+      setText("phase9Output", `research pack error: ${error.message}`);
+    } finally {
+      setButtonLoading(button, false);
     }
   }
 

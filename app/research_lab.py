@@ -1347,6 +1347,71 @@ class ResearchLab:
             policy=policy,
         )
 
+    def dot_regime_diagnosis(
+        self,
+        hours: int = 720,
+        symbols: list[str] | None = None,
+        timeframe: str = "5m",
+        folds: int = 4,
+    ) -> str:
+        from .dot_regime_diagnosis import dot_regime_diagnosis_text
+        return dot_regime_diagnosis_text(
+            self.config, self.db, hours=hours, timeframe=timeframe, symbols=symbols, folds=folds,
+        )
+
+    def dot_regime_filter_lab(
+        self,
+        hours: int = 720,
+        symbols: list[str] | None = None,
+        timeframe: str = "5m",
+        folds: int = 4,
+    ) -> str:
+        from .dot_regime_filter_lab import dot_regime_filter_lab_text
+        return dot_regime_filter_lab_text(
+            self.config, self.db, hours=hours, timeframe=timeframe, symbols=symbols, folds=folds,
+        )
+
+    def phase9_paper_readiness(
+        self,
+        hours: int = 720,
+        symbols: list[str] | None = None,
+        timeframe: str = "5m",
+        min_trades: int = 250,
+        folds: int = 4,
+    ) -> str:
+        from .phase9_paper_readiness_validator import phase9_paper_readiness_text
+        return phase9_paper_readiness_text(
+            self.config,
+            self.db,
+            hours=hours,
+            timeframe=timeframe,
+            symbols=symbols,
+            min_trades=min_trades,
+            folds=folds,
+        )
+
+    def net_profit_lock_lab(
+        self,
+        hours: int = 720,
+        symbols: list[str] | None = None,
+        timeframe: str = "5m",
+    ) -> str:
+        from .net_profit_lock_lab import net_profit_lock_text
+        return net_profit_lock_text(self.config, self.db, hours=hours, timeframe=timeframe, symbols=symbols)
+
+    def fast_signal_shadow(
+        self,
+        hours: int = 72,
+        symbols: list[str] | None = None,
+        timeframe: str = "5m",
+    ) -> str:
+        from .fast_signal_shadow import fast_signal_shadow_text
+        return fast_signal_shadow_text(self.config, self.db, hours=hours, timeframe=timeframe, symbols=symbols)
+
+    def research_pack(self, hours: int = 24) -> str:
+        from .research_pack import build_research_pack, render_research_pack_text
+        return render_research_pack_text(build_research_pack(self.config, self.db, hours=hours))
+
     def research_cockpit(
         self,
         latest_backtest_decision: str = "UNKNOWN",
@@ -2001,6 +2066,12 @@ def main() -> None:
             "exit-policy-v2",
             "phase8-candidate-validator",
             "phase8-cost-stress",
+            "dot-regime-diagnosis",
+            "dot-regime-filter-lab",
+            "phase9-paper-readiness",
+            "net-profit-lock-lab",
+            "fast-signal-shadow",
+            "research-pack",
             "research-cockpit",
             "ohlcv-replay-loader-smoke-test",
             "ohlcv-replay-loader-audit",
@@ -2395,6 +2466,47 @@ def main() -> None:
             timeframe=args.timeframe,
             policy=args.policy,
         ))
+    elif args.command == "dot-regime-diagnosis":
+        symbols_arg = [s.strip() for s in (args.symbols or "").split(",") if s.strip()] or None
+        print(lab.dot_regime_diagnosis(
+            hours=args.hours,
+            symbols=symbols_arg,
+            timeframe=args.timeframe,
+            folds=args.folds,
+        ))
+    elif args.command == "dot-regime-filter-lab":
+        symbols_arg = [s.strip() for s in (args.symbols or "").split(",") if s.strip()] or None
+        print(lab.dot_regime_filter_lab(
+            hours=args.hours,
+            symbols=symbols_arg,
+            timeframe=args.timeframe,
+            folds=args.folds,
+        ))
+    elif args.command == "phase9-paper-readiness":
+        symbols_arg = [s.strip() for s in (args.symbols or "").split(",") if s.strip()] or None
+        print(lab.phase9_paper_readiness(
+            hours=args.hours,
+            symbols=symbols_arg,
+            timeframe=args.timeframe,
+            min_trades=args.min_trades,
+            folds=args.folds,
+        ))
+    elif args.command == "net-profit-lock-lab":
+        symbols_arg = [s.strip() for s in (args.symbols or "").split(",") if s.strip()] or None
+        print(lab.net_profit_lock_lab(
+            hours=args.hours,
+            symbols=symbols_arg,
+            timeframe=args.timeframe,
+        ))
+    elif args.command == "fast-signal-shadow":
+        symbols_arg = [s.strip() for s in (args.symbols or "").split(",") if s.strip()] or None
+        print(lab.fast_signal_shadow(
+            hours=args.hours,
+            symbols=symbols_arg,
+            timeframe=args.timeframe,
+        ))
+    elif args.command == "research-pack":
+        print(lab.research_pack(hours=args.hours))
     elif args.command == "research-cockpit":
         print(lab.research_cockpit())
     elif args.command == "ohlcv-replay-loader-smoke-test":
