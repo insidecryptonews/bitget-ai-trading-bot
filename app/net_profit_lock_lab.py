@@ -82,6 +82,7 @@ class NetProfitLockScenarioSummary:
     scenario: str
     cost_pct: float
     promotion_eligible: bool
+    gross_green_net_negative: bool
     trades: int
     gross_ev: float
     net_ev: float
@@ -111,7 +112,11 @@ class NetProfitLockReport:
     break_even_after_fees_buffer_pct: float
     contexts_count: int
     scenarios: list[NetProfitLockScenarioSummary] = field(default_factory=list)
+    lock_sensitivity: list[NetProfitLockScenarioSummary] = field(default_factory=list)
     decision: str = "RESEARCH_ONLY"
+    gross_green_net_negative: bool = False
+    likely_issue: str = ""
+    next_research: str = ""
     loader_statuses: dict[str, str] = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
     research_only: bool = True
@@ -129,7 +134,11 @@ class NetProfitLockReport:
             "break_even_after_fees_buffer_pct": self.break_even_after_fees_buffer_pct,
             "contexts_count": self.contexts_count,
             "scenarios": [scenario.as_dict() for scenario in self.scenarios],
+            "lock_sensitivity": [scenario.as_dict() for scenario in self.lock_sensitivity],
             "decision": self.decision,
+            "gross_green_net_negative": self.gross_green_net_negative,
+            "likely_issue": self.likely_issue,
+            "next_research": self.next_research,
             "loader_statuses": self.loader_statuses,
             "warnings": self.warnings,
             "research_only": self.research_only,
@@ -295,7 +304,8 @@ def _summarise_scenario(
         return NetProfitLockScenarioSummary(
             scenario=scenario_name,
             cost_pct=cost_pct,
-            promotion_eligible=promotion_eligible,
+            promotion_eligible=False,
+            gross_green_net_negative=False,
             trades=0,
             gross_ev=0.0,
             net_ev=0.0,
@@ -314,16 +324,27 @@ def _summarise_scenario(
     gross = [t.gross_return_pct for t in trades]
     net = [t.net_return_pct for t in trades]
     wins = [v for v in net if v > 0]
+    gross_ev = sum(gross) / len(trades)
+    net_ev = sum(net) / len(trades)
+    net_pf_value = net_pf(net)
+    gross_green_net_negative = bool(gross_ev > 0 and net_ev < 0)
+    effective_promotion_eligible = bool(
+        promotion_eligible
+        and net_ev > 0
+        and net_pf_value > 1.0
+        and not gross_green_net_negative
+    )
     return NetProfitLockScenarioSummary(
         scenario=scenario_name,
         cost_pct=cost_pct,
-        promotion_eligible=promotion_eligible,
+        promotion_eligible=effective_promotion_eligible,
+        gross_green_net_negative=gross_green_net_negative,
         trades=len(trades),
-        gross_ev=sum(gross) / len(trades),
-        net_ev=sum(net) / len(trades),
+        gross_ev=gross_ev,
+        net_ev=net_ev,
         fees_total_pct=cost_pct * len(trades),
         win_rate=len(wins) / len(trades),
-        net_pf=net_pf(net),
+        net_pf=net_pf_value,
         tp1_hit_rate=sum(1 for t in trades if t.tp1_hit) / len(trades),
         tp2_hit_rate=sum(1 for t in trades if t.tp2_hit) / len(trades),
         tp3_hit_rate=sum(1 for t in trades if t.tp3_hit) / len(trades),
@@ -375,10 +396,32 @@ def run_net_profit_lock_lab(
             promotion_eligible=promotion_eligible,
             trades=trades,
         ))
+    lock_sensitivity: list[NetProfitLockScenarioSummary] = []
+    for lock_pct in (0.40, 0.60, 0.80, 1.00, 1.20):
+        trades = [
+            _simulate_one_ladder_trade(
+                ctx,
+                cost_pct=COST_BASE_PCT,
+                tp_fractions=tp_fractions,
+                net_profit_lock_pct=lock_pct,
+                break_even_buffer_pct=break_even_buffer_pct,
+                max_holding_bars=max_holding_bars,
+            )
+            for ctx in bundle.contexts
+        ]
+        lock_sensitivity.append(_summarise_scenario(
+            f"net_profit_lock_{str(lock_pct).replace('.', '_')}",
+            COST_BASE_PCT,
+            promotion_eligible=True,
+            trades=trades,
+        ))
     base = next((s for s in summaries if s.scenario == "base_cost_0_18"), None)
     decision = "RESEARCH_ONLY"
-    if base and base.net_ev <= 0:
+    gross_green_net_negative = bool(base and base.gross_green_net_negative)
+    if gross_green_net_negative:
         decision = "RESEARCH_GREEN_GROSS_NEGATIVE_NET"
+    elif base and base.net_ev <= 0:
+        decision = "RESEARCH_NEGATIVE_NET"
     elif base and base.net_ev > 0:
         decision = "RESEARCH_POSITIVE_NET_BUT_NOT_PAPER_READY"
     return NetProfitLockReport(
@@ -390,7 +433,11 @@ def run_net_profit_lock_lab(
         break_even_after_fees_buffer_pct=float(break_even_buffer_pct),
         contexts_count=len(bundle.contexts),
         scenarios=summaries,
+        lock_sensitivity=lock_sensitivity,
         decision=decision,
+        gross_green_net_negative=gross_green_net_negative,
+        likely_issue="profit_lock_or_exit_too_tight_after_costs" if gross_green_net_negative else "",
+        next_research="test_wider_net_profit_locks_and_directional_hold",
         loader_statuses=bundle.loader_statuses,
         warnings=list(bundle.warnings),
     )
@@ -407,17 +454,29 @@ def render_net_profit_lock_text(report: NetProfitLockReport) -> str:
         f"break_even_after_fees_buffer_pct: {report.break_even_after_fees_buffer_pct}",
         f"contexts_count: {report.contexts_count}",
         f"decision: {report.decision}",
-        "scenario | cost | promotion | trades | gross_ev | net_ev | fees_total | win | pf | tp1 | tp2 | tp3 | stop | time | npl | be | avg_bars",
+        f"gross_green_net_negative: {str(report.gross_green_net_negative).lower()}",
+        f"likely_issue: {report.likely_issue or 'none'}",
+        f"next_research: {report.next_research}",
+        "scenario | cost | promotion_eligible | gross_green_net_negative | trades | gross_ev | net_ev | fees_total | win | pf | tp1 | tp2 | tp3 | stop | time | npl | be | avg_bars",
     ]
     for scenario in report.scenarios:
         lines.append(
             f"{scenario.scenario} | {scenario.cost_pct:.4f} | {scenario.promotion_eligible} | "
+            f"{str(scenario.gross_green_net_negative).lower()} | "
             f"{scenario.trades} | {scenario.gross_ev:.6f} | {scenario.net_ev:.6f} | "
             f"{scenario.fees_total_pct:.4f} | {scenario.win_rate:.3f} | {scenario.net_pf:.4f} | "
             f"{scenario.tp1_hit_rate:.3f} | {scenario.tp2_hit_rate:.3f} | {scenario.tp3_hit_rate:.3f} | "
             f"{scenario.stop_hit_rate:.3f} | {scenario.time_hit_rate:.3f} | "
             f"{scenario.net_profit_lock_hit_rate:.3f} | {scenario.break_even_after_fees_rate:.3f} | "
             f"{scenario.avg_duration_bars:.1f}"
+        )
+    lines.append("lock_sensitivity_research_only:")
+    for scenario in report.lock_sensitivity:
+        lines.append(
+            f"{scenario.scenario} | cost={scenario.cost_pct:.4f} | promotion_eligible={scenario.promotion_eligible} | "
+            f"gross_green_net_negative={str(scenario.gross_green_net_negative).lower()} | "
+            f"trades={scenario.trades} | gross_ev={scenario.gross_ev:.6f} | "
+            f"net_ev={scenario.net_ev:.6f} | net_pf={scenario.net_pf:.4f}"
         )
     if report.warnings:
         lines.append("warnings:")

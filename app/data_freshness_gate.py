@@ -124,6 +124,23 @@ def _newest_ohlcv_timestamp(db: Any, symbol: str, timeframe: str) -> datetime | 
     return _parse_timestamp(raw)
 
 
+def _suggested_backfill_command(symbols: list[str] | tuple[str, ...] | str, timeframes: list[str] | tuple[str, ...] | str, *, hours: int = 120) -> str:
+    if isinstance(symbols, str):
+        symbol_values = [part.strip().upper() for part in symbols.split(",") if part.strip()]
+    else:
+        symbol_values = [str(part).strip().upper() for part in symbols if str(part).strip()]
+    if isinstance(timeframes, str):
+        timeframe_values = [part.strip().lower() for part in timeframes.split(",") if part.strip()]
+    else:
+        timeframe_values = [str(part).strip().lower() for part in timeframes if str(part).strip()]
+    safe_symbols = ",".join(symbol_values or ["DOTUSDT"])
+    safe_timeframes = ",".join(timeframe_values or ["5m"])
+    return (
+        "python -m app.ohlcv_backfill "
+        f"--symbols {safe_symbols} --timeframes {safe_timeframes} --hours {int(hours)}"
+    )
+
+
 def evaluate_freshness(
     db: Any,
     *,
@@ -143,10 +160,7 @@ def evaluate_freshness(
     budget = _staleness_budget_minutes(timeframe)
     reference = now or datetime.now(timezone.utc)
     newest = _newest_ohlcv_timestamp(db, symbol, timeframe)
-    suggested_command = (
-        f"python -m app.research_lab ohlcv-replay-loader-audit "
-        f"--symbols {symbol} --timeframe {timeframe} --hours 720"
-    )
+    suggested_command = _suggested_backfill_command(symbol, timeframe, hours=120)
     if newest is None:
         return FreshnessVerdict(
             symbol=symbol,

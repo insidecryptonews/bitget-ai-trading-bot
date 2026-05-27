@@ -12,8 +12,12 @@ from app.fast_signal_shadow import ACTIONABILITY_NO_ACTIONABLE_DATA_STALE, run_f
 from app.health_server import _phase9_research_endpoint, _research_pack_endpoint
 from app.net_profit_lock_lab import (
     COST_MAKER_MAKER_AUDIT_ONLY_PCT,
+    NetProfitLockTrade,
+    _summarise_scenario,
     _price_at_pct_distance,
     _simulate_one_ladder_trade,
+    render_net_profit_lock_text,
+    NetProfitLockReport,
 )
 from app.phase8_candidate_validator import validate_phase8_candidate_from_samples
 from app.phase8_candidate_validator import Phase8PolicySample
@@ -127,11 +131,15 @@ def test_data_freshness_gate_blocks_stale_and_need_data(monkeypatch):
     stale = evaluate_freshness(object(), symbol="DOTUSDT", timeframe="5m", now=now)
     assert stale.status == "STALE"
     assert stale.actionable is False
+    assert "python -m app.ohlcv_backfill" in stale.suggested_command
+    assert "--symbols DOTUSDT" in stale.suggested_command
+    assert "--timeframes 5m" in stale.suggested_command
 
     monkeypatch.setattr("app.data_freshness_gate._newest_ohlcv_timestamp", lambda *a, **k: None)
     missing = evaluate_freshness(object(), symbol="DOTUSDT", timeframe="5m", now=now)
     assert missing.status == "NEED_DATA"
     assert missing.actionable is False
+    assert "app.ohlcv_backfill" in missing.suggested_command
 
 
 def test_net_profit_lock_short_is_fee_aware_and_maker_maker_never_promotes():
@@ -171,6 +179,87 @@ def test_net_profit_lock_short_is_fee_aware_and_maker_maker_never_promotes():
     assert result.net_return_pct > 0
     assert result.exit_price < 100.0
     assert COST_MAKER_MAKER_AUDIT_ONLY_PCT == 0.04
+
+
+def _npl_trade(gross: float, net: float) -> NetProfitLockTrade:
+    return NetProfitLockTrade(
+        symbol="DOTUSDT",
+        side="LONG",
+        entry_index=0,
+        exit_index=1,
+        entry_price=100.0,
+        exit_price=100.0 + gross,
+        gross_return_pct=gross,
+        cost_pct=gross - net,
+        net_return_pct=net,
+        exit_reason="HORIZON_CLOSE",
+        duration_bars=2,
+        tp1_hit=False,
+        tp2_hit=False,
+        tp3_hit=False,
+        net_profit_lock_hit=False,
+        break_even_after_fees_hit=False,
+    )
+
+
+def test_net_profit_lock_blocks_gross_green_net_negative_and_low_pf():
+    gross_green_net_red = _summarise_scenario(
+        "base_cost_0_18",
+        0.18,
+        promotion_eligible=True,
+        trades=[_npl_trade(0.20, -0.02), _npl_trade(0.30, -0.01)],
+    )
+    assert gross_green_net_red.gross_ev > 0
+    assert gross_green_net_red.net_ev < 0
+    assert gross_green_net_red.gross_green_net_negative is True
+    assert gross_green_net_red.promotion_eligible is False
+
+    low_pf = _summarise_scenario(
+        "stress_0_25",
+        0.25,
+        promotion_eligible=True,
+        trades=[_npl_trade(0.50, 0.05), _npl_trade(-0.50, -0.10)],
+    )
+    assert low_pf.net_pf <= 1.0
+    assert low_pf.promotion_eligible is False
+
+    maker = _summarise_scenario(
+        "maker_maker_audit_only",
+        0.04,
+        promotion_eligible=False,
+        trades=[_npl_trade(0.50, 0.40), _npl_trade(0.30, 0.20)],
+    )
+    assert maker.net_ev > 0
+    assert maker.promotion_eligible is False
+
+
+def test_net_profit_lock_output_explains_gross_green_net_negative():
+    report = NetProfitLockReport(
+        symbols=["DOTUSDT"],
+        timeframe="5m",
+        hours=720,
+        tp_fractions=(0.5, 1.0, 1.5),
+        net_profit_lock_pct=0.40,
+        break_even_after_fees_buffer_pct=0.05,
+        contexts_count=2,
+        scenarios=[
+            _summarise_scenario(
+                "base_cost_0_18",
+                0.18,
+                promotion_eligible=True,
+                trades=[_npl_trade(0.20, -0.02), _npl_trade(0.30, -0.01)],
+            )
+        ],
+        decision="RESEARCH_GREEN_GROSS_NEGATIVE_NET",
+        gross_green_net_negative=True,
+        likely_issue="profit_lock_or_exit_too_tight_after_costs",
+        next_research="test_wider_net_profit_locks_and_directional_hold",
+    )
+    text = render_net_profit_lock_text(report)
+    assert "gross_green_net_negative: true" in text
+    assert "likely_issue: profit_lock_or_exit_too_tight_after_costs" in text
+    assert "next_research: test_wider_net_profit_locks_and_directional_hold" in text
+    assert "promotion_eligible" in text
 
 
 def test_fast_signal_shadow_stale_without_context_is_non_actionable(monkeypatch):
