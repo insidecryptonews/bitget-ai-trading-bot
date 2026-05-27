@@ -956,6 +956,13 @@
     $("v5PackBtn")?.addEventListener("click", loadV5Pack);
     $("v5PackCopyBtn")?.addEventListener("click", copyV5PackJson);
     $("v5PackDownloadBtn")?.addEventListener("click", downloadV5PackText);
+    // ResearchOps V5.1 — Strategy Research Enhancer + shadow filters
+    $("v51EnhancerRefreshBtn")?.addEventListener("click", loadV51StrategyEnhancer);
+    $("v51ShadowCopyReportBtn")?.addEventListener("click", copyV51ShadowReport);
+    for (const id of ["v51ShadowFilterSymbol","v51ShadowFilterSide","v51ShadowFilterStatus","v51ShadowFilterPnl","v51ShadowSort","v51ShadowLimit"]) {
+      $(id)?.addEventListener("input", renderV51ShadowFiltered);
+      $(id)?.addEventListener("change", renderV51ShadowFiltered);
+    }
 
     bindSafeNavigation();
   }
@@ -1647,5 +1654,296 @@
     setInterval(localTimes, 1000);
     renderStatusFallback();
     loadStatus();
+  });
+
+  // ResearchOps V5.1 helpers -------------------------------------------------
+  let v51LastShadowPayload = null;
+  let v51LastEnhancerJson = "";
+
+  function _v51SetCockpit(cardId, status, value, sub, foot) {
+    const card = $(cardId);
+    if (!card) return;
+    if (status) card.setAttribute("data-status", status);
+    const v = card.querySelector(".v51-cockpit-value");
+    if (v && value !== undefined) v.textContent = value;
+    const s = card.querySelector(".v51-cockpit-sub");
+    if (s && sub !== undefined) s.textContent = sub;
+    const f = card.querySelector(".v51-cockpit-foot");
+    if (f && foot !== undefined) f.textContent = foot;
+  }
+
+  function _v51CockpitFromFreshness(payload) {
+    if (!payload) return;
+    const ok = payload.ok_count ?? 0;
+    const stale = payload.stale_count ?? 0;
+    const need = payload.need_data_count ?? 0;
+    const gap = payload.gap_count ?? 0;
+    let status = "ok";
+    if (stale + need + gap > 0) status = stale > 0 ? "warn" : "warn";
+    if (need >= ok && ok === 0) status = "bad";
+    const newest = (payload.rows || []).map((r) => r.newest_timestamp).filter(Boolean).sort().slice(-1)[0] || "-";
+    _v51SetCockpit("v51CockpitFreshness", status,
+      payload.overall_actionable ? "All fresh" : `${stale + need + gap} not fresh`,
+      `ok ${ok} · stale ${stale} · need ${need} · gap ${gap}`,
+      `newest: ${newest}`);
+  }
+
+  function _v51CockpitFromCleanView(payload) {
+    if (!payload) return;
+    const status = (payload.overall_status || "UNKNOWN").toUpperCase();
+    const tone = status === "OK" ? "ok" : status === "WARNING" ? "warn" : status === "BAD" ? "bad" : "unknown";
+    _v51SetCockpit("v51CockpitDataQuality", tone, status,
+      `duplicate rate: ${(payload.duplicate_rate ?? 0).toFixed(4)}`,
+      `raw ${payload.raw_sample_count ?? 0} · clean ${payload.clean_sample_count ?? 0}`);
+  }
+
+  function _v51CockpitFromShadow(payload) {
+    if (!payload) return;
+    const closed = (payload.trades || []).filter((t) => String(t.status).startsWith("CLOSED_"));
+    const netPos = closed.filter((t) => t.net_pnl_pct > 0).length;
+    const netNeg = closed.filter((t) => t.net_pnl_pct < 0).length;
+    const ggNetNeg = closed.filter((t) => t.gross_pnl_pct > 0 && t.net_pnl_pct < 0).length;
+    const bySymbol = {};
+    for (const t of closed) {
+      bySymbol[t.symbol] = (bySymbol[t.symbol] || 0) + t.net_pnl_pct;
+    }
+    const entries = Object.entries(bySymbol).sort((a, b) => b[1] - a[1]);
+    const best = entries[0] ? `${entries[0][0]} (${entries[0][1].toFixed(2)}%)` : "-";
+    const worst = entries.length ? entries[entries.length - 1] : null;
+    const worstStr = worst ? `${worst[0]} (${worst[1].toFixed(2)}%)` : "-";
+    let tone = "shadow";
+    if (netNeg > netPos && closed.length >= 10) tone = "warn";
+    _v51SetCockpit("v51CockpitShadow", tone, `${closed.length} closed`,
+      `net+ ${netPos} · net- ${netNeg} · gg-net-neg ${ggNetNeg}`,
+      `best: ${best} · worst: ${worstStr}`);
+  }
+
+  function _v51CockpitFromEnhancer(payload) {
+    if (!payload) return;
+    const dec = String(payload.overall_decision || "UNKNOWN").toUpperCase();
+    let tone = "info";
+    if (dec === "REJECT_DATA_QUALITY" || dec === "REJECT_NEGATIVE_NET" || dec === "REJECT_COSTS" || dec === "REJECT_OVERFIT_RISK") tone = "bad";
+    else if (dec === "RESEARCH_PROMISING") tone = "ok";
+    else if (dec === "NEED_MORE_DATA") tone = "muted";
+    else if (dec === "SHADOW_ONLY") tone = "shadow";
+    _v51SetCockpit("v51CockpitReadiness", "danger", "NO LIVE",
+      `NO paper/demo · paper filter disabled`,
+      `enhancer: ${dec}`);
+  }
+
+  function renderV51ShadowFiltered() {
+    if (!v51LastShadowPayload) return;
+    const trades = Array.isArray(v51LastShadowPayload.trades) ? v51LastShadowPayload.trades : [];
+    const symbolFilter = ($("v51ShadowFilterSymbol")?.value || "").trim().toUpperCase();
+    const sideFilter = $("v51ShadowFilterSide")?.value || "";
+    const statusFilter = $("v51ShadowFilterStatus")?.value || "";
+    const pnlFilter = $("v51ShadowFilterPnl")?.value || "";
+    const sort = $("v51ShadowSort")?.value || "recent";
+    const limit = Math.max(10, Math.min(500, num($("v51ShadowLimit")?.value, 60)));
+    let filtered = trades.filter((t) => {
+      if (symbolFilter && t.symbol !== symbolFilter) return false;
+      if (sideFilter && t.side !== sideFilter) return false;
+      if (statusFilter && t.status !== statusFilter) return false;
+      if (pnlFilter === "positive" && !(t.net_pnl_pct > 0)) return false;
+      if (pnlFilter === "negative" && !(t.net_pnl_pct < 0)) return false;
+      return true;
+    });
+    if (sort === "best_net") filtered.sort((a, b) => b.net_pnl_pct - a.net_pnl_pct);
+    else if (sort === "worst_net") filtered.sort((a, b) => a.net_pnl_pct - b.net_pnl_pct);
+    filtered = filtered.slice(0, limit);
+    const target = $("v5ShadowRows");
+    if (target) {
+      target.innerHTML = filtered.length
+        ? filtered.map((t) => `<tr>
+            <td><code>${escapeHtml(t.shadow_id)}</code></td>
+            <td>${escapeHtml(t.symbol)}</td>
+            <td>${escapeHtml(t.side)}</td>
+            <td>${escapeHtml(t.setup_id)}</td>
+            <td>${escapeHtml(t.status)}</td>
+            <td>${escapeHtml(fmt(t.gross_pnl_pct, 4))}</td>
+            <td>${escapeHtml(fmt(t.net_pnl_pct, 4))}</td>
+            <td>${escapeHtml(fmt(t.gross_pnl_usdt, 4))}</td>
+            <td>${escapeHtml(fmt(t.net_pnl_usdt, 4))}</td>
+            <td>${escapeHtml(String(t.bars_open))}</td>
+          </tr>`).join("")
+        : "<tr><td colspan=\"10\">No trades match the filters.</td></tr>";
+    }
+    // Update inline summary chips.
+    const closed = trades.filter((t) => String(t.status).startsWith("CLOSED_"));
+    const netPos = closed.filter((t) => t.net_pnl_pct > 0).length;
+    const netNeg = closed.filter((t) => t.net_pnl_pct < 0).length;
+    const ggNetNeg = closed.filter((t) => t.gross_pnl_pct > 0 && t.net_pnl_pct < 0).length;
+    const bySymbol = {};
+    for (const t of closed) bySymbol[t.symbol] = (bySymbol[t.symbol] || 0) + t.net_pnl_pct;
+    const sorted = Object.entries(bySymbol).sort((a, b) => b[1] - a[1]);
+    const best = sorted[0] ? `${sorted[0][0]} ${sorted[0][1].toFixed(2)}%` : "-";
+    const worst = sorted.length ? sorted[sorted.length - 1] : null;
+    const worstStr = worst ? `${worst[0]} ${worst[1].toFixed(2)}%` : "-";
+    const row = $("v51ShadowSummaryRow");
+    if (row) {
+      row.innerHTML = `
+        <span class="v51-chip" data-tone="info">total: ${trades.length}</span>
+        <span class="v51-chip" data-tone="ok">net+: ${netPos}</span>
+        <span class="v51-chip" data-tone="bad">net-: ${netNeg}</span>
+        <span class="v51-chip" data-tone="warn">gg-net-neg: ${ggNetNeg}</span>
+        <span class="v51-chip" data-tone="muted">best: ${escapeHtml(best)}</span>
+        <span class="v51-chip" data-tone="muted">worst: ${escapeHtml(worstStr)}</span>
+        <span class="v51-chip" data-tone="shadow">SHADOW_ONLY</span>
+      `;
+    }
+  }
+
+  function copyV51ShadowReport() {
+    if (!v51LastShadowPayload || !v51LastShadowPayload.text) return;
+    copyText(v51LastShadowPayload.text).then(() => {});
+  }
+
+  async function loadV51StrategyEnhancer() {
+    const button = $("v51EnhancerRefreshBtn");
+    setButtonLoading(button, true);
+    try {
+      const hours = num($("v51EnhancerHours")?.value, 24);
+      const symbols = ($("v51EnhancerSymbols")?.value || "BTCUSDT,ETHUSDT,DOTUSDT").trim();
+      const payload = await fetchJson(`/api/research/strategy-research-enhancer?hours=${hours}&symbols=${encodeURIComponent(symbols)}`);
+      if (payload.status === "SKIPPED_HEAVY") {
+        setText("v51EnhancerOutput", `SKIPPED_HEAVY\nCLI: ${payload.cli_command || "-"}`);
+        return;
+      }
+      v51LastEnhancerJson = JSON.stringify(payload, null, 2);
+      const decBadge = $("v51EnhancerDecisionBadge");
+      if (decBadge) {
+        const dec = payload.overall_decision || "UNKNOWN";
+        decBadge.textContent = dec;
+        decBadge.className = "badge " + (
+          dec === "RESEARCH_PROMISING" ? "badge-safe" :
+          dec === "SHADOW_ONLY" ? "badge-info" :
+          dec === "NEED_MORE_DATA" ? "badge-muted" :
+          dec.startsWith("REJECT_") ? "badge-danger" : "badge-warning"
+        );
+      }
+      const summary = $("v51EnhancerSummaryRow");
+      if (summary) {
+        summary.innerHTML = `
+          <span class="v51-chip" data-tone="${payload.overall_decision === 'RESEARCH_PROMISING' ? 'ok' : payload.overall_decision === 'SHADOW_ONLY' ? 'shadow' : payload.overall_decision && payload.overall_decision.startsWith('REJECT_') ? 'bad' : 'muted'}">overall: ${escapeHtml(payload.overall_decision || '-')}</span>
+          <span class="v51-chip" data-tone="${payload.data_quality_status === 'BAD' ? 'bad' : payload.data_quality_status === 'WARNING' ? 'warn' : payload.data_quality_status === 'OK' ? 'ok' : 'muted'}">data quality: ${escapeHtml(payload.data_quality_status || '-')}</span>
+          <span class="v51-chip" data-tone="info">raw ${payload.raw_sample_count ?? 0} · clean ${payload.clean_sample_count ?? 0}</span>
+          <span class="v51-chip" data-tone="muted">duplicate rate: ${(payload.duplicate_rate ?? 0).toFixed(4)}</span>
+        `;
+      }
+      const bySymRows = (payload.rankings_by_symbol || []).slice(0, 12).map((r) => {
+        const decTone = r.decision === "RESEARCH_PROMISING" ? "ok" : r.decision === "SHADOW_ONLY" ? "shadow" : r.decision === "NEED_MORE_DATA" ? "muted" : "bad";
+        return `<tr>
+          <td>${escapeHtml(r.key)}</td>
+          <td>${escapeHtml(String(r.trades))}</td>
+          <td>${escapeHtml(fmt(r.net_ev_pct, 4))}</td>
+          <td>${escapeHtml(fmt(r.net_pf, 4))}</td>
+          <td>${escapeHtml(fmt(r.win_rate_net, 3))}</td>
+          <td>${escapeHtml(fmt(r.gross_green_net_negative_rate, 3))}</td>
+          <td>${escapeHtml(r.confidence)}</td>
+          <td><span class="v51-chip" data-tone="${decTone}">${escapeHtml(r.decision)}</span></td>
+        </tr>`;
+      }).join("");
+      const target1 = $("v51EnhancerBySymbolRows");
+      if (target1) target1.innerHTML = bySymRows || "<tr><td colspan=\"8\">No data.</td></tr>";
+      const bySideRows = (payload.rankings_by_side || []).slice(0, 8).map((r) => {
+        const decTone = r.decision === "RESEARCH_PROMISING" ? "ok" : r.decision === "SHADOW_ONLY" ? "shadow" : r.decision === "NEED_MORE_DATA" ? "muted" : "bad";
+        return `<tr>
+          <td>${escapeHtml(r.key)}</td>
+          <td>${escapeHtml(String(r.trades))}</td>
+          <td>${escapeHtml(fmt(r.net_ev_pct, 4))}</td>
+          <td>${escapeHtml(fmt(r.net_pf, 4))}</td>
+          <td>${escapeHtml(fmt(r.win_rate_net, 3))}</td>
+          <td>${escapeHtml(fmt(r.gross_green_net_negative_rate, 3))}</td>
+          <td>${escapeHtml(r.confidence)}</td>
+          <td><span class="v51-chip" data-tone="${decTone}">${escapeHtml(r.decision)}</span></td>
+        </tr>`;
+      }).join("");
+      const target2 = $("v51EnhancerBySideRows");
+      if (target2) target2.innerHTML = bySideRows || "<tr><td colspan=\"8\">No data.</td></tr>";
+      const ideaList = $("v51EnhancerIdeasList");
+      if (ideaList) {
+        const ideas = Array.isArray(payload.research_ideas) ? payload.research_ideas : [];
+        ideaList.innerHTML = ideas.length
+          ? ideas.map((i) => `<li><strong>${escapeHtml(i.name)}</strong> — ${escapeHtml(i.description)} <em style="color:var(--muted);">(${escapeHtml(i.why)})</em></li>`).join("")
+          : "<li>No ideas yet.</li>";
+      }
+      setText("v51EnhancerOutput", payload.text || v51LastEnhancerJson.slice(0, 5000));
+      _v51CockpitFromEnhancer(payload);
+    } catch (error) {
+      setText("v51EnhancerOutput", `enhancer error: ${error.message}`);
+    } finally {
+      setButtonLoading(button, false);
+    }
+  }
+
+  // Patch existing V5 load functions to also feed the V5.1 cockpit cards.
+  const __origLoadV5FreshnessMatrix = typeof loadV5FreshnessMatrix === "function" ? loadV5FreshnessMatrix : null;
+  if (__origLoadV5FreshnessMatrix) {
+    window.__loadV5FreshnessMatrixHook = async function () {
+      await __origLoadV5FreshnessMatrix();
+      try {
+        const symbols = ($("v5FreshnessSymbols")?.value || "").trim();
+        const timeframes = ($("v5FreshnessTimeframes")?.value || "5m,15m,1h").trim();
+        const payload = await fetchJson(`/api/research/ohlcv-freshness-status?symbols=${encodeURIComponent(symbols)}&timeframes=${encodeURIComponent(timeframes)}`);
+        _v51CockpitFromFreshness(payload);
+      } catch (e) { /* ignore */ }
+    };
+  }
+
+  // Wrap V5 load functions to feed the cockpit when they finish.
+  const __wrapWithCockpit = (origName, cockpitFn) => {
+    if (typeof window[origName] !== "function") return;
+    const orig = window[origName];
+    window[origName] = async function () {
+      const result = await orig.apply(this, arguments);
+      try { cockpitFn(); } catch (e) { /* ignore */ }
+      return result;
+    };
+  };
+
+  // Hook: after V5 functions run, refresh the cockpit. We use polling on the
+  // panel's plain-text output because the original V5 functions are closure-
+  // scoped. The cleanest cross-functional integration is to call the cockpit
+  // helpers directly from each load function — done above for freshness via a
+  // dedicated handler, and below by triggering the cockpit on a refresh button
+  // click using a small wrapper attached to the dashboard refresh buttons.
+  const __wrapRefreshButton = (btnId, cockpitFetcher) => {
+    const btn = document.getElementById(btnId);
+    if (!btn || !cockpitFetcher) return;
+    btn.addEventListener("click", async () => {
+      try { await cockpitFetcher(); } catch (e) { /* ignore */ }
+    });
+  };
+  __wrapRefreshButton("v5FreshnessRefreshBtn", async () => {
+    const symbols = ($("v5FreshnessSymbols")?.value || "").trim();
+    const timeframes = ($("v5FreshnessTimeframes")?.value || "5m,15m,1h").trim();
+    const payload = await fetchJson(`/api/research/ohlcv-freshness-status?symbols=${encodeURIComponent(symbols)}&timeframes=${encodeURIComponent(timeframes)}`);
+    _v51CockpitFromFreshness(payload);
+  });
+  __wrapRefreshButton("v5CleanRefreshBtn", async () => {
+    const hours = num($("v5CleanHours")?.value, 24);
+    const payload = await fetchJson(`/api/research/training-clean-view-audit?hours=${hours}`);
+    _v51CockpitFromCleanView(payload);
+  });
+  __wrapRefreshButton("v5ShadowRefreshBtn", async () => {
+    const hours = num($("v5ShadowHours")?.value, 24);
+    const payload = await fetchJson(`/api/research/shadow-multi-trade-status?hours=${hours}`);
+    if (payload.status === "SKIPPED_HEAVY") return;
+    v51LastShadowPayload = payload;
+    renderV51ShadowFiltered();
+    _v51CockpitFromShadow(payload);
+  });
+  __wrapRefreshButton("v5FeeAwareRefreshBtn", async () => {
+    const symbols = ($("v5FeeAwareSymbols")?.value || "DOTUSDT").trim();
+    const hours = num($("v5FeeAwareHours")?.value, 168);
+    const payload = await fetchJson(`/api/research/fee-aware-exit-trainer?symbols=${encodeURIComponent(symbols)}&hours=${hours}`);
+    if (payload.status === "SKIPPED_HEAVY") return;
+    const promotable = (payload.results || []).filter((r) => r.promotion_eligible);
+    const best = (payload.results || []).reduce((acc, r) => r.best_net_ev > (acc?.best_net_ev ?? -Infinity) ? r : acc, null);
+    const tone = promotable.length > 0 ? "ok" : (best && best.gross_green_net_negative ? "warn" : "muted");
+    _v51SetCockpit("v51CockpitFeeAware", tone,
+      promotable.length > 0 ? `${promotable.length} promotable` : "no promotion",
+      `best net EV: ${best ? best.best_net_ev.toFixed(6) : "-"}`,
+      `npl: ${best ? best.net_profit_lock_pct.toFixed(2) + "%" : "-"}`);
   });
 }());

@@ -1129,3 +1129,125 @@ table.compact tbody tr:hover {
     max-width: 160px;
   }
 }
+
+/* ResearchOps V5.1 — Cockpit cards + chips + hints --------------------- */
+
+.v51-cockpit-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 14px;
+  margin: 12px 0 18px;
+}
+
+.v51-cockpit-card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  position: relative;
+  overflow: hidden;
+  transition: border-color 160ms ease, box-shadow 160ms ease;
+}
+
+.v51-cockpit-card::before {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 3px;
+  background: var(--blue);
+  opacity: 0.7;
+}
+
+.v51-cockpit-card[data-status="ok"]::before { background: var(--green); }
+.v51-cockpit-card[data-status="warn"]::before { background: var(--orange); }
+.v51-cockpit-card[data-status="bad"]::before { background: var(--red); }
+.v51-cockpit-card[data-status="info"]::before { background: var(--blue); }
+.v51-cockpit-card[data-status="shadow"]::before { background: var(--purple); }
+.v51-cockpit-card[data-status="danger"]::before { background: var(--red); }
+.v51-cockpit-card[data-status="unknown"]::before { background: rgba(149, 169, 202, 0.45); }
+
+.v51-cockpit-card:hover {
+  border-color: rgba(90, 183, 255, 0.35);
+}
+
+.v51-cockpit-eyebrow {
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.v51-cockpit-value {
+  font-size: 20px;
+  font-weight: 600;
+  line-height: 1.15;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}
+
+.v51-cockpit-sub,
+.v51-cockpit-foot {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.v51-cockpit-foot {
+  margin-top: 6px;
+}
+
+/* Inline summary chips ------------------------------------------------- */
+
+.v51-summary-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 8px 0 14px;
+}
+
+.v51-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  letter-spacing: 0.02em;
+  border: 1px solid var(--border);
+  background: rgba(18, 26, 38, 0.62);
+  color: var(--text);
+}
+
+.v51-chip[data-tone="ok"]     { color: var(--green);  border-color: rgba(46, 229, 157, 0.32); background: rgba(46, 229, 157, 0.08); }
+.v51-chip[data-tone="warn"]   { color: var(--orange); border-color: rgba(255, 176, 32, 0.32); background: rgba(255, 176, 32, 0.08); }
+.v51-chip[data-tone="bad"]    { color: var(--red);    border-color: rgba(255, 77, 109, 0.32); background: rgba(255, 77, 109, 0.08); }
+.v51-chip[data-tone="info"]   { color: var(--blue);   border-color: rgba(90, 183, 255, 0.32); background: rgba(90, 183, 255, 0.08); }
+.v51-chip[data-tone="shadow"] { color: var(--purple); border-color: rgba(167, 139, 250, 0.32); background: rgba(167, 139, 250, 0.08); }
+.v51-chip[data-tone="muted"]  { color: var(--muted);  border-color: var(--border); }
+
+.v51-hint {
+  font-size: 12.5px;
+  color: var(--muted);
+  margin: 4px 0 10px;
+}
+
+.v51-subtitle {
+  font-size: 13px;
+  margin: 4px 0 8px;
+  color: var(--muted);
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.v51-grid-2col {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+}
+
+@media (max-width: 720px) {
+  .v51-grid-2col { grid-template-columns: 1fr; }
+  .v51-cockpit-value { font-size: 17px; }
+  .v51-cockpit-card { padding: 12px 14px; }
+}

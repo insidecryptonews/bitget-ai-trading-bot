@@ -340,6 +340,18 @@ def refresh(
     try:
         from .ohlcv_backfill import backfill_pair  # local import keeps optional
     except Exception as exc:  # pragma: no cover - defensive guard
+        err_results: list[RefreshSymbolResult] = []
+        for symbol in symbol_list:
+            for timeframe in timeframe_list:
+                err_results.append(RefreshSymbolResult(
+                    symbol=symbol,
+                    timeframe=timeframe,
+                    status="API_ERROR",
+                    rows_inserted=0, rows_skipped=0, rows_rejected=0,
+                    duration_seconds=0.0,
+                    dry_run=dry_run,
+                    error=f"import_error:{type(exc).__name__}",
+                ))
         return RefreshReport(
             symbols=symbol_list,
             timeframes=timeframe_list,
@@ -347,26 +359,40 @@ def refresh(
             dry_run=dry_run,
             auto_refresh_enabled=auto_enabled,
             activation_disabled_until_manual_vps_validation=True,
-            results=[RefreshSymbolResult(
-                symbol=",".join(symbol_list),
-                timeframe=",".join(timeframe_list),
-                status="API_ERROR",
-                rows_inserted=0, rows_skipped=0, rows_rejected=0,
-                duration_seconds=0.0,
-                dry_run=dry_run,
-                error=f"import_error:{type(exc).__name__}",
-            )],
+            results=err_results,
         )
     client = None
     if will_write_real:
-        # Public endpoint only. We do not pass credentials to BitgetClient here
-        # because `get_history_candles` is unauthenticated. The instance is
-        # still constructed defensively with whatever the config provides.
+        # Public endpoint only — `get_history_candles` is unauthenticated.
+        # BitgetClient.__init__ requires (config, logger). We never invoke
+        # private methods from this module; if config is missing, load it from
+        # disk the same way `app.ohlcv_backfill.run_backfill` does so the call
+        # has a valid config object even when this helper is called without
+        # one.
         try:
             from .bitget_client import BitgetClient
 
-            client = BitgetClient(config) if config is not None else BitgetClient(None)
+            if config is None:
+                from .config import load_config as _load_config
+                cfg_for_client = _load_config()
+            else:
+                cfg_for_client = config
+            client = BitgetClient(cfg_for_client, log)
         except Exception as exc:
+            # One row per (symbol, timeframe) so the dashboard renders the
+            # grid correctly even when the client cannot be constructed.
+            err_results: list[RefreshSymbolResult] = []
+            for symbol in symbol_list:
+                for timeframe in timeframe_list:
+                    err_results.append(RefreshSymbolResult(
+                        symbol=symbol,
+                        timeframe=timeframe,
+                        status="API_ERROR",
+                        rows_inserted=0, rows_skipped=0, rows_rejected=0,
+                        duration_seconds=0.0,
+                        dry_run=dry_run,
+                        error=f"client_init_error:{type(exc).__name__}",
+                    ))
             return RefreshReport(
                 symbols=symbol_list,
                 timeframes=timeframe_list,
@@ -374,15 +400,7 @@ def refresh(
                 dry_run=dry_run,
                 auto_refresh_enabled=auto_enabled,
                 activation_disabled_until_manual_vps_validation=True,
-                results=[RefreshSymbolResult(
-                    symbol=",".join(symbol_list),
-                    timeframe=",".join(timeframe_list),
-                    status="API_ERROR",
-                    rows_inserted=0, rows_skipped=0, rows_rejected=0,
-                    duration_seconds=0.0,
-                    dry_run=dry_run,
-                    error=f"client_init_error:{type(exc).__name__}",
-                )],
+                results=err_results,
             )
     for symbol in symbol_list:
         for timeframe in timeframe_list:

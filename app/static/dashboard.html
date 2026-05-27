@@ -188,10 +188,49 @@
         <section id="researchops-v5" class="section">
           <div class="section-title">
             <div>
-              <span class="eyebrow">ResearchOps V5</span>
-              <h2>Trading Research Command Center V5</h2>
+              <span class="eyebrow">ResearchOps V5.1</span>
+              <h2>Trading Research Command Center</h2>
             </div>
             <p>Read-only research. No live, no paper filter, no real orders. Heavy endpoints return SKIPPED_HEAVY with CLI hints.</p>
+          </div>
+
+          <div class="v51-cockpit-grid">
+            <article class="v51-cockpit-card" data-status="unknown" id="v51CockpitFreshness">
+              <span class="v51-cockpit-eyebrow">Freshness</span>
+              <strong class="v51-cockpit-value" id="v51CockpitFreshnessValue">UNKNOWN</strong>
+              <span class="v51-cockpit-sub" id="v51CockpitFreshnessSub">ok 0 · stale 0 · need 0</span>
+              <span class="v51-cockpit-foot" id="v51CockpitFreshnessFoot">last candle: -</span>
+            </article>
+            <article class="v51-cockpit-card" data-status="unknown" id="v51CockpitDataQuality">
+              <span class="v51-cockpit-eyebrow">Data Quality</span>
+              <strong class="v51-cockpit-value" id="v51CockpitDataQualityValue">UNKNOWN</strong>
+              <span class="v51-cockpit-sub" id="v51CockpitDataQualitySub">duplicate rate: -</span>
+              <span class="v51-cockpit-foot" id="v51CockpitDataQualityFoot">raw vs clean: -</span>
+            </article>
+            <article class="v51-cockpit-card" data-status="unknown" id="v51CockpitShadow">
+              <span class="v51-cockpit-eyebrow">Shadow Learning</span>
+              <strong class="v51-cockpit-value" id="v51CockpitShadowValue">0 trades</strong>
+              <span class="v51-cockpit-sub" id="v51CockpitShadowSub">net+ 0 · net- 0 · gg-net-neg 0</span>
+              <span class="v51-cockpit-foot" id="v51CockpitShadowFoot">best: - · worst: -</span>
+            </article>
+            <article class="v51-cockpit-card" data-status="unknown" id="v51CockpitFeeAware">
+              <span class="v51-cockpit-eyebrow">Fee-Aware Edge</span>
+              <strong class="v51-cockpit-value" id="v51CockpitFeeAwareValue">no promotion</strong>
+              <span class="v51-cockpit-sub" id="v51CockpitFeeAwareSub">best net EV: -</span>
+              <span class="v51-cockpit-foot" id="v51CockpitFeeAwareFoot">npl: -</span>
+            </article>
+            <article class="v51-cockpit-card" data-status="info" id="v51CockpitCapital">
+              <span class="v51-cockpit-eyebrow">Capital &amp; Leverage</span>
+              <strong class="v51-cockpit-value">40 USDT default</strong>
+              <span class="v51-cockpit-sub">ROE high ≠ edge if net EV negative</span>
+              <span class="v51-cockpit-foot">leverage informational only</span>
+            </article>
+            <article class="v51-cockpit-card" data-status="danger" id="v51CockpitReadiness">
+              <span class="v51-cockpit-eyebrow">Readiness</span>
+              <strong class="v51-cockpit-value">NO LIVE</strong>
+              <span class="v51-cockpit-sub">NO paper/demo · paper filter disabled</span>
+              <span class="v51-cockpit-foot" id="v51CockpitReadinessFoot">next action: keep research</span>
+            </article>
           </div>
 
           <article class="panel">
@@ -242,11 +281,59 @@
               <h3>Shadow Multi-Trade Learning</h3>
               <span id="v5ShadowStatusBadge" class="badge badge-info">shadow_only</span>
             </div>
+            <p class="v51-hint">Shadow ≠ paper · No execution · Virtual trades for research only.</p>
             <div class="replay-controls">
               <label>Hours
                 <input id="v5ShadowHours" type="number" min="6" max="168" value="24">
               </label>
+              <label>Symbol
+                <input id="v51ShadowFilterSymbol" type="text" maxlength="10" placeholder="any">
+              </label>
+              <label>Side
+                <select id="v51ShadowFilterSide">
+                  <option value="">any</option>
+                  <option value="LONG">LONG</option>
+                  <option value="SHORT">SHORT</option>
+                </select>
+              </label>
+              <label>Status
+                <select id="v51ShadowFilterStatus">
+                  <option value="">any</option>
+                  <option value="CLOSED_TP1">CLOSED_TP1</option>
+                  <option value="CLOSED_TP2">CLOSED_TP2</option>
+                  <option value="CLOSED_TP3">CLOSED_TP3</option>
+                  <option value="CLOSED_STOP">CLOSED_STOP</option>
+                  <option value="CLOSED_TIME">CLOSED_TIME</option>
+                  <option value="CLOSED_NET_PROFIT_LOCK">CLOSED_NET_PROFIT_LOCK</option>
+                </select>
+              </label>
+              <label>P&amp;L net
+                <select id="v51ShadowFilterPnl">
+                  <option value="">any</option>
+                  <option value="positive">net positive only</option>
+                  <option value="negative">net negative only</option>
+                </select>
+              </label>
+              <label>Sort
+                <select id="v51ShadowSort">
+                  <option value="recent">recent</option>
+                  <option value="best_net">best net</option>
+                  <option value="worst_net">worst net</option>
+                </select>
+              </label>
+              <label>Limit
+                <input id="v51ShadowLimit" type="number" min="10" max="500" value="60">
+              </label>
               <button id="v5ShadowRefreshBtn" class="btn btn-primary">Refresh shadow</button>
+              <button id="v51ShadowCopyReportBtn" class="btn btn-secondary">Copy plain text</button>
+            </div>
+            <div class="v51-summary-row" id="v51ShadowSummaryRow">
+              <span class="v51-chip" data-tone="info">total: 0</span>
+              <span class="v51-chip" data-tone="ok">net+: 0</span>
+              <span class="v51-chip" data-tone="bad">net-: 0</span>
+              <span class="v51-chip" data-tone="warn">gg-net-neg: 0</span>
+              <span class="v51-chip" data-tone="muted">best: -</span>
+              <span class="v51-chip" data-tone="muted">worst: -</span>
             </div>
             <div class="table-shell">
               <table class="compact">
@@ -316,6 +403,55 @@
               <button id="v5PackDownloadBtn" class="btn btn-secondary">Download TXT</button>
             </div>
             <details class="report-details"><summary>Show plain-text V5 pack</summary><pre id="v5PackOutput">Not loaded.</pre></details>
+          </article>
+
+          <article class="panel">
+            <div class="panel-head">
+              <h3>Strategy Research Enhancer</h3>
+              <span id="v51EnhancerDecisionBadge" class="badge badge-muted">UNKNOWN</span>
+            </div>
+            <p class="v51-hint">Read-only ranking of shadow trades by symbol/side/setup/regime. Never activates anything — decisions are descriptive only.</p>
+            <div class="replay-controls">
+              <label>Hours
+                <input id="v51EnhancerHours" type="number" min="6" max="168" value="24">
+              </label>
+              <label>Symbols (csv)
+                <input id="v51EnhancerSymbols" type="text" maxlength="120" value="BTCUSDT,ETHUSDT,DOTUSDT">
+              </label>
+              <button id="v51EnhancerRefreshBtn" class="btn btn-primary">Run enhancer</button>
+            </div>
+            <div class="v51-summary-row" id="v51EnhancerSummaryRow">
+              <span class="v51-chip" data-tone="muted">overall: -</span>
+              <span class="v51-chip" data-tone="muted">data quality: -</span>
+            </div>
+            <div class="v51-grid-2col">
+              <div>
+                <h4 class="v51-subtitle">By symbol</h4>
+                <div class="table-shell">
+                  <table class="compact">
+                    <thead><tr><th>symbol</th><th>trades</th><th>net EV</th><th>net PF</th><th>win net</th><th>gg-neg</th><th>conf</th><th>decision</th></tr></thead>
+                    <tbody id="v51EnhancerBySymbolRows"><tr><td colspan="8">Not loaded.</td></tr></tbody>
+                  </table>
+                </div>
+              </div>
+              <div>
+                <h4 class="v51-subtitle">By side</h4>
+                <div class="table-shell">
+                  <table class="compact">
+                    <thead><tr><th>side</th><th>trades</th><th>net EV</th><th>net PF</th><th>win net</th><th>gg-neg</th><th>conf</th><th>decision</th></tr></thead>
+                    <tbody id="v51EnhancerBySideRows"><tr><td colspan="8">Not loaded.</td></tr></tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+            <details class="report-details">
+              <summary>Research ideas (no activation)</summary>
+              <ul id="v51EnhancerIdeasList"><li>Not loaded.</li></ul>
+            </details>
+            <details class="report-details">
+              <summary>Show plain-text enhancer report</summary>
+              <pre id="v51EnhancerOutput">Not loaded.</pre>
+            </details>
           </article>
         </section>
 

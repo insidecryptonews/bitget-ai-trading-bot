@@ -1513,6 +1513,20 @@ class ResearchLab:
         )
         return render_fee_aware_exit_text(report)
 
+    def strategy_research_enhancer(
+        self,
+        hours: int = 24,
+        symbols: list[str] | None = None,
+        timeframe: str = "5m",
+        data_quality_status: str | None = None,
+    ) -> str:
+        from .strategy_research_enhancer import strategy_research_enhancer_text
+        return strategy_research_enhancer_text(
+            self.config, self.db,
+            hours=hours, timeframe=timeframe, symbols=symbols,
+            data_quality_status=data_quality_status,
+        )
+
     def fast_signal_shadow(
         self,
         hours: int = 72,
@@ -2194,6 +2208,7 @@ def main() -> None:
             "shadow-multi-trade-replay",
             "capital-leverage-sim",
             "fee-aware-exit-trainer",
+            "strategy-research-enhancer",
             "ohlcv-replay-loader-smoke-test",
             "ohlcv-replay-loader-audit",
             "duplicate-module-audit-smoke-test",
@@ -2675,6 +2690,13 @@ def main() -> None:
     elif args.command == "fee-aware-exit-trainer":
         symbols_arg = [s.strip() for s in (args.symbols or "").split(",") if s.strip()] or None
         print(lab.fee_aware_exit_trainer(
+            hours=args.hours,
+            symbols=symbols_arg,
+            timeframe=args.timeframe,
+        ))
+    elif args.command == "strategy-research-enhancer":
+        symbols_arg = [s.strip() for s in (args.symbols or "").split(",") if s.strip()] or None
+        print(lab.strategy_research_enhancer(
             hours=args.hours,
             symbols=symbols_arg,
             timeframe=args.timeframe,

@@ -200,6 +200,8 @@ def start_health_server(
                 "/api/research/shadow-multi-trade-status",
                 "/api/research/capital-leverage-sim",
                 "/api/research/fee-aware-exit-trainer",
+                "/api/research/strategy-research-enhancer",
+                "/api/training/strategy-research-enhancer",
                 "/api/training/full-report",
                 "/api/training/export/full.txt",
                 "/api/training/export/full.json",
@@ -562,6 +564,9 @@ def start_health_server(
                 return
             if path in {"/api/training/fee-aware-exit-trainer", "/api/research/fee-aware-exit-trainer"}:
                 self._send_json(_v5_fee_aware_exit_trainer(config, db, query))
+                return
+            if path in {"/api/training/strategy-research-enhancer", "/api/research/strategy-research-enhancer"}:
+                self._send_json(_v51_strategy_research_enhancer(config, db, query))
                 return
             if path == "/api/training/full-report":
                 payload = _dashboard_full_report(config, db, query)
@@ -2373,6 +2378,51 @@ def _v5_capital_leverage_sim(config: Any | None, db: Any | None, query: dict[str
         payload["research_only"] = True
         payload["paper_filter_enabled"] = False
         payload["can_send_real_orders"] = False
+        payload["final_recommendation"] = "NO LIVE"
+        return payload
+    except Exception as exc:
+        return _v5_no_op_safety_payload(str(exc)[:300])
+
+
+def _v51_strategy_research_enhancer(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
+    """ResearchOps V5.1 — Strategy Research Enhancer (read-only)."""
+    hours = _query_int(query, "hours", 24)
+    timeframe = (query.get("timeframe") or ["5m"])[0]
+    symbols_arg = (query.get("symbols") or [""])[0]
+    symbols = [s.strip().upper() for s in symbols_arg.split(",") if s.strip()] or None
+    data_quality_status = (query.get("data_quality_status") or [""])[0] or None
+    allow_heavy = (query.get("allow_heavy") or ["0"])[0] in {"1", "true", "yes"}
+    if not allow_heavy and (hours > 168 or (symbols and len(symbols) > 3)):
+        return {
+            "status": "SKIPPED_HEAVY",
+            "reason": "strategy_research_enhancer_hours_above_168_or_more_than_3_symbols",
+            "cli_command": (
+                f"python -m app.research_lab strategy-research-enhancer --hours {hours} "
+                f"--timeframe {timeframe} --symbols {','.join(symbols or [])}"
+            ),
+            "research_only": True,
+            "paper_filter_enabled": False,
+            "can_send_real_orders": False,
+            "final_recommendation": "NO LIVE",
+        }
+    if db is None:
+        return _v5_no_op_safety_payload("strategy research enhancer unavailable")
+    try:
+        from .strategy_research_enhancer import (
+            render_strategy_research_enhancer_text,
+            run_strategy_research_enhancer,
+        )
+        report = run_strategy_research_enhancer(
+            config, db,
+            hours=hours, timeframe=timeframe, symbols=symbols,
+            data_quality_status=data_quality_status,
+        )
+        payload = report.as_dict()
+        payload["text"] = render_strategy_research_enhancer_text(report)
+        payload["research_only"] = True
+        payload["paper_filter_enabled"] = False
+        payload["can_send_real_orders"] = False
+        payload["activation"] = "disabled"
         payload["final_recommendation"] = "NO LIVE"
         return payload
     except Exception as exc:
