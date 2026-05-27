@@ -19,6 +19,7 @@
       <nav class="side-nav">
         <button type="button" class="nav-link nav-item active" data-target="overview">Overview</button>
         <button type="button" class="nav-link nav-item" data-target="research-cockpit">Research Cockpit</button>
+        <button type="button" class="nav-link nav-item" data-target="researchops-v5">ResearchOps V5</button>
         <button type="button" class="nav-link nav-item" data-target="trade-replay">Trade Replay</button>
         <button type="button" class="nav-link nav-item" data-target="paper-monitor">Paper Monitor</button>
         <button type="button" class="nav-link nav-item" data-target="signals">Signals</button>
@@ -68,6 +69,7 @@
       <nav class="mobile-nav" aria-label="Navegacion compacta">
         <button type="button" class="mobile-nav-item" data-target="overview">Overview</button>
         <button type="button" class="mobile-nav-item" data-target="research-cockpit">Cockpit</button>
+        <button type="button" class="mobile-nav-item" data-target="researchops-v5">V5</button>
         <button type="button" class="mobile-nav-item" data-target="trade-replay">Replay</button>
         <button type="button" class="mobile-nav-item" data-target="edge-policy">Edge</button>
         <button type="button" class="mobile-nav-item" data-target="cost-stress">Stress</button>
@@ -181,6 +183,140 @@
             <summary>Ver texto plano cockpit</summary>
             <pre id="cockpitOutput">Sin cargar todavia.</pre>
           </details>
+        </section>
+
+        <section id="researchops-v5" class="section">
+          <div class="section-title">
+            <div>
+              <span class="eyebrow">ResearchOps V5</span>
+              <h2>Trading Research Command Center V5</h2>
+            </div>
+            <p>Read-only research. No live, no paper filter, no real orders. Heavy endpoints return SKIPPED_HEAVY with CLI hints.</p>
+          </div>
+
+          <article class="panel">
+            <div class="panel-head">
+              <h3>OHLCV Freshness Matrix</h3>
+              <span id="v5FreshnessOverallBadge" class="badge badge-muted">UNKNOWN</span>
+            </div>
+            <div class="replay-controls">
+              <label>Symbols (csv)
+                <input id="v5FreshnessSymbols" type="text" maxlength="200" value="BTCUSDT,ETHUSDT,SOLUSDT,XRPUSDT,DOGEUSDT,BNBUSDT,LINKUSDT,AVAXUSDT,ADAUSDT,DOTUSDT">
+              </label>
+              <label>Timeframes
+                <input id="v5FreshnessTimeframes" type="text" maxlength="60" value="5m,15m,1h">
+              </label>
+              <button id="v5FreshnessRefreshBtn" class="btn btn-primary">Refresh status</button>
+              <button id="v5FreshnessPrepareCliBtn" class="btn btn-secondary">Prepare CLI</button>
+            </div>
+            <div class="table-shell">
+              <table class="compact">
+                <thead><tr><th>symbol</th><th>timeframe</th><th>status</th><th>age (min)</th><th>budget</th><th>rows</th><th>newest</th><th>suggested CLI</th></tr></thead>
+                <tbody id="v5FreshnessRows"><tr><td colspan="8">Not loaded.</td></tr></tbody>
+              </table>
+            </div>
+          </article>
+
+          <article class="panel">
+            <div class="panel-head">
+              <h3>Training Data Clean View</h3>
+              <span id="v5CleanStatusBadge" class="badge badge-muted">UNKNOWN</span>
+            </div>
+            <div class="replay-controls">
+              <label>Hours
+                <input id="v5CleanHours" type="number" min="6" max="2160" value="24">
+              </label>
+              <button id="v5CleanRefreshBtn" class="btn btn-primary">Audit clean view</button>
+            </div>
+            <div class="table-shell">
+              <table class="compact">
+                <thead><tr><th>table</th><th>raw</th><th>clean</th><th>duplicates</th><th>dup rate</th><th>dedupe ratio</th><th>notes</th></tr></thead>
+                <tbody id="v5CleanRows"><tr><td colspan="7">Not loaded.</td></tr></tbody>
+              </table>
+            </div>
+            <details class="report-details"><summary>Show plain-text clean view</summary><pre id="v5CleanOutput">Not loaded.</pre></details>
+          </article>
+
+          <article class="panel">
+            <div class="panel-head">
+              <h3>Shadow Multi-Trade Learning</h3>
+              <span id="v5ShadowStatusBadge" class="badge badge-info">shadow_only</span>
+            </div>
+            <div class="replay-controls">
+              <label>Hours
+                <input id="v5ShadowHours" type="number" min="6" max="168" value="24">
+              </label>
+              <button id="v5ShadowRefreshBtn" class="btn btn-primary">Refresh shadow</button>
+            </div>
+            <div class="table-shell">
+              <table class="compact">
+                <thead><tr><th>shadow_id</th><th>symbol</th><th>side</th><th>setup</th><th>status</th><th>gross %</th><th>net %</th><th>gross USDT</th><th>net USDT</th><th>bars</th></tr></thead>
+                <tbody id="v5ShadowRows"><tr><td colspan="10">Not loaded.</td></tr></tbody>
+              </table>
+            </div>
+            <details class="report-details"><summary>Show plain-text shadow report</summary><pre id="v5ShadowOutput">Not loaded.</pre></details>
+          </article>
+
+          <article class="panel">
+            <div class="panel-head">
+              <h3>Capital &amp; Leverage Simulator</h3>
+              <span class="badge badge-info">leverage_simulated</span>
+            </div>
+            <div class="replay-controls">
+              <label>Symbol
+                <input id="v5CapitalSymbol" type="text" value="DOTUSDT" maxlength="20">
+              </label>
+              <label>Hours
+                <input id="v5CapitalHours" type="number" min="24" max="720" value="168">
+              </label>
+              <label>Capital USDT
+                <input id="v5CapitalTotal" type="number" min="1" max="100000" value="40">
+              </label>
+              <button id="v5CapitalRefreshBtn" class="btn btn-primary">Run simulation</button>
+            </div>
+            <div class="table-shell">
+              <table class="compact">
+                <thead><tr><th>margin</th><th>leverage</th><th>notional</th><th>trades</th><th>avg move %</th><th>net USDT</th><th>ROE %</th><th>BE %</th><th>liq dist %</th><th>promotable</th></tr></thead>
+                <tbody id="v5CapitalRows"><tr><td colspan="10">Not loaded.</td></tr></tbody>
+              </table>
+            </div>
+            <p class="hint" style="margin-top:6px;font-size:12px;color:var(--muted)">High ROE does NOT equal edge if net EV negative. Leverage informational only.</p>
+          </article>
+
+          <article class="panel">
+            <div class="panel-head">
+              <h3>Fee-Aware Exit Trainer</h3>
+              <span id="v5FeeAwareBestBadge" class="badge badge-muted">no_promotion</span>
+            </div>
+            <div class="replay-controls">
+              <label>Symbols (csv)
+                <input id="v5FeeAwareSymbols" type="text" maxlength="120" value="BTCUSDT,ETHUSDT,DOTUSDT">
+              </label>
+              <label>Hours
+                <input id="v5FeeAwareHours" type="number" min="24" max="720" value="168">
+              </label>
+              <button id="v5FeeAwareRefreshBtn" class="btn btn-primary">Run trainer</button>
+            </div>
+            <div class="table-shell">
+              <table class="compact">
+                <thead><tr><th>symbol</th><th>npl%</th><th>decision</th><th>promotable</th><th>best scenario</th><th>best net_ev</th><th>gross_green_net_neg</th></tr></thead>
+                <tbody id="v5FeeAwareRows"><tr><td colspan="7">Not loaded.</td></tr></tbody>
+              </table>
+            </div>
+          </article>
+
+          <article class="panel">
+            <div class="panel-head">
+              <h3>Research Pack V5 Export</h3>
+              <span class="badge badge-info">no_secrets</span>
+            </div>
+            <div class="replay-controls">
+              <button id="v5PackBtn" class="btn btn-primary">GENERAR PACK PARA CHATGPT V5</button>
+              <button id="v5PackCopyBtn" class="btn btn-secondary">Copy JSON</button>
+              <button id="v5PackDownloadBtn" class="btn btn-secondary">Download TXT</button>
+            </div>
+            <details class="report-details"><summary>Show plain-text V5 pack</summary><pre id="v5PackOutput">Not loaded.</pre></details>
+          </article>
         </section>
 
         <section id="trade-replay" class="section">

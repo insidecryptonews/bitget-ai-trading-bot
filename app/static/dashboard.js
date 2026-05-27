@@ -946,7 +946,251 @@
     $("phase9FullBtn")?.addEventListener("click", () => loadPhase9Labs({ hours: 720, symbols: "DOTUSDT" }));
     $("researchPackBtn")?.addEventListener("click", loadResearchPack);
 
+    // --- ResearchOps V5 ---
+    $("v5FreshnessRefreshBtn")?.addEventListener("click", loadV5FreshnessMatrix);
+    $("v5FreshnessPrepareCliBtn")?.addEventListener("click", prepareV5FreshnessCli);
+    $("v5CleanRefreshBtn")?.addEventListener("click", loadV5TrainingCleanView);
+    $("v5ShadowRefreshBtn")?.addEventListener("click", loadV5ShadowMultiTrade);
+    $("v5CapitalRefreshBtn")?.addEventListener("click", loadV5CapitalLeverage);
+    $("v5FeeAwareRefreshBtn")?.addEventListener("click", loadV5FeeAwareExit);
+    $("v5PackBtn")?.addEventListener("click", loadV5Pack);
+    $("v5PackCopyBtn")?.addEventListener("click", copyV5PackJson);
+    $("v5PackDownloadBtn")?.addEventListener("click", downloadV5PackText);
+
     bindSafeNavigation();
+  }
+
+  // ResearchOps V5 helpers ---------------------------------------------------
+  let lastV5PackJson = "";
+  let lastV5PackText = "";
+
+  function _v5BadgeForStatus(status) {
+    switch (String(status || "").toUpperCase()) {
+      case "OK": return "badge badge-safe";
+      case "WARNING": return "badge badge-info";
+      case "BAD": case "FAIL": case "STALE": case "NEED_DATA": case "GAP": return "badge badge-danger";
+      default: return "badge badge-muted";
+    }
+  }
+
+  async function loadV5FreshnessMatrix() {
+    const button = $("v5FreshnessRefreshBtn");
+    setButtonLoading(button, true);
+    try {
+      const symbols = ($("v5FreshnessSymbols")?.value || "").trim();
+      const timeframes = ($("v5FreshnessTimeframes")?.value || "5m,15m,1h").trim();
+      const url = `/api/research/ohlcv-freshness-status?symbols=${encodeURIComponent(symbols)}&timeframes=${encodeURIComponent(timeframes)}`;
+      const payload = await fetchJson(url);
+      const overall = payload.overall_actionable ? "OK" : (payload.stale_count + payload.need_data_count + payload.gap_count > 0 ? "STALE" : "UNKNOWN");
+      const badge = $("v5FreshnessOverallBadge");
+      if (badge) { badge.textContent = overall; badge.className = _v5BadgeForStatus(overall); }
+      const rows = Array.isArray(payload.rows) ? payload.rows : [];
+      const target = $("v5FreshnessRows");
+      if (target) {
+        target.innerHTML = rows.length
+          ? rows.map((r) => `<tr>
+              <td>${escapeHtml(r.symbol)}</td>
+              <td>${escapeHtml(r.timeframe)}</td>
+              <td><span class="${_v5BadgeForStatus(r.status)}">${escapeHtml(r.status)}</span></td>
+              <td>${escapeHtml(fmt(r.age_minutes, 1))}</td>
+              <td>${escapeHtml(String(r.staleness_budget_minutes ?? "-"))}</td>
+              <td>${escapeHtml(String(r.row_count ?? 0))}</td>
+              <td>${escapeHtml(r.newest_timestamp || "-")}</td>
+              <td><code>${escapeHtml(r.suggested_command || "-")}</code></td>
+            </tr>`).join("")
+          : "<tr><td colspan=\"8\">No data.</td></tr>";
+      }
+    } catch (error) {
+      const target = $("v5FreshnessRows");
+      if (target) target.innerHTML = `<tr><td colspan="8">freshness error: ${escapeHtml(error.message)}</td></tr>`;
+    } finally {
+      setButtonLoading(button, false);
+    }
+  }
+
+  function prepareV5FreshnessCli() {
+    const symbols = ($("v5FreshnessSymbols")?.value || "").trim();
+    const timeframes = ($("v5FreshnessTimeframes")?.value || "5m,15m,1h").trim();
+    const cli = `python -m app.research_lab ohlcv-freshness-refresh --symbols ${symbols} --timeframes ${timeframes} --hours 120 --dry-run`;
+    copyText(cli).then(() => {});
+  }
+
+  async function loadV5TrainingCleanView() {
+    const button = $("v5CleanRefreshBtn");
+    setButtonLoading(button, true);
+    try {
+      const hours = num($("v5CleanHours")?.value, 24);
+      const payload = await fetchJson(`/api/research/training-clean-view-audit?hours=${hours}`);
+      const badge = $("v5CleanStatusBadge");
+      if (badge) { badge.textContent = payload.overall_status || "UNKNOWN"; badge.className = _v5BadgeForStatus(payload.overall_status); }
+      const tables = Array.isArray(payload.tables) ? payload.tables : [];
+      const target = $("v5CleanRows");
+      if (target) {
+        target.innerHTML = tables.length
+          ? tables.map((row) => `<tr>
+              <td>${escapeHtml(row.table)}</td>
+              <td>${escapeHtml(String(row.raw_count))}</td>
+              <td>${escapeHtml(String(row.clean_count))}</td>
+              <td>${escapeHtml(String(row.duplicates))}</td>
+              <td>${escapeHtml(fmt(row.duplicate_rate, 4))}</td>
+              <td>${escapeHtml(fmt(row.dedupe_ratio, 4))}</td>
+              <td>${escapeHtml((row.notes || []).join(','))}</td>
+            </tr>`).join("")
+          : "<tr><td colspan=\"7\">No data.</td></tr>";
+      }
+      setText("v5CleanOutput", payload.text || JSON.stringify(payload, null, 2).slice(0, 4000));
+    } catch (error) {
+      setText("v5CleanOutput", `clean view error: ${error.message}`);
+    } finally {
+      setButtonLoading(button, false);
+    }
+  }
+
+  async function loadV5ShadowMultiTrade() {
+    const button = $("v5ShadowRefreshBtn");
+    setButtonLoading(button, true);
+    try {
+      const hours = num($("v5ShadowHours")?.value, 24);
+      const payload = await fetchJson(`/api/research/shadow-multi-trade-status?hours=${hours}`);
+      if (payload.status === "SKIPPED_HEAVY") {
+        setText("v5ShadowOutput", `SKIPPED_HEAVY\nCLI: ${payload.cli_command}`);
+        const target = $("v5ShadowRows");
+        if (target) target.innerHTML = `<tr><td colspan="10">SKIPPED_HEAVY — use CLI: ${escapeHtml(payload.cli_command || '-')}</td></tr>`;
+        return;
+      }
+      const trades = Array.isArray(payload.trades) ? payload.trades : [];
+      const target = $("v5ShadowRows");
+      if (target) {
+        target.innerHTML = trades.length
+          ? trades.slice(0, 60).map((t) => `<tr>
+              <td><code>${escapeHtml(t.shadow_id)}</code></td>
+              <td>${escapeHtml(t.symbol)}</td>
+              <td>${escapeHtml(t.side)}</td>
+              <td>${escapeHtml(t.setup_id)}</td>
+              <td>${escapeHtml(t.status)}</td>
+              <td>${escapeHtml(fmt(t.gross_pnl_pct, 4))}</td>
+              <td>${escapeHtml(fmt(t.net_pnl_pct, 4))}</td>
+              <td>${escapeHtml(fmt(t.gross_pnl_usdt, 4))}</td>
+              <td>${escapeHtml(fmt(t.net_pnl_usdt, 4))}</td>
+              <td>${escapeHtml(String(t.bars_open))}</td>
+            </tr>`).join("")
+          : "<tr><td colspan=\"10\">No shadow trades.</td></tr>";
+      }
+      setText("v5ShadowOutput", payload.text || JSON.stringify(payload, null, 2).slice(0, 4000));
+    } catch (error) {
+      setText("v5ShadowOutput", `shadow error: ${error.message}`);
+    } finally {
+      setButtonLoading(button, false);
+    }
+  }
+
+  async function loadV5CapitalLeverage() {
+    const button = $("v5CapitalRefreshBtn");
+    setButtonLoading(button, true);
+    try {
+      const symbol = ($("v5CapitalSymbol")?.value || "DOTUSDT").toUpperCase();
+      const hours = num($("v5CapitalHours")?.value, 168);
+      const capital = num($("v5CapitalTotal")?.value, 40);
+      const payload = await fetchJson(`/api/research/capital-leverage-sim?symbols=${encodeURIComponent(symbol)}&hours=${hours}&capital=${capital}`);
+      if (payload.status === "SKIPPED_HEAVY") {
+        const target = $("v5CapitalRows");
+        if (target) target.innerHTML = `<tr><td colspan="10">SKIPPED_HEAVY — use CLI: ${escapeHtml(payload.cli_command || '-')}</td></tr>`;
+        return;
+      }
+      const scenarios = Array.isArray(payload.scenarios) ? payload.scenarios : [];
+      const target = $("v5CapitalRows");
+      if (target) {
+        target.innerHTML = scenarios.length
+          ? scenarios.map((s) => `<tr>
+              <td>${escapeHtml(fmt(s.margin_per_trade_usdt, 2))}</td>
+              <td>${escapeHtml(String(s.leverage))}</td>
+              <td>${escapeHtml(fmt(s.notional_usdt, 2))}</td>
+              <td>${escapeHtml(String(s.trades))}</td>
+              <td>${escapeHtml(fmt(s.avg_price_move_pct, 4))}</td>
+              <td>${escapeHtml(fmt(s.net_pnl_usdt, 4))}</td>
+              <td>${escapeHtml(fmt(s.roe_pct, 4))}</td>
+              <td>${escapeHtml(fmt(s.min_price_move_to_break_even_pct, 4))}</td>
+              <td>${escapeHtml(fmt(s.liquidation_distance_estimate_pct, 4))}</td>
+              <td>${escapeHtml(String(s.promotion_eligible))}</td>
+            </tr>`).join("")
+          : "<tr><td colspan=\"10\">No data.</td></tr>";
+      }
+    } catch (error) {
+      const target = $("v5CapitalRows");
+      if (target) target.innerHTML = `<tr><td colspan="10">capital sim error: ${escapeHtml(error.message)}</td></tr>`;
+    } finally {
+      setButtonLoading(button, false);
+    }
+  }
+
+  async function loadV5FeeAwareExit() {
+    const button = $("v5FeeAwareRefreshBtn");
+    setButtonLoading(button, true);
+    try {
+      const symbols = ($("v5FeeAwareSymbols")?.value || "DOTUSDT").trim();
+      const hours = num($("v5FeeAwareHours")?.value, 168);
+      const payload = await fetchJson(`/api/research/fee-aware-exit-trainer?symbols=${encodeURIComponent(symbols)}&hours=${hours}`);
+      if (payload.status === "SKIPPED_HEAVY") {
+        const target = $("v5FeeAwareRows");
+        if (target) target.innerHTML = `<tr><td colspan="7">SKIPPED_HEAVY — use CLI: ${escapeHtml(payload.cli_command || '-')}</td></tr>`;
+        return;
+      }
+      const results = Array.isArray(payload.results) ? payload.results : [];
+      const target = $("v5FeeAwareRows");
+      if (target) {
+        target.innerHTML = results.length
+          ? results.map((r) => `<tr>
+              <td>${escapeHtml(r.symbol)}</td>
+              <td>${escapeHtml(fmt(r.net_profit_lock_pct, 2))}</td>
+              <td>${escapeHtml(r.decision)}</td>
+              <td>${escapeHtml(String(r.promotion_eligible))}</td>
+              <td>${escapeHtml(r.best_scenario_name)}</td>
+              <td>${escapeHtml(fmt(r.best_net_ev, 6))}</td>
+              <td>${escapeHtml(String(r.gross_green_net_negative))}</td>
+            </tr>`).join("")
+          : "<tr><td colspan=\"7\">No data.</td></tr>";
+      }
+      const promotable = results.filter((r) => r.promotion_eligible);
+      const badge = $("v5FeeAwareBestBadge");
+      if (badge) {
+        if (promotable.length > 0) { badge.textContent = `${promotable.length} promotable`; badge.className = "badge badge-safe"; }
+        else { badge.textContent = "no_promotion"; badge.className = "badge badge-muted"; }
+      }
+    } catch (error) {
+      const target = $("v5FeeAwareRows");
+      if (target) target.innerHTML = `<tr><td colspan="7">fee aware error: ${escapeHtml(error.message)}</td></tr>`;
+    } finally {
+      setButtonLoading(button, false);
+    }
+  }
+
+  async function loadV5Pack() {
+    const button = $("v5PackBtn");
+    setButtonLoading(button, true);
+    try {
+      const payload = await fetchJson(`/api/research-pack-v5?hours=24`);
+      lastV5PackJson = JSON.stringify(payload, null, 2);
+      lastV5PackText = payload.text || lastV5PackJson;
+      setText("v5PackOutput", lastV5PackText.slice(0, 8000));
+    } catch (error) {
+      setText("v5PackOutput", `pack v5 error: ${error.message}`);
+    } finally {
+      setButtonLoading(button, false);
+    }
+  }
+
+  function copyV5PackJson() {
+    if (!lastV5PackJson) return;
+    copyText(lastV5PackJson).then(() => {});
+  }
+
+  function downloadV5PackText() {
+    if (!lastV5PackText) return;
+    const blob = new Blob([lastV5PackText], { type: "text/plain;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = "research_pack_v5.txt"; a.click();
+    URL.revokeObjectURL(url);
   }
 
   // Phase 7B helpers ---------------------------------------------------------

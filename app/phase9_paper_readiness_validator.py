@@ -67,6 +67,10 @@ PHASE9_READY = PAPER_DEMO_READY_MANUAL_REVIEW_ONLY
 PHASE9_PROMISING = RESEARCH_PROMISING_NOT_ACTIONABLE
 PHASE9_NEED_DATA = "NEED_MORE_DATA"
 PHASE9_REJECT_DATA_STALE = "REJECT_DATA_STALE"
+# ResearchOps V5 — additional gates
+PHASE9_REJECT_DATA_QUALITY = "REJECT_DATA_QUALITY"
+PHASE9_REJECT_NEGATIVE_NET = "REJECT_NEGATIVE_NET"
+PHASE9_REJECT_CATASTROPHIC_FOLD = "REJECT_CATASTROPHIC_FOLD"
 
 
 @dataclass
@@ -92,6 +96,11 @@ class Phase9CandidateVerdict:
     validation_hours: int
     min_trades: int
     min_net_pf: float
+    # ResearchOps V5 — additional inputs surfaced by V2 gates
+    data_quality_status: str = "UNKNOWN"
+    net_profit_lock_eligible: bool = False
+    capital_leverage_net_positive: bool = False
+    gross_green_net_negative: bool = False
     research_only: bool = True
     paper_filter_enabled: bool = False
     can_send_real_orders: bool = False
@@ -169,6 +178,11 @@ def _decision_for_candidate(
     freshness_ok: bool,
     fold_dominance_ok: bool,
     catastrophic_fold: bool,
+    data_quality_status: str = "UNKNOWN",
+    net_profit_lock_eligible: bool = False,
+    capital_leverage_net_positive: bool = False,
+    gross_green_net_negative: bool = False,
+    require_v5_gates: bool = False,
 ) -> tuple[str, list[str], list[str]]:
     blocked: list[str] = []
     reasons: list[str] = []
@@ -176,6 +190,11 @@ def _decision_for_candidate(
         blocked.append("data_freshness")
         reasons.append("data_freshness_blocked")
         return PHASE9_REJECT_DATA_STALE, blocked, reasons
+    # ResearchOps V5 — data quality hard gate. BAD blocks promotion.
+    if str(data_quality_status).upper() == "BAD":
+        blocked.append("data_quality")
+        reasons.append("data_quality_status=BAD")
+        return PHASE9_REJECT_DATA_QUALITY, blocked, reasons
     if validation_hours < 720:
         blocked.append("validation_hours")
         reasons.append(f"validation_hours={validation_hours}_below_720")
@@ -213,9 +232,26 @@ def _decision_for_candidate(
     if catastrophic_fold:
         blocked.append("catastrophic_fold")
         reasons.append("at_least_one_fold_below_-10pct_ev")
+        # Catastrophic fold is a HARD reject — V5 contract.
+        return PHASE9_REJECT_CATASTROPHIC_FOLD, blocked, reasons
     if candidate.delta_ev <= 0:
         blocked.append("delta_ev")
         reasons.append("delta_ev_not_positive_vs_baseline")
+    # ResearchOps V5 — additional gates. These are *additive*: callers that do
+    # not feed them in keep the previous behaviour. `gross_green_net_negative=True`
+    # is always a hard block. `net_profit_lock_eligible` / `capital_leverage_net_positive`
+    # default to False ("not evaluated") and only block when the caller opts in
+    # via `require_v5_gates=True`.
+    if gross_green_net_negative:
+        blocked.append("gross_green_net_negative")
+        reasons.append("gross_green_net_negative_blocks_promotion")
+        return PHASE9_REJECT_NEGATIVE_NET, blocked, reasons
+    if not net_profit_lock_eligible and require_v5_gates:
+        blocked.append("net_profit_lock_promotion_eligible")
+        reasons.append("net_profit_lock_not_promotion_eligible")
+    if not capital_leverage_net_positive and require_v5_gates:
+        blocked.append("capital_leverage_net_positive")
+        reasons.append("capital_leverage_scenario_not_net_positive")
     if blocked:
         # Pick the most specific REJECT label only if a hard failure occurred.
         if "policy_net_ev" in blocked:
@@ -231,6 +267,11 @@ def _verdict_from_phase8(
     min_trades: int,
     min_net_pf: float,
     validation_hours: int,
+    data_quality_status: str = "UNKNOWN",
+    net_profit_lock_eligible: bool = False,
+    capital_leverage_net_positive: bool = False,
+    gross_green_net_negative: bool = False,
+    require_v5_gates: bool = False,
 ) -> Phase9CandidateVerdict:
     freshness_ok = aggregate_actionable(freshness_verdicts)
     fold_dom_ok = _fold_dominance_ok(candidate)
@@ -243,6 +284,11 @@ def _verdict_from_phase8(
         freshness_ok=freshness_ok,
         fold_dominance_ok=fold_dom_ok,
         catastrophic_fold=catastrophic,
+        data_quality_status=data_quality_status,
+        net_profit_lock_eligible=net_profit_lock_eligible,
+        capital_leverage_net_positive=capital_leverage_net_positive,
+        gross_green_net_negative=gross_green_net_negative,
+        require_v5_gates=require_v5_gates,
     )
     return Phase9CandidateVerdict(
         candidate_id=candidate.candidate_id,
@@ -284,6 +330,13 @@ def run_phase9_paper_readiness(
     folds: int = 4,
     policies: list[str] | None = None,
     historical: bool = False,
+    # ResearchOps V5 — optional inputs from sibling labs. Defaults preserve the
+    # original Phase 9 behaviour. Pass them in to apply the V2 hard gates.
+    data_quality_status: str = "UNKNOWN",
+    net_profit_lock_eligible: bool = False,
+    capital_leverage_net_positive: bool = False,
+    gross_green_net_negative: bool = False,
+    require_v5_gates: bool = False,
 ) -> Phase9PaperReadinessReport:
     symbol_list = parse_symbols(symbols, config)
     if not symbol_list:
@@ -298,12 +351,22 @@ def run_phase9_paper_readiness(
     )
     candidates: list[Phase9CandidateVerdict] = []
     for candidate in phase8_report.candidates:
-        candidates.append(_verdict_from_phase8(
+        verdict = _verdict_from_phase8(
             candidate, freshness_verdicts,
             min_trades=min_trades,
             min_net_pf=min_net_pf,
             validation_hours=int(hours),
-        ))
+            data_quality_status=data_quality_status,
+            net_profit_lock_eligible=net_profit_lock_eligible,
+            capital_leverage_net_positive=capital_leverage_net_positive,
+            gross_green_net_negative=gross_green_net_negative,
+            require_v5_gates=require_v5_gates,
+        )
+        verdict.data_quality_status = str(data_quality_status)
+        verdict.net_profit_lock_eligible = bool(net_profit_lock_eligible)
+        verdict.capital_leverage_net_positive = bool(capital_leverage_net_positive)
+        verdict.gross_green_net_negative = bool(gross_green_net_negative)
+        candidates.append(verdict)
     actionable = aggregate_actionable(freshness_verdicts) and any(
         candidate.phase9_decision == PHASE9_READY for candidate in candidates
     )

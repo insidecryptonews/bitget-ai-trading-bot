@@ -173,6 +173,13 @@ def start_health_server(
                 "/api/training/net-profit-lock-lab",
                 "/api/training/fast-signal-shadow",
                 "/api/training/research-pack",
+                "/api/training/research-pack-v5",
+                "/api/training/ohlcv-freshness-status",
+                "/api/training/ohlcv-freshness-refresh-dry",
+                "/api/training/training-clean-view-audit",
+                "/api/training/shadow-multi-trade-status",
+                "/api/training/capital-leverage-sim",
+                "/api/training/fee-aware-exit-trainer",
                 "/api/time-exit-autopsy-v2",
                 "/api/dynamic-hold-lab",
                 "/api/entry-exhaustion-lab",
@@ -186,6 +193,13 @@ def start_health_server(
                 "/api/net-profit-lock-lab",
                 "/api/fast-signal-shadow",
                 "/api/research-pack",
+                "/api/research-pack-v5",
+                "/api/research/ohlcv-freshness-status",
+                "/api/research/ohlcv-freshness-refresh-dry",
+                "/api/research/training-clean-view-audit",
+                "/api/research/shadow-multi-trade-status",
+                "/api/research/capital-leverage-sim",
+                "/api/research/fee-aware-exit-trainer",
                 "/api/training/full-report",
                 "/api/training/export/full.txt",
                 "/api/training/export/full.json",
@@ -522,6 +536,32 @@ def start_health_server(
                     self._send_text(str(payload.get("text") or ""))
                 else:
                     self._send_json(payload)
+                return
+            if path in {"/api/training/research-pack-v5", "/api/research-pack-v5"}:
+                payload = _research_pack_v5_endpoint(config, db, query)
+                fmt = (query.get("format") or ["json"])[0].lower()
+                if fmt == "text":
+                    self._send_text(str(payload.get("text") or ""))
+                else:
+                    self._send_json(payload)
+                return
+            if path in {"/api/training/ohlcv-freshness-status", "/api/research/ohlcv-freshness-status"}:
+                self._send_json(_v5_ohlcv_freshness_status(config, db, query))
+                return
+            if path in {"/api/training/ohlcv-freshness-refresh-dry", "/api/research/ohlcv-freshness-refresh-dry"}:
+                self._send_json(_v5_ohlcv_freshness_refresh_dry(config, db, query))
+                return
+            if path in {"/api/training/training-clean-view-audit", "/api/research/training-clean-view-audit"}:
+                self._send_json(_v5_training_clean_view_audit(config, db, query))
+                return
+            if path in {"/api/training/shadow-multi-trade-status", "/api/research/shadow-multi-trade-status"}:
+                self._send_json(_v5_shadow_multi_trade_status(config, db, query))
+                return
+            if path in {"/api/training/capital-leverage-sim", "/api/research/capital-leverage-sim"}:
+                self._send_json(_v5_capital_leverage_sim(config, db, query))
+                return
+            if path in {"/api/training/fee-aware-exit-trainer", "/api/research/fee-aware-exit-trainer"}:
+                self._send_json(_v5_fee_aware_exit_trainer(config, db, query))
                 return
             if path == "/api/training/full-report":
                 payload = _dashboard_full_report(config, db, query)
@@ -2141,6 +2181,244 @@ def _research_pack_endpoint(config: Any | None, db: Any | None, query: dict[str,
             "can_send_real_orders": False,
             "final_recommendation": "NO LIVE",
         }
+
+
+# ----- ResearchOps V5 endpoints --------------------------------------------
+
+
+def _v5_no_op_safety_payload(error: str) -> dict[str, Any]:
+    return {
+        "error": error,
+        "research_only": True,
+        "paper_filter_enabled": False,
+        "can_send_real_orders": False,
+        "final_recommendation": "NO LIVE",
+    }
+
+
+def _research_pack_v5_endpoint(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
+    hours = _query_int(query, "hours", 24)
+    symbols_arg = (query.get("symbols") or [""])[0]
+    timeframes_arg = (query.get("timeframes") or [""])[0]
+    symbols = [s.strip().upper() for s in symbols_arg.split(",") if s.strip()] or None
+    timeframes = [t.strip().lower() for t in timeframes_arg.split(",") if t.strip()] or None
+    include_shadow = (query.get("include_shadow") or ["1"])[0] in {"1", "true", "yes"}
+    include_capital = (query.get("include_capital_leverage") or ["1"])[0] in {"1", "true", "yes"}
+    include_fee = (query.get("include_fee_aware_exit") or ["0"])[0] in {"1", "true", "yes"}
+    if config is None or db is None:
+        return _v5_no_op_safety_payload("research pack v5 unavailable")
+    try:
+        from .research_pack_v5 import build_research_pack_v5, render_research_pack_v5_text
+        payload = build_research_pack_v5(
+            config, db,
+            hours=min(hours, 24),
+            symbols=symbols,
+            timeframes=timeframes,
+            include_shadow=include_shadow,
+            include_capital_leverage=include_capital,
+            include_fee_aware_exit=include_fee,
+        )
+        payload["text"] = render_research_pack_v5_text(payload)
+        payload["research_only"] = True
+        payload["paper_filter_enabled"] = False
+        payload["can_send_real_orders"] = False
+        payload["final_recommendation"] = "NO LIVE"
+        return payload
+    except Exception as exc:
+        return _v5_no_op_safety_payload(str(exc)[:300])
+
+
+def _v5_ohlcv_freshness_status(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
+    symbols_arg = (query.get("symbols") or [""])[0]
+    timeframes_arg = (query.get("timeframes") or [""])[0]
+    symbols = [s.strip().upper() for s in symbols_arg.split(",") if s.strip()] or None
+    timeframes = [t.strip().lower() for t in timeframes_arg.split(",") if t.strip()] or None
+    if db is None:
+        return _v5_no_op_safety_payload("freshness status unavailable")
+    try:
+        from .ohlcv_freshness_manager import freshness_status, render_freshness_matrix_text
+        report = freshness_status(db, symbols=symbols, timeframes=timeframes, config=config)
+        payload = report.as_dict()
+        payload["text"] = render_freshness_matrix_text(report)
+        payload["research_only"] = True
+        payload["paper_filter_enabled"] = False
+        payload["can_send_real_orders"] = False
+        payload["final_recommendation"] = "NO LIVE"
+        return payload
+    except Exception as exc:
+        return _v5_no_op_safety_payload(str(exc)[:300])
+
+
+def _v5_ohlcv_freshness_refresh_dry(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
+    symbols_arg = (query.get("symbols") or [""])[0]
+    timeframes_arg = (query.get("timeframes") or [""])[0]
+    hours = _query_int(query, "hours", 120)
+    symbols = [s.strip().upper() for s in symbols_arg.split(",") if s.strip()] or None
+    timeframes = [t.strip().lower() for t in timeframes_arg.split(",") if t.strip()] or None
+    if db is None:
+        return _v5_no_op_safety_payload("freshness refresh dry-run unavailable")
+    try:
+        from .ohlcv_freshness_manager import refresh, render_refresh_report_text
+        # Dashboard endpoints NEVER trigger a real write. dry_run=True only.
+        report = refresh(
+            db,
+            config=config,
+            symbols=symbols,
+            timeframes=timeframes,
+            hours=hours,
+            dry_run=True,
+            allow_real_writes=False,
+        )
+        payload = report.as_dict()
+        payload["text"] = render_refresh_report_text(report)
+        payload["research_only"] = True
+        payload["paper_filter_enabled"] = False
+        payload["can_send_real_orders"] = False
+        payload["final_recommendation"] = "NO LIVE"
+        return payload
+    except Exception as exc:
+        return _v5_no_op_safety_payload(str(exc)[:300])
+
+
+def _v5_training_clean_view_audit(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
+    hours = _query_int(query, "hours", 24)
+    if db is None:
+        return _v5_no_op_safety_payload("training clean view unavailable")
+    try:
+        from .training_data_clean_view import run_training_data_clean_view, render_training_data_clean_view_text
+        report = run_training_data_clean_view(db, hours=hours)
+        payload = report.as_dict()
+        payload["text"] = render_training_data_clean_view_text(report)
+        payload["research_only"] = True
+        payload["paper_filter_enabled"] = False
+        payload["can_send_real_orders"] = False
+        payload["final_recommendation"] = "NO LIVE"
+        return payload
+    except Exception as exc:
+        return _v5_no_op_safety_payload(str(exc)[:300])
+
+
+def _v5_shadow_multi_trade_status(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
+    hours = _query_int(query, "hours", 24)
+    timeframe = (query.get("timeframe") or ["5m"])[0]
+    symbols_arg = (query.get("symbols") or [""])[0]
+    symbols = [s.strip().upper() for s in symbols_arg.split(",") if s.strip()] or None
+    allow_heavy = (query.get("allow_heavy") or ["0"])[0] in {"1", "true", "yes"}
+    if not allow_heavy and hours > 72:
+        return {
+            "status": "SKIPPED_HEAVY",
+            "reason": "shadow_multi_trade_request_hours_above_72_pass_allow_heavy_1",
+            "cli_command": (
+                f"python -m app.research_lab shadow-multi-trade-replay --hours {hours} "
+                f"--timeframe {timeframe} --symbols {','.join(symbols or [])}"
+            ),
+            "research_only": True,
+            "paper_filter_enabled": False,
+            "can_send_real_orders": False,
+            "final_recommendation": "NO LIVE",
+        }
+    if db is None:
+        return _v5_no_op_safety_payload("shadow multi-trade unavailable")
+    try:
+        from .shadow_multi_trade_learning import run_shadow_multi_trade, render_shadow_multi_trade_text
+        report = run_shadow_multi_trade(
+            config, db, hours=hours, timeframe=timeframe, symbols=symbols,
+        )
+        payload = report.as_dict()
+        payload["text"] = render_shadow_multi_trade_text(report)
+        payload["research_only"] = True
+        payload["paper_filter_enabled"] = False
+        payload["can_send_real_orders"] = False
+        payload["activation"] = "shadow_only"
+        payload["final_recommendation"] = "NO LIVE"
+        return payload
+    except Exception as exc:
+        return _v5_no_op_safety_payload(str(exc)[:300])
+
+
+def _v5_capital_leverage_sim(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
+    hours = _query_int(query, "hours", 168)
+    timeframe = (query.get("timeframe") or ["5m"])[0]
+    symbols_arg = (query.get("symbols") or [""])[0]
+    capital = float((query.get("capital") or ["40"])[0])
+    symbols = [s.strip().upper() for s in symbols_arg.split(",") if s.strip()] or None
+    allow_heavy = (query.get("allow_heavy") or ["0"])[0] in {"1", "true", "yes"}
+    if not allow_heavy and hours > 168:
+        return {
+            "status": "SKIPPED_HEAVY",
+            "reason": "capital_leverage_sim_request_hours_above_168_pass_allow_heavy_1",
+            "cli_command": (
+                f"python -m app.research_lab capital-leverage-sim --hours {hours} "
+                f"--timeframe {timeframe} --symbols {','.join(symbols or [])} --capital {capital}"
+            ),
+            "research_only": True,
+            "paper_filter_enabled": False,
+            "can_send_real_orders": False,
+            "final_recommendation": "NO LIVE",
+        }
+    if db is None:
+        return _v5_no_op_safety_payload("capital leverage simulator unavailable")
+    try:
+        from .capital_leverage_simulator import (
+            run_capital_leverage_simulator,
+            render_capital_leverage_text,
+        )
+        report = run_capital_leverage_simulator(
+            config, db,
+            hours=hours, timeframe=timeframe, symbols=symbols,
+            capital_total_usdt=capital,
+        )
+        payload = report.as_dict()
+        payload["text"] = render_capital_leverage_text(report)
+        payload["research_only"] = True
+        payload["paper_filter_enabled"] = False
+        payload["can_send_real_orders"] = False
+        payload["final_recommendation"] = "NO LIVE"
+        return payload
+    except Exception as exc:
+        return _v5_no_op_safety_payload(str(exc)[:300])
+
+
+def _v5_fee_aware_exit_trainer(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
+    hours = _query_int(query, "hours", 168)
+    timeframe = (query.get("timeframe") or ["5m"])[0]
+    symbols_arg = (query.get("symbols") or [""])[0]
+    symbols = [s.strip().upper() for s in symbols_arg.split(",") if s.strip()] or None
+    allow_heavy = (query.get("allow_heavy") or ["0"])[0] in {"1", "true", "yes"}
+    symbol_count = len(symbols or [])
+    if not allow_heavy and (hours > 168 or symbol_count > 2):
+        return {
+            "status": "SKIPPED_HEAVY",
+            "reason": "fee_aware_exit_request_heavy_pass_allow_heavy_1",
+            "cli_command": (
+                f"python -m app.research_lab fee-aware-exit-trainer --hours {hours} "
+                f"--timeframe {timeframe} --symbols {','.join(symbols or [])}"
+            ),
+            "research_only": True,
+            "paper_filter_enabled": False,
+            "can_send_real_orders": False,
+            "final_recommendation": "NO LIVE",
+        }
+    if db is None:
+        return _v5_no_op_safety_payload("fee aware exit trainer unavailable")
+    try:
+        from .fee_aware_exit_trainer import (
+            run_fee_aware_exit_trainer,
+            render_fee_aware_exit_text,
+        )
+        report = run_fee_aware_exit_trainer(
+            config, db,
+            hours=hours, timeframe=timeframe, symbols=symbols,
+        )
+        payload = report.as_dict()
+        payload["text"] = render_fee_aware_exit_text(report)
+        payload["research_only"] = True
+        payload["paper_filter_enabled"] = False
+        payload["can_send_real_orders"] = False
+        payload["final_recommendation"] = "NO LIVE"
+        return payload
+    except Exception as exc:
+        return _v5_no_op_safety_payload(str(exc)[:300])
 
 
 def _dashboard_full_report(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:

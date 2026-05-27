@@ -1399,6 +1399,120 @@ class ResearchLab:
         from .net_profit_lock_lab import net_profit_lock_text
         return net_profit_lock_text(self.config, self.db, hours=hours, timeframe=timeframe, symbols=symbols)
 
+    # ResearchOps V5 ---------------------------------------------------------
+
+    def ohlcv_freshness_status(
+        self,
+        symbols: list[str] | None = None,
+        timeframes: list[str] | None = None,
+    ) -> str:
+        from .ohlcv_freshness_manager import (
+            freshness_status,
+            render_freshness_matrix_text,
+        )
+        report = freshness_status(
+            self.db,
+            symbols=symbols,
+            timeframes=timeframes,
+            config=self.config,
+        )
+        return render_freshness_matrix_text(report)
+
+    def ohlcv_freshness_refresh(
+        self,
+        symbols: list[str] | None = None,
+        timeframes: list[str] | None = None,
+        hours: int = 120,
+        dry_run: bool = True,
+        allow_real_writes: bool = False,
+    ) -> str:
+        from .ohlcv_freshness_manager import (
+            refresh,
+            render_refresh_report_text,
+        )
+        report = refresh(
+            self.db,
+            config=self.config,
+            symbols=symbols,
+            timeframes=timeframes,
+            hours=hours,
+            dry_run=dry_run,
+            allow_real_writes=allow_real_writes,
+            logger=self.logger,
+        )
+        return render_refresh_report_text(report)
+
+    def training_clean_view_audit(self, hours: int = 24) -> str:
+        from .training_data_clean_view import (
+            run_training_data_clean_view,
+            render_training_data_clean_view_text,
+        )
+        report = run_training_data_clean_view(self.db, hours=hours)
+        return render_training_data_clean_view_text(report)
+
+    def shadow_multi_trade_status(self, hours: int = 24) -> str:
+        from .shadow_multi_trade_learning import (
+            run_shadow_multi_trade,
+            render_shadow_multi_trade_text,
+        )
+        report = run_shadow_multi_trade(
+            self.config, self.db, hours=hours, timeframe="5m",
+        )
+        return render_shadow_multi_trade_text(report)
+
+    def shadow_multi_trade_replay(
+        self,
+        hours: int = 720,
+        symbols: list[str] | None = None,
+        timeframe: str = "5m",
+    ) -> str:
+        from .shadow_multi_trade_learning import (
+            run_shadow_multi_trade,
+            render_shadow_multi_trade_text,
+        )
+        report = run_shadow_multi_trade(
+            self.config, self.db,
+            hours=hours, timeframe=timeframe, symbols=symbols,
+        )
+        return render_shadow_multi_trade_text(report)
+
+    def capital_leverage_sim(
+        self,
+        hours: int = 720,
+        symbols: list[str] | None = None,
+        timeframe: str = "5m",
+        capital_total_usdt: float = 40.0,
+        margins: tuple[float, ...] = (2.0, 5.0, 10.0, 20.0),
+        leverages: tuple[int, ...] = (1, 3, 5, 10, 20, 50),
+    ) -> str:
+        from .capital_leverage_simulator import (
+            run_capital_leverage_simulator,
+            render_capital_leverage_text,
+        )
+        report = run_capital_leverage_simulator(
+            self.config, self.db,
+            hours=hours, timeframe=timeframe, symbols=symbols,
+            capital_total_usdt=capital_total_usdt,
+            margins=margins, leverages=leverages,
+        )
+        return render_capital_leverage_text(report)
+
+    def fee_aware_exit_trainer(
+        self,
+        hours: int = 720,
+        symbols: list[str] | None = None,
+        timeframe: str = "5m",
+    ) -> str:
+        from .fee_aware_exit_trainer import (
+            run_fee_aware_exit_trainer,
+            render_fee_aware_exit_text,
+        )
+        report = run_fee_aware_exit_trainer(
+            self.config, self.db,
+            hours=hours, timeframe=timeframe, symbols=symbols,
+        )
+        return render_fee_aware_exit_text(report)
+
     def fast_signal_shadow(
         self,
         hours: int = 72,
@@ -2073,6 +2187,13 @@ def main() -> None:
             "fast-signal-shadow",
             "research-pack",
             "research-cockpit",
+            "ohlcv-freshness-status",
+            "ohlcv-freshness-refresh",
+            "training-clean-view-audit",
+            "shadow-multi-trade-status",
+            "shadow-multi-trade-replay",
+            "capital-leverage-sim",
+            "fee-aware-exit-trainer",
             "ohlcv-replay-loader-smoke-test",
             "ohlcv-replay-loader-audit",
             "duplicate-module-audit-smoke-test",
@@ -2179,6 +2300,11 @@ def main() -> None:
     parser.add_argument("--max-candles", type=int, default=1200, help="Max candles for trade-replay-export.")
     parser.add_argument("--max-trades", type=int, default=200, help="Max trades for trade-replay-export.")
     parser.add_argument("--policy", default="late_entry_block_plus_dynamic_hold", help="Phase 8 policy name for cost stress / validator helpers.")
+    parser.add_argument("--timeframes", default="", help="Comma-separated timeframes for OHLCV freshness manager (default 5m,15m,1h).")
+    parser.add_argument("--allow-real-writes", action="store_true", help="Explicitly allow OHLCV freshness refresh to write to DB (ResearchOps V5).")
+    parser.add_argument("--capital", type=float, default=40.0, help="Capital total USDT for capital-leverage-sim (default 40).")
+    parser.add_argument("--margins", default="2,5,10,20", help="Margins (csv USDT) for capital-leverage-sim (default 2,5,10,20).")
+    parser.add_argument("--leverages", default="1,3,5,10,20,50", help="Leverages (csv) for capital-leverage-sim (default 1,3,5,10,20,50).")
     args = parser.parse_args()
     config = load_config()
     logger = setup_logger()
@@ -2509,6 +2635,50 @@ def main() -> None:
         print(lab.research_pack(hours=args.hours))
     elif args.command == "research-cockpit":
         print(lab.research_cockpit())
+    elif args.command == "ohlcv-freshness-status":
+        symbols_arg = [s.strip() for s in (args.symbols or "").split(",") if s.strip()] or None
+        timeframes_arg = [t.strip() for t in (args.timeframes or "").split(",") if t.strip()] or None
+        print(lab.ohlcv_freshness_status(symbols=symbols_arg, timeframes=timeframes_arg))
+    elif args.command == "ohlcv-freshness-refresh":
+        symbols_arg = [s.strip() for s in (args.symbols or "").split(",") if s.strip()] or None
+        timeframes_arg = [t.strip() for t in (args.timeframes or "").split(",") if t.strip()] or None
+        # --dry-run forces dry. Without --apply we default to dry-run.
+        forced_dry = bool(args.dry_run)
+        will_apply = bool(args.apply) and not forced_dry
+        dry_run = forced_dry or not will_apply
+        print(lab.ohlcv_freshness_refresh(
+            symbols=symbols_arg,
+            timeframes=timeframes_arg,
+            hours=args.hours,
+            dry_run=dry_run,
+            allow_real_writes=bool(args.allow_real_writes),
+        ))
+    elif args.command == "training-clean-view-audit":
+        print(lab.training_clean_view_audit(hours=args.hours))
+    elif args.command == "shadow-multi-trade-status":
+        print(lab.shadow_multi_trade_status(hours=args.hours))
+    elif args.command == "shadow-multi-trade-replay":
+        symbols_arg = [s.strip() for s in (args.symbols or "").split(",") if s.strip()] or None
+        print(lab.shadow_multi_trade_replay(hours=args.hours, symbols=symbols_arg, timeframe=args.timeframe))
+    elif args.command == "capital-leverage-sim":
+        symbols_arg = [s.strip() for s in (args.symbols or "").split(",") if s.strip()] or None
+        margins_arg = tuple(float(value) for value in (args.margins or "").split(",") if value.strip()) or (2.0, 5.0, 10.0, 20.0)
+        leverages_arg = tuple(int(float(value)) for value in (args.leverages or "").split(",") if value.strip()) or (1, 3, 5, 10, 20, 50)
+        print(lab.capital_leverage_sim(
+            hours=args.hours,
+            symbols=symbols_arg,
+            timeframe=args.timeframe,
+            capital_total_usdt=float(args.capital),
+            margins=margins_arg,
+            leverages=leverages_arg,
+        ))
+    elif args.command == "fee-aware-exit-trainer":
+        symbols_arg = [s.strip() for s in (args.symbols or "").split(",") if s.strip()] or None
+        print(lab.fee_aware_exit_trainer(
+            hours=args.hours,
+            symbols=symbols_arg,
+            timeframe=args.timeframe,
+        ))
     elif args.command == "ohlcv-replay-loader-smoke-test":
         print(lab.ohlcv_replay_loader_smoke_test())
     elif args.command == "ohlcv-replay-loader-audit":
