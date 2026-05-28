@@ -1527,6 +1527,21 @@ class ResearchLab:
             data_quality_status=data_quality_status,
         )
 
+    def clean_research_metrics(
+        self,
+        hours: int = 24,
+        symbols: list[str] | None = None,
+        timeframes: list[str] | None = None,
+    ) -> str:
+        from .clean_research_metrics import (
+            get_clean_research_metrics,
+            render_clean_metrics_text,
+        )
+        report = get_clean_research_metrics(
+            self.db, hours=hours, symbols=symbols, timeframes=timeframes,
+        )
+        return render_clean_metrics_text(report)
+
     def fast_signal_shadow(
         self,
         hours: int = 72,
@@ -2209,6 +2224,7 @@ def main() -> None:
             "capital-leverage-sim",
             "fee-aware-exit-trainer",
             "strategy-research-enhancer",
+            "clean-research-metrics",
             "ohlcv-replay-loader-smoke-test",
             "ohlcv-replay-loader-audit",
             "duplicate-module-audit-smoke-test",
@@ -2700,6 +2716,14 @@ def main() -> None:
             hours=args.hours,
             symbols=symbols_arg,
             timeframe=args.timeframe,
+        ))
+    elif args.command == "clean-research-metrics":
+        symbols_arg = [s.strip() for s in (args.symbols or "").split(",") if s.strip()] or None
+        timeframes_arg = [t.strip() for t in (args.timeframes or "").split(",") if t.strip()] or None
+        print(lab.clean_research_metrics(
+            hours=args.hours,
+            symbols=symbols_arg,
+            timeframes=timeframes_arg,
         ))
     elif args.command == "ohlcv-replay-loader-smoke-test":
         print(lab.ohlcv_replay_loader_smoke_test())

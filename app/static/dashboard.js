@@ -1654,7 +1654,266 @@
     setInterval(localTimes, 1000);
     renderStatusFallback();
     loadStatus();
+    // Wire the V6 cockpit refresh + pack buttons after DOM is ready.
+    $("v6OverviewRefreshBtn")?.addEventListener("click", refreshV6Cockpit);
+    $("v6OverviewPackBtn")?.addEventListener("click", refreshV6PackButton);
+    // Initial cockpit population — light fetches only.
+    refreshV6Cockpit().catch(() => {});
   });
+
+  // ResearchOps V6 — Operator Cockpit helpers --------------------------------
+
+  function _v6SetCard(id, status, value, sub, foot) {
+    const card = $(id);
+    if (!card) return;
+    if (status) card.setAttribute("data-status", status);
+    const v = card.querySelector(".v6-card-value");
+    if (v && value !== undefined) v.textContent = value;
+    const s = card.querySelector(".v6-card-sub");
+    if (s && sub !== undefined) s.textContent = sub;
+    const f = card.querySelector(".v6-card-foot");
+    if (f && foot !== undefined) f.textContent = foot;
+  }
+
+  function _v6Status(input) {
+    const s = String(input || "UNKNOWN").toUpperCase();
+    if (s === "OK") return "ok";
+    if (s === "WARNING" || s === "WARN") return "warn";
+    if (s === "BAD" || s === "FAIL" || s === "STALE" || s === "NEED_DATA" || s === "GAP") return "bad";
+    if (s === "SHADOW_ONLY" || s === "SHADOW") return "shadow";
+    if (s === "INFO") return "info";
+    return "unknown";
+  }
+
+  function _v6RenderBlockers(items) {
+    const list = $("v6BlockersList");
+    const countBadge = $("v6BlockersCount");
+    if (!list) return;
+    if (!items.length) {
+      list.innerHTML = `<li class="v6-blocker-item" data-severity="ok"><span class="v6-blocker-tag">OK</span><span class="v6-blocker-text">Sin bloqueos detectados. Mantener research.</span></li>`;
+      if (countBadge) { countBadge.textContent = "0 bloqueos"; countBadge.className = "badge badge-safe"; }
+      return;
+    }
+    list.innerHTML = items.map((b) => `<li class="v6-blocker-item" data-severity="${b.severity}"><span class="v6-blocker-tag">${escapeHtml(b.tag)}</span><span class="v6-blocker-text"><strong>${escapeHtml(b.title)}</strong> — ${escapeHtml(b.detail)}<br><em style="color:var(--muted);">next: ${escapeHtml(b.next_action || "-")}</em></span></li>`).join("");
+    if (countBadge) {
+      countBadge.textContent = `${items.length} bloqueos`;
+      countBadge.className = "badge " + (items.some((b) => b.severity === "bad") ? "badge-danger" : "badge-warning");
+    }
+  }
+
+  async function refreshV6Cockpit() {
+    const btn = $("v6OverviewRefreshBtn");
+    setButtonLoading(btn, true);
+    const blockers = [];
+    try {
+      // Worker status + git from /api/training/status (cheap).
+      try {
+        const statusPayload = await fetchJson("/api/training/status");
+        if (statusPayload && statusPayload.git) {
+          const gitTxt = String(statusPayload.git).slice(0, 40);
+          setText("v6CommandGit", `git: ${gitTxt}`);
+        }
+        const workerOk = statusPayload?.health?.toLowerCase?.() === "ok" || statusPayload?.worker_lock?.status === "OK";
+        const wb = $("v6CommandWorkerBadge");
+        if (wb) {
+          wb.textContent = `worker: ${workerOk ? "OK" : "unknown"}`;
+          wb.className = `badge ${workerOk ? "badge-safe" : "badge-muted"}`;
+        }
+      } catch (e) { /* tolerate missing endpoint */ }
+      setText("v6CommandLastScan", `last scan: ${new Date().toISOString().slice(0, 19).replace("T", " ")} UTC`);
+
+      // Freshness
+      try {
+        const fr = await fetchJson("/api/research/ohlcv-freshness-status?symbols=BTCUSDT,ETHUSDT,SOLUSDT,XRPUSDT,DOGEUSDT,BNBUSDT,LINKUSDT,AVAXUSDT,ADAUSDT,DOTUSDT&timeframes=5m,15m,1h");
+        const ok = fr.ok_count ?? 0;
+        const stale = fr.stale_count ?? 0;
+        const need = fr.need_data_count ?? 0;
+        const gap = fr.gap_count ?? 0;
+        const status = (stale + need + gap === 0) ? "ok" : (need >= 5 ? "bad" : "warn");
+        const newest = (fr.rows || []).map((r) => r.newest_timestamp).filter(Boolean).sort().slice(-1)[0] || "-";
+        _v6SetCard("v6CardFreshness", status,
+          fr.overall_actionable ? "All fresh" : `${stale + need + gap} not fresh`,
+          `ok ${ok} · stale ${stale} · need ${need} · gap ${gap}`,
+          `last candle: ${newest}`);
+        if (stale + need + gap > 0) {
+          blockers.push({
+            severity: status === "bad" ? "bad" : "warn",
+            tag: "OHLCV_STALE",
+            title: "OHLCV data not fresh",
+            detail: `${stale} stale · ${need} missing · ${gap} gap`,
+            next_action: "python -m app.research_lab ohlcv-freshness-refresh --apply --allow-real-writes",
+          });
+        }
+      } catch (e) { /* keep card UNKNOWN */ }
+
+      // Clean research metrics (V6)
+      let cleanPayload = null;
+      try {
+        cleanPayload = await fetchJson("/api/research/clean-research-metrics?hours=24");
+        const dq = String(cleanPayload.data_quality_status || "UNKNOWN").toUpperCase();
+        const dqStatus = dq === "OK" ? "ok" : dq === "WARNING" ? "warn" : dq === "BAD" ? "bad" : "unknown";
+        _v6SetCard("v6CardDataQuality", dqStatus, dq,
+          `duplicate rate: ${(cleanPayload.duplicate_rate ?? 0).toFixed(4)}`,
+          `raw ${cleanPayload.raw_sample_count ?? 0} · clean ${cleanPayload.clean_sample_count ?? 0}`);
+        // Populate raw vs clean panel.
+        setText("v6RawSampleValue", String(cleanPayload.raw_sample_count ?? 0));
+        setText("v6CleanSampleValue", String(cleanPayload.clean_sample_count ?? 0));
+        setText("v6DuplicateRateValue", `${((cleanPayload.duplicate_rate ?? 0) * 100).toFixed(2)}%`);
+        setText("v6DuplicateImpactValue", `${((cleanPayload.duplicate_impact_pct ?? 0)).toFixed(4)}%`);
+        setText("v6RawEvValue", (cleanPayload.raw_ev_pct ?? 0).toFixed(6));
+        setText("v6CleanEvValue", (cleanPayload.clean_ev_pct ?? 0).toFixed(6));
+        if (dq === "BAD") {
+          blockers.push({
+            severity: "bad",
+            tag: "DATA_QUALITY",
+            title: "Data Quality BAD — duplicate_rate over threshold",
+            detail: `duplicate_rate=${((cleanPayload.duplicate_rate ?? 0) * 100).toFixed(2)}% — research rankings on RAW are not trustworthy.`,
+            next_action: "python -m app.research_lab training-clean-view-audit --hours 720",
+          });
+        }
+        if ((cleanPayload.clean_sample_count ?? 0) < 15) {
+          blockers.push({
+            severity: "warn",
+            tag: "LOW_SAMPLE",
+            title: "Clean sample count too low",
+            detail: `clean_sample_count=${cleanPayload.clean_sample_count ?? 0} — readings are not yet reliable.`,
+            next_action: "Continue shadow data collection",
+          });
+        }
+        if ((cleanPayload.raw_ev_pct ?? 0) > 0 && (cleanPayload.clean_ev_pct ?? 0) <= 0) {
+          blockers.push({
+            severity: "bad",
+            tag: "RAW_CLEAN_DIFF",
+            title: "RAW positive but CLEAN negative",
+            detail: "Promoting on RAW would chase duplicates that wipe out the apparent edge.",
+            next_action: "Use clean metrics only; never promote raw",
+          });
+        }
+      } catch (e) { /* leave card UNKNOWN */ }
+
+      // Strategy Research Enhancer (CLEAN-aware decision + best leads)
+      try {
+        const enh = await fetchJson("/api/research/strategy-research-enhancer?hours=24&symbols=BTCUSDT,ETHUSDT,DOTUSDT");
+        const dec = String(enh.overall_decision || "UNKNOWN").toUpperCase();
+        const tone = dec === "RESEARCH_PROMISING" ? "ok" : dec === "SHADOW_ONLY" ? "shadow" : dec.startsWith("REJECT_") ? "bad" : "warn";
+        _v6SetCard("v6CardEdge", tone, dec,
+          `clean net EV: ${(enh.clean_metrics?.clean_ev_pct ?? 0).toFixed(6)}`,
+          `clean PF: ${(enh.clean_metrics?.clean_pf ?? 0).toFixed(4)} · promotable: ${dec === "RESEARCH_PROMISING" ? "review only" : "false"}`);
+        // Best leads table.
+        const target = $("v6BestLeadsRows");
+        if (target) {
+          const top = (enh.rankings_by_symbol || []).slice(0, 10);
+          if (top.length === 0) {
+            target.innerHTML = "<tr><td colspan=\"10\">Sin pistas todavía. Carga la sección ResearchOps V5 para generar shadow trades.</td></tr>";
+          } else {
+            target.innerHTML = top.map((r, idx) => {
+              const why = r.decision === "RESEARCH_PROMISING" ? "research only" : (r.reasons && r.reasons[0]) || "—";
+              return `<tr>
+                <td>${idx + 1}</td>
+                <td>${escapeHtml(r.key)}</td>
+                <td>—</td>
+                <td>—</td>
+                <td>${escapeHtml(fmt(r.net_ev_pct, 4))}</td>
+                <td>${escapeHtml(fmt(r.net_pf, 4))}</td>
+                <td>${escapeHtml(String(r.trades))}</td>
+                <td>${escapeHtml(r.confidence)}</td>
+                <td>${escapeHtml(r.decision)}</td>
+                <td>${escapeHtml(why)}</td>
+              </tr>`;
+            }).join("");
+          }
+        }
+        // Worst side / symbol.
+        const sideRanking = enh.rankings_by_side || [];
+        const worstSide = sideRanking.filter((r) => r.net_ev_pct < 0).sort((a, b) => a.net_ev_pct - b.net_ev_pct).slice(0, 3);
+        const worstSym = (enh.rankings_by_symbol || []).filter((r) => r.net_ev_pct < 0).sort((a, b) => a.net_ev_pct - b.net_ev_pct).slice(0, 5);
+        const sideList = $("v6WorstSideList");
+        if (sideList) sideList.innerHTML = worstSide.length ? worstSide.map((r) => `<li><strong>${escapeHtml(r.key)}</strong> · clean EV ${fmt(r.net_ev_pct, 4)} · n=${r.trades}</li>`).join("") : "<li>Sin datos suficientes.</li>";
+        const symList = $("v6WorstSymbolList");
+        if (symList) symList.innerHTML = worstSym.length ? worstSym.map((r) => `<li><strong>${escapeHtml(r.key)}</strong> · clean EV ${fmt(r.net_ev_pct, 4)} · n=${r.trades}</li>`).join("") : "<li>Sin datos suficientes.</li>";
+        if (dec === "REJECT_NEGATIVE_NET") {
+          blockers.push({
+            severity: "bad", tag: "NEGATIVE_NET",
+            title: "Clean net EV is negative",
+            detail: "Promotion blocked because the de-duplicated dataset gives net EV ≤ 0.",
+            next_action: "Iterate filters (SHORT-only, anti-late, time-death reducer)",
+          });
+        }
+        if (dec === "NEED_MORE_DATA") {
+          blockers.push({
+            severity: "warn", tag: "MORE_DATA",
+            title: "Need more clean samples",
+            detail: "Shadow trades available are below the promising threshold.",
+            next_action: "Run shadow-multi-trade-replay over 720h",
+          });
+        }
+      } catch (e) { /* keep card UNKNOWN */ }
+
+      // Shadow learning quick read.
+      try {
+        const sh = await fetchJson("/api/research/shadow-multi-trade-status?hours=24");
+        if (sh.status !== "SKIPPED_HEAVY") {
+          const closed = (sh.trades || []).filter((t) => String(t.status).startsWith("CLOSED_"));
+          const netPos = closed.filter((t) => t.net_pnl_pct > 0).length;
+          const netNeg = closed.filter((t) => t.net_pnl_pct < 0).length;
+          const bySymbol = {};
+          for (const t of closed) bySymbol[t.symbol] = (bySymbol[t.symbol] || 0) + t.net_pnl_pct;
+          const entries = Object.entries(bySymbol).sort((a, b) => b[1] - a[1]);
+          const best = entries[0] ? `${entries[0][0]} ${entries[0][1].toFixed(2)}%` : "-";
+          const worst = entries.length ? entries[entries.length - 1] : null;
+          const worstStr = worst ? `${worst[0]} ${worst[1].toFixed(2)}%` : "-";
+          const tone = netNeg > netPos && closed.length >= 10 ? "warn" : "shadow";
+          _v6SetCard("v6CardShadow", tone, `${closed.length} closed`,
+            `net+ ${netPos} · net- ${netNeg}`,
+            `best: ${best} · worst: ${worstStr}`);
+        }
+      } catch (e) { /* keep default */ }
+
+      // Always-on blockers based on safety flags.
+      blockers.push({
+        severity: "muted",
+        tag: "LIVE_DISABLED",
+        title: "Live trading explicitly disabled",
+        detail: "LIVE_TRADING=False · can_send_real_orders=False · ENABLE_PAPER_POLICY_FILTER=False.",
+        next_action: "No action required — invariant by design.",
+      });
+      blockers.push({
+        severity: "muted",
+        tag: "PAPER_FILTER_OFF",
+        title: "Paper filter disabled by design",
+        detail: "PAPER_DEMO_READY_MANUAL_REVIEW_ONLY is a label — not an activation.",
+        next_action: "Human review only; never auto-activate.",
+      });
+      // Update readiness card.
+      const hasBad = blockers.some((b) => b.severity === "bad");
+      const hasWarn = blockers.some((b) => b.severity === "warn");
+      _v6SetCard("v6CardReadiness", "danger", "NO PAPER · NO LIVE",
+        hasBad ? "hard blockers present" : hasWarn ? "warnings present" : "manual review only",
+        `next action: ${hasBad ? "fix data quality + net EV" : hasWarn ? "keep collecting clean samples" : "keep research"}`);
+      setText("v6CommandNextAction", `Next action: ${hasBad ? "Resolver bloqueos rojos antes de seguir." : hasWarn ? "Seguir investigando con CLEAN metrics." : "Mantener research, no promocionar."}`);
+      _v6RenderBlockers(blockers);
+    } finally {
+      setButtonLoading(btn, false);
+    }
+  }
+
+  async function refreshV6PackButton() {
+    const btn = $("v6OverviewPackBtn");
+    setButtonLoading(btn, true);
+    try {
+      const payload = await fetchJson("/api/research-pack-v5?hours=24");
+      const text = payload.text || JSON.stringify(payload, null, 2);
+      const ok = await copyText(text);
+      if (!ok) {
+        const blob = new Blob([text], { type: "text/plain;charset=utf-8" });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url; a.download = "research_pack_v5.txt"; a.click();
+        URL.revokeObjectURL(url);
+      }
+    } catch (e) { /* tolerate */ }
+    finally { setButtonLoading(btn, false); }
+  }
 
   // ResearchOps V5.1 helpers -------------------------------------------------
   let v51LastShadowPayload = null;

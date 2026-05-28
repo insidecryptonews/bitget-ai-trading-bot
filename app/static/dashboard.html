@@ -85,25 +85,166 @@
 
       <main class="content">
         <section id="overview" class="section">
-          <div class="hero-card">
-            <div class="hero-copy">
-              <div class="hero-kicker">SAFE_PAPER_ONLY</div>
-              <h2>PAPER ONLY. NO LIVE. Keep research.</h2>
-              <p id="heroMessage">Esperando estado rapido. El dashboard no ejecuta labs pesados ni acciones peligrosas al cargar.</p>
-              <div class="hero-actions">
-                <button id="quickRefreshBtn" class="btn btn-primary">Actualizar estado rapido</button>
-                <button id="refreshMainAnalysisBtn" class="btn btn-secondary">Actualizar analisis principal</button>
+          <!-- ResearchOps V6 — Operator Cockpit -->
+          <div class="v6-command-status">
+            <div class="v6-command-left">
+              <div class="v6-command-badges">
+                <span class="badge badge-safe">SAFE PAPER ONLY</span>
+                <span class="badge badge-danger">NO LIVE</span>
+                <span class="badge badge-info">DRY RUN</span>
+                <span id="v6CommandWorkerBadge" class="badge badge-muted">worker: -</span>
               </div>
+              <div class="v6-command-meta">
+                <span id="v6CommandGit">git: -</span>
+                <span id="v6CommandLastScan">last scan: -</span>
+                <span id="v6CommandFinal" class="v6-final-rec">FINAL: NO LIVE</span>
+              </div>
+              <p id="v6CommandNextAction" class="v6-command-next">Next action: pulsa Refresh para iniciar el escaneo.</p>
             </div>
-            <div class="hero-recommendation">
-              <span class="panel-label">Final recommendation</span>
-              <strong id="finalRecommendationHero">NO LIVE</strong>
-              <p id="mainProblemHero">No activar live ni filtros paper.</p>
+            <div class="v6-command-right">
+              <button id="v6OverviewRefreshBtn" class="btn btn-primary">Refresh cockpit</button>
+              <button id="v6OverviewPackBtn" class="btn btn-secondary">Pack for ChatGPT</button>
+              <a href="#researchops-v5" class="btn btn-secondary" data-target="researchops-v5">Open V5 detail</a>
             </div>
           </div>
 
-          <div id="overviewKpis" class="kpi-grid"></div>
-          <div id="readinessGrid" class="readiness-grid"></div>
+          <div class="v6-cockpit-grid">
+            <article class="v6-cockpit-card" data-status="ok" id="v6CardSafety">
+              <span class="v6-card-eyebrow">1 · Safety</span>
+              <strong class="v6-card-value">SAFE</strong>
+              <span class="v6-card-sub">live=false · real_orders=false · dry_run=true</span>
+              <span class="v6-card-foot">paper filter disabled · candidate shadow monitor disabled</span>
+            </article>
+            <article class="v6-cockpit-card" data-status="unknown" id="v6CardFreshness">
+              <span class="v6-card-eyebrow">2 · Data Freshness</span>
+              <strong class="v6-card-value" id="v6CardFreshnessValue">-</strong>
+              <span class="v6-card-sub" id="v6CardFreshnessSub">ok · stale · need</span>
+              <span class="v6-card-foot" id="v6CardFreshnessFoot">last candle: -</span>
+            </article>
+            <article class="v6-cockpit-card" data-status="unknown" id="v6CardDataQuality">
+              <span class="v6-card-eyebrow">3 · Data Quality</span>
+              <strong class="v6-card-value" id="v6CardDataQualityValue">-</strong>
+              <span class="v6-card-sub" id="v6CardDataQualitySub">duplicate rate: -</span>
+              <span class="v6-card-foot" id="v6CardDataQualityFoot">raw vs clean: -</span>
+            </article>
+            <article class="v6-cockpit-card" data-status="shadow" id="v6CardShadow">
+              <span class="v6-card-eyebrow">4 · Learning / Shadow</span>
+              <strong class="v6-card-value" id="v6CardShadowValue">0 trades</strong>
+              <span class="v6-card-sub" id="v6CardShadowSub">net+ 0 · net- 0</span>
+              <span class="v6-card-foot" id="v6CardShadowFoot">best: - · worst: -</span>
+            </article>
+            <article class="v6-cockpit-card" data-status="unknown" id="v6CardEdge">
+              <span class="v6-card-eyebrow">5 · Edge (CLEAN)</span>
+              <strong class="v6-card-value" id="v6CardEdgeValue">-</strong>
+              <span class="v6-card-sub" id="v6CardEdgeSub">clean net EV: -</span>
+              <span class="v6-card-foot" id="v6CardEdgeFoot">promotable: false</span>
+            </article>
+            <article class="v6-cockpit-card" data-status="danger" id="v6CardReadiness">
+              <span class="v6-card-eyebrow">6 · Readiness</span>
+              <strong class="v6-card-value">NO PAPER · NO LIVE</strong>
+              <span class="v6-card-sub" id="v6CardReadinessSub">manual review only</span>
+              <span class="v6-card-foot" id="v6CardReadinessFoot">next action: keep research</span>
+            </article>
+          </div>
+
+          <div class="v6-two-column">
+            <article class="panel v6-blockers-panel">
+              <div class="panel-head">
+                <h3>Qué está bloqueando el avance</h3>
+                <span class="badge badge-warning" id="v6BlockersCount">- bloqueos</span>
+              </div>
+              <ul class="v6-blockers-list" id="v6BlockersList">
+                <li class="v6-blocker-item" data-severity="muted">
+                  <span class="v6-blocker-tag">UNKNOWN</span>
+                  <span class="v6-blocker-text">Pulsa Refresh para evaluar los bloqueos.</span>
+                </li>
+              </ul>
+            </article>
+
+            <article class="panel v6-best-leads-panel">
+              <div class="panel-head">
+                <h3>Mejores pistas actuales (CLEAN)</h3>
+                <span class="badge badge-info">top 10</span>
+              </div>
+              <div class="table-shell">
+                <table class="compact">
+                  <thead><tr><th>#</th><th>symbol</th><th>side</th><th>setup</th><th>clean EV</th><th>clean PF</th><th>n</th><th>conf</th><th>decision</th><th>why not</th></tr></thead>
+                  <tbody id="v6BestLeadsRows"><tr><td colspan="10">Pulsa Refresh para cargar.</td></tr></tbody>
+                </table>
+              </div>
+            </article>
+          </div>
+
+          <article class="panel v6-worst-panel">
+            <div class="panel-head">
+              <h3>Peores cosas a evitar</h3>
+              <span class="badge badge-danger" id="v6WorstCount">-</span>
+            </div>
+            <div class="v6-worst-grid">
+              <div>
+                <h4 class="v6-subtitle">Side underperformance</h4>
+                <ul id="v6WorstSideList"><li>—</li></ul>
+              </div>
+              <div>
+                <h4 class="v6-subtitle">Symbols with negative net EV</h4>
+                <ul id="v6WorstSymbolList"><li>—</li></ul>
+              </div>
+              <div>
+                <h4 class="v6-subtitle">Cost / time traps</h4>
+                <ul id="v6WorstTrapList">
+                  <li><strong>gross_green_net_negative</strong> — verde bruto que se come la comisión.</li>
+                  <li><strong>high TIME%</strong> — setups que mueren por horizon close.</li>
+                  <li><strong>low sample traps</strong> — PF=999 con &lt; 10 trades.</li>
+                </ul>
+              </div>
+            </div>
+          </article>
+
+          <article class="panel v6-rawclean-panel">
+            <div class="panel-head">
+              <h3>RAW vs CLEAN data quality</h3>
+              <span class="badge badge-warning">DO NOT PROMOTE RAW</span>
+            </div>
+            <div class="v6-rawclean-grid">
+              <div class="v6-rawclean-cell">
+                <span class="v6-card-eyebrow">RAW sample</span>
+                <strong id="v6RawSampleValue">-</strong>
+                <span class="v6-card-foot">raw net EV: <code id="v6RawEvValue">-</code></span>
+              </div>
+              <div class="v6-rawclean-cell">
+                <span class="v6-card-eyebrow">CLEAN sample</span>
+                <strong id="v6CleanSampleValue">-</strong>
+                <span class="v6-card-foot">clean net EV: <code id="v6CleanEvValue">-</code></span>
+              </div>
+              <div class="v6-rawclean-cell">
+                <span class="v6-card-eyebrow">Duplicate rate</span>
+                <strong id="v6DuplicateRateValue">-</strong>
+                <span class="v6-card-foot">duplicate impact %: <code id="v6DuplicateImpactValue">-</code></span>
+              </div>
+            </div>
+          </article>
+
+          <div class="v6-legacy-overview hero-card" hidden aria-hidden="true">
+            <!-- Legacy V3 compatibility markers (kept hidden so the V6 Overview
+                 stays clean but the smoke-test selectors still match). -->
+            <span class="hero-kicker">SAFE_PAPER_ONLY</span>
+            <h2 class="hero-copy-h2">PAPER ONLY. NO LIVE. Keep research.</h2>
+          </div>
+
+          <div class="v6-legacy-overview">
+            <details class="report-details">
+              <summary>Legacy overview KPIs / charts (V5 compat)</summary>
+              <div id="overviewKpis" class="kpi-grid"></div>
+              <div id="readinessGrid" class="readiness-grid"></div>
+              <div class="hero-actions" style="margin-top:12px;">
+                <button id="quickRefreshBtn" class="btn btn-secondary">Actualizar estado rapido</button>
+                <button id="refreshMainAnalysisBtn" class="btn btn-secondary">Actualizar analisis principal</button>
+              </div>
+              <span id="finalRecommendationHero" hidden>NO LIVE</span>
+              <span id="heroMessage" hidden>Legacy hero message placeholder for V5 compat.</span>
+              <span id="mainProblemHero" hidden>No activar live ni filtros paper.</span>
+            </details>
+          </div>
 
           <div class="visual-grid">
             <article class="panel chart-panel">

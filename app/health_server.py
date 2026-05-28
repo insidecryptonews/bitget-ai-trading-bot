@@ -202,6 +202,8 @@ def start_health_server(
                 "/api/research/fee-aware-exit-trainer",
                 "/api/research/strategy-research-enhancer",
                 "/api/training/strategy-research-enhancer",
+                "/api/research/clean-research-metrics",
+                "/api/training/clean-research-metrics",
                 "/api/training/full-report",
                 "/api/training/export/full.txt",
                 "/api/training/export/full.json",
@@ -567,6 +569,9 @@ def start_health_server(
                 return
             if path in {"/api/training/strategy-research-enhancer", "/api/research/strategy-research-enhancer"}:
                 self._send_json(_v51_strategy_research_enhancer(config, db, query))
+                return
+            if path in {"/api/training/clean-research-metrics", "/api/research/clean-research-metrics"}:
+                self._send_json(_v6_clean_research_metrics(config, db, query))
                 return
             if path == "/api/training/full-report":
                 payload = _dashboard_full_report(config, db, query)
@@ -2375,6 +2380,34 @@ def _v5_capital_leverage_sim(config: Any | None, db: Any | None, query: dict[str
         )
         payload = report.as_dict()
         payload["text"] = render_capital_leverage_text(report)
+        payload["research_only"] = True
+        payload["paper_filter_enabled"] = False
+        payload["can_send_real_orders"] = False
+        payload["final_recommendation"] = "NO LIVE"
+        return payload
+    except Exception as exc:
+        return _v5_no_op_safety_payload(str(exc)[:300])
+
+
+def _v6_clean_research_metrics(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
+    """ResearchOps V6 — Clean research metrics (RAW vs CLEAN)."""
+    hours = _query_int(query, "hours", 24)
+    symbols_arg = (query.get("symbols") or [""])[0]
+    timeframes_arg = (query.get("timeframes") or ["5m"])[0]
+    symbols = [s.strip().upper() for s in symbols_arg.split(",") if s.strip()] or None
+    timeframes = [t.strip().lower() for t in timeframes_arg.split(",") if t.strip()] or None
+    if db is None:
+        return _v5_no_op_safety_payload("clean research metrics unavailable")
+    try:
+        from .clean_research_metrics import (
+            get_clean_research_metrics,
+            render_clean_metrics_text,
+        )
+        report = get_clean_research_metrics(
+            db, hours=hours, symbols=symbols, timeframes=timeframes,
+        )
+        payload = report.as_dict()
+        payload["text"] = render_clean_metrics_text(report)
         payload["research_only"] = True
         payload["paper_filter_enabled"] = False
         payload["can_send_real_orders"] = False

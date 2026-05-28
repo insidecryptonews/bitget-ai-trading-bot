@@ -337,10 +337,30 @@ def run_phase9_paper_readiness(
     capital_leverage_net_positive: bool = False,
     gross_green_net_negative: bool = False,
     require_v5_gates: bool = False,
+    # ResearchOps V6 — when enabled, consult the central clean metrics helper
+    # to derive `data_quality_status` and refuse promotion when CLEAN samples
+    # disagree with RAW or the count is too low.
+    require_v6_clean_gate: bool = True,
 ) -> Phase9PaperReadinessReport:
     symbol_list = parse_symbols(symbols, config)
     if not symbol_list:
         symbol_list = ["DOTUSDT"]
+    # V6 — pull central clean metrics and override data_quality_status if needed.
+    if require_v6_clean_gate:
+        try:
+            from .clean_research_metrics import get_clean_research_metrics
+            clean_metrics = get_clean_research_metrics(
+                db, hours=int(hours), symbols=symbol_list, timeframes=[timeframe],
+            )
+            # If the helper sees BAD or LOW sample, escalate to the gates.
+            if clean_metrics.data_quality_status == "BAD":
+                data_quality_status = "BAD"
+            # If RAW says positive EV but CLEAN says negative, force negative
+            # gross_green_net_negative so promotion is rejected as cost-failure.
+            if clean_metrics.raw_ev_pct > 0 and clean_metrics.clean_ev_pct <= 0:
+                gross_green_net_negative = True
+        except Exception:
+            pass
     freshness_verdicts = evaluate_freshness_many(
         db, symbols=symbol_list, timeframe=timeframe, historical=historical,
     )

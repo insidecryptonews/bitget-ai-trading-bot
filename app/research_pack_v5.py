@@ -74,6 +74,26 @@ def build_research_pack_v5(
             "error_type": type(exc).__name__,
         }
 
+    # V6 — clean research metrics (raw vs clean EV/PF + duplicate impact).
+    try:
+        from .clean_research_metrics import get_clean_research_metrics
+        clean_metrics = get_clean_research_metrics(
+            db, hours=max(hours, 24), symbols=symbols, timeframes=timeframes,
+        )
+        pack["clean_research_metrics"] = clean_metrics.as_dict()
+        # Surface the do-not-promote warning explicitly so ChatGPT can read it.
+        if clean_metrics.data_quality_status == "BAD":
+            pack.setdefault("known_issues", []).append("data_quality_bad_blocks_promotion")
+        if clean_metrics.blocked_gate:
+            pack.setdefault("known_issues", []).append(f"clean_metrics_blocked_gate={clean_metrics.blocked_gate}")
+        if clean_metrics.raw_ev_pct > 0 and clean_metrics.clean_ev_pct <= 0:
+            pack.setdefault("known_issues", []).append("raw_positive_clean_negative_do_not_promote_raw")
+    except Exception as exc:
+        pack["clean_research_metrics"] = {
+            "status": "unavailable",
+            "error_type": type(exc).__name__,
+        }
+
     # Shadow multi-trade quick replay (small window so the pack stays cheap).
     if include_shadow:
         try:
