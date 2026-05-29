@@ -1542,6 +1542,70 @@ class ResearchLab:
         )
         return render_clean_metrics_text(report)
 
+    # ResearchOps V7 ---------------------------------------------------------
+
+    def data_pipeline_root_cause(
+        self,
+        hours: int = 24,
+        symbols: list[str] | None = None,
+        timeframes: list[str] | None = None,
+    ) -> str:
+        from .data_pipeline_root_cause import (
+            render_data_pipeline_root_cause_text,
+            run_data_pipeline_root_cause,
+        )
+        report = run_data_pipeline_root_cause(
+            self.db, hours=hours, symbols=symbols, timeframes=timeframes,
+        )
+        return render_data_pipeline_root_cause_text(report)
+
+    def clean_strategy_lab(
+        self,
+        hours: int = 24,
+        symbols: list[str] | None = None,
+        timeframe: str = "5m",
+    ) -> str:
+        from .clean_strategy_lab import (
+            render_clean_strategy_lab_text,
+            run_clean_strategy_lab,
+        )
+        report = run_clean_strategy_lab(
+            self.config, self.db,
+            hours=hours, timeframe=timeframe, symbols=symbols,
+        )
+        return render_clean_strategy_lab_text(report)
+
+    def capital_scaling_simulator(
+        self,
+        base_clean_net_ev_pct: float = 0.0,
+        base_clean_pf: float = 0.0,
+        trades_per_window: int = 100,
+        data_quality_status: str = "UNKNOWN",
+        ohlcv_actionable: bool = False,
+    ) -> str:
+        from .capital_scaling_simulator import (
+            render_capital_scaling_text,
+            run_capital_scaling_simulator,
+        )
+        report = run_capital_scaling_simulator(
+            base_clean_net_ev_pct=base_clean_net_ev_pct,
+            base_clean_pf=base_clean_pf,
+            trades_per_window=trades_per_window,
+            data_quality_status=data_quality_status,
+            ohlcv_actionable=ohlcv_actionable,
+        )
+        return render_capital_scaling_text(report)
+
+    def research_pack_v7(self, hours: int = 24) -> str:
+        from .research_pack_v7 import build_research_pack_v7, render_research_pack_v7_text
+        payload = build_research_pack_v7(
+            self.config, self.db,
+            hours=min(int(hours), 24),
+            include_strategy_lab=True,
+            include_capital_scaling=True,
+        )
+        return render_research_pack_v7_text(payload)
+
     def fast_signal_shadow(
         self,
         hours: int = 72,
@@ -2225,6 +2289,10 @@ def main() -> None:
             "fee-aware-exit-trainer",
             "strategy-research-enhancer",
             "clean-research-metrics",
+            "data-pipeline-root-cause",
+            "clean-strategy-lab",
+            "capital-scaling-simulator",
+            "research-pack-v7",
             "ohlcv-replay-loader-smoke-test",
             "ohlcv-replay-loader-audit",
             "duplicate-module-audit-smoke-test",
@@ -2725,6 +2793,30 @@ def main() -> None:
             symbols=symbols_arg,
             timeframes=timeframes_arg,
         ))
+    elif args.command == "data-pipeline-root-cause":
+        symbols_arg = [s.strip() for s in (args.symbols or "").split(",") if s.strip()] or None
+        timeframes_arg = [t.strip() for t in (args.timeframes or "").split(",") if t.strip()] or None
+        print(lab.data_pipeline_root_cause(
+            hours=args.hours, symbols=symbols_arg, timeframes=timeframes_arg,
+        ))
+    elif args.command == "clean-strategy-lab":
+        symbols_arg = [s.strip() for s in (args.symbols or "").split(",") if s.strip()] or None
+        print(lab.clean_strategy_lab(
+            hours=args.hours, symbols=symbols_arg, timeframe=args.timeframe,
+        ))
+    elif args.command == "capital-scaling-simulator":
+        # Reuse the clean metrics helper for sane defaults.
+        from .clean_research_metrics import get_clean_research_metrics
+        cm = get_clean_research_metrics(db, hours=args.hours)
+        print(lab.capital_scaling_simulator(
+            base_clean_net_ev_pct=float(cm.clean_ev_pct),
+            base_clean_pf=float(cm.clean_pf),
+            trades_per_window=100,
+            data_quality_status=cm.data_quality_status,
+            ohlcv_actionable=False,
+        ))
+    elif args.command == "research-pack-v7":
+        print(lab.research_pack_v7(hours=args.hours))
     elif args.command == "ohlcv-replay-loader-smoke-test":
         print(lab.ohlcv_replay_loader_smoke_test())
     elif args.command == "ohlcv-replay-loader-audit":

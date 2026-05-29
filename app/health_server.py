@@ -204,6 +204,14 @@ def start_health_server(
                 "/api/training/strategy-research-enhancer",
                 "/api/research/clean-research-metrics",
                 "/api/training/clean-research-metrics",
+                "/api/research/data-pipeline-root-cause",
+                "/api/training/data-pipeline-root-cause",
+                "/api/research/clean-strategy-lab",
+                "/api/training/clean-strategy-lab",
+                "/api/research/capital-scaling-simulator",
+                "/api/training/capital-scaling-simulator",
+                "/api/research-pack-v7",
+                "/api/training/research-pack-v7",
                 "/api/training/full-report",
                 "/api/training/export/full.txt",
                 "/api/training/export/full.json",
@@ -572,6 +580,23 @@ def start_health_server(
                 return
             if path in {"/api/training/clean-research-metrics", "/api/research/clean-research-metrics"}:
                 self._send_json(_v6_clean_research_metrics(config, db, query))
+                return
+            if path in {"/api/training/data-pipeline-root-cause", "/api/research/data-pipeline-root-cause"}:
+                self._send_json(_v7_data_pipeline_root_cause(config, db, query))
+                return
+            if path in {"/api/training/clean-strategy-lab", "/api/research/clean-strategy-lab"}:
+                self._send_json(_v7_clean_strategy_lab(config, db, query))
+                return
+            if path in {"/api/training/capital-scaling-simulator", "/api/research/capital-scaling-simulator"}:
+                self._send_json(_v7_capital_scaling_simulator(config, db, query))
+                return
+            if path in {"/api/research-pack-v7", "/api/training/research-pack-v7"}:
+                payload = _v7_research_pack(config, db, query)
+                fmt = (query.get("format") or ["json"])[0].lower()
+                if fmt == "text":
+                    self._send_text(str(payload.get("text") or ""))
+                else:
+                    self._send_json(payload)
                 return
             if path == "/api/training/full-report":
                 payload = _dashboard_full_report(config, db, query)
@@ -2380,6 +2405,132 @@ def _v5_capital_leverage_sim(config: Any | None, db: Any | None, query: dict[str
         )
         payload = report.as_dict()
         payload["text"] = render_capital_leverage_text(report)
+        payload["research_only"] = True
+        payload["paper_filter_enabled"] = False
+        payload["can_send_real_orders"] = False
+        payload["final_recommendation"] = "NO LIVE"
+        return payload
+    except Exception as exc:
+        return _v5_no_op_safety_payload(str(exc)[:300])
+
+
+def _v7_data_pipeline_root_cause(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
+    """V7 — Data pipeline root cause audit (read-only)."""
+    hours = _query_int(query, "hours", 24)
+    symbols_arg = (query.get("symbols") or [""])[0]
+    timeframes_arg = (query.get("timeframes") or [""])[0]
+    symbols = [s.strip().upper() for s in symbols_arg.split(",") if s.strip()] or None
+    timeframes = [t.strip().lower() for t in timeframes_arg.split(",") if t.strip()] or None
+    if db is None:
+        return _v5_no_op_safety_payload("data pipeline root cause unavailable")
+    try:
+        from .data_pipeline_root_cause import (
+            render_data_pipeline_root_cause_text,
+            run_data_pipeline_root_cause,
+        )
+        report = run_data_pipeline_root_cause(
+            db, hours=hours, symbols=symbols, timeframes=timeframes,
+        )
+        payload = report.as_dict()
+        payload["text"] = render_data_pipeline_root_cause_text(report)
+        payload["research_only"] = True
+        payload["paper_filter_enabled"] = False
+        payload["can_send_real_orders"] = False
+        payload["final_recommendation"] = "NO LIVE"
+        return payload
+    except Exception as exc:
+        return _v5_no_op_safety_payload(str(exc)[:300])
+
+
+def _v7_clean_strategy_lab(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
+    """V7 — Clean Strategy Lab. Research-only."""
+    hours = _query_int(query, "hours", 24)
+    timeframe = (query.get("timeframe") or ["5m"])[0]
+    symbols_arg = (query.get("symbols") or [""])[0]
+    symbols = [s.strip().upper() for s in symbols_arg.split(",") if s.strip()] or None
+    allow_heavy = (query.get("allow_heavy") or ["0"])[0] in {"1", "true", "yes"}
+    if not allow_heavy and (hours > 168 or (symbols and len(symbols) > 3)):
+        return {
+            "status": "SKIPPED_HEAVY",
+            "reason": "clean_strategy_lab_hours_above_168_or_more_than_3_symbols",
+            "cli_command": (
+                f"python -m app.research_lab clean-strategy-lab --hours {hours} "
+                f"--timeframe {timeframe} --symbols {','.join(symbols or [])}"
+            ),
+            "research_only": True,
+            "paper_filter_enabled": False,
+            "can_send_real_orders": False,
+            "final_recommendation": "NO LIVE",
+        }
+    if db is None:
+        return _v5_no_op_safety_payload("clean strategy lab unavailable")
+    try:
+        from .clean_strategy_lab import (
+            render_clean_strategy_lab_text,
+            run_clean_strategy_lab,
+        )
+        report = run_clean_strategy_lab(
+            config, db,
+            hours=hours, timeframe=timeframe, symbols=symbols,
+        )
+        payload = report.as_dict()
+        payload["text"] = render_clean_strategy_lab_text(report)
+        payload["research_only"] = True
+        payload["paper_filter_enabled"] = False
+        payload["can_send_real_orders"] = False
+        payload["final_recommendation"] = "NO LIVE"
+        return payload
+    except Exception as exc:
+        return _v5_no_op_safety_payload(str(exc)[:300])
+
+
+def _v7_capital_scaling_simulator(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
+    """V7 — Capital scaling simulator. Read-only."""
+    hours = _query_int(query, "hours", 24)
+    if db is None:
+        return _v5_no_op_safety_payload("capital scaling simulator unavailable")
+    try:
+        from .clean_research_metrics import get_clean_research_metrics
+        from .capital_scaling_simulator import (
+            render_capital_scaling_text,
+            run_capital_scaling_simulator,
+        )
+        cm = get_clean_research_metrics(db, hours=hours)
+        report = run_capital_scaling_simulator(
+            base_clean_net_ev_pct=float(cm.clean_ev_pct),
+            base_clean_pf=float(cm.clean_pf),
+            trades_per_window=100,
+            data_quality_status=cm.data_quality_status,
+            ohlcv_actionable=False,
+        )
+        payload = report.as_dict()
+        payload["text"] = render_capital_scaling_text(report)
+        payload["research_only"] = True
+        payload["paper_filter_enabled"] = False
+        payload["can_send_real_orders"] = False
+        payload["final_recommendation"] = "NO LIVE"
+        return payload
+    except Exception as exc:
+        return _v5_no_op_safety_payload(str(exc)[:300])
+
+
+def _v7_research_pack(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
+    """V7 — Pack for ChatGPT V7."""
+    hours = _query_int(query, "hours", 24)
+    symbols_arg = (query.get("symbols") or [""])[0]
+    timeframes_arg = (query.get("timeframes") or [""])[0]
+    symbols = [s.strip().upper() for s in symbols_arg.split(",") if s.strip()] or None
+    timeframes = [t.strip().lower() for t in timeframes_arg.split(",") if t.strip()] or None
+    if config is None or db is None:
+        return _v5_no_op_safety_payload("research pack v7 unavailable")
+    try:
+        from .research_pack_v7 import build_research_pack_v7, render_research_pack_v7_text
+        payload = build_research_pack_v7(
+            config, db,
+            hours=min(hours, 24),
+            symbols=symbols, timeframes=timeframes,
+        )
+        payload["text"] = render_research_pack_v7_text(payload)
         payload["research_only"] = True
         payload["paper_filter_enabled"] = False
         payload["can_send_real_orders"] = False

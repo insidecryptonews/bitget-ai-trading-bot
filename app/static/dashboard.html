@@ -108,6 +108,58 @@
             </div>
           </div>
 
+          <!-- ResearchOps V7 — Operator Loop strip -->
+          <article class="panel v7-operator-loop">
+            <div class="panel-head">
+              <h3>Operator Loop V7</h3>
+              <span class="badge badge-info">SCAN → DETECT → VALIDATE → SIZE_SIM → MANAGE_SIM → SETTLE → LEARN</span>
+            </div>
+            <div class="v7-loop-grid">
+              <div class="v7-loop-step" data-status="unknown" id="v7LoopScan">
+                <span class="v7-loop-eyebrow">1 · SCAN</span>
+                <strong class="v7-loop-value">data ingest</strong>
+                <span class="v7-loop-sub">OHLCV historical · freshness</span>
+                <span class="v7-loop-foot">CLI: ohlcv-freshness-status</span>
+              </div>
+              <div class="v7-loop-step" data-status="unknown" id="v7LoopDetect">
+                <span class="v7-loop-eyebrow">2 · DETECT</span>
+                <strong class="v7-loop-value">data quality</strong>
+                <span class="v7-loop-sub">duplicate_rate · clean ratio</span>
+                <span class="v7-loop-foot">CLI: data-pipeline-root-cause</span>
+              </div>
+              <div class="v7-loop-step" data-status="unknown" id="v7LoopValidate">
+                <span class="v7-loop-eyebrow">3 · VALIDATE</span>
+                <strong class="v7-loop-value">strategy lab</strong>
+                <span class="v7-loop-sub">clean families · gates</span>
+                <span class="v7-loop-foot">CLI: clean-strategy-lab</span>
+              </div>
+              <div class="v7-loop-step" data-status="unknown" id="v7LoopSize">
+                <span class="v7-loop-eyebrow">4 · SIZE_SIM</span>
+                <strong class="v7-loop-value">capital sim</strong>
+                <span class="v7-loop-sub">risk pct · leverage · ruin</span>
+                <span class="v7-loop-foot">CLI: capital-scaling-simulator</span>
+              </div>
+              <div class="v7-loop-step" data-status="shadow" id="v7LoopManage">
+                <span class="v7-loop-eyebrow">5 · MANAGE_SIM</span>
+                <strong class="v7-loop-value">shadow only</strong>
+                <span class="v7-loop-sub">no execution · label only</span>
+                <span class="v7-loop-foot">CLI: shadow-multi-trade-replay</span>
+              </div>
+              <div class="v7-loop-step" data-status="unknown" id="v7LoopSettle">
+                <span class="v7-loop-eyebrow">6 · SETTLE</span>
+                <strong class="v7-loop-value">post-trade analytics</strong>
+                <span class="v7-loop-sub">net EV · TIME · TP/SL</span>
+                <span class="v7-loop-foot">CLI: fee-aware-exit-trainer</span>
+              </div>
+              <div class="v7-loop-step" data-status="info" id="v7LoopLearn">
+                <span class="v7-loop-eyebrow">7 · LEARN</span>
+                <strong class="v7-loop-value">research pack</strong>
+                <span class="v7-loop-sub">pack for ChatGPT V7</span>
+                <span class="v7-loop-foot">CLI: research-pack-v7</span>
+              </div>
+            </div>
+          </article>
+
           <div class="v6-cockpit-grid">
             <article class="v6-cockpit-card" data-status="ok" id="v6CardSafety">
               <span class="v6-card-eyebrow">1 · Safety</span>
