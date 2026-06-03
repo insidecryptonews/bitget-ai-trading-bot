@@ -108,6 +108,87 @@
             </div>
           </div>
 
+          <!-- ResearchOps V7.5 — Data Reliability strip -->
+          <article class="panel v75-strip">
+            <div class="panel-head">
+              <h3>ResearchOps V7.5 — Data Reliability</h3>
+              <span class="badge badge-info" id="v75StripBadge">audit / research-only</span>
+            </div>
+            <div class="v75-grid">
+              <div class="v75-card" data-status="unknown" id="v75CardDupHook">
+                <span class="v75-eyebrow">Duplicate Guard Hook</span>
+                <strong class="v75-value" id="v75DupHookValue">disabled</strong>
+                <span class="v75-sub" id="v75DupHookSub">would_block 0 · actual_block 0</span>
+                <span class="v75-foot">mode: audit (default)</span>
+              </div>
+              <div class="v75-card" data-status="unknown" id="v75CardFunding">
+                <span class="v75-eyebrow">Funding Cost Model</span>
+                <strong class="v75-value" id="v75FundingValue">-</strong>
+                <span class="v75-sub" id="v75FundingSub">table_present: -</span>
+                <span class="v75-foot">research-only · public data</span>
+              </div>
+              <div class="v75-card" data-status="unknown" id="v75CardLiquidation">
+                <span class="v75-eyebrow">Liquidation (DOTUSDT 5x)</span>
+                <strong class="v75-value" id="v75LiqValue">-</strong>
+                <span class="v75-sub" id="v75LiqSub">tier_source: -</span>
+                <span class="v75-foot">no set_leverage call</span>
+              </div>
+              <div class="v75-card" data-status="unknown" id="v75CardWfv2">
+                <span class="v75-eyebrow">Walk-Forward V2</span>
+                <strong class="v75-value" id="v75WfValue">-</strong>
+                <span class="v75-sub" id="v75WfSub">folds 0 · positive 0</span>
+                <span class="v75-foot">rolling + bootstrap CI</span>
+              </div>
+            </div>
+            <div class="lab-actions">
+              <button id="v75RefreshBtn" class="btn btn-primary">Refresh V7.5</button>
+              <button id="v75PackBtn" class="btn btn-secondary">Pack V7.5 for ChatGPT</button>
+            </div>
+          </article>
+
+          <!-- ResearchOps V8/V9 — Research Foundation strip -->
+          <article class="panel v75-strip">
+            <div class="panel-head">
+              <h3>ResearchOps V8/V9 — Research Foundation</h3>
+              <span class="badge badge-info">research-only · NO LIVE</span>
+            </div>
+            <div class="v75-grid">
+              <div class="v75-card" data-status="unknown" id="v8v9CardEnrichment">
+                <span class="v75-eyebrow">Auto Data Enrichment</span>
+                <strong class="v75-value" id="v8v9EnrichmentValue">-</strong>
+                <span class="v75-sub" id="v8v9EnrichmentSub">funding / spread / OI / vol / corr</span>
+                <span class="v75-foot">no private endpoints</span>
+              </div>
+              <div class="v75-card" data-status="unknown" id="v8v9CardExit">
+                <span class="v75-eyebrow">Exit Intelligence</span>
+                <strong class="v75-value" id="v8v9ExitValue">-</strong>
+                <span class="v75-sub" id="v8v9ExitSub">12 policies · baseline delta</span>
+                <span class="v75-foot">never applies live exits</span>
+              </div>
+              <div class="v75-card" data-status="unknown" id="v8v9CardRegistry">
+                <span class="v75-eyebrow">Experiment Registry</span>
+                <strong class="v75-value" id="v8v9RegistryValue">-</strong>
+                <span class="v75-sub" id="v8v9RegistrySub">REJECT · WATCH · SHADOW · LABEL</span>
+                <span class="v75-foot">no auto-promotion</span>
+              </div>
+              <div class="v75-card" data-status="unknown" id="v8v9CardLifecycle">
+                <span class="v75-eyebrow">Candidate Lifecycle</span>
+                <strong class="v75-value" id="v8v9LifecycleValue">-</strong>
+                <span class="v75-sub" id="v8v9LifecycleSub">15 gates · DETECT → LABEL_ONLY</span>
+                <span class="v75-foot">paper filter still off</span>
+              </div>
+              <div class="v75-card" data-status="unknown" id="v8v9CardGates">
+                <span class="v75-eyebrow">Validation Gates V9</span>
+                <strong class="v75-value" id="v8v9GatesValue">-</strong>
+                <span class="v75-sub" id="v8v9GatesSub">WF · CI · MC · PBO · DSR · stress</span>
+                <span class="v75-foot">NEED_MORE_DATA if no sample</span>
+              </div>
+            </div>
+            <div class="lab-actions">
+              <button id="v8v9RefreshBtn" class="btn btn-primary">Refresh V8/V9</button>
+            </div>
+          </article>
+
           <!-- ResearchOps V7 — Operator Loop strip -->
           <article class="panel v7-operator-loop">
             <div class="panel-head">

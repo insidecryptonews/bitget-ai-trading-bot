@@ -1606,6 +1606,170 @@ class ResearchLab:
         )
         return render_research_pack_v7_text(payload)
 
+    # ResearchOps V7.5 ------------------------------------------------------
+
+    def duplicate_guard_hook_status(self) -> str:
+        from .duplicate_guard_hook import (
+            get_global_hook,
+            render_duplicate_guard_hook_stats_text,
+        )
+        return render_duplicate_guard_hook_stats_text(get_global_hook().stats())
+
+    def funding_cost_model(self, hours: int = 720) -> str:
+        from .funding_cost_model import render_funding_summary_text, summarise_funding
+        return render_funding_summary_text(summarise_funding(self.db, trades=[], hours=hours))
+
+    def liquidation_model_bitget(
+        self,
+        symbol: str = "DOTUSDT",
+        leverage: int = 5,
+        capital_usdt: float = 40.0,
+        margin_per_trade_usdt: float = 5.0,
+    ) -> str:
+        from .liquidation_model_bitget import (
+            evaluate_liquidation,
+            render_liquidation_text,
+        )
+        verdict = evaluate_liquidation(
+            symbol=symbol, leverage=leverage,
+            capital_usdt=capital_usdt,
+            margin_per_trade_usdt=margin_per_trade_usdt,
+        )
+        return render_liquidation_text(verdict)
+
+    def walk_forward_v2(
+        self,
+        hours: int = 720,
+        timeframe: str = "5m",
+        symbols: list[str] | None = None,
+        train_days: int = 30,
+        test_days: int = 7,
+        step_days: int = 7,
+    ) -> str:
+        # WF V2 trabaja con la lista de trades reconstruida desde el
+        # backtester. Si no hay datos en la DB, devuelve NEED_MORE_DATA.
+        from .backtest_breakdown import collect_trade_records
+        from .walk_forward_runner_v2 import (
+            render_walk_forward_v2_text,
+            run_walk_forward_v2,
+        )
+        records = collect_trade_records(
+            self.config, self.db, hours=hours, symbols=symbols, timeframe=timeframe,
+        )
+        trades = [
+            {
+                "entry_time": getattr(r, "entry_time", "") or "",
+                "net_return_pct": getattr(r, "net_return_pct", 0.0) or 0.0,
+            }
+            for r in records
+        ]
+        report = run_walk_forward_v2(
+            trades=trades,
+            train_days=train_days,
+            test_days=test_days,
+            step_days=step_days,
+            symbols=symbols or [],
+            timeframe=timeframe,
+        )
+        return render_walk_forward_v2_text(report)
+
+    def research_pack_v7_5(self, hours: int = 24) -> str:
+        from .research_pack_v7_5 import build_research_pack_v7_5, render_research_pack_v7_5_text
+        payload = build_research_pack_v7_5(
+            self.config, self.db, hours=min(int(hours), 24),
+        )
+        return render_research_pack_v7_5_text(payload)
+
+    # ---- V8/V9 foundation CLI surface ----
+
+    def auto_data_enrichment_status(
+        self,
+        hours: int = 24,
+        timeframe: str = "5m",
+        symbols: list[str] | None = None,
+    ) -> str:
+        from .auto_data_enrichment import summarise_enrichment
+        from .phase8_research_utils import parse_symbols
+        sym_list = parse_symbols(symbols, self.config) or ["BTCUSDT", "ETHUSDT", "DOTUSDT"]
+        out = summarise_enrichment(self.db, symbols=sym_list, timeframe=timeframe, hours=int(hours))
+        lines = ["AUTO DATA ENRICHMENT STATUS START"]
+        lines.append(f"timeframe: {out['timeframe']}")
+        lines.append(f"hours: {out['hours']}")
+        for snap in out["snapshots"]:
+            lines.append(
+                f"symbol={snap['symbol']} overall={snap['overall_status']} "
+                f"need_data={','.join(snap['need_data_reasons']) or 'none'}"
+            )
+        lines.append(f"symbols_ok: {','.join(out['symbols_ok']) or 'none'}")
+        lines.append(f"symbols_partial: {','.join(out['symbols_partial']) or 'none'}")
+        lines.append(f"symbols_need_data: {','.join(out['symbols_need_data']) or 'none'}")
+        lines.append(f"research_only: {str(out['research_only']).lower()}")
+        lines.append(f"final_recommendation: {out['final_recommendation']}")
+        lines.append("AUTO DATA ENRICHMENT STATUS END")
+        return "\n".join(lines)
+
+    def exit_intelligence_lab(
+        self,
+        hours: int = 24,
+        timeframe: str = "5m",
+        symbols: list[str] | None = None,
+    ) -> str:
+        from .exit_intelligence_lab import run_exit_intelligence
+        # Research-only: empty sample default; integrators may pass shadow trades.
+        report = run_exit_intelligence([], hours=int(hours), timeframe=timeframe, symbols=symbols)
+        lines = ["EXIT INTELLIGENCE LAB START"]
+        lines.append(f"hours: {report.hours} timeframe: {report.timeframe}")
+        lines.append(f"samples: {report.samples} need_more_data: {str(report.need_more_data).lower()}")
+        lines.append(f"best_policy: {report.best_policy} best_delta_pct: {report.best_delta_pct:.4f}")
+        for p in report.policies:
+            lines.append(
+                f"policy={p.policy} n={p.sample_count} avg_net={p.avg_net_pct:.4f} "
+                f"delta={p.delta_net_vs_baseline_pct:.4f} time_deaths_pct={p.time_deaths_pct:.4f}"
+            )
+        lines.append(f"research_only: {str(report.research_only).lower()}")
+        lines.append(f"final_recommendation: {report.final_recommendation}")
+        lines.append("EXIT INTELLIGENCE LAB END")
+        return "\n".join(lines)
+
+    def strategy_experiment_registry_snapshot(self) -> str:
+        from .strategy_experiment_registry import StrategyExperimentRegistry
+        reg = StrategyExperimentRegistry()
+        snap = reg.snapshot()
+        lines = ["STRATEGY EXPERIMENT REGISTRY START"]
+        lines.append(f"total: {snap['total']}")
+        for state, count in snap["by_state"].items():
+            lines.append(f"by_state {state}: {count}")
+        lines.append(f"research_only: {str(snap['research_only']).lower()}")
+        lines.append(f"final_recommendation: {snap['final_recommendation']}")
+        lines.append("STRATEGY EXPERIMENT REGISTRY END")
+        return "\n".join(lines)
+
+    def shadow_candidate_lifecycle_status(self, hours: int = 24) -> str:
+        from .shadow_candidate_lifecycle import summarise_lifecycle
+        out = summarise_lifecycle([])
+        lines = ["SHADOW CANDIDATE LIFECYCLE START"]
+        lines.append(f"total: {out['total']}")
+        for state, count in out["by_proposed_state"].items():
+            lines.append(f"by_proposed_state {state}: {count}")
+        lines.append(f"research_only: {str(out['research_only']).lower()}")
+        lines.append(f"final_recommendation: {out['final_recommendation']}")
+        lines.append("SHADOW CANDIDATE LIFECYCLE END")
+        return "\n".join(lines)
+
+    def validation_gates_v9_status(self, hours: int = 24) -> str:
+        from .validation_gates_v9 import run_validation_gates_v9
+        report = run_validation_gates_v9(strategy_id="placeholder", net_returns=[])
+        lines = ["VALIDATION GATES V9 START"]
+        lines.append(f"strategy_id: {report.strategy_id}")
+        lines.append(f"samples: {report.samples} overall: {report.overall_status}")
+        lines.append(f"pass: {report.pass_count} fail: {report.fail_count} need_data: {report.need_data_count}")
+        for g in report.gates:
+            lines.append(f"gate={g.name} status={g.status} reason={g.reason}")
+        lines.append(f"research_only: {str(report.research_only).lower()}")
+        lines.append(f"final_recommendation: {report.final_recommendation}")
+        lines.append("VALIDATION GATES V9 END")
+        return "\n".join(lines)
+
     def fast_signal_shadow(
         self,
         hours: int = 72,
@@ -2293,6 +2457,16 @@ def main() -> None:
             "clean-strategy-lab",
             "capital-scaling-simulator",
             "research-pack-v7",
+            "duplicate-guard-hook-status",
+            "funding-cost-model",
+            "liquidation-model-bitget",
+            "walk-forward-v2",
+            "research-pack-v7-5",
+            "auto-data-enrichment-status",
+            "exit-intelligence-lab",
+            "strategy-experiment-registry",
+            "shadow-candidate-lifecycle",
+            "validation-gates-v9",
             "ohlcv-replay-loader-smoke-test",
             "ohlcv-replay-loader-audit",
             "duplicate-module-audit-smoke-test",
@@ -2817,6 +2991,42 @@ def main() -> None:
         ))
     elif args.command == "research-pack-v7":
         print(lab.research_pack_v7(hours=args.hours))
+    elif args.command == "duplicate-guard-hook-status":
+        print(lab.duplicate_guard_hook_status())
+    elif args.command == "funding-cost-model":
+        print(lab.funding_cost_model(hours=args.hours))
+    elif args.command == "liquidation-model-bitget":
+        symbols_arg = [s.strip() for s in (args.symbols or "DOTUSDT").split(",") if s.strip()]
+        symbol = symbols_arg[0] if symbols_arg else "DOTUSDT"
+        print(lab.liquidation_model_bitget(
+            symbol=symbol,
+            leverage=5,
+            capital_usdt=40.0,
+            margin_per_trade_usdt=5.0,
+        ))
+    elif args.command == "walk-forward-v2":
+        symbols_arg = [s.strip() for s in (args.symbols or "").split(",") if s.strip()] or None
+        print(lab.walk_forward_v2(
+            hours=args.hours, timeframe=args.timeframe, symbols=symbols_arg,
+        ))
+    elif args.command == "research-pack-v7-5":
+        print(lab.research_pack_v7_5(hours=args.hours))
+    elif args.command == "auto-data-enrichment-status":
+        symbols_arg = [s.strip() for s in (args.symbols or "").split(",") if s.strip()] or None
+        print(lab.auto_data_enrichment_status(
+            hours=args.hours, timeframe=args.timeframe, symbols=symbols_arg,
+        ))
+    elif args.command == "exit-intelligence-lab":
+        symbols_arg = [s.strip() for s in (args.symbols or "").split(",") if s.strip()] or None
+        print(lab.exit_intelligence_lab(
+            hours=args.hours, timeframe=args.timeframe, symbols=symbols_arg,
+        ))
+    elif args.command == "strategy-experiment-registry":
+        print(lab.strategy_experiment_registry_snapshot())
+    elif args.command == "shadow-candidate-lifecycle":
+        print(lab.shadow_candidate_lifecycle_status(hours=args.hours))
+    elif args.command == "validation-gates-v9":
+        print(lab.validation_gates_v9_status(hours=args.hours))
     elif args.command == "ohlcv-replay-loader-smoke-test":
         print(lab.ohlcv_replay_loader_smoke_test())
     elif args.command == "ohlcv-replay-loader-audit":

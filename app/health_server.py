@@ -212,6 +212,17 @@ def start_health_server(
                 "/api/training/capital-scaling-simulator",
                 "/api/research-pack-v7",
                 "/api/training/research-pack-v7",
+                "/api/research/duplicate-guard-hook-status",
+                "/api/research/funding-cost-model",
+                "/api/research/liquidation-model-bitget",
+                "/api/research/walk-forward-v2",
+                "/api/research-pack-v7-5",
+                "/api/training/research-pack-v7-5",
+                "/api/research/auto-data-enrichment-status",
+                "/api/research/exit-intelligence-lab",
+                "/api/research/strategy-experiment-registry",
+                "/api/research/shadow-candidate-lifecycle",
+                "/api/research/validation-gates-v9",
                 "/api/training/full-report",
                 "/api/training/export/full.txt",
                 "/api/training/export/full.json",
@@ -597,6 +608,41 @@ def start_health_server(
                     self._send_text(str(payload.get("text") or ""))
                 else:
                     self._send_json(payload)
+                return
+            if path == "/api/research/duplicate-guard-hook-status":
+                self._send_json(_v75_duplicate_guard_hook_status(config, db, query))
+                return
+            if path == "/api/research/funding-cost-model":
+                self._send_json(_v75_funding_cost_model(config, db, query))
+                return
+            if path == "/api/research/liquidation-model-bitget":
+                self._send_json(_v75_liquidation_model_bitget(config, db, query))
+                return
+            if path == "/api/research/walk-forward-v2":
+                self._send_json(_v75_walk_forward_v2(config, db, query))
+                return
+            if path in {"/api/research-pack-v7-5", "/api/training/research-pack-v7-5"}:
+                payload = _v75_research_pack(config, db, query)
+                fmt = (query.get("format") or ["json"])[0].lower()
+                if fmt == "text":
+                    self._send_text(str(payload.get("text") or ""))
+                else:
+                    self._send_json(payload)
+                return
+            if path == "/api/research/auto-data-enrichment-status":
+                self._send_json(_v8v9_auto_data_enrichment(config, db, query))
+                return
+            if path == "/api/research/exit-intelligence-lab":
+                self._send_json(_v8v9_exit_intelligence(config, db, query))
+                return
+            if path == "/api/research/strategy-experiment-registry":
+                self._send_json(_v8v9_strategy_experiment_registry(config, db, query))
+                return
+            if path == "/api/research/shadow-candidate-lifecycle":
+                self._send_json(_v8v9_shadow_candidate_lifecycle(config, db, query))
+                return
+            if path == "/api/research/validation-gates-v9":
+                self._send_json(_v8v9_validation_gates(config, db, query))
                 return
             if path == "/api/training/full-report":
                 payload = _dashboard_full_report(config, db, query)
@@ -2405,6 +2451,236 @@ def _v5_capital_leverage_sim(config: Any | None, db: Any | None, query: dict[str
         )
         payload = report.as_dict()
         payload["text"] = render_capital_leverage_text(report)
+        payload["research_only"] = True
+        payload["paper_filter_enabled"] = False
+        payload["can_send_real_orders"] = False
+        payload["final_recommendation"] = "NO LIVE"
+        return payload
+    except Exception as exc:
+        return _v5_no_op_safety_payload(str(exc)[:300])
+
+
+def _v75_duplicate_guard_hook_status(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
+    """V7.5 — Stats del duplicate guard hook (audit por defecto)."""
+    del db, query
+    try:
+        from .duplicate_guard_hook import (
+            get_global_hook,
+            render_duplicate_guard_hook_stats_text,
+        )
+        stats = get_global_hook().stats()
+        payload = stats.as_dict()
+        payload["text"] = render_duplicate_guard_hook_stats_text(stats)
+        payload["research_only"] = True
+        payload["paper_filter_enabled"] = False
+        payload["can_send_real_orders"] = False
+        payload["final_recommendation"] = "NO LIVE"
+        return payload
+    except Exception as exc:
+        return _v5_no_op_safety_payload(str(exc)[:300])
+
+
+def _v75_funding_cost_model(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
+    """V7.5 — Resumen del modelo de funding (read-only)."""
+    hours = _query_int(query, "hours", 720)
+    symbols_arg = (query.get("symbols") or [""])[0]
+    symbols = [s.strip().upper() for s in symbols_arg.split(",") if s.strip()] or None
+    if db is None:
+        return _v5_no_op_safety_payload("funding cost model unavailable")
+    try:
+        from .funding_cost_model import render_funding_summary_text, summarise_funding
+        summary = summarise_funding(db, trades=[], symbols=symbols or [], hours=hours)
+        payload = summary.as_dict()
+        payload["text"] = render_funding_summary_text(summary)
+        payload["research_only"] = True
+        payload["paper_filter_enabled"] = False
+        payload["can_send_real_orders"] = False
+        payload["final_recommendation"] = "NO LIVE"
+        return payload
+    except Exception as exc:
+        return _v5_no_op_safety_payload(str(exc)[:300])
+
+
+def _v75_liquidation_model_bitget(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
+    """V7.5 — Liquidation model Bitget (read-only)."""
+    del db
+    symbol = (query.get("symbol") or ["DOTUSDT"])[0].upper()
+    try:
+        leverage = int((query.get("leverage") or ["5"])[0])
+    except Exception:
+        leverage = 5
+    try:
+        capital = float((query.get("capital") or ["40"])[0])
+    except Exception:
+        capital = 40.0
+    try:
+        margin = float((query.get("margin") or ["5"])[0])
+    except Exception:
+        margin = 5.0
+    try:
+        from .liquidation_model_bitget import (
+            evaluate_liquidation,
+            render_liquidation_text,
+        )
+        verdict = evaluate_liquidation(
+            symbol=symbol, leverage=leverage,
+            capital_usdt=capital, margin_per_trade_usdt=margin,
+        )
+        payload = verdict.as_dict()
+        payload["text"] = render_liquidation_text(verdict)
+        payload["research_only"] = True
+        payload["paper_filter_enabled"] = False
+        payload["can_send_real_orders"] = False
+        payload["final_recommendation"] = "NO LIVE"
+        return payload
+    except Exception as exc:
+        return _v5_no_op_safety_payload(str(exc)[:300])
+
+
+def _v75_walk_forward_v2(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
+    """V7.5 — Walk-forward V2 con bootstrap. Por defecto allow_heavy=false."""
+    hours = _query_int(query, "hours", 720)
+    timeframe = (query.get("timeframe") or ["5m"])[0]
+    symbols_arg = (query.get("symbols") or [""])[0]
+    symbols = [s.strip().upper() for s in symbols_arg.split(",") if s.strip()] or None
+    allow_heavy = (query.get("allow_heavy") or ["0"])[0] in {"1", "true", "yes"}
+    if not allow_heavy and hours > 168:
+        return {
+            "status": "SKIPPED_HEAVY",
+            "reason": "walk_forward_v2_heavy_pass_allow_heavy_1",
+            "cli_command": (
+                f"python -m app.research_lab walk-forward-v2 --hours {hours} "
+                f"--timeframe {timeframe} --symbols {','.join(symbols or [])}"
+            ),
+            "research_only": True,
+            "paper_filter_enabled": False,
+            "can_send_real_orders": False,
+            "final_recommendation": "NO LIVE",
+        }
+    if db is None or config is None:
+        return _v5_no_op_safety_payload("walk forward v2 unavailable")
+    try:
+        from .backtest_breakdown import collect_trade_records
+        from .walk_forward_runner_v2 import (
+            render_walk_forward_v2_text,
+            run_walk_forward_v2,
+        )
+        records = collect_trade_records(config, db, hours=hours, symbols=symbols, timeframe=timeframe)
+        trades = [
+            {
+                "entry_time": getattr(r, "entry_time", "") or "",
+                "net_return_pct": getattr(r, "net_return_pct", 0.0) or 0.0,
+            }
+            for r in records
+        ]
+        report = run_walk_forward_v2(
+            trades=trades, symbols=symbols or [], timeframe=timeframe,
+        )
+        payload = report.as_dict()
+        payload["text"] = render_walk_forward_v2_text(report)
+        payload["research_only"] = True
+        payload["paper_filter_enabled"] = False
+        payload["can_send_real_orders"] = False
+        payload["final_recommendation"] = "NO LIVE"
+        return payload
+    except Exception as exc:
+        return _v5_no_op_safety_payload(str(exc)[:300])
+
+
+def _v75_research_pack(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
+    """V7.5 — Pack ChatGPT V7.5."""
+    hours = _query_int(query, "hours", 24)
+    if config is None or db is None:
+        return _v5_no_op_safety_payload("research pack v7.5 unavailable")
+    try:
+        from .research_pack_v7_5 import (
+            build_research_pack_v7_5,
+            render_research_pack_v7_5_text,
+        )
+        payload = build_research_pack_v7_5(config, db, hours=min(hours, 24))
+        payload["text"] = render_research_pack_v7_5_text(payload)
+        payload["research_only"] = True
+        payload["paper_filter_enabled"] = False
+        payload["can_send_real_orders"] = False
+        payload["final_recommendation"] = "NO LIVE"
+        return payload
+    except Exception as exc:
+        return _v5_no_op_safety_payload(str(exc)[:300])
+
+
+def _v8v9_auto_data_enrichment(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
+    """V8/V9 — Auto Data Enrichment. Read-only."""
+    hours = _query_int(query, "hours", 24)
+    timeframe = (query.get("timeframe") or ["5m"])[0]
+    symbols_arg = (query.get("symbols") or [""])[0]
+    symbols = [s.strip().upper() for s in symbols_arg.split(",") if s.strip()] or None
+    if db is None:
+        return _v5_no_op_safety_payload("auto data enrichment unavailable")
+    try:
+        from .auto_data_enrichment import summarise_enrichment
+        from .phase8_research_utils import parse_symbols
+        sym_list = parse_symbols(symbols, config) or ["BTCUSDT", "ETHUSDT", "DOTUSDT"]
+        payload = summarise_enrichment(db, symbols=sym_list, timeframe=timeframe, hours=hours)
+        payload["research_only"] = True
+        payload["paper_filter_enabled"] = False
+        payload["can_send_real_orders"] = False
+        payload["final_recommendation"] = "NO LIVE"
+        return payload
+    except Exception as exc:
+        return _v5_no_op_safety_payload(str(exc)[:300])
+
+
+def _v8v9_exit_intelligence(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
+    """V8/V9 — Exit Intelligence Lab. Read-only stub when no trades present."""
+    hours = _query_int(query, "hours", 24)
+    timeframe = (query.get("timeframe") or ["5m"])[0]
+    try:
+        from .exit_intelligence_lab import run_exit_intelligence
+        report = run_exit_intelligence([], hours=hours, timeframe=timeframe)
+        payload = report.as_dict()
+        payload["research_only"] = True
+        payload["paper_filter_enabled"] = False
+        payload["can_send_real_orders"] = False
+        payload["final_recommendation"] = "NO LIVE"
+        return payload
+    except Exception as exc:
+        return _v5_no_op_safety_payload(str(exc)[:300])
+
+
+def _v8v9_strategy_experiment_registry(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
+    """V8/V9 — Strategy Experiment Registry snapshot. Read-only."""
+    try:
+        from .strategy_experiment_registry import StrategyExperimentRegistry
+        snap = StrategyExperimentRegistry().snapshot()
+        snap["research_only"] = True
+        snap["paper_filter_enabled"] = False
+        snap["can_send_real_orders"] = False
+        snap["final_recommendation"] = "NO LIVE"
+        return snap
+    except Exception as exc:
+        return _v5_no_op_safety_payload(str(exc)[:300])
+
+
+def _v8v9_shadow_candidate_lifecycle(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
+    """V8/V9 — Shadow Candidate Lifecycle summary. Read-only."""
+    try:
+        from .shadow_candidate_lifecycle import summarise_lifecycle
+        out = summarise_lifecycle([])
+        out["research_only"] = True
+        out["paper_filter_enabled"] = False
+        out["can_send_real_orders"] = False
+        out["final_recommendation"] = "NO LIVE"
+        return out
+    except Exception as exc:
+        return _v5_no_op_safety_payload(str(exc)[:300])
+
+
+def _v8v9_validation_gates(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
+    """V8/V9 — Validation Gates V9 status (no sample yet)."""
+    try:
+        from .validation_gates_v9 import run_validation_gates_v9
+        report = run_validation_gates_v9(strategy_id="placeholder", net_returns=[])
+        payload = report.as_dict()
         payload["research_only"] = True
         payload["paper_filter_enabled"] = False
         payload["can_send_real_orders"] = False

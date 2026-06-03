@@ -169,12 +169,25 @@ def _median(values: list[float]) -> float:
 
 
 def _net_pf(values: list[float]) -> float:
+    """Profit factor without the legacy ``999.0`` placeholder.
+
+    The V7.5 fix removes the ``999.0`` fallback that used to appear when a
+    family produced wins but no losses — it surfaced as a fake-edge signal on
+    Clean Strategy Lab even when ``samples_clean == 0`` globally. We now return
+    ``0.0`` in that degenerate case and let the higher level classifier guard
+    flag it explicitly via ``no_clean_samples`` / ``wins_only_no_losses``.
+    """
+
+    if not values:
+        return 0.0
     wins = [v for v in values if v > 0]
     losses = [v for v in values if v < 0]
     loss_sum = abs(sum(losses))
     if loss_sum > 0:
         return sum(wins) / loss_sum
-    return 999.0 if wins else 0.0
+    # No losses: never emit a synthetic infinite PF. Caller decides whether
+    # this is "wins_only_no_losses" or "no_clean_samples".
+    return 0.0
 
 
 def _closed(trade: ShadowVirtualTrade) -> bool:
@@ -282,6 +295,40 @@ def _build_family_result(
     gross_green_rate = gross_green_net_negative / n
     net_ev = _avg(net_returns)
     net_pf_value = _net_pf(net_returns)
+
+    # V7.5 fix: never publish EV/PF derived from shadow trades when the
+    # global clean signal count is 0. The previous behaviour reported
+    # net_ev > 0 and net_pf up to 999 on families whose ``samples_clean`` was
+    # zero, contaminating downstream promotion logic and packs.
+    if clean_sample_count == 0:
+        decision = DECISION_NEED_MORE_DATA
+        confidence = "LOW"
+        why_not = "no_clean_samples"
+        return StrategyFamilyResult(
+            strategy_family=family,
+            description=description,
+            symbols=sorted({t.symbol for t in filtered}),
+            sides=sorted({t.side for t in filtered}),
+            regimes=sorted({t.regime or "UNKNOWN" for t in filtered}),
+            timeframe=timeframe,
+            samples_raw=raw_sample_count,
+            samples_clean=clean_sample_count,
+            samples_trade_signal=trade_signal_clean,
+            samples_market_probe=market_probe,
+            tp_pct=0.0, sl_pct=0.0, time_pct=0.0,
+            gross_ev_pct=0.0, net_ev_pct=0.0,
+            gross_pf=0.0, net_pf=0.0,
+            avg_mfe_pct=0.0, avg_mae_pct=0.0,
+            median_mfe_pct=0.0, median_mae_pct=0.0,
+            bars_to_tp=0.0, bars_to_sl=0.0,
+            fee_impact_pct=0.18,
+            slippage_stress_result="UNKNOWN",
+            fold_count=0, folds_positive=0,
+            confidence=confidence,
+            decision=decision,
+            why_not=why_not,
+        )
+
     decision, confidence, why_not = _classify_family(
         family=family,
         trade_signal_clean=trade_signal_clean,

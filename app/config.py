@@ -161,6 +161,23 @@ class BotConfig:
     # requests through the existing public-endpoint flow. Disabled here means
     # the OhlcvFreshnessManager will only ever produce status/dry-run output.
     enable_ohlcv_auto_refresh: bool = False
+    # ResearchOps V7.5 — flags para los nuevos módulos. Todos arrancan False.
+    # `ENABLE_DUPLICATE_GUARD_HOOK` controla si el FeatureLogger consulta el
+    # duplicate_guard antes de insertar. Cuando True, además respeta el modo
+    # `DUPLICATE_GUARD_HOOK_MODE` ("audit" o "enforce"). Audit es read-only
+    # (solo cuenta would_block_count). Enforce bloquea las inserciones
+    # duplicadas y las registra en events.
+    enable_duplicate_guard_hook: bool = False
+    duplicate_guard_hook_mode: str = "audit"
+    # `ENABLE_FUNDING_COST_MODEL` decide si cost_stress y phase8 incorporan el
+    # coste de funding en el net_EV reportado. Si no hay tabla de funding rates,
+    # el modelo devuelve funding_data_status=NEED_DATA y los gates no aplican
+    # ajuste — nunca inventa magnitudes.
+    enable_funding_cost_model: bool = False
+    # `ENABLE_LIQUIDATION_MODEL_BITGET` redirige el simulador de capital al
+    # modelo basado en tiers reales de Bitget en lugar de la estimación
+    # conservadora `1/L × 0.95`. Investigación pura: no se llama set_leverage.
+    enable_liquidation_model_bitget: bool = False
     # Phase 7.3C/D research labs do NOT have runtime flags — pure library + CLI.
     paper_policy_filter_mode: str = "shadow"
     paper_policy_min_validation_pf: float = 1.2
@@ -524,6 +541,10 @@ def load_config(load_dotenv_file: bool = True) -> BotConfig:
         enable_paper_policy_filter=env_bool(os.getenv("ENABLE_PAPER_POLICY_FILTER"), False),
         enable_candidate_shadow_monitor=env_bool(os.getenv("ENABLE_CANDIDATE_SHADOW_MONITOR"), False),
         enable_ohlcv_auto_refresh=env_bool(os.getenv("ENABLE_OHLCV_AUTO_REFRESH"), False),
+        enable_duplicate_guard_hook=env_bool(os.getenv("ENABLE_DUPLICATE_GUARD_HOOK"), False),
+        duplicate_guard_hook_mode=(os.getenv("DUPLICATE_GUARD_HOOK_MODE") or "audit"),
+        enable_funding_cost_model=env_bool(os.getenv("ENABLE_FUNDING_COST_MODEL"), False),
+        enable_liquidation_model_bitget=env_bool(os.getenv("ENABLE_LIQUIDATION_MODEL_BITGET"), False),
         paper_policy_filter_mode=os.getenv("PAPER_POLICY_FILTER_MODE", "shadow"),
         paper_policy_min_validation_pf=env_float(os.getenv("PAPER_POLICY_MIN_VALIDATION_PF"), 1.2),
         paper_policy_min_samples=env_int(os.getenv("PAPER_POLICY_MIN_SAMPLES"), 500),

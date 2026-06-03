@@ -1659,7 +1659,137 @@
     $("v6OverviewPackBtn")?.addEventListener("click", refreshV6PackButton);
     // Initial cockpit population — light fetches only.
     refreshV6Cockpit().catch(() => {});
+    $("v75RefreshBtn")?.addEventListener("click", refreshV75Strip);
+    $("v75PackBtn")?.addEventListener("click", downloadV75Pack);
+    refreshV75Strip().catch(() => {});
+    $("v8v9RefreshBtn")?.addEventListener("click", refreshV8V9Strip);
+    refreshV8V9Strip().catch(() => {});
   });
+
+  // ResearchOps V7.5 helpers --------------------------------------------------
+  function _v75SetCard(id, status, value, sub) {
+    const card = $(id);
+    if (!card) return;
+    if (status) card.setAttribute("data-status", status);
+    const v = card.querySelector(".v75-value");
+    if (v && value !== undefined) v.textContent = value;
+    const s = card.querySelector(".v75-sub");
+    if (s && sub !== undefined) s.textContent = sub;
+  }
+
+  async function refreshV75Strip() {
+    const btn = $("v75RefreshBtn");
+    setButtonLoading(btn, true);
+    try {
+      // Duplicate guard hook
+      try {
+        const p = await fetchJson("/api/research/duplicate-guard-hook-status");
+        const tone = p.enabled ? (p.actual_block_count > 0 ? "warn" : "ok") : "info";
+        _v75SetCard("v75CardDupHook", tone,
+          p.enabled ? (p.mode || "audit") : "disabled",
+          `would_block ${p.would_block_count ?? 0} · actual_block ${p.actual_block_count ?? 0}`);
+      } catch (e) { /* tolerate */ }
+      // Funding model
+      try {
+        const p = await fetchJson("/api/research/funding-cost-model?hours=720");
+        const tone = p.funding_data_status === "OK" ? "ok" : (p.funding_data_status === "NEED_DATA" ? "warn" : "info");
+        _v75SetCard("v75CardFunding", tone,
+          p.funding_data_status || "UNKNOWN",
+          `table_present: ${p.table_present === true}`);
+      } catch (e) { /* tolerate */ }
+      // Liquidation
+      try {
+        const p = await fetchJson("/api/research/liquidation-model-bitget?symbol=DOTUSDT&leverage=5&capital=40&margin=5");
+        const risk = String(p.liquidation_risk || "UNKNOWN");
+        const tone = risk === "LOW" ? "ok" : risk === "MEDIUM" ? "warn" : "bad";
+        _v75SetCard("v75CardLiquidation", tone,
+          `${(p.liquidation_distance_pct ?? 0).toFixed(2)}% (${risk})`,
+          `tier_source: ${p.tier_source || "-"}`);
+      } catch (e) { /* tolerate */ }
+      // WF V2 (light call, hours=72 to evitar SKIPPED_HEAVY)
+      try {
+        const p = await fetchJson("/api/research/walk-forward-v2?hours=72");
+        if (p.status === "SKIPPED_HEAVY") {
+          _v75SetCard("v75CardWfv2", "info", "skipped", "use CLI for full window");
+        } else {
+          const tone = p.decision === "WF2_PROMISING_LABEL_ONLY" ? "ok"
+            : p.decision === "WF2_REJECT" ? "bad" : "info";
+          _v75SetCard("v75CardWfv2", tone,
+            String(p.decision || "UNKNOWN"),
+            `folds ${p.n_folds ?? 0} · positive ${p.positive_folds ?? 0}`);
+        }
+      } catch (e) { /* tolerate */ }
+    } finally {
+      setButtonLoading(btn, false);
+    }
+  }
+
+  // ResearchOps V8/V9 helpers ----------------------------------------------
+  async function refreshV8V9Strip() {
+    const btn = $("v8v9RefreshBtn");
+    setButtonLoading(btn, true);
+    try {
+      try {
+        const p = await fetchJson("/api/research/auto-data-enrichment-status?hours=24");
+        const tone = p.symbols_ok && p.symbols_ok.length > 0 ? "ok"
+          : (p.symbols_partial && p.symbols_partial.length > 0 ? "warn" : "info");
+        const ok = (p.symbols_ok || []).length;
+        const partial = (p.symbols_partial || []).length;
+        const need = (p.symbols_need_data || []).length;
+        _v75SetCard("v8v9CardEnrichment", tone,
+          `ok ${ok} · partial ${partial} · need ${need}`,
+          `tf ${p.timeframe} · ${p.hours}h`);
+      } catch (e) { /* tolerate */ }
+      try {
+        const p = await fetchJson("/api/research/exit-intelligence-lab?hours=24");
+        const tone = p.need_more_data ? "info" : (p.best_delta_pct > 0 ? "ok" : "warn");
+        _v75SetCard("v8v9CardExit", tone,
+          p.need_more_data ? "NEED_MORE_DATA" : (p.best_policy || "-"),
+          `delta ${(p.best_delta_pct ?? 0).toFixed(4)} · n ${p.samples ?? 0}`);
+      } catch (e) { /* tolerate */ }
+      try {
+        const p = await fetchJson("/api/research/strategy-experiment-registry");
+        const total = p.total ?? 0;
+        _v75SetCard("v8v9CardRegistry", total > 0 ? "ok" : "info",
+          `total ${total}`,
+          Object.keys(p.by_state || {}).slice(0, 3).map(k => `${k}:${p.by_state[k]}`).join(" · "));
+      } catch (e) { /* tolerate */ }
+      try {
+        const p = await fetchJson("/api/research/shadow-candidate-lifecycle");
+        const total = p.total ?? 0;
+        _v75SetCard("v8v9CardLifecycle", total > 0 ? "ok" : "info",
+          `total ${total}`,
+          Object.keys(p.by_proposed_state || {}).slice(0, 3).map(k => `${k}:${p.by_proposed_state[k]}`).join(" · "));
+      } catch (e) { /* tolerate */ }
+      try {
+        const p = await fetchJson("/api/research/validation-gates-v9");
+        const overall = p.overall_status || "NEED_MORE_DATA";
+        const tone = overall === "PASS" ? "ok" : overall === "FAIL" ? "bad" : "info";
+        _v75SetCard("v8v9CardGates", tone, overall,
+          `pass ${p.pass_count ?? 0} · fail ${p.fail_count ?? 0} · need ${p.need_data_count ?? 0}`);
+      } catch (e) { /* tolerate */ }
+    } finally {
+      setButtonLoading(btn, false);
+    }
+  }
+
+  async function downloadV75Pack() {
+    const btn = $("v75PackBtn");
+    setButtonLoading(btn, true);
+    try {
+      const payload = await fetchJson("/api/research-pack-v7-5?hours=24");
+      const text = payload.text || JSON.stringify(payload, null, 2);
+      const ok = await copyText(text);
+      if (!ok) {
+        const blob = new Blob([text], { type: "text/plain;charset=utf-8" });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url; a.download = "research_pack_v7_5.txt"; a.click();
+        URL.revokeObjectURL(url);
+      }
+    } catch (e) { /* tolerate */ }
+    finally { setButtonLoading(btn, false); }
+  }
 
   // ResearchOps V6 — Operator Cockpit helpers --------------------------------
 

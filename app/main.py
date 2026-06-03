@@ -115,6 +115,15 @@ def main() -> None:
     position_manager = PositionManager(config, client, paper_trader, telegram, logger)
     news_intel = NewsIntel(config, logger)
     feature_logger = FeatureLogger(db, logger) if config.enable_feature_logging else None
+    # ResearchOps V7.5 — configurar hook (research-only). Audit por defecto.
+    try:
+        from .duplicate_guard_hook import configure_global_hook
+        configure_global_hook(
+            enabled=bool(getattr(config, "enable_duplicate_guard_hook", False)),
+            mode=str(getattr(config, "duplicate_guard_hook_mode", "audit")),
+        )
+    except Exception:  # pragma: no cover - defensive
+        pass
     shadow_engine = ShadowStrategyEngine(db, feature_logger, logger) if feature_logger else None
     labeler = TripleBarrierLabeler(config, db, logger) if config.enable_signal_labeling else None
     mfe_mae_tracker = MfeMaeTracker(config, db, logger) if config.enable_mfe_mae_capture else None

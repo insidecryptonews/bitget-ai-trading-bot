@@ -44,8 +44,30 @@ class FeatureLogger:
         return self.record_observation(observation)
 
     def record_observation(self, observation: dict[str, Any]) -> int:
+        # ResearchOps V7.5 — Duplicate Guard Hook (audit por defecto).
+        # Si el hook está deshabilitado, allow_write=True y cero side-effects.
+        try:
+            from .duplicate_guard_hook import get_global_hook
+            decision = get_global_hook().decide(observation)
+        except Exception:
+            decision = None
+        if decision and decision.actual_block:
+            if self.logger:
+                self.logger.info(
+                    "Duplicate guard hook bloqueó observation %s reason=%s fp=%s",
+                    observation.get("symbol"), decision.reason, decision.fingerprint[:12],
+                )
+            # En modo enforce devolvemos 0 para indicar "no escrito".
+            # La cadena llamadora ya tolera observation_id falsy (ver
+            # update_observation guard al inicio).
+            return 0
         observation_id = self.db.record_signal_observation(observation)
         if self.logger:
+            if decision and decision.would_block and not decision.actual_block:
+                self.logger.debug(
+                    "Duplicate guard hook audit would_block %s fp=%s reason=%s",
+                    observation.get("symbol"), decision.fingerprint[:12], decision.reason,
+                )
             self.logger.debug("Signal observation saved %s id=%s", observation.get("symbol"), observation_id)
         return observation_id
 

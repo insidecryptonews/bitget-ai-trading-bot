@@ -1527,3 +1527,57 @@ table.compact tbody tr:hover {
 @media (max-width: 720px) {
   .v7-loop-grid { grid-template-columns: 1fr 1fr; }
 }
+
+/* ResearchOps V7.5 — Data Reliability strip ---------------------------- */
+
+.v75-strip { padding: 18px 20px; margin-bottom: 18px; }
+
+.v75-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 12px;
+  margin: 12px 0;
+}
+
+.v75-card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 12px 14px;
+  position: relative;
+  display: grid;
+  gap: 4px;
+  overflow: hidden;
+}
+
+.v75-card::before {
+  content: "";
+  position: absolute;
+  top: 0; left: 0; bottom: 0;
+  width: 3px;
+  background: rgba(149, 169, 202, 0.45);
+}
+
+.v75-card[data-status="ok"]::before     { background: var(--green); }
+.v75-card[data-status="warn"]::before   { background: var(--orange); }
+.v75-card[data-status="bad"]::before    { background: var(--red); }
+.v75-card[data-status="info"]::before   { background: var(--blue); }
+.v75-card[data-status="shadow"]::before { background: var(--purple); }
+
+.v75-eyebrow {
+  color: var(--muted);
+  text-transform: uppercase;
+  font-size: 10.5px;
+  letter-spacing: 0.08em;
+}
+
+.v75-value {
+  font-size: 18px;
+  font-weight: 700;
+}
+
+.v75-sub,
+.v75-foot {
+  font-size: 12px;
+  color: var(--muted);
+}
