@@ -1756,6 +1756,155 @@ class ResearchLab:
         lines.append("SHADOW CANDIDATE LIFECYCLE END")
         return "\n".join(lines)
 
+    # ---- V8.1 Event Foundation CLI surface ----
+
+    def _event_store(self):
+        from .events.event_store import EventStore
+        return EventStore()
+
+    def event_catalyst_status(self) -> str:
+        store = self._event_store()
+        snap = store.snapshot()
+        lines = ["EVENT CATALYST STATUS START"]
+        lines.append(f"base_path: {snap['base_path']}")
+        lines.append(f"raw_count: {snap['raw_count']}")
+        lines.append(f"canonical_count: {snap['canonical_count']}")
+        lines.append(f"candidates_count: {snap['candidates_count']}")
+        lines.append(f"runs_count: {snap['runs_count']}")
+        for fam, n in snap["by_family"].items():
+            lines.append(f"by_family {fam}: {n}")
+        for s, n in snap["by_status"].items():
+            lines.append(f"by_status {s}: {n}")
+        lines.append(f"research_only: {str(snap['research_only']).lower()}")
+        lines.append(f"final_recommendation: {snap['final_recommendation']}")
+        lines.append("EVENT CATALYST STATUS END")
+        return "\n".join(lines)
+
+    def listing_tracker_audit(self, hours: int = 720) -> str:
+        from .events.listing_tracker import build_listing_audit
+        window_days = max(1, int(hours) // 24)
+        report = build_listing_audit(self.db, window_days=window_days)
+        lines = ["LISTING TRACKER AUDIT START"]
+        lines.append(f"window_days: {report.window_days}")
+        lines.append(f"records: {len(report.records)}")
+        if report.need_data_reasons:
+            lines.append(f"need_data: {','.join(report.need_data_reasons)}")
+        for r in report.records[:25]:
+            lines.append(
+                f"symbol={r['symbol']} venue={r['venue']} "
+                f"age_days={r.get('age_days')} fdv_usd={r.get('fdv_usd')}"
+            )
+        lines.append(f"research_only: {str(report.research_only).lower()}")
+        lines.append(f"final_recommendation: {report.final_recommendation}")
+        lines.append("LISTING TRACKER AUDIT END")
+        return "\n".join(lines)
+
+    def unlock_watchlist_audit(self, hours: int = 1440) -> str:
+        from .events.unlock_watchlist import build_unlock_audit
+        window_days = max(1, int(hours) // 24)
+        report = build_unlock_audit(self.db, window_days=window_days)
+        lines = ["UNLOCK WATCHLIST AUDIT START"]
+        lines.append(f"window_days: {report.window_days}")
+        lines.append(f"records: {len(report.records)}")
+        lines.append(f"conflicts: {len(report.conflicts)}")
+        if report.need_data_reasons:
+            lines.append(f"need_data: {','.join(report.need_data_reasons)}")
+        for c in report.conflicts[:25]:
+            lines.append(
+                f"conflict token={c.get('token')} field={c.get('field')} "
+                f"a={c.get('source_a')}:{c.get('value_a')} b={c.get('source_b')}:{c.get('value_b')}"
+            )
+        lines.append(f"research_only: {str(report.research_only).lower()}")
+        lines.append(f"final_recommendation: {report.final_recommendation}")
+        lines.append("UNLOCK WATCHLIST AUDIT END")
+        return "\n".join(lines)
+
+    def perp_availability_audit(self, symbols: list[str] | None = None) -> str:
+        from .events.perp_availability_checker import (
+            batch_check_perp_availability,
+            summarise_perp_audit,
+        )
+        from .phase8_research_utils import parse_symbols
+        sym_list = parse_symbols(symbols, self.config) or [
+            "BTCUSDT", "ETHUSDT", "DOTUSDT",
+        ]
+        results = batch_check_perp_availability(self.db, symbols=sym_list)
+        summary = summarise_perp_audit(results)
+        lines = ["PERP AVAILABILITY AUDIT START"]
+        lines.append(f"total: {summary['total']}")
+        lines.append(f"with_perp_bitget: {summary['with_perp_bitget']}")
+        lines.append(f"without_perp_bitget: {summary['without_perp_bitget']}")
+        if summary["missing_methods"]:
+            lines.append(f"missing_methods: {','.join(summary['missing_methods'])}")
+        for r in results:
+            lines.append(
+                f"symbol={r.symbol} perp={r.perp_available_bitget} "
+                f"perp_symbol={r.perp_symbol_bitget or '-'} venues={r.venue_count}"
+            )
+        lines.append(f"research_only: {str(summary['research_only']).lower()}")
+        lines.append(f"final_recommendation: {summary['final_recommendation']}")
+        lines.append("PERP AVAILABILITY AUDIT END")
+        return "\n".join(lines)
+
+    def shortability_score_audit(self, symbols: list[str] | None = None) -> str:
+        from .events.perp_availability_checker import batch_check_perp_availability
+        from .events.shortability_score import (
+            batch_shortability,
+            summarise_shortability,
+        )
+        from .phase8_research_utils import parse_symbols
+        sym_list = parse_symbols(symbols, self.config) or [
+            "BTCUSDT", "ETHUSDT", "DOTUSDT",
+        ]
+        perp = batch_check_perp_availability(self.db, symbols=sym_list)
+        pairs = [(r.symbol, r.perp_available_bitget) for r in perp]
+        results = batch_shortability(self.db, symbols_with_perp=pairs)
+        summary = summarise_shortability(results)
+        lines = ["SHORTABILITY SCORE AUDIT START"]
+        lines.append(f"total: {summary['total']}")
+        lines.append(f"ok: {summary['ok']}")
+        lines.append(f"need_data: {summary['need_data']}")
+        lines.append(f"no_perp: {summary['no_perp']}")
+        for r in results:
+            score = r.shortability_score
+            score_s = f"{score:.4f}" if score is not None else "NA"
+            lines.append(
+                f"symbol={r.symbol} status={r.score_status} score={score_s}"
+            )
+        lines.append(f"research_only: {str(summary['research_only']).lower()}")
+        lines.append(f"final_recommendation: {summary['final_recommendation']}")
+        lines.append("SHORTABILITY SCORE AUDIT END")
+        return "\n".join(lines)
+
+    def event_candidate_registry_status(self) -> str:
+        from .events.event_candidate_registry import summarise
+        store = self._event_store()
+        snap = summarise(store)
+        lines = ["EVENT CANDIDATE REGISTRY STATUS START"]
+        lines.append(f"total: {snap['candidates_count']}")
+        for fam, n in snap["by_family"].items():
+            lines.append(f"by_family {fam}: {n}")
+        for s, n in snap["by_status"].items():
+            lines.append(f"by_status {s}: {n}")
+        lines.append(f"research_only: {str(snap['research_only']).lower()}")
+        lines.append(f"final_recommendation: {snap['final_recommendation']}")
+        lines.append("EVENT CANDIDATE REGISTRY STATUS END")
+        return "\n".join(lines)
+
+    def research_pack_event_v1(self, symbols: list[str] | None = None) -> str:
+        from .events.research_pack_event_v1 import (
+            build_event_pack_v1,
+            render_event_pack_v1_text,
+        )
+        from .phase8_research_utils import parse_symbols
+        sym_list = parse_symbols(symbols, self.config) or [
+            "BTCUSDT", "ETHUSDT", "DOTUSDT",
+        ]
+        payload = build_event_pack_v1(
+            self.config, self.db, sample_symbols=sym_list,
+        )
+        return render_event_pack_v1_text(payload)
+
     def validation_gates_v9_status(self, hours: int = 24) -> str:
         from .validation_gates_v9 import run_validation_gates_v9
         report = run_validation_gates_v9(strategy_id="placeholder", net_returns=[])
@@ -2467,6 +2616,13 @@ def main() -> None:
             "strategy-experiment-registry",
             "shadow-candidate-lifecycle",
             "validation-gates-v9",
+            "event-catalyst-status",
+            "listing-tracker-audit",
+            "unlock-watchlist-audit",
+            "perp-availability-audit",
+            "shortability-score-audit",
+            "event-candidate-registry-status",
+            "research-pack-event-v1",
             "ohlcv-replay-loader-smoke-test",
             "ohlcv-replay-loader-audit",
             "duplicate-module-audit-smoke-test",
@@ -3027,6 +3183,23 @@ def main() -> None:
         print(lab.shadow_candidate_lifecycle_status(hours=args.hours))
     elif args.command == "validation-gates-v9":
         print(lab.validation_gates_v9_status(hours=args.hours))
+    elif args.command == "event-catalyst-status":
+        print(lab.event_catalyst_status())
+    elif args.command == "listing-tracker-audit":
+        print(lab.listing_tracker_audit(hours=args.hours))
+    elif args.command == "unlock-watchlist-audit":
+        print(lab.unlock_watchlist_audit(hours=args.hours))
+    elif args.command == "perp-availability-audit":
+        symbols_arg = [s.strip() for s in (args.symbols or "").split(",") if s.strip()] or None
+        print(lab.perp_availability_audit(symbols=symbols_arg))
+    elif args.command == "shortability-score-audit":
+        symbols_arg = [s.strip() for s in (args.symbols or "").split(",") if s.strip()] or None
+        print(lab.shortability_score_audit(symbols=symbols_arg))
+    elif args.command == "event-candidate-registry-status":
+        print(lab.event_candidate_registry_status())
+    elif args.command == "research-pack-event-v1":
+        symbols_arg = [s.strip() for s in (args.symbols or "").split(",") if s.strip()] or None
+        print(lab.research_pack_event_v1(symbols=symbols_arg))
     elif args.command == "ohlcv-replay-loader-smoke-test":
         print(lab.ohlcv_replay_loader_smoke_test())
     elif args.command == "ohlcv-replay-loader-audit":
