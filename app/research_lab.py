@@ -2557,6 +2557,132 @@ class ResearchLab:
             text += "\n" + warning
         return text
 
+    # ---- V8.2.7 Strict OOS + Final Gate + Short Verdict Fix ----
+
+    def strict_oos_rule_selector_v827_cli(self, hours: int = 168, limit: int = 50000) -> str:
+        from .labs.short_barrier_debug_v8_2_7 import debug_short_barriers_v827
+        from .labs.strict_oos_rule_selector_v8_2_7 import select_rules_strict_oos
+        from .labs.score_calibration_audit import audit_score_calibration
+        from .labs.counterfactual_training_dataset import build_dataset
+        dataset, _ = build_dataset(self.db, hours=int(hours), limit=int(limit))
+        short = debug_short_barriers_v827(self.db, hours=hours, limit=limit, rows=dataset)
+        recal = audit_score_calibration(self.db, hours=hours, limit=limit, rows=dataset)
+        score_ok = recal.monotonicity_status == "PASS"
+        r = select_rules_strict_oos(
+            self.db, hours=hours, limit=limit, rows=dataset,
+            short_verdict=short.verdict, score_calibration_ok=score_ok,
+        )
+        lines = ["STRICT OOS RULE SELECTOR V8.2.7 START"]
+        lines.append(f"hours: {r.hours} status: {r.status}")
+        lines.append(f"short_verdict: {r.short_verdict} short_excluded: {r.short_excluded}")
+        lines.append(f"score_calibration_ok: {r.score_calibration_ok}")
+        lines.append(f"total_dataset_rows: {r.total_dataset_rows}")
+        lines.append(f"evaluable_rows: {r.evaluable_rows}")
+        lines.append(f"split: train={r.train_size} validation={r.validation_size} test={r.test_size}")
+        lines.append(f"total_rules_evaluated: {r.total_rules_evaluated}")
+        for gate, count in r.by_final_gate.items():
+            lines.append(f"by_final_gate {gate}: {count}")
+        for rule in r.paper_sandbox_candidates[:10]:
+            lines.append(
+                f"PAPER_SANDBOX {rule.get('rule_id')} train_n={rule.get('train_samples')} "
+                f"test_n={rule.get('test_samples')} test_ev={rule.get('test_net_ev_pct'):.4f} "
+                f"test_pf={rule.get('test_pf'):.2f} degr={rule.get('degradation_train_to_test_pct'):.2f}"
+            )
+        for rule in r.research_candidates[:10]:
+            lines.append(
+                f"RESEARCH {rule.get('rule_id')} reason={rule.get('reject_reason')}"
+            )
+        lines.extend(self._v82_safety_footer())
+        warning = self._v82_heavy_warning(hours)
+        if warning:
+            lines.append(warning)
+        lines.append("STRICT OOS RULE SELECTOR V8.2.7 END")
+        return "\n".join(lines)
+
+    def short_barrier_debug_v827_cli(self, hours: int = 168, limit: int = 50000) -> str:
+        from .labs.short_barrier_debug_v8_2_7 import debug_short_barriers_v827
+        r = debug_short_barriers_v827(self.db, hours=int(hours), limit=int(limit))
+        lines = ["SHORT BARRIER DEBUG V8.2.7 START"]
+        lines.append(f"hours: {r.hours} status: {r.status}")
+        lines.append(f"total_short_rows: {r.total_short_rows}")
+        lines.append(f"evaluable_short_rows: {r.evaluable_short_rows}")
+        lines.append(f"trusted_count: {r.trusted_count}")
+        lines.append(f"legitimate_stop_before_drop: {r.legitimate_stop_before_drop}")
+        lines.append(f"possible_sign_bug: {r.possible_sign_bug}")
+        lines.append(f"possible_barrier_bug: {r.possible_barrier_bug}")
+        lines.append(f"same_bar_ambiguous: {r.same_bar_ambiguous}")
+        lines.append(f"needs_path: {r.needs_path}")
+        lines.append(f"suspicious_ratio: {r.suspicious_ratio:.4f}")
+        lines.append(f"sign_bug_ratio: {r.sign_bug_ratio:.4f}")
+        lines.append(f"barrier_bug_ratio: {r.barrier_bug_ratio:.4f}")
+        lines.append(f"same_bar_ratio: {r.same_bar_ratio:.4f}")
+        lines.append(f"verdict: {r.verdict}")
+        for c in r.examples_top_100[:20]:
+            lines.append(
+                f"CASE symbol={c.get('symbol')} class={c.get('classification')} "
+                f"ret_4h={c.get('ret_4h_pct')} mfe={c.get('mfe_pct')} mae={c.get('mae_pct')}"
+            )
+        lines.extend(self._v82_safety_footer())
+        warning = self._v82_heavy_warning(hours)
+        if warning:
+            lines.append(warning)
+        lines.append("SHORT BARRIER DEBUG V8.2.7 END")
+        return "\n".join(lines)
+
+    def final_rule_gate_v827_cli(self, hours: int = 168, limit: int = 50000) -> str:
+        from .labs.final_rule_gate_v8_2_7 import run_final_gate
+        r = run_final_gate(self.db, hours=int(hours), limit=int(limit))
+        lines = ["FINAL RULE GATE V8.2.7 START"]
+        lines.append(f"hours: {r.hours} status: {r.status}")
+        lines.append(f"short_verdict: {r.short_verdict}")
+        lines.append(f"score_monotonicity: {r.score_monotonicity}")
+        lines.append(f"duplicate_ratio: {r.duplicate_ratio:.4f}")
+        lines.append(f"total_rules_mined: {r.total_rules_mined}")
+        lines.append(f"rejected: {r.rejected}")
+        lines.append(f"watch_only: {r.watch_only}")
+        lines.append(f"research_candidates: {r.research_candidates}")
+        lines.append(f"paper_sandbox_candidates: {r.paper_sandbox_candidates}")
+        lines.append(f"need_more_data: {r.need_more_data}")
+        if r.no_paper_candidates_marker:
+            lines.append(f"no_paper_candidates_marker: {r.no_paper_candidates_marker}")
+        for entry in r.reasons_top[:10]:
+            lines.append(f"reason {entry['reason']}: {entry['count']}")
+        for rule in r.paper_sandbox_rules[:5]:
+            lines.append(f"PAPER_SANDBOX {rule.get('rule_id')}")
+        lines.extend(self._v82_safety_footer())
+        warning = self._v82_heavy_warning(hours)
+        if warning:
+            lines.append(warning)
+        lines.append("FINAL RULE GATE V8.2.7 END")
+        return "\n".join(lines)
+
+    def export_research_v827_cli(self, hours: int = 168, limit: int = 50000) -> str:
+        from .labs.research_export_v8_2_7 import export_research_v827
+        manifest = export_research_v827(self.db, hours=int(hours), limit=int(limit))
+        lines = ["EXPORT RESEARCH V8.2.7 START"]
+        lines.append(f"hours: {int(hours)} limit: {int(limit)}")
+        lines.append(f"base_dir: {manifest.get('base_dir')}")
+        for f in manifest.get("files") or []:
+            lines.append(f"file: {f.get('name')} size={f.get('size_bytes')} sha1={f.get('sha1')}")
+        z = manifest.get("zip")
+        if z:
+            lines.append(f"zip: {z.get('name')} size={z.get('size_bytes')} sha1={z.get('sha1')}")
+        lines.extend(self._v82_safety_footer())
+        warning = self._v82_heavy_warning(hours)
+        if warning:
+            lines.append(warning)
+        lines.append("EXPORT RESEARCH V8.2.7 END")
+        return "\n".join(lines)
+
+    def research_pack_v827_cli(self, hours: int = 168, limit: int = 50000) -> str:
+        from .labs.research_export_v8_2_7 import build_pack_v827, render_pack_v827_text
+        payload = build_pack_v827(self.db, hours=int(hours), limit=int(limit))
+        text = render_pack_v827_text(payload)
+        warning = self._v82_heavy_warning(hours)
+        if warning:
+            text += "\n" + warning
+        return text
+
     def _render_training_summary(self, summary, *, hours: int, limit: int) -> str:
         lines = ["COUNTERFACTUAL TRAINING SUMMARY START"]
         lines.append(f"hours: {int(hours)} limit: {int(limit)}")
@@ -3334,6 +3460,11 @@ def build_argument_parser() -> argparse.ArgumentParser:
             "score-recalibration-sandbox-v826",
             "export-research-v826",
             "research-pack-v826",
+            "strict-oos-rule-selector-v827",
+            "short-barrier-debug-v827",
+            "final-rule-gate-v827",
+            "export-research-v827",
+            "research-pack-v827",
             "ohlcv-replay-loader-smoke-test",
             "ohlcv-replay-loader-audit",
             "duplicate-module-audit-smoke-test",
@@ -4017,6 +4148,21 @@ def main() -> None:
     elif args.command == "research-pack-v826":
         limit_arg = int(getattr(args, "limit", 50000) or 50000)
         print(lab.research_pack_v826_cli(hours=args.hours, limit=limit_arg))
+    elif args.command == "strict-oos-rule-selector-v827":
+        limit_arg = int(getattr(args, "limit", 50000) or 50000)
+        print(lab.strict_oos_rule_selector_v827_cli(hours=args.hours, limit=limit_arg))
+    elif args.command == "short-barrier-debug-v827":
+        limit_arg = int(getattr(args, "limit", 50000) or 50000)
+        print(lab.short_barrier_debug_v827_cli(hours=args.hours, limit=limit_arg))
+    elif args.command == "final-rule-gate-v827":
+        limit_arg = int(getattr(args, "limit", 50000) or 50000)
+        print(lab.final_rule_gate_v827_cli(hours=args.hours, limit=limit_arg))
+    elif args.command == "export-research-v827":
+        limit_arg = int(getattr(args, "limit", 50000) or 50000)
+        print(lab.export_research_v827_cli(hours=args.hours, limit=limit_arg))
+    elif args.command == "research-pack-v827":
+        limit_arg = int(getattr(args, "limit", 50000) or 50000)
+        print(lab.research_pack_v827_cli(hours=args.hours, limit=limit_arg))
     elif args.command == "ohlcv-replay-loader-smoke-test":
         print(lab.ohlcv_replay_loader_smoke_test())
     elif args.command == "ohlcv-replay-loader-audit":
