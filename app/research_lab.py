@@ -2738,7 +2738,14 @@ def _print_discovery(result: dict[str, Any]) -> None:
     print(f"Reports saved to {result['reports_dir']}")
 
 
-def main() -> None:
+def build_argument_parser() -> argparse.ArgumentParser:
+    """V8.2.3 — Build the ``research_lab`` argparse parser without parsing.
+
+    Extracted from :func:`main` so tests can verify the parser is
+    constructible (no ``conflicting option string`` errors) without going
+    through ``sys.argv`` or subprocesses. Single source of truth for both
+    runtime and tests.
+    """
     parser = argparse.ArgumentParser(description="Research Lab offline tools")
     parser.add_argument(
         "command",
@@ -2994,7 +3001,11 @@ def main() -> None:
     parser.add_argument("--upload", action="store_true", help="Sube data-export si external storage esta configurado.")
     parser.add_argument("--side", default="", help="Lado para labs V8.2: LONG o SHORT.")
     parser.add_argument("--max-adds", type=int, default=3, help="Max adds para trend-campaign-sim.")
-    parser.add_argument("--policy", default="all", help="Politica para profit-lock-sim o 'all'.")
+    # V8.2.3 — ``--policy`` already exists below (declared by Phase 8 / cost
+    # stress / validator helpers). Re-declaring it here triggered
+    # ``argparse.ArgumentError: argument --policy: conflicting option string``.
+    # The dispatch for ``profit-lock-sim`` now treats the legacy Phase 8
+    # default (``late_entry_block_plus_dynamic_hold``) as ``"all"``.
     parser.add_argument("--timeframe", default="5m", help="OHLCV timeframe para real-strategy-backtest-multi (default: 5m).")
     parser.add_argument("--group-by", default="symbol", help="Group-by tokens for real-strategy-backtest-breakdown (comma-separated, e.g. 'symbol,side,regime').")
     parser.add_argument("--min-trades", type=int, default=30, help="Min trades for breakdown/policy gate.")
@@ -3010,6 +3021,11 @@ def main() -> None:
     parser.add_argument("--capital", type=float, default=40.0, help="Capital total USDT for capital-leverage-sim (default 40).")
     parser.add_argument("--margins", default="2,5,10,20", help="Margins (csv USDT) for capital-leverage-sim (default 2,5,10,20).")
     parser.add_argument("--leverages", default="1,3,5,10,20,50", help="Leverages (csv) for capital-leverage-sim (default 1,3,5,10,20,50).")
+    return parser
+
+
+def main() -> None:
+    parser = build_argument_parser()
     args = parser.parse_args()
     config = load_config()
     logger = setup_logger()
@@ -3507,7 +3523,13 @@ def main() -> None:
         print(lab.trend_campaign_sim_cli(hours=args.hours, side=side_arg, max_adds=max_adds))
     elif args.command == "profit-lock-sim":
         side_arg = getattr(args, "side", None) or "SHORT"
+        # V8.2.3 — ``--policy`` is shared with Phase 8 helpers and defaults to
+        # ``late_entry_block_plus_dynamic_hold``. For ``profit-lock-sim`` that
+        # default is meaningless, so treat it as ``"all"``. Explicit user
+        # input (any other string) is respected.
         policy_arg = getattr(args, "policy", None) or "all"
+        if policy_arg == "late_entry_block_plus_dynamic_hold":
+            policy_arg = "all"
         print(lab.profit_lock_sim_cli(hours=args.hours, side=side_arg, policy=policy_arg))
     elif args.command == "research-pack-bidirectional-v1":
         print(lab.research_pack_bidirectional_v1_cli(hours=args.hours))
