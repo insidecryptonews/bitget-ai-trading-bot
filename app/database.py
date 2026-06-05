@@ -1341,17 +1341,320 @@ class Database:
         with self._connect() as conn:
             conn.execute(sql, tuple(payload.values()))
 
-    def fetch_signal_observations(self, limit: int | None = None) -> list[dict[str, Any]]:
-        sql = "SELECT * FROM signal_observations ORDER BY timestamp ASC"
-        params: tuple[Any, ...] = ()
+    def fetch_signal_observations(
+        self,
+        hours: int | None = None,
+        limit: int | None = None,
+        side: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Read-only fetch of signal observations.
+
+        Backwards compatible:
+        - ``fetch_signal_observations()`` returns all rows (legacy behaviour).
+        - ``fetch_signal_observations(limit=100)`` returns up to 100 rows.
+
+        V8.2.1 additions (research-only):
+        - ``fetch_signal_observations(hours=168)`` filters by ``timestamp >= cutoff``
+          and joins ``signal_path_metrics`` to enrich with MFE/MAE/realized/
+          first_barrier_hit/bars_open.
+        - ``fetch_signal_observations(side="SHORT")`` filters by side.
+
+        Never writes. Never creates tables. Never deletes data.
+        """
+        if hours is None and side is None:
+            # Legacy path — identical to pre-V8.2.1 behaviour.
+            sql = "SELECT * FROM signal_observations ORDER BY timestamp ASC"
+            params: tuple[Any, ...] = ()
+            if limit:
+                sql += " LIMIT ?"
+                params = (limit,)
+            if self._use_postgres:
+                sql = sql.replace("?", "%s")
+            with self._connect() as conn:
+                cur = conn.execute(sql, params)
+                return self._fetchall_dicts(cur)
+        # Enriched path with optional time/side filters + LEFT JOIN path_metrics.
+        clauses = ["1 = 1"]
+        params_list: list[Any] = []
+        if hours is not None and int(hours) > 0:
+            cutoff_iso = (
+                datetime.now(timezone.utc) - timedelta(hours=int(hours))
+            ).isoformat()
+            clauses.append("o.timestamp >= ?")
+            params_list.append(cutoff_iso)
+        if side:
+            clauses.append("UPPER(o.side) = ?")
+            params_list.append(str(side).upper())
+        sql = (
+            "SELECT o.*, "
+            " p.max_favorable_pct AS mfe_pct, "
+            " p.max_adverse_pct AS mae_pct, "
+            " p.final_return_pct AS realized_pct, "
+            " p.first_barrier_hit AS first_barrier_hit, "
+            " p.bars_tracked AS bars_open, "
+            " p.score_bucket AS path_score_bucket "
+            "FROM signal_observations o "
+            "LEFT JOIN signal_path_metrics p ON p.observation_id = o.id "
+            f"WHERE {' AND '.join(clauses)} "
+            "ORDER BY o.timestamp ASC"
+        )
         if limit:
             sql += " LIMIT ?"
-            params = (limit,)
+            params_list.append(limit)
         if self._use_postgres:
             sql = sql.replace("?", "%s")
-        with self._connect() as conn:
-            cur = conn.execute(sql, params)
-            return self._fetchall_dicts(cur)
+        try:
+            with self._connect() as conn:
+                cur = conn.execute(sql, tuple(params_list))
+                return self._fetchall_dicts(cur)
+        except Exception:
+            # Schema mismatch (e.g. older DB without signal_path_metrics) —
+            # fall back to plain rows without JOIN. Never raise; readers are
+            # research-only and must degrade gracefully to NEED_DATA paths.
+            try:
+                fallback = "SELECT * FROM signal_observations o WHERE 1 = 1"
+                fb_params: list[Any] = []
+                if hours is not None and int(hours) > 0:
+                    cutoff_iso = (
+                        datetime.now(timezone.utc) - timedelta(hours=int(hours))
+                    ).isoformat()
+                    fallback += " AND o.timestamp >= ?"
+                    fb_params.append(cutoff_iso)
+                if side:
+                    fallback += " AND UPPER(o.side) = ?"
+                    fb_params.append(str(side).upper())
+                fallback += " ORDER BY o.timestamp ASC"
+                if limit:
+                    fallback += " LIMIT ?"
+                    fb_params.append(limit)
+                if self._use_postgres:
+                    fallback = fallback.replace("?", "%s")
+                with self._connect() as conn:
+                    cur = conn.execute(fallback, tuple(fb_params))
+                    return self._fetchall_dicts(cur)
+            except Exception:
+                return []
+
+    def fetch_router_inputs(self, hours: int = 168) -> list[dict[str, Any]]:
+        """Read-only: synthesise hourly router inputs from
+        ``signal_observations``.
+
+        Returns an empty list when the table is empty or the window has no
+        observations — never raises. Each row matches
+        ``app.labs.regime_router_simulator.RouterInputs``.
+        """
+        if int(hours) <= 0:
+            return []
+        cutoff_iso = (
+            datetime.now(timezone.utc) - timedelta(hours=int(hours))
+        ).isoformat()
+        # Bucket by hour using the first 13 chars of the ISO timestamp.
+        sql = (
+            "SELECT substr(o.timestamp, 1, 13) AS bucket_prefix, "
+            " SUM(CASE WHEN UPPER(o.side) = 'LONG' THEN 1 ELSE 0 END) AS long_count, "
+            " SUM(CASE WHEN UPPER(o.side) = 'SHORT' THEN 1 ELSE 0 END) AS short_count, "
+            " SUM(CASE WHEN UPPER(o.side) = 'NO_TRADE' THEN 1 ELSE 0 END) AS no_trade_count, "
+            " COUNT(*) AS total, "
+            " AVG(o.normalized_atr) AS avg_atr_norm, "
+            " AVG(o.spread_pct) AS avg_spread_pct, "
+            " AVG(o.funding_rate) AS avg_funding "
+            "FROM signal_observations o "
+            "WHERE o.timestamp >= ? "
+            "GROUP BY bucket_prefix "
+            "ORDER BY bucket_prefix ASC"
+        )
+        params: tuple[Any, ...] = (cutoff_iso,)
+        if self._use_postgres:
+            sql = sql.replace("?", "%s")
+        try:
+            with self._connect() as conn:
+                rows = self._fetchall_dicts(conn.execute(sql, params))
+        except Exception:
+            return []
+        out: list[dict[str, Any]] = []
+        for row in rows:
+            total = int(row.get("total") or 0)
+            if total <= 0:
+                continue
+            long_count = int(row.get("long_count") or 0)
+            short_count = int(row.get("short_count") or 0)
+            if long_count > short_count and long_count > total * 0.5:
+                regime = "TREND_UP"
+                btc_bias = "bullish"
+            elif short_count > long_count and short_count > total * 0.5:
+                regime = "TREND_DOWN"
+                btc_bias = "bearish"
+            else:
+                regime = "RANGE"
+                btc_bias = "neutral"
+            spread_avg = row.get("avg_spread_pct")
+            out.append({
+                "timestamp": (str(row.get("bucket_prefix") or "") + ":00:00Z"),
+                "btc_bias_1h": btc_bias,
+                "btc_bias_4h": btc_bias,
+                "eth_bias_1h": btc_bias,
+                "pct_universe_up": long_count / max(total, 1),
+                "pct_universe_down": short_count / max(total, 1),
+                "regime_current": regime,
+                "atr_norm_avg": row.get("avg_atr_norm"),
+                "spread_bps_avg": (
+                    float(spread_avg) * 10000.0
+                    if isinstance(spread_avg, (int, float))
+                    else None
+                ),
+                "funding_avg": row.get("avg_funding"),
+                "oi_delta_24h_pct": None,
+                "liquidations_24h_usd": None,
+                "has_high_severity_event": False,
+                "news_risk_red": False,
+                "universe_volume_avg_usd": None,
+            })
+        return out
+
+    @staticmethod
+    def _timeframe_minutes(tf: str) -> int:
+        text = str(tf or "5m").strip().lower()
+        try:
+            if text.endswith("m"):
+                return max(1, int(text[:-1]))
+            if text.endswith("h"):
+                return max(1, int(text[:-1])) * 60
+            if text.endswith("d"):
+                return max(1, int(text[:-1])) * 60 * 24
+        except Exception:
+            return 5
+        return 5
+
+    def _fetch_completed_trades_with_path(
+        self,
+        *,
+        hours: int = 168,
+        side: str | None = None,
+        timeframe: str = "5m",
+        max_bars: int = 48,
+    ) -> list[dict[str, Any]]:
+        """Internal: completed trades enriched with OHLCV bar-path windows.
+
+        Returns an empty list when no completed trades exist in the window or
+        when OHLCV bar paths cannot be reconstructed. Never raises.
+        """
+        if int(hours) <= 0:
+            return []
+        cutoff_iso = (
+            datetime.now(timezone.utc) - timedelta(hours=int(hours))
+        ).isoformat()
+        clauses = [
+            "timestamp >= ?",
+            "UPPER(COALESCE(status, '')) NOT IN ('PAPER_OPEN', 'OPEN', 'PAPER_NEW')",
+        ]
+        params: list[Any] = [cutoff_iso]
+        if side:
+            clauses.append("UPPER(side) = ?")
+            params.append(str(side).upper())
+        sql = (
+            "SELECT id, timestamp, symbol, side, entry, stop_loss, take_profit_1, "
+            "       take_profit_2, confidence_score, strategy_type, realized_pnl, "
+            "       raw_signal_json "
+            "FROM trades "
+            f"WHERE {' AND '.join(clauses)} "
+            "ORDER BY timestamp ASC"
+        )
+        if self._use_postgres:
+            sql = sql.replace("?", "%s")
+        try:
+            with self._connect() as conn:
+                trades_rows = self._fetchall_dicts(conn.execute(sql, tuple(params)))
+        except Exception:
+            return []
+        if not trades_rows:
+            return []
+        out: list[dict[str, Any]] = []
+        tf_minutes = self._timeframe_minutes(timeframe)
+        for tr in trades_rows:
+            symbol = str(tr.get("symbol") or "")
+            entry_time = str(tr.get("timestamp") or "")
+            if not symbol or not entry_time:
+                continue
+            try:
+                entry_dt = datetime.fromisoformat(entry_time.replace("Z", "+00:00"))
+                if entry_dt.tzinfo is None:
+                    entry_dt = entry_dt.replace(tzinfo=timezone.utc)
+                window_end = entry_dt + timedelta(minutes=tf_minutes * int(max_bars))
+            except Exception:
+                continue
+            try:
+                bars = self.fetch_ohlcv_range(
+                    symbol=symbol,
+                    timeframe=timeframe,
+                    since_iso=entry_dt.isoformat(),
+                    until_iso=window_end.isoformat(),
+                    limit=int(max_bars),
+                )
+            except Exception:
+                bars = []
+            if not bars:
+                continue
+            bar_path = []
+            for b in bars:
+                try:
+                    bar_path.append({
+                        "open": float(b.get("open", 0) or 0),
+                        "high": float(b.get("high", 0) or 0),
+                        "low": float(b.get("low", 0) or 0),
+                        "close": float(b.get("close", 0) or 0),
+                    })
+                except Exception:
+                    continue
+            if not bar_path:
+                continue
+            entry_price = float(tr.get("entry") or 0)
+            atr_pct = 0.5
+            if entry_price > 0 and bar_path:
+                first = bar_path[0]
+                try:
+                    raw = (first["high"] - first["low"]) / entry_price * 100.0
+                    atr_pct = max(0.1, min(raw, 5.0))
+                except Exception:
+                    atr_pct = 0.5
+            out.append({
+                "symbol": symbol,
+                "side": str(tr.get("side") or "").upper(),
+                "entry": entry_price,
+                "stop": float(tr.get("stop_loss") or 0),
+                "tp1": float(tr.get("take_profit_1") or 0),
+                "tp2": float(tr.get("take_profit_2") or 0),
+                "bar_path": bar_path,
+                "fees_pct": 0.18,
+                "atr_pct": atr_pct,
+                "atr_pct_at_entry": atr_pct,
+                "regime": "UNKNOWN",
+            })
+        return out
+
+    def fetch_campaign_trades(
+        self,
+        hours: int = 168,
+        side: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Read-only: completed trades reconstructed with OHLCV bar paths,
+        formatted for the V8.2 trend-campaign simulator. Returns ``[]`` when
+        the sample is empty or OHLCV cannot be rebuilt.
+        """
+        return self._fetch_completed_trades_with_path(
+            hours=hours, side=side, timeframe="5m", max_bars=48,
+        )
+
+    def fetch_exit_replay_trades(
+        self,
+        hours: int = 168,
+        side: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Read-only: completed trades for the V8.2 profit-lock simulator.
+        Same shape as ``fetch_campaign_trades``.
+        """
+        return self._fetch_completed_trades_with_path(
+            hours=hours, side=side, timeframe="5m", max_bars=48,
+        )
 
     def get_signal_observation_summary(self) -> dict[str, int]:
         sql = """

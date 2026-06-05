@@ -223,6 +223,11 @@ def start_health_server(
                 "/api/research/strategy-experiment-registry",
                 "/api/research/shadow-candidate-lifecycle",
                 "/api/research/validation-gates-v9",
+                "/api/research/bidirectional-funnel",
+                "/api/research/score-asymmetry-audit",
+                "/api/research/trend-campaign-sim",
+                "/api/research/profit-lock-sim",
+                "/api/research/research-pack-bidirectional-v1",
                 "/api/training/full-report",
                 "/api/training/export/full.txt",
                 "/api/training/export/full.json",
@@ -643,6 +648,21 @@ def start_health_server(
                 return
             if path == "/api/research/validation-gates-v9":
                 self._send_json(_v8v9_validation_gates(config, db, query))
+                return
+            if path == "/api/research/bidirectional-funnel":
+                self._send_json(_v82_bidirectional_funnel(config, db, query))
+                return
+            if path == "/api/research/score-asymmetry-audit":
+                self._send_json(_v82_score_asymmetry(config, db, query))
+                return
+            if path == "/api/research/trend-campaign-sim":
+                self._send_json(_v82_trend_campaign_sim(config, db, query))
+                return
+            if path == "/api/research/profit-lock-sim":
+                self._send_json(_v82_profit_lock_sim(config, db, query))
+                return
+            if path == "/api/research/research-pack-bidirectional-v1":
+                self._send_json(_v82_research_pack(config, db, query))
                 return
             if path == "/api/training/full-report":
                 payload = _dashboard_full_report(config, db, query)
@@ -2681,6 +2701,144 @@ def _v8v9_validation_gates(config: Any | None, db: Any | None, query: dict[str, 
         from .validation_gates_v9 import run_validation_gates_v9
         report = run_validation_gates_v9(strategy_id="placeholder", net_returns=[])
         payload = report.as_dict()
+        payload["research_only"] = True
+        payload["paper_filter_enabled"] = False
+        payload["can_send_real_orders"] = False
+        payload["final_recommendation"] = "NO LIVE"
+        return payload
+    except Exception as exc:
+        return _v5_no_op_safety_payload(str(exc)[:300])
+
+
+def _v82_bidirectional_funnel(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
+    """V8.2 — Bidirectional funnel. Read-only.
+
+    V8.2.1: protected by ``allow_heavy=false`` when ``hours > 168``.
+    """
+    hours = _query_int(query, "hours", 168)
+    side = (query.get("side") or [""])[0] or None
+    allow_heavy = (query.get("allow_heavy") or ["0"])[0] in {"1", "true", "yes"}
+    if not allow_heavy and hours > 168:
+        return {
+            "status": "SKIPPED_HEAVY",
+            "reason": "bidirectional_funnel_hours_above_168",
+            "hint": "pass allow_heavy=true to compute",
+            "research_only": True,
+            "paper_filter_enabled": False,
+            "can_send_real_orders": False,
+            "final_recommendation": "NO LIVE",
+        }
+    try:
+        from .labs.bidirectional_forensic_lab import build_funnel
+        payload = build_funnel(db, hours=hours, side_filter=side).as_dict()
+        payload["research_only"] = True
+        payload["paper_filter_enabled"] = False
+        payload["can_send_real_orders"] = False
+        payload["final_recommendation"] = "NO LIVE"
+        return payload
+    except Exception as exc:
+        return _v5_no_op_safety_payload(str(exc)[:300])
+
+
+def _v82_score_asymmetry(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
+    """V8.2 — Score asymmetry audit. Read-only.
+
+    V8.2.1: protected by ``allow_heavy=false`` when ``hours > 168``.
+    """
+    hours = _query_int(query, "hours", 168)
+    allow_heavy = (query.get("allow_heavy") or ["0"])[0] in {"1", "true", "yes"}
+    if not allow_heavy and hours > 168:
+        return {
+            "status": "SKIPPED_HEAVY",
+            "reason": "score_asymmetry_audit_hours_above_168",
+            "hint": "pass allow_heavy=true to compute",
+            "research_only": True,
+            "paper_filter_enabled": False,
+            "can_send_real_orders": False,
+            "final_recommendation": "NO LIVE",
+        }
+    try:
+        from .labs.score_asymmetry_audit import audit
+        payload = audit(db, hours=hours).as_dict()
+        payload["research_only"] = True
+        payload["paper_filter_enabled"] = False
+        payload["can_send_real_orders"] = False
+        payload["final_recommendation"] = "NO LIVE"
+        return payload
+    except Exception as exc:
+        return _v5_no_op_safety_payload(str(exc)[:300])
+
+
+def _v82_trend_campaign_sim(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
+    """V8.2 — Trend campaign simulator. Read-only."""
+    hours = _query_int(query, "hours", 168)
+    side = (query.get("side") or ["SHORT"])[0].upper()
+    allow_heavy = (query.get("allow_heavy") or ["0"])[0] in {"1", "true", "yes"}
+    if not allow_heavy and hours > 168:
+        return {
+            "status": "SKIPPED_HEAVY",
+            "reason": "trend_campaign_hours_above_168",
+            "hint": "pass allow_heavy=true to compute",
+            "research_only": True,
+            "paper_filter_enabled": False,
+            "can_send_real_orders": False,
+            "final_recommendation": "NO LIVE",
+        }
+    try:
+        from .labs.trend_campaign_simulator import run_campaign_simulation
+        payload = run_campaign_simulation(db, side=side, hours=hours).as_dict()
+        payload["research_only"] = True
+        payload["paper_filter_enabled"] = False
+        payload["can_send_real_orders"] = False
+        payload["final_recommendation"] = "NO LIVE"
+        return payload
+    except Exception as exc:
+        return _v5_no_op_safety_payload(str(exc)[:300])
+
+
+def _v82_profit_lock_sim(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
+    """V8.2 — Profit lock simulator. Read-only."""
+    hours = _query_int(query, "hours", 168)
+    side = (query.get("side") or ["SHORT"])[0].upper()
+    allow_heavy = (query.get("allow_heavy") or ["0"])[0] in {"1", "true", "yes"}
+    if not allow_heavy and hours > 168:
+        return {
+            "status": "SKIPPED_HEAVY",
+            "reason": "profit_lock_hours_above_168",
+            "hint": "pass allow_heavy=true to compute",
+            "research_only": True,
+            "paper_filter_enabled": False,
+            "can_send_real_orders": False,
+            "final_recommendation": "NO LIVE",
+        }
+    try:
+        from .labs.profit_lock_simulator import run_profit_lock_simulation
+        payload = run_profit_lock_simulation(db, side=side, hours=hours).as_dict()
+        payload["research_only"] = True
+        payload["paper_filter_enabled"] = False
+        payload["can_send_real_orders"] = False
+        payload["final_recommendation"] = "NO LIVE"
+        return payload
+    except Exception as exc:
+        return _v5_no_op_safety_payload(str(exc)[:300])
+
+
+def _v82_research_pack(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
+    """V8.2 — Research Pack Bidirectional V1. Read-only."""
+    hours = _query_int(query, "hours", 168)
+    allow_heavy = (query.get("allow_heavy") or ["0"])[0] in {"1", "true", "yes"}
+    if not allow_heavy and hours > 168:
+        return {
+            "status": "SKIPPED_HEAVY",
+            "reason": "research_pack_bidirectional_hours_above_168",
+            "research_only": True,
+            "paper_filter_enabled": False,
+            "can_send_real_orders": False,
+            "final_recommendation": "NO LIVE",
+        }
+    try:
+        from .labs.research_pack_bidirectional_v1 import build_pack
+        payload = build_pack(db, hours=hours)
         payload["research_only"] = True
         payload["paper_filter_enabled"] = False
         payload["can_send_real_orders"] = False

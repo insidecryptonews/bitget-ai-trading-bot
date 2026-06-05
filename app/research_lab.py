@@ -1905,6 +1905,266 @@ class ResearchLab:
         )
         return render_event_pack_v1_text(payload)
 
+    # ---- V8.2 Bidirectional Forensics + Campaign + Exit Lab ----
+
+    @staticmethod
+    def _v82_safety_footer() -> list[str]:
+        """V8.2.1 — common safety footer for every V8.2 CLI command."""
+        return [
+            "research_only: true",
+            "paper_filter_enabled: false",
+            "can_send_real_orders: false",
+            "final_recommendation: NO LIVE",
+        ]
+
+    @staticmethod
+    def _v82_heavy_warning(hours: int) -> str | None:
+        if int(hours) > 168:
+            return f"heavy_window_warning: hours={hours} above 168; CLI proceeds, endpoints would SKIP_HEAVY"
+        return None
+
+    def bidirectional_funnel(self, hours: int = 168, side: str | None = None) -> str:
+        from .labs.bidirectional_forensic_lab import build_funnel
+        report = build_funnel(self.db, hours=int(hours), side_filter=side or None)
+        lines = ["BIDIRECTIONAL FUNNEL START"]
+        lines.append(f"hours: {report.hours} status: {report.status}")
+        lines.append(f"total_signals: {report.total_signals}")
+        for k, v in report.by_side.items():
+            lines.append(f"by_side {k}: {v}")
+        for k, v in report.by_regime.items():
+            lines.append(f"by_regime {k}: {v}")
+        for k, v in report.by_score_bucket.items():
+            lines.append(f"by_score_bucket {k}: {v}")
+        for k, v in report.by_reject_reason.items():
+            lines.append(f"by_reject_reason {k}: {v}")
+        for k, v in report.gross_ev_avg_by_side.items():
+            lines.append(f"gross_ev_avg_by_side {k}: {v:.4f}")
+        for k, v in report.net_ev_avg_by_side.items():
+            lines.append(f"net_ev_avg_by_side {k}: {v:.4f}")
+        if report.need_data_reasons:
+            lines.append(f"need_data: {','.join(report.need_data_reasons)}")
+        lines.extend(self._v82_safety_footer())
+        warning = self._v82_heavy_warning(hours)
+        if warning:
+            lines.append(warning)
+        lines.append("BIDIRECTIONAL FUNNEL END")
+        return "\n".join(lines)
+
+    def missed_opportunities_cli(self, hours: int = 168, side: str = "SHORT") -> str:
+        from .labs.bidirectional_forensic_lab import missed_opportunities
+        report = missed_opportunities(self.db, side=side, hours=int(hours))
+        lines = [f"MISSED OPPORTUNITIES {side.upper()} START"]
+        lines.append(f"hours: {report.hours} status: {report.status} top_n: {report.top_n}")
+        for cand in report.candidates[:20]:
+            lines.append(
+                f"symbol={cand.get('symbol')} regime={cand.get('regime')} score={cand.get('score')} "
+                f"ret_1h={cand.get('ret_1h_pct')} would_have_worked={cand.get('would_have_worked_estimate')} reason={cand.get('reason')}"
+            )
+        if report.need_data_reasons:
+            lines.append(f"need_data: {','.join(report.need_data_reasons)}")
+        lines.extend(self._v82_safety_footer())
+        warning = self._v82_heavy_warning(hours)
+        if warning:
+            lines.append(warning)
+        lines.append("MISSED OPPORTUNITIES END")
+        return "\n".join(lines)
+
+    def blocked_counterfactual_cli(self, hours: int = 168, side: str = "SHORT") -> str:
+        from .labs.bidirectional_forensic_lab import blocked_that_would_have_worked
+        report = blocked_that_would_have_worked(self.db, side=side, hours=int(hours))
+        lines = [f"BLOCKED COUNTERFACTUAL {side.upper()} START"]
+        lines.append(f"hours: {report.hours} status: {report.status}")
+        for cand in report.candidates[:20]:
+            lines.append(
+                f"symbol={cand.get('symbol')} score={cand.get('score')} ret_1h={cand.get('ret_1h_pct')} "
+                f"would_have_worked={cand.get('would_have_worked_estimate')} reason={cand.get('reason')}"
+            )
+        if report.need_data_reasons:
+            lines.append(f"need_data: {','.join(report.need_data_reasons)}")
+        lines.extend(self._v82_safety_footer())
+        warning = self._v82_heavy_warning(hours)
+        if warning:
+            lines.append(warning)
+        lines.append("BLOCKED COUNTERFACTUAL END")
+        return "\n".join(lines)
+
+    def failed_executed_cli(self, hours: int = 168, side: str = "SHORT") -> str:
+        from .labs.bidirectional_forensic_lab import failed_executed
+        report = failed_executed(self.db, side=side, hours=int(hours))
+        lines = [f"FAILED EXECUTED {side.upper()} START"]
+        lines.append(f"hours: {report.hours} status: {report.status}")
+        for f in report.failures[:20]:
+            lines.append(
+                f"symbol={f.get('symbol')} regime={f.get('regime')} outcome={f.get('outcome')} "
+                f"realized={f.get('realized_pct')} mfe={f.get('mfe_pct')} reason={f.get('failure_reason')}"
+            )
+        if report.need_data_reasons:
+            lines.append(f"need_data: {','.join(report.need_data_reasons)}")
+        lines.extend(self._v82_safety_footer())
+        warning = self._v82_heavy_warning(hours)
+        if warning:
+            lines.append(warning)
+        lines.append("FAILED EXECUTED END")
+        return "\n".join(lines)
+
+    def good_not_monetized_cli(self, hours: int = 168, side: str = "SHORT") -> str:
+        from .labs.bidirectional_forensic_lab import good_not_monetized
+        report = good_not_monetized(self.db, side=side, hours=int(hours))
+        lines = [f"GOOD NOT MONETIZED {side.upper()} START"]
+        lines.append(f"hours: {report.hours} status: {report.status}")
+        for c in report.cases[:20]:
+            lines.append(
+                f"symbol={c.get('symbol')} realized={c.get('realized_pct')} mfe={c.get('mfe_pct')} "
+                f"capture={c.get('mfe_capture_ratio')} cause={c.get('likely_cause')}"
+            )
+        if report.need_data_reasons:
+            lines.append(f"need_data: {','.join(report.need_data_reasons)}")
+        lines.extend(self._v82_safety_footer())
+        warning = self._v82_heavy_warning(hours)
+        if warning:
+            lines.append(warning)
+        lines.append("GOOD NOT MONETIZED END")
+        return "\n".join(lines)
+
+    def score_asymmetry_audit_cli(self, hours: int = 168) -> str:
+        from .labs.score_asymmetry_audit import audit
+        r = audit(self.db, hours=int(hours))
+        lines = ["SCORE ASYMMETRY AUDIT START"]
+        lines.append(f"hours: {r.hours} status: {r.status}")
+        lines.append(f"median_long: {r.median_long:.2f} median_short: {r.median_short:.2f}")
+        lines.append(f"gap_long_minus_short: {r.gap_long_minus_short:.2f}")
+        lines.append(f"long_pass%: {r.pct_long_pass_min_score * 100:.1f}")
+        lines.append(f"short_pass%: {r.pct_short_pass_min_score * 100:.1f}")
+        lines.append(f"long_in_bull n={r.long_in_bull.get('count', 0)}")
+        lines.append(f"short_in_bear n={r.short_in_bear.get('count', 0)}")
+        if r.need_data_reasons:
+            lines.append(f"need_data: {','.join(r.need_data_reasons)}")
+        lines.extend(self._v82_safety_footer())
+        warning = self._v82_heavy_warning(hours)
+        if warning:
+            lines.append(warning)
+        lines.append("SCORE ASYMMETRY AUDIT END")
+        return "\n".join(lines)
+
+    def _score_sim_lines(self, header: str, r: Any) -> str:
+        lines = [header]
+        lines.append(f"hours: {r.hours} status: {r.status} name: {r.name}")
+        lines.append(f"samples_long: {r.samples_long} samples_short: {r.samples_short}")
+        lines.append(f"baseline_long_pass%: {r.baseline_long_pass_pct * 100:.1f}")
+        lines.append(f"new_long_pass%: {r.new_long_pass_pct * 100:.1f}")
+        lines.append(f"baseline_short_pass%: {r.baseline_short_pass_pct * 100:.1f}")
+        lines.append(f"new_short_pass%: {r.new_short_pass_pct * 100:.1f}")
+        lines.append(f"delta_long_pass: {r.delta_long_pass}")
+        lines.append(f"delta_short_pass: {r.delta_short_pass}")
+        if r.need_data_reasons:
+            lines.append(f"need_data: {','.join(r.need_data_reasons)}")
+        lines.extend(self._v82_safety_footer())
+        warning = self._v82_heavy_warning(r.hours)
+        if warning:
+            lines.append(warning)
+        lines.append(header.replace("START", "END"))
+        return "\n".join(lines)
+
+    def score_symmetric_simulation_cli(self, hours: int = 168) -> str:
+        from .labs.score_asymmetry_audit import simulate_symmetric_regime
+        return self._score_sim_lines(
+            "SCORE SYMMETRIC SIMULATION START", simulate_symmetric_regime(self.db, hours=int(hours))
+        )
+
+    def score_atr_softened_simulation_cli(self, hours: int = 168) -> str:
+        from .labs.score_asymmetry_audit import simulate_atr_softening
+        return self._score_sim_lines(
+            "SCORE ATR SOFTENED SIMULATION START", simulate_atr_softening(self.db, hours=int(hours))
+        )
+
+    def score_high_vol_directional_simulation_cli(self, hours: int = 168) -> str:
+        from .labs.score_asymmetry_audit import simulate_high_vol_directional
+        return self._score_sim_lines(
+            "SCORE HIGH VOL DIRECTIONAL SIMULATION START",
+            simulate_high_vol_directional(self.db, hours=int(hours)),
+        )
+
+    def regime_router_simulation_cli(self, hours: int = 168) -> str:
+        from .labs.regime_router_simulator import simulate_router
+        r = simulate_router(self.db, hours=int(hours))
+        lines = ["REGIME ROUTER SIMULATION START"]
+        lines.append(f"hours: {r.hours} status: {r.status} samples: {r.samples}")
+        for state, count in r.by_state.items():
+            cov = r.coverage_pct.get(state, 0.0)
+            lines.append(f"by_state {state}: {count} coverage%={cov * 100:.1f}")
+        if r.need_data_reasons:
+            lines.append(f"need_data: {','.join(r.need_data_reasons)}")
+        lines.extend(self._v82_safety_footer())
+        warning = self._v82_heavy_warning(hours)
+        if warning:
+            lines.append(warning)
+        lines.append("REGIME ROUTER SIMULATION END")
+        return "\n".join(lines)
+
+    def trend_campaign_sim_cli(self, hours: int = 168, side: str = "SHORT", max_adds: int = 3) -> str:
+        from .labs.trend_campaign_simulator import run_campaign_simulation
+        variants = tuple(sorted({0, 1, 2, 3, 5, 8, int(max_adds)}))
+        r = run_campaign_simulation(self.db, side=side, hours=int(hours), max_adds_variants=variants)
+        lines = [f"TREND CAMPAIGN SIM {side.upper()} START"]
+        lines.append(f"hours: {r.hours} samples: {r.samples} status: {r.status}")
+        lines.append(f"optimal_adds: {r.optimal_adds}")
+        for v in r.variants:
+            lines.append(
+                f"adds_max={v.get('adds_max')} samples={v.get('samples')} net_ev={v.get('net_ev_avg_pct'):.4f} "
+                f"pf={v.get('pf'):.2f} hit%={v.get('hit_rate') * 100:.1f} "
+                f"avg_adds={v.get('avg_adds_executed'):.2f} high_risk={v.get('high_risk_flag')}"
+            )
+        for ins in r.insights[:10]:
+            lines.append(f"insight: {ins}")
+        if r.need_data_reasons:
+            lines.append(f"need_data: {','.join(r.need_data_reasons)}")
+        lines.extend(self._v82_safety_footer())
+        warning = self._v82_heavy_warning(hours)
+        if warning:
+            lines.append(warning)
+        lines.append("TREND CAMPAIGN SIM END")
+        return "\n".join(lines)
+
+    def profit_lock_sim_cli(self, hours: int = 168, side: str = "SHORT", policy: str = "all") -> str:
+        from .labs.profit_lock_simulator import (
+            ALL_POLICIES,
+            POLICY_BASELINE,
+            run_profit_lock_simulation,
+        )
+        if policy and policy.lower() != "all":
+            policies = [POLICY_BASELINE, policy]
+        else:
+            policies = list(ALL_POLICIES)
+        r = run_profit_lock_simulation(self.db, side=side, hours=int(hours), policies=policies)
+        lines = [f"PROFIT LOCK SIM {side.upper()} START"]
+        lines.append(f"hours: {r.hours} samples: {r.samples} status: {r.status}")
+        lines.append(f"baseline_policy: {r.baseline_policy}")
+        lines.append(f"best_policy: {r.best_policy} best_delta_pct: {r.best_delta_pct:.4f}")
+        for p in r.policies:
+            lines.append(
+                f"policy={p.get('policy')} samples={p.get('samples')} net_ev={p.get('net_ev_avg_pct'):.4f} "
+                f"delta_net_ev={p.get('delta_net_ev_vs_baseline_pct'):.4f} "
+                f"mfe_capture={p.get('avg_mfe_capture_pct'):.2f} tp%={p.get('tp_rate') * 100:.1f} "
+                f"sl%={p.get('sl_rate') * 100:.1f} time%={p.get('time_rate') * 100:.1f}"
+            )
+        if r.need_data_reasons:
+            lines.append(f"need_data: {','.join(r.need_data_reasons)}")
+        lines.extend(self._v82_safety_footer())
+        warning = self._v82_heavy_warning(hours)
+        if warning:
+            lines.append(warning)
+        lines.append("PROFIT LOCK SIM END")
+        return "\n".join(lines)
+
+    def research_pack_bidirectional_v1_cli(self, hours: int = 168) -> str:
+        from .labs.research_pack_bidirectional_v1 import build_pack, render_pack_text
+        payload = build_pack(self.db, hours=int(hours))
+        text = render_pack_text(payload)
+        warning = self._v82_heavy_warning(hours)
+        if warning:
+            text += "\n" + warning
+        return text
+
     def validation_gates_v9_status(self, hours: int = 24) -> str:
         from .validation_gates_v9 import run_validation_gates_v9
         report = run_validation_gates_v9(strategy_id="placeholder", net_returns=[])
@@ -2623,6 +2883,19 @@ def main() -> None:
             "shortability-score-audit",
             "event-candidate-registry-status",
             "research-pack-event-v1",
+            "bidirectional-funnel",
+            "missed-opportunities",
+            "blocked-counterfactual",
+            "failed-executed",
+            "good-not-monetized",
+            "score-asymmetry-audit",
+            "score-symmetric-simulation",
+            "score-atr-softened-simulation",
+            "score-high-vol-directional-simulation",
+            "regime-router-simulation",
+            "trend-campaign-sim",
+            "profit-lock-sim",
+            "research-pack-bidirectional-v1",
             "ohlcv-replay-loader-smoke-test",
             "ohlcv-replay-loader-audit",
             "duplicate-module-audit-smoke-test",
@@ -2719,6 +2992,9 @@ def main() -> None:
     parser.add_argument("--apply", action="store_true", help="Aplica data-import. Sin esto, import es dry-run.")
     parser.add_argument("--dry-run", action="store_true", help="Fuerza data-import dry-run.")
     parser.add_argument("--upload", action="store_true", help="Sube data-export si external storage esta configurado.")
+    parser.add_argument("--side", default="", help="Lado para labs V8.2: LONG o SHORT.")
+    parser.add_argument("--max-adds", type=int, default=3, help="Max adds para trend-campaign-sim.")
+    parser.add_argument("--policy", default="all", help="Politica para profit-lock-sim o 'all'.")
     parser.add_argument("--timeframe", default="5m", help="OHLCV timeframe para real-strategy-backtest-multi (default: 5m).")
     parser.add_argument("--group-by", default="symbol", help="Group-by tokens for real-strategy-backtest-breakdown (comma-separated, e.g. 'symbol,side,regime').")
     parser.add_argument("--min-trades", type=int, default=30, help="Min trades for breakdown/policy gate.")
@@ -3200,6 +3476,41 @@ def main() -> None:
     elif args.command == "research-pack-event-v1":
         symbols_arg = [s.strip() for s in (args.symbols or "").split(",") if s.strip()] or None
         print(lab.research_pack_event_v1(symbols=symbols_arg))
+    elif args.command == "bidirectional-funnel":
+        side_arg = getattr(args, "side", None)
+        print(lab.bidirectional_funnel(hours=args.hours, side=side_arg))
+    elif args.command == "missed-opportunities":
+        side_arg = getattr(args, "side", None) or "SHORT"
+        print(lab.missed_opportunities_cli(hours=args.hours, side=side_arg))
+    elif args.command == "blocked-counterfactual":
+        side_arg = getattr(args, "side", None) or "SHORT"
+        print(lab.blocked_counterfactual_cli(hours=args.hours, side=side_arg))
+    elif args.command == "failed-executed":
+        side_arg = getattr(args, "side", None) or "SHORT"
+        print(lab.failed_executed_cli(hours=args.hours, side=side_arg))
+    elif args.command == "good-not-monetized":
+        side_arg = getattr(args, "side", None) or "SHORT"
+        print(lab.good_not_monetized_cli(hours=args.hours, side=side_arg))
+    elif args.command == "score-asymmetry-audit":
+        print(lab.score_asymmetry_audit_cli(hours=args.hours))
+    elif args.command == "score-symmetric-simulation":
+        print(lab.score_symmetric_simulation_cli(hours=args.hours))
+    elif args.command == "score-atr-softened-simulation":
+        print(lab.score_atr_softened_simulation_cli(hours=args.hours))
+    elif args.command == "score-high-vol-directional-simulation":
+        print(lab.score_high_vol_directional_simulation_cli(hours=args.hours))
+    elif args.command == "regime-router-simulation":
+        print(lab.regime_router_simulation_cli(hours=args.hours))
+    elif args.command == "trend-campaign-sim":
+        side_arg = getattr(args, "side", None) or "SHORT"
+        max_adds = int(getattr(args, "max_adds", 3) or 3)
+        print(lab.trend_campaign_sim_cli(hours=args.hours, side=side_arg, max_adds=max_adds))
+    elif args.command == "profit-lock-sim":
+        side_arg = getattr(args, "side", None) or "SHORT"
+        policy_arg = getattr(args, "policy", None) or "all"
+        print(lab.profit_lock_sim_cli(hours=args.hours, side=side_arg, policy=policy_arg))
+    elif args.command == "research-pack-bidirectional-v1":
+        print(lab.research_pack_bidirectional_v1_cli(hours=args.hours))
     elif args.command == "ohlcv-replay-loader-smoke-test":
         print(lab.ohlcv_replay_loader_smoke_test())
     elif args.command == "ohlcv-replay-loader-audit":
