@@ -2407,6 +2407,156 @@ class ResearchLab:
             text += "\n" + warning
         return text
 
+    # ---- V8.2.6 Candidate Rule Miner + WF + Short Debug + Score Sandbox ----
+
+    def candidate_rule_miner_v826_cli(self, hours: int = 168, limit: int = 50000) -> str:
+        from .labs.candidate_rule_miner_v8_2_6 import mine_candidate_rules
+        from .labs.score_recalibration_sandbox_v8_2_6 import sandbox_recalibration
+        from .labs.short_barrier_debug_v8_2_6 import debug_short_barriers
+        from .labs.counterfactual_training_dataset import build_dataset
+        dataset, _ = build_dataset(self.db, hours=int(hours), limit=int(limit))
+        short = debug_short_barriers(self.db, hours=hours, limit=limit, rows=dataset)
+        recal = sandbox_recalibration(self.db, hours=hours, limit=limit, rows=dataset)
+        score_ok = recal.old_monotonicity == "PASS"
+        r = mine_candidate_rules(
+            self.db, hours=hours, limit=limit, rows=dataset,
+            short_verdict=short.verdict, score_calibration_ok=score_ok,
+        )
+        lines = ["CANDIDATE RULE MINER V8.2.6 START"]
+        lines.append(f"hours: {r.hours} status: {r.status}")
+        lines.append(f"short_verdict: {r.short_verdict} short_excluded: {r.short_excluded}")
+        lines.append(f"total_rules: {r.total_rules}")
+        for status, count in r.by_status.items():
+            lines.append(f"by_status {status}: {count}")
+        for rule in r.candidate_rules[:20]:
+            lines.append(
+                f"CANDIDATE {rule.get('rule_id')} n={rule.get('samples')} "
+                f"net_ev={rule.get('net_ev_avg_pct'):.4f} pf={rule.get('pf'):.2f} "
+                f"status={rule.get('rule_status')} reason={rule.get('rule_reason')}"
+            )
+        for rule in r.watch_only_rules[:10]:
+            lines.append(
+                f"WATCH {rule.get('rule_id')} n={rule.get('samples')} "
+                f"net_ev={rule.get('net_ev_avg_pct'):.4f} reason={rule.get('rule_reason')}"
+            )
+        lines.extend(self._v82_safety_footer())
+        warning = self._v82_heavy_warning(hours)
+        if warning:
+            lines.append(warning)
+        lines.append("CANDIDATE RULE MINER V8.2.6 END")
+        return "\n".join(lines)
+
+    def candidate_rule_walkforward_v826_cli(self, hours: int = 168, limit: int = 50000) -> str:
+        from .labs.candidate_rule_miner_v8_2_6 import mine_candidate_rules
+        from .labs.candidate_rule_walkforward_v8_2_6 import run_walkforward
+        from .labs.score_recalibration_sandbox_v8_2_6 import sandbox_recalibration
+        from .labs.short_barrier_debug_v8_2_6 import debug_short_barriers
+        from .labs.counterfactual_training_dataset import build_dataset
+        dataset, _ = build_dataset(self.db, hours=int(hours), limit=int(limit))
+        short = debug_short_barriers(self.db, hours=hours, limit=limit, rows=dataset)
+        recal = sandbox_recalibration(self.db, hours=hours, limit=limit, rows=dataset)
+        score_ok = recal.old_monotonicity == "PASS"
+        miner = mine_candidate_rules(
+            self.db, hours=hours, limit=limit, rows=dataset,
+            short_verdict=short.verdict, score_calibration_ok=score_ok,
+        )
+        candidates = miner.candidate_rules + miner.watch_only_rules
+        wf = run_walkforward(
+            self.db, hours=hours, limit=limit, rows=dataset, rules=candidates,
+        )
+        lines = ["CANDIDATE RULE WALKFORWARD V8.2.6 START"]
+        lines.append(f"hours: {wf.hours} status: {wf.status}")
+        lines.append(f"rules_evaluated: {wf.rules_evaluated}")
+        for dec, count in wf.by_decision.items():
+            lines.append(f"by_decision {dec}: {count}")
+        for r in wf.results[:20]:
+            lines.append(
+                f"WF {r.get('rule_id')} total={r.get('total_samples')} "
+                f"train_ev={r.get('train_net_ev_pct'):.4f} "
+                f"test_ev={r.get('test_net_ev_pct'):.4f} "
+                f"decision={r.get('decision')} reason={r.get('reason')}"
+            )
+        lines.extend(self._v82_safety_footer())
+        warning = self._v82_heavy_warning(hours)
+        if warning:
+            lines.append(warning)
+        lines.append("CANDIDATE RULE WALKFORWARD V8.2.6 END")
+        return "\n".join(lines)
+
+    def short_barrier_debug_v826_cli(self, hours: int = 168, limit: int = 50000) -> str:
+        from .labs.short_barrier_debug_v8_2_6 import debug_short_barriers
+        r = debug_short_barriers(self.db, hours=int(hours), limit=int(limit))
+        lines = ["SHORT BARRIER DEBUG V8.2.6 START"]
+        lines.append(f"hours: {r.hours} status: {r.status}")
+        lines.append(f"total_short_rows: {r.total_short_rows}")
+        lines.append(f"evaluable_short_rows: {r.evaluable_short_rows}")
+        lines.append(f"trusted_count: {r.trusted_count}")
+        lines.append(f"legitimate_stop_before_drop: {r.legitimate_stop_before_drop}")
+        lines.append(f"possible_sign_bug: {r.possible_sign_bug}")
+        lines.append(f"possible_barrier_bug: {r.possible_barrier_bug}")
+        lines.append(f"same_bar_ambiguous: {r.same_bar_ambiguous}")
+        lines.append(f"needs_path: {r.needs_path}")
+        lines.append(f"verdict: {r.verdict}")
+        for c in r.examples_top_100[:20]:
+            lines.append(
+                f"CASE symbol={c.get('symbol')} class={c.get('classification')} "
+                f"barrier_inv={c.get('barrier_inverted')} orient_ok={c.get('mfe_mae_orientation_ok')} "
+                f"same_bar={c.get('same_bar_suspected')}"
+            )
+        lines.extend(self._v82_safety_footer())
+        warning = self._v82_heavy_warning(hours)
+        if warning:
+            lines.append(warning)
+        lines.append("SHORT BARRIER DEBUG V8.2.6 END")
+        return "\n".join(lines)
+
+    def score_recalibration_sandbox_v826_cli(self, hours: int = 168, limit: int = 50000) -> str:
+        from .labs.score_recalibration_sandbox_v8_2_6 import sandbox_recalibration
+        r = sandbox_recalibration(self.db, hours=int(hours), limit=int(limit))
+        lines = ["SCORE RECALIBRATION SANDBOX V8.2.6 START"]
+        lines.append(f"hours: {r.hours} status: {r.status} samples: {r.samples}")
+        lines.append(f"old_correlation: {r.old_correlation:.4f}")
+        lines.append(f"recalibrated_correlation: {r.recalibrated_correlation:.4f}")
+        lines.append(f"delta_correlation: {r.delta_correlation:.4f}")
+        lines.append(f"old_monotonicity: {r.old_monotonicity}")
+        lines.append(f"recalibrated_monotonicity: {r.recalibrated_monotonicity}")
+        lines.append(f"recommendation: {r.recommendation}")
+        for bucket, rec_score in r.bucket_to_recalibrated_score.items():
+            lines.append(f"bucket_to_recalibrated_score {bucket}: {rec_score:.4f}")
+        lines.extend(self._v82_safety_footer())
+        warning = self._v82_heavy_warning(hours)
+        if warning:
+            lines.append(warning)
+        lines.append("SCORE RECALIBRATION SANDBOX V8.2.6 END")
+        return "\n".join(lines)
+
+    def export_research_v826_cli(self, hours: int = 168, limit: int = 50000) -> str:
+        from .labs.research_export_v8_2_6 import export_research_v826
+        manifest = export_research_v826(self.db, hours=int(hours), limit=int(limit))
+        lines = ["EXPORT RESEARCH V8.2.6 START"]
+        lines.append(f"hours: {int(hours)} limit: {int(limit)}")
+        lines.append(f"base_dir: {manifest.get('base_dir')}")
+        for f in manifest.get("files") or []:
+            lines.append(f"file: {f.get('name')} size={f.get('size_bytes')} sha1={f.get('sha1')}")
+        z = manifest.get("zip")
+        if z:
+            lines.append(f"zip: {z.get('name')} size={z.get('size_bytes')} sha1={z.get('sha1')}")
+        lines.extend(self._v82_safety_footer())
+        warning = self._v82_heavy_warning(hours)
+        if warning:
+            lines.append(warning)
+        lines.append("EXPORT RESEARCH V8.2.6 END")
+        return "\n".join(lines)
+
+    def research_pack_v826_cli(self, hours: int = 168, limit: int = 50000) -> str:
+        from .labs.research_export_v8_2_6 import build_pack_v826, render_pack_v826_text
+        payload = build_pack_v826(self.db, hours=int(hours), limit=int(limit))
+        text = render_pack_v826_text(payload)
+        warning = self._v82_heavy_warning(hours)
+        if warning:
+            text += "\n" + warning
+        return text
+
     def _render_training_summary(self, summary, *, hours: int, limit: int) -> str:
         lines = ["COUNTERFACTUAL TRAINING SUMMARY START"]
         lines.append(f"hours: {int(hours)} limit: {int(limit)}")
@@ -3178,6 +3328,12 @@ def build_argument_parser() -> argparse.ArgumentParser:
             "counterfactual-cost-stress",
             "export-counterfactual-clean-v2",
             "research-pack-counterfactual-quality-v1",
+            "candidate-rule-miner-v826",
+            "candidate-rule-walkforward-v826",
+            "short-barrier-debug-v826",
+            "score-recalibration-sandbox-v826",
+            "export-research-v826",
+            "research-pack-v826",
             "ohlcv-replay-loader-smoke-test",
             "ohlcv-replay-loader-audit",
             "duplicate-module-audit-smoke-test",
@@ -3843,6 +3999,24 @@ def main() -> None:
         print(lab.research_pack_counterfactual_quality_v1_cli(
             hours=args.hours, limit=limit_arg,
         ))
+    elif args.command == "candidate-rule-miner-v826":
+        limit_arg = int(getattr(args, "limit", 50000) or 50000)
+        print(lab.candidate_rule_miner_v826_cli(hours=args.hours, limit=limit_arg))
+    elif args.command == "candidate-rule-walkforward-v826":
+        limit_arg = int(getattr(args, "limit", 50000) or 50000)
+        print(lab.candidate_rule_walkforward_v826_cli(hours=args.hours, limit=limit_arg))
+    elif args.command == "short-barrier-debug-v826":
+        limit_arg = int(getattr(args, "limit", 50000) or 50000)
+        print(lab.short_barrier_debug_v826_cli(hours=args.hours, limit=limit_arg))
+    elif args.command == "score-recalibration-sandbox-v826":
+        limit_arg = int(getattr(args, "limit", 50000) or 50000)
+        print(lab.score_recalibration_sandbox_v826_cli(hours=args.hours, limit=limit_arg))
+    elif args.command == "export-research-v826":
+        limit_arg = int(getattr(args, "limit", 50000) or 50000)
+        print(lab.export_research_v826_cli(hours=args.hours, limit=limit_arg))
+    elif args.command == "research-pack-v826":
+        limit_arg = int(getattr(args, "limit", 50000) or 50000)
+        print(lab.research_pack_v826_cli(hours=args.hours, limit=limit_arg))
     elif args.command == "ohlcv-replay-loader-smoke-test":
         print(lab.ohlcv_replay_loader_smoke_test())
     elif args.command == "ohlcv-replay-loader-audit":
