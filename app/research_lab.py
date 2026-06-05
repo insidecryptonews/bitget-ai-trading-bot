@@ -2270,6 +2270,143 @@ class ResearchLab:
         _, summary = build_dataset(self.db, hours=int(hours), limit=50000)
         return self._render_training_summary(summary, hours=hours, limit=50000)
 
+    # ---- V8.2.5 Counterfactual Quality CLI ----
+
+    def counterfactual_dedup_audit_cli(self, hours: int = 168, limit: int = 50000) -> str:
+        from .labs.counterfactual_dedup_audit import audit_dedup
+        r = audit_dedup(self.db, hours=int(hours), limit=int(limit))
+        lines = ["COUNTERFACTUAL DEDUP AUDIT START"]
+        lines.append(f"hours: {r.hours} status: {r.status}")
+        lines.append(f"total_rows: {r.total_rows}")
+        lines.append(f"evaluable_rows: {r.evaluable_rows}")
+        lines.append(f"duplicate_rows: {r.duplicate_rows}")
+        lines.append(f"unique_outcomes: {r.unique_outcomes}")
+        lines.append(f"duplicate_ratio: {r.duplicate_ratio:.4f}")
+        for k, v in r.raw_metrics.items():
+            lines.append(f"raw_{k}: {v}")
+        for k, v in r.dedup_metrics.items():
+            lines.append(f"dedup_{k}: {v}")
+        for entry in r.inflated_symbols[:10]:
+            lines.append(
+                f"INFLATED symbol={entry['symbol']} raw_net_ev={entry['raw_net_ev']:.4f} "
+                f"dedup_net_ev={entry['dedup_net_ev']:.4f} inflation_factor={entry['inflation_factor']:.2f}"
+            )
+        for entry in r.top_duplicate_fingerprints[:10]:
+            lines.append(
+                f"DUP fingerprint={entry['fingerprint']} count={entry['count']} "
+                f"symbol={entry['symbol']} side={entry['side']}"
+            )
+        lines.extend(self._v82_safety_footer())
+        warning = self._v82_heavy_warning(hours)
+        if warning:
+            lines.append(warning)
+        lines.append("COUNTERFACTUAL DEDUP AUDIT END")
+        return "\n".join(lines)
+
+    def short_sign_barrier_audit_cli(self, hours: int = 168, limit: int = 50000) -> str:
+        from .labs.short_sign_barrier_audit import audit_short_sign
+        r = audit_short_sign(self.db, hours=int(hours), limit=int(limit))
+        lines = ["SHORT SIGN BARRIER AUDIT START"]
+        lines.append(f"hours: {r.hours} status: {r.status}")
+        lines.append(f"total_short_rows: {r.total_short_rows}")
+        lines.append(f"evaluable_short_rows: {r.evaluable_short_rows}")
+        lines.append(f"suspicious_short_rows: {r.suspicious_short_rows}")
+        lines.append(f"suspicious_ratio: {r.suspicious_ratio:.4f}")
+        lines.append(f"verdict: {r.verdict}")
+        for k, v in r.by_classification.items():
+            lines.append(f"by_classification {k}: {v}")
+        for c in r.examples_top_50[:20]:
+            lines.append(
+                f"SUS symbol={c.get('symbol')} ret_4h={c.get('ret_4h_pct')} "
+                f"mfe={c.get('mfe_pct')} mae={c.get('mae_pct')} "
+                f"barrier={c.get('first_barrier_hit')} class={c.get('classification')}"
+            )
+        lines.extend(self._v82_safety_footer())
+        warning = self._v82_heavy_warning(hours)
+        if warning:
+            lines.append(warning)
+        lines.append("SHORT SIGN BARRIER AUDIT END")
+        return "\n".join(lines)
+
+    def score_calibration_audit_cli(self, hours: int = 168, limit: int = 50000) -> str:
+        from .labs.score_calibration_audit import audit_score_calibration
+        r = audit_score_calibration(self.db, hours=int(hours), limit=int(limit))
+        lines = ["SCORE CALIBRATION AUDIT START"]
+        lines.append(f"hours: {r.hours} status: {r.status}")
+        lines.append(f"samples: {r.samples}")
+        lines.append(f"monotonicity_status: {r.monotonicity_status}")
+        lines.append(f"corr_score_vs_net_pnl: {r.correlation_score_vs_net_pnl:.4f}")
+        lines.append(f"corr_score_vs_win: {r.correlation_score_vs_win:.4f}")
+        for b in r.score_bucket_table:
+            lines.append(
+                f"bucket={b['bucket']} n={b['count']} winrate={b['winrate']:.4f} "
+                f"net_ev={b['net_ev_avg_pct']:.4f}"
+            )
+        for w in r.warnings:
+            lines.append(f"warning: {w}")
+        if r.recommendation:
+            lines.append(f"recommendation: {r.recommendation}")
+        lines.extend(self._v82_safety_footer())
+        warning = self._v82_heavy_warning(hours)
+        if warning:
+            lines.append(warning)
+        lines.append("SCORE CALIBRATION AUDIT END")
+        return "\n".join(lines)
+
+    def counterfactual_cost_stress_cli(self, hours: int = 168, limit: int = 50000) -> str:
+        from .labs.counterfactual_cost_stress import stress_costs
+        r = stress_costs(self.db, hours=int(hours), limit=int(limit))
+        lines = ["COUNTERFACTUAL COST STRESS START"]
+        lines.append(f"hours: {r.hours} status: {r.status} samples: {r.samples}")
+        lines.append(f"dedup_used: {r.dedup_used}")
+        for entry in r.by_cost_level:
+            lines.append(
+                f"cost={entry['cost_pct']:.2f}% net_ev={entry['net_ev_avg_pct']:.4f} "
+                f"survives={entry['survives']}"
+            )
+        lines.append(f"surviving_groups: {len(r.surviving_groups)}")
+        lines.append(f"optimistic_only_groups: {len(r.optimistic_only_groups)}")
+        for g in r.surviving_groups[:10]:
+            lines.append(
+                f"SURVIVE side={g.get('side')} symbol={g.get('symbol')} "
+                f"regime={g.get('regime')} count={g.get('count')}"
+            )
+        lines.extend(self._v82_safety_footer())
+        warning = self._v82_heavy_warning(hours)
+        if warning:
+            lines.append(warning)
+        lines.append("COUNTERFACTUAL COST STRESS END")
+        return "\n".join(lines)
+
+    def export_counterfactual_clean_v2_cli(self, hours: int = 168, limit: int = 50000) -> str:
+        from .labs.counterfactual_clean_export_v2 import export_clean_v2
+        manifest = export_clean_v2(self.db, hours=int(hours), limit=int(limit))
+        lines = ["EXPORT COUNTERFACTUAL CLEAN V2 START"]
+        lines.append(f"hours: {int(hours)} limit: {int(limit)}")
+        lines.append(f"base_dir: {manifest.get('base_dir')}")
+        for f in manifest.get("files") or []:
+            lines.append(f"file: {f.get('name')} size={f.get('size_bytes')} sha1={f.get('sha1')}")
+        z = manifest.get("zip")
+        if z:
+            lines.append(f"zip: {z.get('name')} size={z.get('size_bytes')} sha1={z.get('sha1')}")
+        lines.extend(self._v82_safety_footer())
+        warning = self._v82_heavy_warning(hours)
+        if warning:
+            lines.append(warning)
+        lines.append("EXPORT COUNTERFACTUAL CLEAN V2 END")
+        return "\n".join(lines)
+
+    def research_pack_counterfactual_quality_v1_cli(
+        self, hours: int = 168, limit: int = 50000,
+    ) -> str:
+        from .labs.counterfactual_clean_export_v2 import build_pack, render_pack_text
+        payload = build_pack(self.db, hours=int(hours), limit=int(limit))
+        text = render_pack_text(payload)
+        warning = self._v82_heavy_warning(hours)
+        if warning:
+            text += "\n" + warning
+        return text
+
     def _render_training_summary(self, summary, *, hours: int, limit: int) -> str:
         lines = ["COUNTERFACTUAL TRAINING SUMMARY START"]
         lines.append(f"hours: {int(hours)} limit: {int(limit)}")
@@ -3035,6 +3172,12 @@ def build_argument_parser() -> argparse.ArgumentParser:
             "counterfactual-training-dataset",
             "export-counterfactual-training-dataset",
             "training-dataset-summary",
+            "counterfactual-dedup-audit",
+            "short-sign-barrier-audit",
+            "score-calibration-audit",
+            "counterfactual-cost-stress",
+            "export-counterfactual-clean-v2",
+            "research-pack-counterfactual-quality-v1",
             "ohlcv-replay-loader-smoke-test",
             "ohlcv-replay-loader-audit",
             "duplicate-module-audit-smoke-test",
@@ -3680,6 +3823,26 @@ def main() -> None:
         print(lab.export_counterfactual_training_dataset_cli(hours=args.hours, limit=limit_arg))
     elif args.command == "training-dataset-summary":
         print(lab.training_dataset_summary_cli(hours=args.hours))
+    elif args.command == "counterfactual-dedup-audit":
+        limit_arg = int(getattr(args, "limit", 50000) or 50000)
+        print(lab.counterfactual_dedup_audit_cli(hours=args.hours, limit=limit_arg))
+    elif args.command == "short-sign-barrier-audit":
+        limit_arg = int(getattr(args, "limit", 50000) or 50000)
+        print(lab.short_sign_barrier_audit_cli(hours=args.hours, limit=limit_arg))
+    elif args.command == "score-calibration-audit":
+        limit_arg = int(getattr(args, "limit", 50000) or 50000)
+        print(lab.score_calibration_audit_cli(hours=args.hours, limit=limit_arg))
+    elif args.command == "counterfactual-cost-stress":
+        limit_arg = int(getattr(args, "limit", 50000) or 50000)
+        print(lab.counterfactual_cost_stress_cli(hours=args.hours, limit=limit_arg))
+    elif args.command == "export-counterfactual-clean-v2":
+        limit_arg = int(getattr(args, "limit", 50000) or 50000)
+        print(lab.export_counterfactual_clean_v2_cli(hours=args.hours, limit=limit_arg))
+    elif args.command == "research-pack-counterfactual-quality-v1":
+        limit_arg = int(getattr(args, "limit", 50000) or 50000)
+        print(lab.research_pack_counterfactual_quality_v1_cli(
+            hours=args.hours, limit=limit_arg,
+        ))
     elif args.command == "ohlcv-replay-loader-smoke-test":
         print(lab.ohlcv_replay_loader_smoke_test())
     elif args.command == "ohlcv-replay-loader-audit":
