@@ -2165,6 +2165,133 @@ class ResearchLab:
             text += "\n" + warning
         return text
 
+    # ---- V8.2.4 Counterfactual Training Dataset CLI ----
+
+    def future_returns_bridge_cli(
+        self, hours: int = 168, side: str | None = None, top_n: int = 20,
+    ) -> str:
+        from .labs.future_returns_bridge import (
+            batch_compute_future_returns,
+            summarise_future_returns,
+        )
+        ok = hasattr(self.db, "fetch_signal_observations")
+        if not ok:
+            obs: list[dict] = []
+        else:
+            try:
+                rows_raw = self.db.fetch_signal_observations(
+                    hours=int(hours), side=side, limit=int(top_n) * 4,
+                )
+            except Exception:
+                rows_raw = []
+            obs = list(rows_raw)[: int(top_n) * 4]
+        results = batch_compute_future_returns(self.db, observations=obs)
+        summary = summarise_future_returns(results)
+        lines = ["FUTURE RETURNS BRIDGE START"]
+        lines.append(f"hours: {int(hours)} side: {side or 'ALL'} samples: {len(results)}")
+        lines.append(
+            f"summary: total={summary['total']} ok={summary['ok']} "
+            f"partial={summary['partial']} need_data={summary['need_data']} "
+            f"tp_first={summary['tp_first_count']} sl_first={summary['sl_first_count']} "
+            f"time={summary['time_count']}"
+        )
+        for r in results[: int(top_n)]:
+            lines.append(
+                f"symbol={r.symbol} side={r.side} hit={r.first_barrier_hit} "
+                f"mfe={r.mfe_pct} mae={r.mae_pct} ret_1h={r.returns_by_horizon_pct.get('60m')}"
+            )
+        lines.extend(self._v82_safety_footer())
+        warning = self._v82_heavy_warning(hours)
+        if warning:
+            lines.append(warning)
+        lines.append("FUTURE RETURNS BRIDGE END")
+        return "\n".join(lines)
+
+    def edgeguard_counterfactual_cli(self, hours: int = 168, top_n: int = 20) -> str:
+        from .labs.edgeguard_counterfactual_lab import analyze_edgeguard_blocks
+        report = analyze_edgeguard_blocks(self.db, hours=int(hours), top_n=int(top_n))
+        lines = ["EDGEGUARD COUNTERFACTUAL START"]
+        lines.append(f"hours: {report.hours} status: {report.status}")
+        lines.append(f"total_edgeguard_blocks: {report.total_edgeguard_blocks}")
+        lines.append(f"estimated_winners: {report.estimated_winners}")
+        lines.append(f"estimated_losers: {report.estimated_losers}")
+        lines.append(f"need_data: {report.need_data}")
+        lines.append(f"gross_ev_avg_pct: {report.gross_ev_avg_pct:.4f}")
+        lines.append(f"net_ev_avg_pct: {report.net_ev_avg_pct:.4f}")
+        for k, v in report.blocks_by_side.items():
+            lines.append(f"by_side {k}: {v}")
+        for k, v in report.blocks_by_reason.items():
+            lines.append(f"by_reason {k}: {v}")
+        for o in report.top_blocked_winners[: int(top_n)]:
+            lines.append(
+                f"WINNER symbol={o.get('symbol')} side={o.get('side')} "
+                f"net={o.get('net_ev_est_pct')} reason={o.get('edgeguard_reason')}"
+            )
+        for o in report.top_blocked_losers[: int(top_n)]:
+            lines.append(
+                f"LOSER symbol={o.get('symbol')} side={o.get('side')} "
+                f"net={o.get('net_ev_est_pct')} reason={o.get('edgeguard_reason')}"
+            )
+        if report.need_data_reasons:
+            lines.append(f"need_data: {','.join(report.need_data_reasons)}")
+        lines.extend(self._v82_safety_footer())
+        warning = self._v82_heavy_warning(hours)
+        if warning:
+            lines.append(warning)
+        lines.append("EDGEGUARD COUNTERFACTUAL END")
+        return "\n".join(lines)
+
+    def counterfactual_training_dataset_cli(self, hours: int = 168, limit: int = 50000) -> str:
+        from .labs.counterfactual_training_dataset import build_dataset
+        _, summary = build_dataset(self.db, hours=int(hours), limit=int(limit))
+        return self._render_training_summary(summary, hours=hours, limit=limit)
+
+    def export_counterfactual_training_dataset_cli(self, hours: int = 168, limit: int = 50000) -> str:
+        from .labs.counterfactual_training_dataset import build_dataset, export_dataset
+        dataset, summary = build_dataset(self.db, hours=int(hours), limit=int(limit))
+        manifest = export_dataset(dataset, summary)
+        lines = ["EXPORT COUNTERFACTUAL TRAINING DATASET START"]
+        lines.append(f"hours: {int(hours)} limit: {int(limit)} rows: {summary.total_rows}")
+        lines.append(f"base_dir: {manifest.get('base_dir')}")
+        for f in manifest.get("files") or []:
+            lines.append(f"file: {f.get('name')} size={f.get('size_bytes')} sha1={f.get('sha1')}")
+        z = manifest.get("zip")
+        if z:
+            lines.append(f"zip: {z.get('name')} size={z.get('size_bytes')} sha1={z.get('sha1')}")
+        lines.extend(self._v82_safety_footer())
+        warning = self._v82_heavy_warning(hours)
+        if warning:
+            lines.append(warning)
+        lines.append("EXPORT COUNTERFACTUAL TRAINING DATASET END")
+        return "\n".join(lines)
+
+    def training_dataset_summary_cli(self, hours: int = 168) -> str:
+        from .labs.counterfactual_training_dataset import build_dataset
+        _, summary = build_dataset(self.db, hours=int(hours), limit=50000)
+        return self._render_training_summary(summary, hours=hours, limit=50000)
+
+    def _render_training_summary(self, summary, *, hours: int, limit: int) -> str:
+        lines = ["COUNTERFACTUAL TRAINING SUMMARY START"]
+        lines.append(f"hours: {int(hours)} limit: {int(limit)}")
+        lines.append(f"status: {summary.status}")
+        lines.append(f"total_rows: {summary.total_rows}")
+        lines.append(f"use_for_training_count: {summary.use_for_training_count}")
+        lines.append(f"need_data_count: {summary.need_data_count}")
+        lines.append(f"blocked_winner_count: {summary.blocked_winner_count}")
+        lines.append(f"blocked_loser_count: {summary.blocked_loser_count}")
+        lines.append(f"good_not_monetized_count: {summary.good_not_monetized_count}")
+        lines.append(f"net_ev_avg_est_pct: {summary.net_ev_avg_est_pct:.4f}")
+        for k, v in summary.by_label.items():
+            lines.append(f"by_label {k}: {v}")
+        for k, v in summary.by_side.items():
+            lines.append(f"by_side {k}: {v}")
+        lines.extend(self._v82_safety_footer())
+        warning = self._v82_heavy_warning(hours)
+        if warning:
+            lines.append(warning)
+        lines.append("COUNTERFACTUAL TRAINING SUMMARY END")
+        return "\n".join(lines)
+
     def validation_gates_v9_status(self, hours: int = 24) -> str:
         from .validation_gates_v9 import run_validation_gates_v9
         report = run_validation_gates_v9(strategy_id="placeholder", net_returns=[])
@@ -2903,6 +3030,11 @@ def build_argument_parser() -> argparse.ArgumentParser:
             "trend-campaign-sim",
             "profit-lock-sim",
             "research-pack-bidirectional-v1",
+            "future-returns-bridge",
+            "edgeguard-counterfactual",
+            "counterfactual-training-dataset",
+            "export-counterfactual-training-dataset",
+            "training-dataset-summary",
             "ohlcv-replay-loader-smoke-test",
             "ohlcv-replay-loader-audit",
             "duplicate-module-audit-smoke-test",
@@ -3533,6 +3665,21 @@ def main() -> None:
         print(lab.profit_lock_sim_cli(hours=args.hours, side=side_arg, policy=policy_arg))
     elif args.command == "research-pack-bidirectional-v1":
         print(lab.research_pack_bidirectional_v1_cli(hours=args.hours))
+    elif args.command == "future-returns-bridge":
+        side_arg = getattr(args, "side", None) or None
+        top_n = int(getattr(args, "top", 20) or 20)
+        print(lab.future_returns_bridge_cli(hours=args.hours, side=side_arg, top_n=top_n))
+    elif args.command == "edgeguard-counterfactual":
+        top_n = int(getattr(args, "top", 20) or 20)
+        print(lab.edgeguard_counterfactual_cli(hours=args.hours, top_n=top_n))
+    elif args.command == "counterfactual-training-dataset":
+        limit_arg = int(getattr(args, "limit", 50000) or 50000)
+        print(lab.counterfactual_training_dataset_cli(hours=args.hours, limit=limit_arg))
+    elif args.command == "export-counterfactual-training-dataset":
+        limit_arg = int(getattr(args, "limit", 50000) or 50000)
+        print(lab.export_counterfactual_training_dataset_cli(hours=args.hours, limit=limit_arg))
+    elif args.command == "training-dataset-summary":
+        print(lab.training_dataset_summary_cli(hours=args.hours))
     elif args.command == "ohlcv-replay-loader-smoke-test":
         print(lab.ohlcv_replay_loader_smoke_test())
     elif args.command == "ohlcv-replay-loader-audit":

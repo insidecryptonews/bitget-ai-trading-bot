@@ -228,6 +228,9 @@ def start_health_server(
                 "/api/research/trend-campaign-sim",
                 "/api/research/profit-lock-sim",
                 "/api/research/research-pack-bidirectional-v1",
+                "/api/research/counterfactual-training-export",
+                "/api/research/counterfactual-training-download",
+                "/api/research/counterfactual-training-summary",
                 "/api/training/full-report",
                 "/api/training/export/full.txt",
                 "/api/training/export/full.json",
@@ -664,6 +667,22 @@ def start_health_server(
             if path == "/api/research/research-pack-bidirectional-v1":
                 self._send_json(_v82_research_pack(config, db, query))
                 return
+            if path == "/api/research/counterfactual-training-export":
+                self._send_json(_v824_counterfactual_training_export(config, db, query))
+                return
+            if path == "/api/research/counterfactual-training-download":
+                payload = _v824_counterfactual_training_download(config, db, query)
+                if payload.get("status") == "OK" and payload.get("zip_bytes") is not None:
+                    self._send_zip(
+                        payload["zip_bytes"],
+                        filename=payload.get("zip_name", "counterfactual_training_exports_v1.zip"),
+                    )
+                else:
+                    self._send_json(payload)
+                return
+            if path == "/api/research/counterfactual-training-summary":
+                self._send_json(_v824_counterfactual_training_summary(config, db, query))
+                return
             if path == "/api/training/full-report":
                 payload = _dashboard_full_report(config, db, query)
                 fmt = (query.get("format") or ["text"])[0].lower()
@@ -740,6 +759,16 @@ def start_health_server(
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
+
+        def _send_zip(self, payload: bytes, status: int = 200, filename: str = "export.zip") -> None:
+            """V8.2.4 — stream a sanitised ZIP to the client."""
+            self.send_response(status)
+            self.send_header("Content-Type", "application/zip")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
 
         def _send_html(self, html: str, status: int = 200) -> None:
             body = html.encode("utf-8")
@@ -2819,6 +2848,111 @@ def _v82_profit_lock_sim(config: Any | None, db: Any | None, query: dict[str, li
         payload["can_send_real_orders"] = False
         payload["final_recommendation"] = "NO LIVE"
         return payload
+    except Exception as exc:
+        return _v5_no_op_safety_payload(str(exc)[:300])
+
+
+def _v824_counterfactual_training_export(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
+    """V8.2.4 — generate the counterfactual training dataset and ZIP it."""
+    hours = _query_int(query, "hours", 168)
+    limit = _query_int(query, "limit", 50000)
+    allow_heavy = (query.get("allow_heavy") or ["0"])[0] in {"1", "true", "yes"}
+    if not allow_heavy and (hours > 168 or limit > 50000):
+        return {
+            "status": "SKIPPED_HEAVY",
+            "reason": "counterfactual_training_export_heavy",
+            "hint": "pass allow_heavy=true to compute",
+            "research_only": True,
+            "paper_filter_enabled": False,
+            "can_send_real_orders": False,
+            "final_recommendation": "NO LIVE",
+        }
+    try:
+        from .labs.counterfactual_training_dataset import build_dataset, export_dataset
+        dataset, summary = build_dataset(db, hours=hours, limit=limit)
+        manifest = export_dataset(dataset, summary)
+        payload = {
+            "status": "OK",
+            "hours": hours,
+            "limit": limit,
+            "summary": summary.as_dict(),
+            "manifest": manifest,
+            "research_only": True,
+            "paper_filter_enabled": False,
+            "can_send_real_orders": False,
+            "final_recommendation": "NO LIVE",
+        }
+        return payload
+    except Exception as exc:
+        return _v5_no_op_safety_payload(str(exc)[:300])
+
+
+def _v824_counterfactual_training_summary(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
+    """V8.2.4 — counterfactual training dataset summary (no export)."""
+    hours = _query_int(query, "hours", 168)
+    limit = _query_int(query, "limit", 50000)
+    allow_heavy = (query.get("allow_heavy") or ["0"])[0] in {"1", "true", "yes"}
+    if not allow_heavy and (hours > 168 or limit > 50000):
+        return {
+            "status": "SKIPPED_HEAVY",
+            "reason": "counterfactual_training_summary_heavy",
+            "hint": "pass allow_heavy=true to compute",
+            "research_only": True,
+            "paper_filter_enabled": False,
+            "can_send_real_orders": False,
+            "final_recommendation": "NO LIVE",
+        }
+    try:
+        from .labs.counterfactual_training_dataset import build_dataset
+        _dataset, summary = build_dataset(db, hours=hours, limit=limit)
+        payload = summary.as_dict()
+        payload["research_only"] = True
+        payload["paper_filter_enabled"] = False
+        payload["can_send_real_orders"] = False
+        payload["final_recommendation"] = "NO LIVE"
+        return payload
+    except Exception as exc:
+        return _v5_no_op_safety_payload(str(exc)[:300])
+
+
+def _v824_counterfactual_training_download(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:
+    """V8.2.4 — return the latest exported ZIP as bytes for streaming.
+
+    The handler refuses to serve any file outside the
+    ``training_exports/research_v8_2_4/`` directory (path-traversal guard).
+    """
+    try:
+        from .labs.counterfactual_training_dataset import EXPORT_SUBDIR, find_latest_zip
+        zip_path = find_latest_zip()
+        if zip_path is None:
+            return {
+                "status": "NEED_DATA",
+                "reason": "no_export_available_yet",
+                "hint": "call /api/research/counterfactual-training-export first",
+                "research_only": True,
+                "paper_filter_enabled": False,
+                "can_send_real_orders": False,
+                "final_recommendation": "NO LIVE",
+            }
+        # Path-traversal guard: ensure the resolved path is inside EXPORT_SUBDIR.
+        from pathlib import Path
+        base = Path(EXPORT_SUBDIR).resolve()
+        resolved = zip_path.resolve()
+        try:
+            resolved.relative_to(base)
+        except ValueError:
+            return _v5_no_op_safety_payload("zip_path_outside_export_dir")
+        with resolved.open("rb") as f:
+            data = f.read()
+        return {
+            "status": "OK",
+            "zip_name": resolved.name,
+            "zip_bytes": data,
+            "research_only": True,
+            "paper_filter_enabled": False,
+            "can_send_real_orders": False,
+            "final_recommendation": "NO LIVE",
+        }
     except Exception as exc:
         return _v5_no_op_safety_payload(str(exc)[:300])
 

@@ -338,10 +338,30 @@ def run_campaign_simulation(
         trade_list = list(trades)
     else:
         ok, value = _safe_call(db, "fetch_campaign_trades", hours=int(hours), side=side_upper)
-        if not ok or not value:
-            report.need_data_reasons.append("fetch_campaign_trades_method_missing_or_empty")
-            return report
-        trade_list = [t if isinstance(t, CampaignTrade) else CampaignTrade(**t) for t in value]
+        if (not ok) or (not value):
+            # V8.2.4 — fallback when ``trades`` is empty: reconstruct pseudo-trades
+            # from signal_observations + OHLCV. Tagged ``source=
+            # pseudo_trade_from_signal_observation``. Never touches PaperTrader.
+            try:
+                from .pseudo_trades_bridge import build_pseudo_trades_from_observations
+                pseudo = build_pseudo_trades_from_observations(
+                    db, hours=int(hours), side=side_upper, limit=1000,
+                )
+            except Exception:
+                pseudo = []
+            if not pseudo:
+                report.need_data_reasons.append("no_trades_and_no_pseudo_trades_from_observations")
+                return report
+            report.need_data_reasons.append("using_pseudo_trades_from_signal_observation")
+            value = pseudo
+        trade_list = []
+        for t in value:
+            if isinstance(t, CampaignTrade):
+                trade_list.append(t)
+                continue
+            allowed = {f for f in CampaignTrade.__dataclass_fields__}
+            safe = {k: v for k, v in t.items() if k in allowed}
+            trade_list.append(CampaignTrade(**safe))
 
     if not trade_list:
         return report

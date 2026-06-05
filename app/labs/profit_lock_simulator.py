@@ -643,10 +643,29 @@ def run_profit_lock_simulation(
         trade_list = list(trades)
     else:
         ok, value = _safe_call(db, "fetch_exit_replay_trades", hours=int(hours), side=side_upper)
-        if not ok or not value:
-            report.need_data_reasons.append("fetch_exit_replay_trades_method_missing_or_empty")
-            return report
-        trade_list = [t if isinstance(t, ExitTrade) else ExitTrade(**t) for t in value]
+        if (not ok) or (not value):
+            # V8.2.4 — fallback to pseudo-trades reconstructed from
+            # signal_observations when there are no real trades.
+            try:
+                from .pseudo_trades_bridge import build_pseudo_trades_from_observations
+                pseudo = build_pseudo_trades_from_observations(
+                    db, hours=int(hours), side=side_upper, limit=1000,
+                )
+            except Exception:
+                pseudo = []
+            if not pseudo:
+                report.need_data_reasons.append("no_trades_and_no_pseudo_trades_from_observations")
+                return report
+            report.need_data_reasons.append("using_pseudo_trades_from_signal_observation")
+            value = pseudo
+        trade_list = []
+        for t in value:
+            if isinstance(t, ExitTrade):
+                trade_list.append(t)
+                continue
+            allowed = {f for f in ExitTrade.__dataclass_fields__}
+            safe = {k: v for k, v in t.items() if k in allowed}
+            trade_list.append(ExitTrade(**safe))
     if not trade_list:
         return report
     report.samples = len(trade_list)
