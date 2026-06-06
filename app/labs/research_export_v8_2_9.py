@@ -1,0 +1,420 @@
+"""V8.2.9 — Sanitised research export (research-only).
+
+Bundles the rebound LONG extractor, EdgeGuard dedup, score-gate
+sandbox, exit monetization audit, strict OOS validation, and
+adversarial audit into a single ZIP under
+``training_exports/research_v8_2_9/``.
+
+Hard contract:
+
+- research-only;
+- ZIP allow-list: CSV / TXT / JSON;
+- secrets stripped via ``_sanitise_row``;
+- no .env, no DB, no zips, no backups, no vaults.
+"""
+
+from __future__ import annotations
+
+import csv
+import hashlib
+import json
+import zipfile
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+from . import FINAL_RECOMMENDATION_NO_LIVE
+from .adversarial_research_audit_v8_2_9 import audit_v829
+from .counterfactual_training_dataset import _sanitise_row, build_dataset
+from .edgeguard_repeat_dedup_v8_2_9 import dedup_edgeguard_repeats
+from .exit_monetization_audit_v8_2_9 import run_exit_monetization_audit
+from .rebound_long_candidate_extractor_v8_2_9 import (
+    extract_rebound_long_candidates,
+)
+from .rebound_long_strict_oos_v8_2_9 import run_strict_oos_rebound
+from .score_gate_sandbox_v8_2_9 import run_score_gate_sandbox
+
+
+EXPORT_SUBDIR_V829 = Path("training_exports") / "research_v8_2_9"
+
+REBOUND_LONG_COLUMNS: tuple[str, ...] = (
+    "symbol", "timestamp", "regime_before", "regime_now",
+    "entry_price", "drawdown_proxy_prefix", "higher_lows_prefix",
+    "trend_recovering_prefix", "bounce_confirmation_prefix",
+    "volatility_bucket", "score_bucket_diagnostic",
+    "candidate_reason", "detection_mode", "used_future_return_features",
+    "net_pnl_est", "outcome_winner_loser",
+    "mfe_pct_outcome", "mae_pct_outcome", "barrier_result_outcome",
+)
+
+EDGEGUARD_DEDUP_COLUMNS: tuple[str, ...] = (
+    "symbol", "side", "regime", "strategy", "timestamp",
+    "edgeguard_reason", "entry_price",
+    "edgeguard_repeat_seen_again",
+)
+
+SCORE_SANDBOX_COLUMNS: tuple[str, ...] = (
+    "variant", "samples", "winrate",
+    "net_ev_avg_pct", "net_ev_after_cost_pct",
+    "pf", "max_loss_pct", "duplicate_ratio",
+    "train_samples", "validation_samples", "test_samples",
+    "test_net_ev_after_cost_pct", "test_pf", "oos_status",
+)
+
+EXIT_AUDIT_COLUMNS: tuple[str, ...] = (
+    "side", "entry_time", "entry_price", "exit_time", "exit_price",
+    "outcome", "net_pct", "mfe_pct", "mae_pct", "bars",
+    "tp_pct", "sl_pct", "closed_by_horizon",
+    "profit_capture_ratio", "missed_profit_pct",
+    "is_missed_profit_candidate",
+    "same_bar_ambiguous", "same_bar_resolution",
+)
+
+EXIT_POLICY_COLUMNS: tuple[str, ...] = (
+    "policy", "slice_label", "samples", "winrate", "avg_net_pct",
+    "pf", "max_loss_pct",
+    "avg_profit_capture_ratio", "avg_missed_profit_pct",
+    "net_ev_cost_normal_pct", "net_ev_cost_realistic_pct",
+    "net_ev_cost_stress_pct", "oos_status",
+    "used_future_return_features_for_input",
+    "same_bar_ambiguity_rule",
+)
+
+STRICT_OOS_COLUMNS: tuple[str, ...] = (
+    "rule_id",
+    "train_samples", "validation_samples", "test_samples",
+    "train_net_ev_pct", "validation_net_ev_pct", "test_net_ev_pct",
+    "test_net_ev_after_cost_realistic_pct",
+    "test_net_ev_after_cost_stress_pct",
+    "test_pf", "test_winrate",
+    "test_cluster_ratio", "test_symbol_concentration",
+    "duplicate_ratio_after",
+    "final_status", "reject_reason",
+)
+
+AUDIT_COLUMNS: tuple[str, ...] = (
+    "category", "message",
+)
+
+
+def _write_csv(path: Path, rows: list[dict[str, Any]], columns: tuple[str, ...]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=list(columns), lineterminator="\n")
+        writer.writeheader()
+        for r in rows:
+            writer.writerow({c: r.get(c, "") for c in columns})
+
+
+def _sha1_file(path: Path) -> str:
+    sha = hashlib.sha1()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(65536), b""):
+            sha.update(chunk)
+    return sha.hexdigest()
+
+
+def export_research_v829(
+    db: Any = None,
+    *,
+    hours: int = 168,
+    limit: int = 50000,
+    base_dir: Path | None = None,
+    rows: list[dict[str, Any]] | None = None,
+    score_anti_calibrated: bool = True,
+) -> dict[str, Any]:
+    """Build the V8.2.9 sanitised export under ``base_dir``."""
+    base = Path(base_dir) if base_dir else EXPORT_SUBDIR_V829
+    base.mkdir(parents=True, exist_ok=True)
+    if rows is None:
+        dataset, _ = build_dataset(db, hours=int(hours), limit=int(limit))
+    else:
+        dataset = list(rows)
+
+    extractor = extract_rebound_long_candidates(
+        db, hours=hours, limit=limit, rows=dataset,
+    )
+    dedup_rows, dedup_report = dedup_edgeguard_repeats(dataset, hours=hours)
+    score_sandbox = run_score_gate_sandbox(
+        extractor.candidates, hours=hours,
+        score_anti_calibrated=bool(score_anti_calibrated),
+    )
+    exit_audit = run_exit_monetization_audit(
+        db, hours=hours, limit=limit, rows=dataset,
+    )
+    deduped_candidates, _ = dedup_edgeguard_repeats(extractor.candidates,
+                                                    hours=hours)
+    strict_oos = run_strict_oos_rebound(
+        deduped_candidates, hours=hours,
+        score_anti_calibrated=bool(score_anti_calibrated),
+        duplicate_ratio_after=dedup_report.duplicate_ratio_before,
+        exit_monetization_diagnostic={
+            "best_policy": exit_audit.best_policy,
+            "best_policy_test_status": exit_audit.best_policy_test_status,
+            "horizon_close_problem_detected": exit_audit.horizon_close_problem_detected,
+            "avg_profit_capture_ratio": exit_audit.avg_profit_capture_ratio,
+            "avg_missed_profit_pct": exit_audit.avg_missed_profit_pct,
+        },
+    )
+
+    symbol_conc = 0.0
+    cluster_conc = 0.0
+    test_net_stress = 0.0
+    for rule in strict_oos.paper_sandbox_candidates:
+        symbol_conc = max(symbol_conc, rule.get("test_symbol_concentration", 0.0))
+        cluster_conc = max(cluster_conc, rule.get("test_cluster_ratio", 0.0))
+        test_net_stress = max(
+            test_net_stress,
+            rule.get("test_net_ev_after_cost_stress_pct", 0.0),
+        )
+
+    audit = audit_v829(
+        hours=hours,
+        score_anti_calibrated=bool(score_anti_calibrated),
+        score_used_as_gate=False,
+        duplicate_ratio_after=dedup_report.duplicate_ratio_before,
+        single_symbol_concentration=symbol_conc,
+        single_cluster_concentration=cluster_conc,
+        paper_filter_enabled=False,
+        can_send_real_orders=False,
+        live_trading=False,
+        paper_sandbox_candidates_count=len(strict_oos.paper_sandbox_candidates),
+        test_net_ev_after_stress_pct=test_net_stress,
+        exit_policy_used_future_returns=False,
+        exit_policy_selected_on_test=False,
+        same_bar_resolution_conservative=True,
+    )
+
+    rebound_csv = base / "rebound_long_candidates_v1.csv"
+    _write_csv(
+        rebound_csv,
+        [_sanitise_row(r) for r in extractor.candidates],
+        REBOUND_LONG_COLUMNS,
+    )
+    dedup_csv = base / "edgeguard_repeat_dedup_v1.csv"
+    _write_csv(
+        dedup_csv,
+        [_sanitise_row(r) for r in dedup_rows[:5000]],
+        EDGEGUARD_DEDUP_COLUMNS,
+    )
+    score_csv = base / "score_gate_sandbox_v1.csv"
+    _write_csv(score_csv, score_sandbox.variants, SCORE_SANDBOX_COLUMNS)
+    exit_audit_csv = base / "exit_monetization_audit_v1.csv"
+    _write_csv(
+        exit_audit_csv,
+        [_sanitise_row(r) for r in exit_audit.rows],
+        EXIT_AUDIT_COLUMNS,
+    )
+    exit_policy_csv = base / "exit_policy_simulation_v1.csv"
+    _write_csv(exit_policy_csv, exit_audit.policies, EXIT_POLICY_COLUMNS)
+    rerun_csv = base / "rebound_long_strict_oos_v1.csv"
+    all_rule_rows = (
+        strict_oos.paper_sandbox_candidates
+        + strict_oos.research_candidates
+        + strict_oos.watch_only
+        + strict_oos.rejected
+        + strict_oos.need_more_data
+    )
+    _write_csv(rerun_csv, all_rule_rows, STRICT_OOS_COLUMNS)
+    audit_csv = base / "adversarial_research_audit_v1.csv"
+    _write_csv(audit_csv, audit.findings, AUDIT_COLUMNS)
+
+    summary_txt = base / "research_v8_2_9_summary.txt"
+    with summary_txt.open("w", encoding="utf-8") as f:
+        f.write("RESEARCH V8.2.9 SUMMARY\n")
+        f.write(f"generated_at: {datetime.now(timezone.utc).isoformat()}\n")
+        f.write(f"hours: {hours} limit: {limit}\n")
+        f.write(f"raw_rebound_candidates: {extractor.candidates_count}\n")
+        f.write(f"dedup_rebound_candidates: {len(deduped_candidates)}\n")
+        f.write(f"duplicate_ratio_before: {dedup_report.duplicate_ratio_before:.4f}\n")
+        f.write(f"duplicate_ratio_after: {dedup_report.duplicate_ratio_after:.4f}\n")
+        f.write(
+            f"edgeguard_repeat_blocks_removed: "
+            f"{dedup_report.edgeguard_repeat_blocks_removed}\n"
+        )
+        f.write(f"score_gate_best_variant: {score_sandbox.best_variant or 'NONE'}\n")
+        f.write(
+            f"score_used_as_gate: "
+            f"{str(score_sandbox.score_used_as_positive_gate).lower()}\n"
+        )
+        f.write(f"strict_oos_status: {strict_oos.final_status_top_level}\n")
+        f.write(
+            f"paper_sandbox_candidates: "
+            f"{len(strict_oos.paper_sandbox_candidates)}\n"
+        )
+        f.write(f"best_exit_policy: {exit_audit.best_policy}\n")
+        f.write(f"exit_oos_status: {exit_audit.best_policy_test_status}\n")
+        f.write(
+            f"horizon_close_problem_detected: "
+            f"{str(exit_audit.horizon_close_problem_detected).lower()}\n"
+        )
+        f.write(
+            f"avg_profit_capture_ratio: "
+            f"{exit_audit.avg_profit_capture_ratio:.4f}\n"
+        )
+        f.write(
+            f"avg_missed_profit_pct: "
+            f"{exit_audit.avg_missed_profit_pct:.4f}\n"
+        )
+        f.write(f"adversarial_audit_status: {audit.audit_status}\n")
+        f.write(
+            f"blockers: {','.join(audit.blockers) if audit.blockers else 'NONE'}\n"
+        )
+        f.write("research_only: true\n")
+        f.write("paper_filter_enabled: false\n")
+        f.write("can_send_real_orders: false\n")
+        f.write(f"final_recommendation: {FINAL_RECOMMENDATION_NO_LIVE}\n")
+
+    files = [
+        rebound_csv, dedup_csv, score_csv,
+        exit_audit_csv, exit_policy_csv, rerun_csv, audit_csv, summary_txt,
+    ]
+    manifest: dict[str, Any] = {
+        "version": "v8.2.9.v1",
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "base_dir": str(base),
+        "files": [],
+        "raw_rebound_candidates": extractor.candidates_count,
+        "dedup_rebound_candidates": len(deduped_candidates),
+        "duplicate_ratio_before": dedup_report.duplicate_ratio_before,
+        "duplicate_ratio_after": dedup_report.duplicate_ratio_after,
+        "score_gate_best_variant": score_sandbox.best_variant or "NONE",
+        "strict_oos_status": strict_oos.final_status_top_level,
+        "paper_sandbox_candidates": len(strict_oos.paper_sandbox_candidates),
+        "best_exit_policy": exit_audit.best_policy,
+        "exit_oos_status": exit_audit.best_policy_test_status,
+        "horizon_close_problem_detected": exit_audit.horizon_close_problem_detected,
+        "avg_profit_capture_ratio": exit_audit.avg_profit_capture_ratio,
+        "avg_missed_profit_pct": exit_audit.avg_missed_profit_pct,
+        "adversarial_audit_status": audit.audit_status,
+        "blockers": audit.blockers,
+        "research_only": True,
+        "paper_filter_enabled": False,
+        "can_send_real_orders": False,
+        "final_recommendation": FINAL_RECOMMENDATION_NO_LIVE,
+    }
+    for path in files:
+        if path.exists():
+            manifest["files"].append({
+                "name": path.name,
+                "size_bytes": path.stat().st_size,
+                "sha1": _sha1_file(path),
+            })
+    manifest_path = base / "manifest_v1.json"
+    manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    manifest["files"].append({
+        "name": manifest_path.name,
+        "size_bytes": manifest_path.stat().st_size,
+        "sha1": _sha1_file(manifest_path),
+    })
+
+    zip_path = base / "research_v8_2_9_exports.zip"
+    with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        for path in files + [manifest_path]:
+            if not path.exists():
+                continue
+            if path.suffix not in {".csv", ".txt", ".json"}:
+                continue
+            zf.write(path, arcname=path.name)
+    manifest["zip"] = {
+        "name": zip_path.name,
+        "size_bytes": zip_path.stat().st_size,
+        "sha1": _sha1_file(zip_path),
+    }
+    return manifest
+
+
+def build_pack_v829(
+    db: Any = None,
+    *,
+    hours: int = 168,
+    limit: int = 50000,
+    score_anti_calibrated: bool = True,
+) -> dict[str, Any]:
+    dataset, _ = build_dataset(db, hours=int(hours), limit=int(limit))
+    extractor = extract_rebound_long_candidates(
+        db, hours=hours, limit=limit, rows=dataset,
+    )
+    _, dedup_report = dedup_edgeguard_repeats(dataset, hours=hours)
+    score_sandbox = run_score_gate_sandbox(
+        extractor.candidates, hours=hours,
+        score_anti_calibrated=bool(score_anti_calibrated),
+    )
+    exit_audit = run_exit_monetization_audit(
+        db, hours=hours, limit=limit, rows=dataset,
+    )
+    deduped_candidates, _ = dedup_edgeguard_repeats(extractor.candidates,
+                                                    hours=hours)
+    strict_oos = run_strict_oos_rebound(
+        deduped_candidates, hours=hours,
+        score_anti_calibrated=bool(score_anti_calibrated),
+        duplicate_ratio_after=dedup_report.duplicate_ratio_before,
+    )
+    audit = audit_v829(
+        hours=hours,
+        score_anti_calibrated=bool(score_anti_calibrated),
+        score_used_as_gate=False,
+        duplicate_ratio_after=dedup_report.duplicate_ratio_before,
+        paper_filter_enabled=False,
+        can_send_real_orders=False,
+        live_trading=False,
+        paper_sandbox_candidates_count=len(strict_oos.paper_sandbox_candidates),
+    )
+    return {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "pack_version": "research_v8_2_9_v1",
+        "hours": int(hours),
+        "limit": int(limit),
+        "rebound_extractor": extractor.as_dict(),
+        "edgeguard_repeat_dedup": dedup_report.as_dict(),
+        "score_gate_sandbox": score_sandbox.as_dict(),
+        "exit_monetization": exit_audit.as_dict(),
+        "strict_oos_rebound": strict_oos.as_dict(),
+        "adversarial_audit": audit.as_dict(),
+        "research_only": True,
+        "paper_filter_enabled": False,
+        "can_send_real_orders": False,
+        "final_recommendation": FINAL_RECOMMENDATION_NO_LIVE,
+    }
+
+
+def render_pack_v829_text(payload: dict[str, Any]) -> str:
+    lines = ["RESEARCH PACK V8.2.9 START"]
+    lines.append(f"generated_at: {payload.get('generated_at')}")
+    lines.append(f"pack_version: {payload.get('pack_version')}")
+    extractor = payload.get("rebound_extractor") or {}
+    lines.append(
+        f"rebound_candidates_count: {extractor.get('candidates_count', 0)}"
+    )
+    dedup = payload.get("edgeguard_repeat_dedup") or {}
+    lines.append(
+        f"duplicate_ratio_before: {dedup.get('duplicate_ratio_before', 0.0):.4f} "
+        f"after: {dedup.get('duplicate_ratio_after', 0.0):.4f}"
+    )
+    sandbox = payload.get("score_gate_sandbox") or {}
+    lines.append(f"score_gate_best_variant: {sandbox.get('best_variant') or 'NONE'}")
+    exit_payload = payload.get("exit_monetization") or {}
+    lines.append(
+        f"best_exit_policy: {exit_payload.get('best_policy')} "
+        f"exit_oos_status: {exit_payload.get('best_policy_test_status')}"
+    )
+    lines.append(
+        f"horizon_close_problem_detected: "
+        f"{str(exit_payload.get('horizon_close_problem_detected')).lower()}"
+    )
+    strict = payload.get("strict_oos_rebound") or {}
+    lines.append(f"strict_oos_status: {strict.get('final_status_top_level')}")
+    lines.append(
+        f"paper_sandbox_candidates: "
+        f"{len(strict.get('paper_sandbox_candidates') or [])}"
+    )
+    audit = payload.get("adversarial_audit") or {}
+    lines.append(f"adversarial_audit_status: {audit.get('audit_status')}")
+    lines.extend([
+        "research_only: true",
+        "paper_filter_enabled: false",
+        "can_send_real_orders: false",
+        f"final_recommendation: {payload.get('final_recommendation')}",
+        "RESEARCH PACK V8.2.9 END",
+    ])
+    return "\n".join(lines)

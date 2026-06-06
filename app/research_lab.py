@@ -2794,6 +2794,245 @@ class ResearchLab:
             text += "\n" + warning
         return text
 
+    # ---- V8.2.9 Rebound LONG Strict OOS + Exit Monetization ----
+
+    def rebound_long_candidates_v829_cli(self, hours: int = 168, limit: int = 50000) -> str:
+        from .labs.rebound_long_candidate_extractor_v8_2_9 import (
+            extract_rebound_long_candidates,
+        )
+        r = extract_rebound_long_candidates(self.db, hours=int(hours), limit=int(limit))
+        lines = ["REBOUND LONG CANDIDATES V8.2.9 START"]
+        lines.append(f"hours: {r.hours} status: {r.status}")
+        lines.append(f"raw_signals: {r.raw_signals}")
+        lines.append(f"long_signals: {r.long_signals}")
+        lines.append(f"candidates_count: {r.candidates_count}")
+        lines.append(f"prefix_only_count: {r.prefix_only_count}")
+        lines.append(f"need_data_count: {r.need_data_count}")
+        lines.append(
+            f"used_future_return_features: "
+            f"{str(bool(r.used_future_return_features)).lower()}"
+        )
+        for k, v in r.by_candidate_reason.items():
+            lines.append(f"by_reason {k}: {v}")
+        lines.extend(self._v82_safety_footer())
+        warning = self._v82_heavy_warning(hours)
+        if warning:
+            lines.append(warning)
+        lines.append("REBOUND LONG CANDIDATES V8.2.9 END")
+        return "\n".join(lines)
+
+    def edgeguard_repeat_dedup_v829_cli(self, hours: int = 168, limit: int = 50000) -> str:
+        from .labs.counterfactual_training_dataset import build_dataset
+        from .labs.edgeguard_repeat_dedup_v8_2_9 import dedup_edgeguard_repeats
+        dataset, _ = build_dataset(self.db, hours=int(hours), limit=int(limit))
+        _, report = dedup_edgeguard_repeats(dataset, hours=int(hours))
+        lines = ["EDGEGUARD REPEAT DEDUP V8.2.9 START"]
+        lines.append(f"hours: {report.hours} status: {report.status}")
+        lines.append(f"raw_rows: {report.raw_rows}")
+        lines.append(f"dedup_rows: {report.dedup_rows}")
+        lines.append(
+            f"duplicate_ratio_before: {report.duplicate_ratio_before:.4f}"
+        )
+        lines.append(
+            f"duplicate_ratio_after: {report.duplicate_ratio_after:.4f}"
+        )
+        lines.append(
+            f"edgeguard_repeat_blocks_removed: "
+            f"{report.edgeguard_repeat_blocks_removed}"
+        )
+        lines.append(
+            f"unique_independent_candidates: "
+            f"{report.unique_independent_candidates}"
+        )
+        lines.extend(self._v82_safety_footer())
+        warning = self._v82_heavy_warning(hours)
+        if warning:
+            lines.append(warning)
+        lines.append("EDGEGUARD REPEAT DEDUP V8.2.9 END")
+        return "\n".join(lines)
+
+    def score_gate_sandbox_v829_cli(self, hours: int = 168, limit: int = 50000) -> str:
+        from .labs.rebound_long_candidate_extractor_v8_2_9 import (
+            extract_rebound_long_candidates,
+        )
+        from .labs.score_gate_sandbox_v8_2_9 import run_score_gate_sandbox
+        extractor = extract_rebound_long_candidates(
+            self.db, hours=int(hours), limit=int(limit),
+        )
+        sandbox = run_score_gate_sandbox(
+            extractor.candidates, hours=int(hours),
+            score_anti_calibrated=True,
+        )
+        lines = ["SCORE GATE SANDBOX V8.2.9 START"]
+        lines.append(f"hours: {sandbox.hours} status: {sandbox.status}")
+        lines.append(f"candidates_total: {sandbox.candidates_total}")
+        lines.append(
+            f"score_anti_calibrated_input: "
+            f"{str(sandbox.score_anti_calibrated_input).lower()}"
+        )
+        lines.append(
+            f"score_used_as_positive_gate: "
+            f"{str(sandbox.score_used_as_positive_gate).lower()}"
+        )
+        lines.append(f"best_variant: {sandbox.best_variant or 'NONE'}")
+        for v in sandbox.variants:
+            lines.append(
+                f"variant {v['variant']}: samples={v['samples']} "
+                f"winrate={v['winrate']:.2f} oos={v['oos_status']}"
+            )
+        lines.extend(self._v82_safety_footer())
+        warning = self._v82_heavy_warning(hours)
+        if warning:
+            lines.append(warning)
+        lines.append("SCORE GATE SANDBOX V8.2.9 END")
+        return "\n".join(lines)
+
+    def exit_monetization_audit_v829_cli(self, hours: int = 168, limit: int = 50000) -> str:
+        from .labs.exit_monetization_audit_v8_2_9 import (
+            run_exit_monetization_audit,
+        )
+        r = run_exit_monetization_audit(
+            self.db, hours=int(hours), limit=int(limit),
+        )
+        lines = ["EXIT MONETIZATION AUDIT V8.2.9 START"]
+        lines.append(f"hours: {r.hours} status: {r.status}")
+        lines.append(f"rows_audited: {r.rows_audited}")
+        lines.append(f"rows_with_outcome: {r.rows_with_outcome}")
+        lines.append(f"horizon_close_count: {r.horizon_close_count}")
+        lines.append(
+            f"horizon_close_with_high_mfe: {r.horizon_close_with_high_mfe}"
+        )
+        lines.append(
+            f"horizon_close_problem_detected: "
+            f"{str(r.horizon_close_problem_detected).lower()}"
+        )
+        lines.append(
+            f"avg_profit_capture_ratio: {r.avg_profit_capture_ratio:.4f}"
+        )
+        lines.append(
+            f"avg_missed_profit_pct: {r.avg_missed_profit_pct:.4f}"
+        )
+        lines.append(f"best_policy: {r.best_policy}")
+        lines.append(f"best_policy_test_status: {r.best_policy_test_status}")
+        for k, v in r.answers.items():
+            lines.append(f"answers {k}: {str(v).lower()}")
+        lines.extend(self._v82_safety_footer())
+        warning = self._v82_heavy_warning(hours)
+        if warning:
+            lines.append(warning)
+        lines.append("EXIT MONETIZATION AUDIT V8.2.9 END")
+        return "\n".join(lines)
+
+    def rebound_long_strict_oos_v829_cli(self, hours: int = 168, limit: int = 50000) -> str:
+        from .labs.counterfactual_training_dataset import build_dataset
+        from .labs.edgeguard_repeat_dedup_v8_2_9 import dedup_edgeguard_repeats
+        from .labs.rebound_long_candidate_extractor_v8_2_9 import (
+            extract_rebound_long_candidates,
+        )
+        from .labs.rebound_long_strict_oos_v8_2_9 import run_strict_oos_rebound
+        dataset, _ = build_dataset(self.db, hours=int(hours), limit=int(limit))
+        extractor = extract_rebound_long_candidates(
+            self.db, hours=int(hours), limit=int(limit), rows=dataset,
+        )
+        _, dedup_report = dedup_edgeguard_repeats(dataset, hours=int(hours))
+        deduped, _ = dedup_edgeguard_repeats(extractor.candidates, hours=int(hours))
+        strict = run_strict_oos_rebound(
+            deduped, hours=int(hours),
+            score_anti_calibrated=True,
+            duplicate_ratio_after=dedup_report.duplicate_ratio_before,
+        )
+        lines = ["REBOUND LONG STRICT OOS V8.2.9 START"]
+        lines.append(f"hours: {strict.hours} status: {strict.status}")
+        lines.append(f"candidates_total: {strict.candidates_total}")
+        lines.append(
+            f"duplicate_ratio_after: {strict.duplicate_ratio_after:.4f}"
+        )
+        lines.append(
+            f"final_status_top_level: {strict.final_status_top_level}"
+        )
+        for k, v in strict.by_final_status.items():
+            lines.append(f"by_final_status {k}: {v}")
+        lines.append(
+            f"score_used_as_gate: {str(strict.score_used_as_gate).lower()}"
+        )
+        lines.extend(self._v82_safety_footer())
+        warning = self._v82_heavy_warning(hours)
+        if warning:
+            lines.append(warning)
+        lines.append("REBOUND LONG STRICT OOS V8.2.9 END")
+        return "\n".join(lines)
+
+    def adversarial_research_audit_v829_cli(self, hours: int = 168, limit: int = 50000) -> str:
+        from .labs.adversarial_research_audit_v8_2_9 import audit_v829
+        r = audit_v829(hours=int(hours))
+        lines = ["ADVERSARIAL RESEARCH AUDIT V8.2.9 START"]
+        lines.append(f"hours: {r.hours} status: {r.status}")
+        lines.append(f"audit_status: {r.audit_status}")
+        lines.append(
+            f"score_anti_calibrated: {str(r.score_anti_calibrated).lower()}"
+        )
+        lines.append(
+            f"score_used_as_gate: {str(r.score_used_as_gate).lower()}"
+        )
+        lines.append(
+            f"exit_policy_used_future_returns: "
+            f"{str(r.exit_policy_used_future_returns).lower()}"
+        )
+        for f in r.findings:
+            lines.append(f"finding {f['category']}: {f['message']}")
+        lines.append(f"blockers: {','.join(r.blockers) if r.blockers else 'NONE'}")
+        lines.extend(self._v82_safety_footer())
+        warning = self._v82_heavy_warning(hours)
+        if warning:
+            lines.append(warning)
+        lines.append("ADVERSARIAL RESEARCH AUDIT V8.2.9 END")
+        return "\n".join(lines)
+
+    def export_research_v829_cli(self, hours: int = 168, limit: int = 50000) -> str:
+        from .labs.research_export_v8_2_9 import export_research_v829
+        manifest = export_research_v829(self.db, hours=int(hours), limit=int(limit))
+        lines = ["EXPORT RESEARCH V8.2.9 START"]
+        lines.append(f"hours: {int(hours)} limit: {int(limit)}")
+        lines.append(f"base_dir: {manifest.get('base_dir')}")
+        for f in manifest.get("files") or []:
+            lines.append(
+                f"file: {f.get('name')} size={f.get('size_bytes')} "
+                f"sha1={f.get('sha1')}"
+            )
+        zip_info = manifest.get("zip") or {}
+        if zip_info:
+            lines.append(
+                f"zip: {zip_info.get('name')} size={zip_info.get('size_bytes')} "
+                f"sha1={zip_info.get('sha1')}"
+            )
+        lines.append(
+            f"strict_oos_status: {manifest.get('strict_oos_status')}"
+        )
+        lines.append(
+            f"paper_sandbox_candidates: "
+            f"{manifest.get('paper_sandbox_candidates')}"
+        )
+        lines.append(f"best_exit_policy: {manifest.get('best_exit_policy')}")
+        lines.append(
+            f"adversarial_audit_status: "
+            f"{manifest.get('adversarial_audit_status')}"
+        )
+        lines.extend(self._v82_safety_footer())
+        warning = self._v82_heavy_warning(hours)
+        if warning:
+            lines.append(warning)
+        lines.append("EXPORT RESEARCH V8.2.9 END")
+        return "\n".join(lines)
+
+    def research_pack_v829_cli(self, hours: int = 168, limit: int = 50000) -> str:
+        from .labs.research_export_v8_2_9 import build_pack_v829, render_pack_v829_text
+        payload = build_pack_v829(self.db, hours=int(hours), limit=int(limit))
+        text = render_pack_v829_text(payload)
+        warning = self._v82_heavy_warning(hours)
+        if warning:
+            text += "\n" + warning
+        return text
+
     def _render_training_summary(self, summary, *, hours: int, limit: int) -> str:
         lines = ["COUNTERFACTUAL TRAINING SUMMARY START"]
         lines.append(f"hours: {int(hours)} limit: {int(limit)}")
@@ -3582,6 +3821,14 @@ def build_argument_parser() -> argparse.ArgumentParser:
             "rebound-regime-turn-lab-v828",
             "export-research-v828",
             "research-pack-v828",
+            "rebound-long-candidates-v829",
+            "edgeguard-repeat-dedup-v829",
+            "score-gate-sandbox-v829",
+            "exit-monetization-audit-v829",
+            "rebound-long-strict-oos-v829",
+            "adversarial-research-audit-v829",
+            "export-research-v829",
+            "research-pack-v829",
             "ohlcv-replay-loader-smoke-test",
             "ohlcv-replay-loader-audit",
             "duplicate-module-audit-smoke-test",
@@ -4298,6 +4545,30 @@ def main() -> None:
     elif args.command == "research-pack-v828":
         limit_arg = int(getattr(args, "limit", 50000) or 50000)
         print(lab.research_pack_v828_cli(hours=args.hours, limit=limit_arg))
+    elif args.command == "rebound-long-candidates-v829":
+        limit_arg = int(getattr(args, "limit", 50000) or 50000)
+        print(lab.rebound_long_candidates_v829_cli(hours=args.hours, limit=limit_arg))
+    elif args.command == "edgeguard-repeat-dedup-v829":
+        limit_arg = int(getattr(args, "limit", 50000) or 50000)
+        print(lab.edgeguard_repeat_dedup_v829_cli(hours=args.hours, limit=limit_arg))
+    elif args.command == "score-gate-sandbox-v829":
+        limit_arg = int(getattr(args, "limit", 50000) or 50000)
+        print(lab.score_gate_sandbox_v829_cli(hours=args.hours, limit=limit_arg))
+    elif args.command == "exit-monetization-audit-v829":
+        limit_arg = int(getattr(args, "limit", 50000) or 50000)
+        print(lab.exit_monetization_audit_v829_cli(hours=args.hours, limit=limit_arg))
+    elif args.command == "rebound-long-strict-oos-v829":
+        limit_arg = int(getattr(args, "limit", 50000) or 50000)
+        print(lab.rebound_long_strict_oos_v829_cli(hours=args.hours, limit=limit_arg))
+    elif args.command == "adversarial-research-audit-v829":
+        limit_arg = int(getattr(args, "limit", 50000) or 50000)
+        print(lab.adversarial_research_audit_v829_cli(hours=args.hours, limit=limit_arg))
+    elif args.command == "export-research-v829":
+        limit_arg = int(getattr(args, "limit", 50000) or 50000)
+        print(lab.export_research_v829_cli(hours=args.hours, limit=limit_arg))
+    elif args.command == "research-pack-v829":
+        limit_arg = int(getattr(args, "limit", 50000) or 50000)
+        print(lab.research_pack_v829_cli(hours=args.hours, limit=limit_arg))
     elif args.command == "ohlcv-replay-loader-smoke-test":
         print(lab.ohlcv_replay_loader_smoke_test())
     elif args.command == "ohlcv-replay-loader-audit":
