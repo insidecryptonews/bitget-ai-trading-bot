@@ -119,6 +119,13 @@ class StrictOosReboundReport:
     score_used_as_gate: bool = False
     candidates_total: int = 0
     duplicate_ratio_after: float = 0.0
+    # V8.2.9.2 — explicit wiring of duplicate-ratio source so consumers
+    # can verify the OOS run consumed the deduped dataset, not the raw
+    # dataset. ``strict_oos_input_is_deduped=True`` means the caller has
+    # already removed duplicates upstream and is passing the after-dedup
+    # ratio.
+    strict_oos_input_rows: int = 0
+    strict_oos_input_is_deduped: bool = False
     by_final_status: dict[str, int] = field(default_factory=dict)
     paper_sandbox_candidates: list[dict[str, Any]] = field(default_factory=list)
     research_candidates: list[dict[str, Any]] = field(default_factory=list)
@@ -275,20 +282,31 @@ def run_strict_oos_rebound(
     score_anti_calibrated: bool = True,
     grouping_features: Iterable[str] = EX_ANTE_FEATURES,
     duplicate_ratio_after: float = 0.0,
+    input_is_deduped: bool = False,
     exit_monetization_diagnostic: dict[str, Any] | None = None,
 ) -> StrictOosReboundReport:
     """Strict train-only rule selection + single-shot OOS evaluation
-    over LONG rebound candidates."""
+    over LONG rebound candidates.
+
+    ``input_is_deduped`` (V8.2.9.2): callers that have already
+    deduplicated the input MUST set this to ``True`` so the report
+    exposes ``strict_oos_input_is_deduped = True``. The consistency
+    checker and adversarial audit use that flag to validate which
+    duplicate ratio (raw vs after-dedup) should drive the audit.
+    """
+    rows_list = list(candidates or [])
     report = StrictOosReboundReport(
         hours=int(hours),
         generated_at=datetime.now(timezone.utc).isoformat(),
         score_anti_calibrated_input=bool(score_anti_calibrated),
         duplicate_ratio_after=float(duplicate_ratio_after),
+        strict_oos_input_rows=len(rows_list),
+        strict_oos_input_is_deduped=bool(input_is_deduped),
         exit_monetization_diagnostic=dict(exit_monetization_diagnostic or {}),
     )
     features = tuple(grouping_features)
     _validate_features(features)
-    rows = list(candidates or [])
+    rows = rows_list
     report.candidates_total = len(rows)
     if not rows:
         return report

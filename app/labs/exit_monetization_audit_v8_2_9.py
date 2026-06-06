@@ -61,6 +61,17 @@ COST_STRESS_PCT = 0.35
 # the conservative rule is SL fires first (STOP_BEFORE_TP).
 SAME_BAR_AMBIGUITY_RULE = "STOP_BEFORE_TP"
 
+# V8.2.9.2 — Replay-mode tagging. The exit policies in this audit are
+# parametric approximations driven by MFE / MAE columns; they are NOT a
+# bar-by-bar OHLCV replay. While the replay mode stays approximate the
+# audit MUST NOT promote any policy to paper-sandbox status.
+REPLAY_MODE_APPROXIMATE_MFE_MAE = "approximate_mfe_mae"
+REPLAY_MODE_BAR_BY_BAR = "bar_by_bar"
+
+EXIT_POLICY_STATUS_NEED_BAR_BY_BAR = "NEED_BAR_BY_BAR_REPLAY"
+EXIT_POLICY_STATUS_OOS_PASS_APPROX_ONLY = "OOS_PASS_APPROX_ONLY"
+EXIT_POLICY_STATUS_RESEARCH_APPROX_ONLY = "RESEARCH_APPROX_ONLY"
+
 TRAIN_FRACTION = 0.60
 VAL_FRACTION = 0.20
 
@@ -149,6 +160,14 @@ class ExitMonetizationReport:
     differences_long_vs_short: dict[str, Any] = field(default_factory=dict)
     differences_rebound_vs_trend: dict[str, Any] = field(default_factory=dict)
     answers: dict[str, Any] = field(default_factory=dict)
+    # V8.2.9.2 — replay-mode hardening. While the audit runs the
+    # parametric approximation no policy is "productive ready"; a
+    # bar-by-bar OHLCV replay is required before any policy can move
+    # into paper sandbox candidate status.
+    exit_policy_replay_mode: str = REPLAY_MODE_APPROXIMATE_MFE_MAE
+    exit_policy_productive_ready: bool = False
+    requires_bar_by_bar_replay: bool = True
+    exit_policy_candidate_status: str = EXIT_POLICY_STATUS_NEED_BAR_BY_BAR
     status: str = STATUS_NEED_DATA
     research_only: bool = True
     paper_filter_enabled: bool = False
@@ -589,8 +608,32 @@ def run_exit_monetization_audit(
             and report.best_policy_test_status == "PASS"
         ):
             answers["trailing_improves_after_cost"] = True
-            if (test_best.get("net_ev_cost_stress_pct", 0.0) or 0.0) > 0:
-                answers["any_exit_paper_sandbox_candidate"] = True
+    # V8.2.9.2 — while the audit runs in approximate MFE/MAE mode,
+    # ``any_exit_paper_sandbox_candidate`` is hard-coded to False so the
+    # report cannot be mis-read as a productive policy promotion. A
+    # bar-by-bar OHLCV replay is the precondition for paper sandbox
+    # eligibility.
+    answers["any_exit_paper_sandbox_candidate"] = False
+    answers["requires_bar_by_bar_replay"] = True
     report.answers = answers
+    # ``exit_policy_candidate_status`` reports what the best policy
+    # could earn IF the audit were a real bar-by-bar replay. While we
+    # remain in approximate mode it stays at OOS_PASS_APPROX_ONLY at
+    # best — never RESEARCH_APPROX_ONLY-as-productive.
+    if report.exit_policy_replay_mode == REPLAY_MODE_APPROXIMATE_MFE_MAE:
+        if report.best_policy_test_status == "PASS":
+            report.exit_policy_candidate_status = EXIT_POLICY_STATUS_OOS_PASS_APPROX_ONLY
+        else:
+            report.exit_policy_candidate_status = EXIT_POLICY_STATUS_NEED_BAR_BY_BAR
+        report.exit_policy_productive_ready = False
+        report.requires_bar_by_bar_replay = True
+    else:
+        # Reserved for a future bar-by-bar replay implementation.
+        if report.best_policy_test_status == "PASS":
+            report.exit_policy_candidate_status = EXIT_POLICY_STATUS_RESEARCH_APPROX_ONLY
+            report.exit_policy_productive_ready = True
+        else:
+            report.exit_policy_candidate_status = EXIT_POLICY_STATUS_NEED_BAR_BY_BAR
+        report.requires_bar_by_bar_replay = False
     report.status = STATUS_OK
     return report

@@ -24,6 +24,9 @@ AUDIT_FAIL_OVERFIT = "FAIL_OVERFIT"
 AUDIT_FAIL_SCORE_MISUSE = "FAIL_SCORE_MISUSE"
 AUDIT_FAIL_EXIT_LOOKAHEAD = "FAIL_EXIT_LOOKAHEAD"
 AUDIT_FAIL_SAFETY = "FAIL_SAFETY"
+# V8.2.9.2 — new blocker raised when the consistency check across the
+# pipeline (dedup ratio wiring / status alignment / NO LIVE) fails.
+AUDIT_FAIL_CONSISTENCY = "FAIL_CONSISTENCY"
 
 LOOKAHEAD_FIELDS: frozenset[str] = frozenset({
     "ret_15m_pct", "ret_30m_pct", "ret_1h_pct", "ret_4h_pct", "ret_24h_pct",
@@ -55,9 +58,18 @@ class AdversarialAuditReport:
     score_anti_calibrated: bool = True
     score_used_as_gate: bool = False
     duplicate_ratio_after: float = 0.0
+    # V8.2.9.2 — explicit dedup-ratio sources so consumers can see which
+    # number the audit actually used and where it came from.
+    duplicate_ratio_raw: float = 0.0
+    duplicate_ratio_after_dedup: float = 0.0
+    strict_oos_input_is_deduped: bool = False
+    adversarial_duplicate_ratio_used: float = 0.0
+    adversarial_duplicate_source: str = "before"
     single_symbol_concentration: float = 0.0
     single_cluster_concentration: float = 0.0
     exit_policy_used_future_returns: bool = False
+    consistency_check_failed: bool = False
+    consistency_findings: list[str] = field(default_factory=list)
     status: str = STATUS_NEED_DATA
     research_only: bool = True
     paper_filter_enabled: bool = False
@@ -114,6 +126,9 @@ def audit_v829(
     score_anti_calibrated: bool = True,
     score_used_as_gate: bool = False,
     duplicate_ratio_after: float = 0.0,
+    duplicate_ratio_raw: float = 0.0,
+    duplicate_ratio_after_dedup: float | None = None,
+    strict_oos_input_is_deduped: bool = False,
     single_symbol_concentration: float = 0.0,
     single_cluster_concentration: float = 0.0,
     paper_filter_enabled: bool = False,
@@ -124,17 +139,52 @@ def audit_v829(
     exit_policy_used_future_returns: bool = False,
     exit_policy_selected_on_test: bool = False,
     same_bar_resolution_conservative: bool = True,
+    consistency_check_failed: bool = False,
+    consistency_findings: list[str] | None = None,
 ) -> AdversarialAuditReport:
-    """Run the V8.2.9 adversarial audit and return a structured report."""
+    """Run the V8.2.9 adversarial audit and return a structured report.
+
+    V8.2.9.2 wiring rules:
+
+    - When ``strict_oos_input_is_deduped`` is True, the audit uses
+      ``duplicate_ratio_after_dedup`` (or ``duplicate_ratio_after`` for
+      backward compatibility) as the gating ratio. The raw ratio is
+      reported as diagnostic only and does NOT raise
+      ``FAIL_DUPLICATES``.
+    - When ``strict_oos_input_is_deduped`` is False, the audit uses the
+      higher of ``duplicate_ratio_raw`` and ``duplicate_ratio_after``
+      so it cannot be tricked by a low after-dedup ratio over a raw
+      input.
+    """
+    # Backward-compat: if the caller only sends ``duplicate_ratio_after``
+    # (the V8.2.9 API), interpret it as the post-dedup ratio.
+    if duplicate_ratio_after_dedup is None:
+        duplicate_ratio_after_dedup = duplicate_ratio_after
+    if bool(strict_oos_input_is_deduped):
+        adv_ratio_used = float(duplicate_ratio_after_dedup)
+        adv_source = "after"
+    else:
+        adv_ratio_used = max(
+            float(duplicate_ratio_raw),
+            float(duplicate_ratio_after),
+        )
+        adv_source = "before"
     report = AdversarialAuditReport(
         hours=int(hours),
         generated_at=datetime.now(timezone.utc).isoformat(),
         score_anti_calibrated=bool(score_anti_calibrated),
         score_used_as_gate=bool(score_used_as_gate),
         duplicate_ratio_after=float(duplicate_ratio_after),
+        duplicate_ratio_raw=float(duplicate_ratio_raw),
+        duplicate_ratio_after_dedup=float(duplicate_ratio_after_dedup),
+        strict_oos_input_is_deduped=bool(strict_oos_input_is_deduped),
+        adversarial_duplicate_ratio_used=adv_ratio_used,
+        adversarial_duplicate_source=adv_source,
         single_symbol_concentration=float(single_symbol_concentration),
         single_cluster_concentration=float(single_cluster_concentration),
         exit_policy_used_future_returns=bool(exit_policy_used_future_returns),
+        consistency_check_failed=bool(consistency_check_failed),
+        consistency_findings=list(consistency_findings or []),
     )
     findings: list[AdversarialFinding] = []
     blockers: list[str] = []
@@ -146,12 +196,12 @@ def audit_v829(
             f"prefix-only detector references forbidden fields: {offending}",
         ))
         blockers.append(AUDIT_FAIL_LOOKAHEAD)
-    # 2. Duplicate contamination.
-    if duplicate_ratio_after > DUPLICATE_RATIO_MAX:
+    # 2. Duplicate contamination — gated by V8.2.9.2 wiring.
+    if adv_ratio_used > DUPLICATE_RATIO_MAX:
         findings.append(AdversarialFinding(
             "duplicate_contamination",
-            f"duplicate_ratio_after={duplicate_ratio_after:.4f} "
-            f"above max {DUPLICATE_RATIO_MAX}",
+            f"adversarial_duplicate_ratio_used={adv_ratio_used:.4f} "
+            f"(source={adv_source}) above max {DUPLICATE_RATIO_MAX}",
         ))
         blockers.append(AUDIT_FAIL_DUPLICATES)
     # 3. Score misuse.
@@ -203,6 +253,16 @@ def audit_v829(
             "stress check",
         ))
         blockers.append(AUDIT_FAIL_OVERFIT)
+    # 7. V8.2.9.2 — pipeline consistency check failed (dedup wiring or
+    # status mis-alignment). The consistency report is built externally
+    # and passed in via ``consistency_check_failed``.
+    if consistency_check_failed:
+        findings.append(AdversarialFinding(
+            "consistency",
+            "pipeline consistency check failed: "
+            + (", ".join(report.consistency_findings) or "see consistency report"),
+        ))
+        blockers.append(AUDIT_FAIL_CONSISTENCY)
     report.findings = [f.as_dict() for f in findings]
     # Deduplicate blockers while preserving order.
     seen: set[str] = set()
@@ -218,7 +278,8 @@ def audit_v829(
         for b in (
             AUDIT_FAIL_SAFETY, AUDIT_FAIL_LOOKAHEAD,
             AUDIT_FAIL_EXIT_LOOKAHEAD, AUDIT_FAIL_SCORE_MISUSE,
-            AUDIT_FAIL_DUPLICATES, AUDIT_FAIL_OVERFIT,
+            AUDIT_FAIL_CONSISTENCY, AUDIT_FAIL_DUPLICATES,
+            AUDIT_FAIL_OVERFIT,
         ):
             if b in unique_blockers:
                 report.audit_status = b

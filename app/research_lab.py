@@ -3033,6 +3033,41 @@ class ResearchLab:
             text += "\n" + warning
         return text
 
+    def rebound_outcome_reconciliation_v829_cli(
+        self, hours: int = 168, limit: int = 50000,
+    ) -> str:
+        from .labs.rebound_outcome_reconciliation_v8_2_9 import (
+            reconcile_rebound_outcome,
+        )
+        r = reconcile_rebound_outcome(self.db, hours=int(hours), limit=int(limit))
+        lines = ["REBOUND OUTCOME RECONCILIATION V8.2.9 START"]
+        lines.append(f"hours: {r.hours} status: {r.status}")
+        lines.append(f"candidates_v828_like: {r.candidates_v828_like}")
+        lines.append(f"candidates_v829_raw: {r.candidates_v829_raw}")
+        lines.append(f"candidates_v829_dedup: {r.candidates_v829_dedup}")
+        lines.append(f"winrate_v828_like: {r.winrate_v828_like:.4f}")
+        lines.append(f"winrate_v829_raw: {r.winrate_v829_raw:.4f}")
+        lines.append(f"winrate_v829_dedup: {r.winrate_v829_dedup:.4f}")
+        lines.append(f"net_ev_before_cost: {r.net_ev_before_cost:.4f}")
+        lines.append(f"net_ev_after_cost_0_25: {r.net_ev_after_cost_0_25:.4f}")
+        lines.append(f"sign_bug_count: {r.sign_bug_count}")
+        lines.append(
+            f"outcome_field_mismatch_count: {r.outcome_field_mismatch_count}"
+        )
+        lines.append(f"reason_for_gap: {r.reason_for_gap}")
+        lines.append(
+            f"used_future_return_features: "
+            f"{str(bool(r.used_future_return_features)).lower()}"
+        )
+        for note in r.notes:
+            lines.append(f"note: {note}")
+        lines.extend(self._v82_safety_footer())
+        warning = self._v82_heavy_warning(hours)
+        if warning:
+            lines.append(warning)
+        lines.append("REBOUND OUTCOME RECONCILIATION V8.2.9 END")
+        return "\n".join(lines)
+
     def _render_training_summary(self, summary, *, hours: int, limit: int) -> str:
         lines = ["COUNTERFACTUAL TRAINING SUMMARY START"]
         lines.append(f"hours: {int(hours)} limit: {int(limit)}")
@@ -3829,6 +3864,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
             "adversarial-research-audit-v829",
             "export-research-v829",
             "research-pack-v829",
+            "rebound-outcome-reconciliation-v829",
             "ohlcv-replay-loader-smoke-test",
             "ohlcv-replay-loader-audit",
             "duplicate-module-audit-smoke-test",
@@ -4569,6 +4605,13 @@ def main() -> None:
     elif args.command == "research-pack-v829":
         limit_arg = int(getattr(args, "limit", 50000) or 50000)
         print(lab.research_pack_v829_cli(hours=args.hours, limit=limit_arg))
+    elif args.command == "rebound-outcome-reconciliation-v829":
+        limit_arg = int(getattr(args, "limit", 50000) or 50000)
+        print(
+            lab.rebound_outcome_reconciliation_v829_cli(
+                hours=args.hours, limit=limit_arg,
+            )
+        )
     elif args.command == "ohlcv-replay-loader-smoke-test":
         print(lab.ohlcv_replay_loader_smoke_test())
     elif args.command == "ohlcv-replay-loader-audit":

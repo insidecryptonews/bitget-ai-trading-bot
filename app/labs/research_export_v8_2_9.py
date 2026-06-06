@@ -32,6 +32,10 @@ from .rebound_long_candidate_extractor_v8_2_9 import (
     extract_rebound_long_candidates,
 )
 from .rebound_long_strict_oos_v8_2_9 import run_strict_oos_rebound
+from .rebound_outcome_reconciliation_v8_2_9 import reconcile_rebound_outcome
+from .research_pack_consistency_check_v8_2_9_2 import (
+    run_consistency_check_v8_2_9_2,
+)
 from .score_gate_sandbox_v8_2_9 import run_score_gate_sandbox
 
 
@@ -45,6 +49,16 @@ REBOUND_LONG_COLUMNS: tuple[str, ...] = (
     "candidate_reason", "detection_mode", "used_future_return_features",
     "net_pnl_est", "outcome_winner_loser",
     "mfe_pct_outcome", "mae_pct_outcome", "barrier_result_outcome",
+)
+
+RECONCILIATION_COLUMNS: tuple[str, ...] = (
+    "symbol", "timestamp", "regime_before", "regime_now",
+    "bounce_confirmation_prefix", "higher_lows_prefix",
+    "trend_recovering_prefix", "net_pnl_est", "outcome_winner_loser",
+)
+
+CONSISTENCY_COLUMNS: tuple[str, ...] = (
+    "finding",
 )
 
 EDGEGUARD_DEDUP_COLUMNS: tuple[str, ...] = (
@@ -142,18 +156,26 @@ def export_research_v829(
     exit_audit = run_exit_monetization_audit(
         db, hours=hours, limit=limit, rows=dataset,
     )
-    deduped_candidates, _ = dedup_edgeguard_repeats(extractor.candidates,
-                                                    hours=hours)
+    # V8.2.9.2 — wire the deduplicated candidate set + after-dedup ratio
+    # explicitly into strict OOS. ``input_is_deduped=True`` so the OOS
+    # report exposes that the input has already been deduped.
+    deduped_candidates, deduped_candidate_report = dedup_edgeguard_repeats(
+        extractor.candidates, hours=hours,
+    )
     strict_oos = run_strict_oos_rebound(
         deduped_candidates, hours=hours,
         score_anti_calibrated=bool(score_anti_calibrated),
-        duplicate_ratio_after=dedup_report.duplicate_ratio_before,
+        duplicate_ratio_after=deduped_candidate_report.duplicate_ratio_after,
+        input_is_deduped=True,
         exit_monetization_diagnostic={
             "best_policy": exit_audit.best_policy,
             "best_policy_test_status": exit_audit.best_policy_test_status,
             "horizon_close_problem_detected": exit_audit.horizon_close_problem_detected,
             "avg_profit_capture_ratio": exit_audit.avg_profit_capture_ratio,
             "avg_missed_profit_pct": exit_audit.avg_missed_profit_pct,
+            "exit_policy_replay_mode": exit_audit.exit_policy_replay_mode,
+            "exit_policy_productive_ready": exit_audit.exit_policy_productive_ready,
+            "exit_policy_candidate_status": exit_audit.exit_policy_candidate_status,
         },
     )
 
@@ -168,11 +190,38 @@ def export_research_v829(
             rule.get("test_net_ev_after_cost_stress_pct", 0.0),
         )
 
+    # V8.2.9.2 — reconcile the V8.2.8 vs V8.2.9 rebound outcome gap.
+    reconciliation = reconcile_rebound_outcome(
+        db, hours=hours, limit=limit, rows=dataset,
+    )
+
+    # V8.2.9.2 — consistency check across the pipeline. Runs BEFORE the
+    # adversarial audit so the audit can include the consistency status
+    # as a hard blocker (``FAIL_CONSISTENCY``).
+    strict_top = strict_oos.final_status_top_level
+    consistency = run_consistency_check_v8_2_9_2(
+        hours=hours,
+        duplicate_ratio_before=dedup_report.duplicate_ratio_before,
+        duplicate_ratio_after=deduped_candidate_report.duplicate_ratio_after,
+        strict_oos_duplicate_ratio_used=strict_oos.duplicate_ratio_after,
+        strict_oos_input_is_deduped=strict_oos.strict_oos_input_is_deduped,
+        strict_oos_status=strict_top,
+        paper_sandbox_candidates=len(strict_oos.paper_sandbox_candidates),
+        adversarial_duplicate_source="after",
+        adversarial_duplicate_ratio_used=deduped_candidate_report.duplicate_ratio_after,
+        exit_oos_status=exit_audit.best_policy_test_status,
+        exit_policy_replay_mode=exit_audit.exit_policy_replay_mode,
+        exit_policy_productive_ready=exit_audit.exit_policy_productive_ready,
+        final_recommendation=FINAL_RECOMMENDATION_NO_LIVE,
+    )
+
     audit = audit_v829(
         hours=hours,
         score_anti_calibrated=bool(score_anti_calibrated),
         score_used_as_gate=False,
-        duplicate_ratio_after=dedup_report.duplicate_ratio_before,
+        duplicate_ratio_raw=dedup_report.duplicate_ratio_before,
+        duplicate_ratio_after_dedup=deduped_candidate_report.duplicate_ratio_after,
+        strict_oos_input_is_deduped=strict_oos.strict_oos_input_is_deduped,
         single_symbol_concentration=symbol_conc,
         single_cluster_concentration=cluster_conc,
         paper_filter_enabled=False,
@@ -183,6 +232,10 @@ def export_research_v829(
         exit_policy_used_future_returns=False,
         exit_policy_selected_on_test=False,
         same_bar_resolution_conservative=True,
+        consistency_check_failed=(
+            consistency.consistency_check_status != "PASS"
+        ),
+        consistency_findings=consistency.consistency_findings,
     )
 
     rebound_csv = base / "rebound_long_candidates_v1.csv"
@@ -218,6 +271,20 @@ def export_research_v829(
     _write_csv(rerun_csv, all_rule_rows, STRICT_OOS_COLUMNS)
     audit_csv = base / "adversarial_research_audit_v1.csv"
     _write_csv(audit_csv, audit.findings, AUDIT_COLUMNS)
+
+    # V8.2.9.2 — new CSVs.
+    reconciliation_csv = base / "rebound_outcome_reconciliation_v1.csv"
+    _write_csv(
+        reconciliation_csv,
+        [_sanitise_row(r) for r in reconciliation.examples_top_100],
+        RECONCILIATION_COLUMNS,
+    )
+    consistency_csv = base / "consistency_check_v1.csv"
+    _write_csv(
+        consistency_csv,
+        [{"finding": f} for f in consistency.consistency_findings],
+        CONSISTENCY_COLUMNS,
+    )
 
     summary_txt = base / "research_v8_2_9_summary.txt"
     with summary_txt.open("w", encoding="utf-8") as f:
@@ -260,6 +327,63 @@ def export_research_v829(
         f.write(
             f"blockers: {','.join(audit.blockers) if audit.blockers else 'NONE'}\n"
         )
+        # V8.2.9.2 wiring transparency.
+        f.write(
+            f"strict_oos_input_is_deduped: "
+            f"{str(strict_oos.strict_oos_input_is_deduped).lower()}\n"
+        )
+        f.write(
+            f"strict_oos_duplicate_ratio_used: "
+            f"{strict_oos.duplicate_ratio_after:.4f}\n"
+        )
+        f.write(
+            f"adversarial_duplicate_source: "
+            f"{audit.adversarial_duplicate_source}\n"
+        )
+        f.write(
+            f"adversarial_duplicate_ratio_used: "
+            f"{audit.adversarial_duplicate_ratio_used:.4f}\n"
+        )
+        # V8.2.9.2 exit hardening transparency.
+        f.write(
+            f"exit_policy_replay_mode: "
+            f"{exit_audit.exit_policy_replay_mode}\n"
+        )
+        f.write(
+            f"exit_policy_productive_ready: "
+            f"{str(exit_audit.exit_policy_productive_ready).lower()}\n"
+        )
+        f.write(
+            f"requires_bar_by_bar_replay: "
+            f"{str(exit_audit.requires_bar_by_bar_replay).lower()}\n"
+        )
+        f.write(
+            f"exit_policy_candidate_status: "
+            f"{exit_audit.exit_policy_candidate_status}\n"
+        )
+        # V8.2.9.2 reconciliation + consistency.
+        f.write(
+            f"rebound_reconciliation_reason: {reconciliation.reason_for_gap}\n"
+        )
+        f.write(
+            f"v828_like_winrate: {reconciliation.winrate_v828_like:.4f}\n"
+        )
+        f.write(
+            f"v829_raw_winrate: {reconciliation.winrate_v829_raw:.4f}\n"
+        )
+        f.write(
+            f"v829_dedup_winrate: {reconciliation.winrate_v829_dedup:.4f}\n"
+        )
+        f.write(
+            f"consistency_check_status: {consistency.consistency_check_status}\n"
+        )
+        if consistency.consistency_findings:
+            f.write(
+                "consistency_findings: "
+                + "; ".join(consistency.consistency_findings) + "\n"
+            )
+        else:
+            f.write("consistency_findings: NONE\n")
         f.write("research_only: true\n")
         f.write("paper_filter_enabled: false\n")
         f.write("can_send_real_orders: false\n")
@@ -267,17 +391,24 @@ def export_research_v829(
 
     files = [
         rebound_csv, dedup_csv, score_csv,
-        exit_audit_csv, exit_policy_csv, rerun_csv, audit_csv, summary_txt,
+        exit_audit_csv, exit_policy_csv, rerun_csv, audit_csv,
+        reconciliation_csv, consistency_csv, summary_txt,
     ]
     manifest: dict[str, Any] = {
-        "version": "v8.2.9.v1",
+        "version": "v8.2.9.v2",
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "base_dir": str(base),
         "files": [],
         "raw_rebound_candidates": extractor.candidates_count,
         "dedup_rebound_candidates": len(deduped_candidates),
         "duplicate_ratio_before": dedup_report.duplicate_ratio_before,
-        "duplicate_ratio_after": dedup_report.duplicate_ratio_after,
+        "duplicate_ratio_after": deduped_candidate_report.duplicate_ratio_after,
+        "duplicate_ratio_raw_dataset_before": dedup_report.duplicate_ratio_before,
+        "duplicate_ratio_raw_dataset_after": dedup_report.duplicate_ratio_after,
+        "strict_oos_input_is_deduped": strict_oos.strict_oos_input_is_deduped,
+        "strict_oos_duplicate_ratio_used": strict_oos.duplicate_ratio_after,
+        "adversarial_duplicate_source": audit.adversarial_duplicate_source,
+        "adversarial_duplicate_ratio_used": audit.adversarial_duplicate_ratio_used,
         "score_gate_best_variant": score_sandbox.best_variant or "NONE",
         "strict_oos_status": strict_oos.final_status_top_level,
         "paper_sandbox_candidates": len(strict_oos.paper_sandbox_candidates),
@@ -286,6 +417,16 @@ def export_research_v829(
         "horizon_close_problem_detected": exit_audit.horizon_close_problem_detected,
         "avg_profit_capture_ratio": exit_audit.avg_profit_capture_ratio,
         "avg_missed_profit_pct": exit_audit.avg_missed_profit_pct,
+        "exit_policy_replay_mode": exit_audit.exit_policy_replay_mode,
+        "exit_policy_productive_ready": exit_audit.exit_policy_productive_ready,
+        "requires_bar_by_bar_replay": exit_audit.requires_bar_by_bar_replay,
+        "exit_policy_candidate_status": exit_audit.exit_policy_candidate_status,
+        "rebound_reconciliation_reason": reconciliation.reason_for_gap,
+        "v828_like_winrate": reconciliation.winrate_v828_like,
+        "v829_raw_winrate": reconciliation.winrate_v829_raw,
+        "v829_dedup_winrate": reconciliation.winrate_v829_dedup,
+        "consistency_check_status": consistency.consistency_check_status,
+        "consistency_findings": consistency.consistency_findings,
         "adversarial_audit_status": audit.audit_status,
         "blockers": audit.blockers,
         "research_only": True,
@@ -343,26 +484,52 @@ def build_pack_v829(
     exit_audit = run_exit_monetization_audit(
         db, hours=hours, limit=limit, rows=dataset,
     )
-    deduped_candidates, _ = dedup_edgeguard_repeats(extractor.candidates,
-                                                    hours=hours)
+    deduped_candidates, deduped_candidate_report = dedup_edgeguard_repeats(
+        extractor.candidates, hours=hours,
+    )
     strict_oos = run_strict_oos_rebound(
         deduped_candidates, hours=hours,
         score_anti_calibrated=bool(score_anti_calibrated),
-        duplicate_ratio_after=dedup_report.duplicate_ratio_before,
+        duplicate_ratio_after=deduped_candidate_report.duplicate_ratio_after,
+        input_is_deduped=True,
+    )
+    reconciliation = reconcile_rebound_outcome(
+        db, hours=hours, limit=limit, rows=dataset,
+    )
+    consistency = run_consistency_check_v8_2_9_2(
+        hours=hours,
+        duplicate_ratio_before=dedup_report.duplicate_ratio_before,
+        duplicate_ratio_after=deduped_candidate_report.duplicate_ratio_after,
+        strict_oos_duplicate_ratio_used=strict_oos.duplicate_ratio_after,
+        strict_oos_input_is_deduped=strict_oos.strict_oos_input_is_deduped,
+        strict_oos_status=strict_oos.final_status_top_level,
+        paper_sandbox_candidates=len(strict_oos.paper_sandbox_candidates),
+        adversarial_duplicate_source="after",
+        adversarial_duplicate_ratio_used=deduped_candidate_report.duplicate_ratio_after,
+        exit_oos_status=exit_audit.best_policy_test_status,
+        exit_policy_replay_mode=exit_audit.exit_policy_replay_mode,
+        exit_policy_productive_ready=exit_audit.exit_policy_productive_ready,
+        final_recommendation=FINAL_RECOMMENDATION_NO_LIVE,
     )
     audit = audit_v829(
         hours=hours,
         score_anti_calibrated=bool(score_anti_calibrated),
         score_used_as_gate=False,
-        duplicate_ratio_after=dedup_report.duplicate_ratio_before,
+        duplicate_ratio_raw=dedup_report.duplicate_ratio_before,
+        duplicate_ratio_after_dedup=deduped_candidate_report.duplicate_ratio_after,
+        strict_oos_input_is_deduped=strict_oos.strict_oos_input_is_deduped,
         paper_filter_enabled=False,
         can_send_real_orders=False,
         live_trading=False,
         paper_sandbox_candidates_count=len(strict_oos.paper_sandbox_candidates),
+        consistency_check_failed=(
+            consistency.consistency_check_status != "PASS"
+        ),
+        consistency_findings=consistency.consistency_findings,
     )
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(),
-        "pack_version": "research_v8_2_9_v1",
+        "pack_version": "research_v8_2_9_v2",
         "hours": int(hours),
         "limit": int(limit),
         "rebound_extractor": extractor.as_dict(),
@@ -370,6 +537,8 @@ def build_pack_v829(
         "score_gate_sandbox": score_sandbox.as_dict(),
         "exit_monetization": exit_audit.as_dict(),
         "strict_oos_rebound": strict_oos.as_dict(),
+        "rebound_outcome_reconciliation": reconciliation.as_dict(),
+        "consistency_check": consistency.as_dict(),
         "adversarial_audit": audit.as_dict(),
         "research_only": True,
         "paper_filter_enabled": False,
