@@ -68,6 +68,10 @@ class ReboundLongCandidate:
     score_bucket_diagnostic: str
     candidate_reason: str
     detection_mode: str
+    # V8.2.9.5 — join keys propagated so downstream bridges can attach
+    # real outcomes from ``signal_path_metrics`` by ``observation_id``.
+    observation_id: Any = None
+    signal_id: Any = None
     used_future_return_features: bool = False
     # Outcome — populated ONLY by evaluate_long_outcome (ex-post).
     net_pnl_est: float | None = None
@@ -300,6 +304,8 @@ def extract_rebound_long_candidates(
             score_bucket_diagnostic=info["score_bucket_diagnostic"],
             candidate_reason=info["candidate_reason"],
             detection_mode=info["detection_mode"],
+            observation_id=r.get("observation_id") or r.get("signal_id"),
+            signal_id=r.get("signal_id"),
             used_future_return_features=False,
             **outcome,
         )

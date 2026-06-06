@@ -3139,6 +3139,89 @@ class Database:
         with self._connect() as conn:
             return self._fetchall_dicts(conn.execute(sql, (since_iso, max(1, int(limit or 50000)))))
 
+    def fetch_signal_path_metrics(
+        self,
+        *,
+        observation_ids: "list[int] | None" = None,
+        symbols: "list[str] | None" = None,
+        limit: int = 50000,
+    ) -> list[dict[str, Any]]:
+        """V8.2.9.5 research-only reader. SELECT only — never writes.
+
+        Reads real path outcomes from ``signal_path_metrics``. Optional
+        filters by ``observation_ids`` and/or ``symbols``. When no filter
+        is given, returns up to ``limit`` rows ordered by id.
+        """
+        clauses: list[str] = []
+        params: list[Any] = []
+        obs_ids = [int(o) for o in (observation_ids or []) if o is not None]
+        if obs_ids:
+            placeholders = ",".join("?" for _ in obs_ids)
+            clauses.append(f"observation_id IN ({placeholders})")
+            params.extend(obs_ids)
+        syms = [str(s).upper() for s in (symbols or []) if s]
+        if syms:
+            placeholders = ",".join("?" for _ in syms)
+            clauses.append(f"UPPER(symbol) IN ({placeholders})")
+            params.extend(syms)
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+        sql = (
+            "SELECT observation_id, symbol, side, entry_price, "
+            "final_return_pct, max_favorable_pct, max_adverse_pct, "
+            "first_barrier_hit, bars_tracked, bars_to_mfe, bars_to_mae, "
+            "would_hit_tp_025, would_hit_tp_050, would_hit_tp_075, "
+            "would_hit_tp_100, would_hit_tp_150, "
+            "would_hit_sl_025, would_hit_sl_050, would_hit_sl_075, "
+            "would_hit_sl_100, status, created_at, updated_at "
+            f"FROM signal_path_metrics{where} "
+            "ORDER BY observation_id ASC LIMIT ?"
+        )
+        params.append(max(1, int(limit or 50000)))
+        if self._use_postgres:
+            sql = sql.replace("?", "%s")
+        with self._connect() as conn:
+            return self._fetchall_dicts(conn.execute(sql, tuple(params)))
+
+    def fetch_ohlcv_path_for_observation(
+        self,
+        *,
+        symbol: str,
+        entry_time_iso: str,
+        horizon_hours: int = 8,
+        timeframe: str = "5m",
+        limit: int = 5000,
+    ) -> list[dict[str, Any]]:
+        """V8.2.9.5 research-only reader. Reconstructs the forward OHLCV
+        path AFTER ``entry_time_iso`` from ``ohlcv_candles``. SELECT only.
+
+        Returns candles with ``timestamp > entry_time`` and
+        ``timestamp <= entry_time + horizon_hours``. Empty list when the
+        symbol/time inputs are missing or no candles exist (caller treats
+        as NEED_DATA — never invents bars).
+        """
+        sym = str(symbol or "").upper()
+        et = str(entry_time_iso or "")
+        if not sym or not et:
+            return []
+        try:
+            from datetime import datetime as _dt, timedelta as _td
+            start = _dt.fromisoformat(et.replace("Z", "+00:00"))
+            until = (start + _td(hours=int(horizon_hours))).isoformat()
+        except Exception:
+            return []
+        clauses = ["symbol = ?", "timeframe = ?", "timestamp > ?", "timestamp <= ?"]
+        params: list[Any] = [sym, str(timeframe).lower(), et, until]
+        sql = (
+            "SELECT symbol, timeframe, timestamp, open, high, low, close, volume "
+            f"FROM ohlcv_candles WHERE {' AND '.join(clauses)} "
+            "ORDER BY timestamp ASC LIMIT ?"
+        )
+        params.append(max(1, int(limit or 5000)))
+        if self._use_postgres:
+            sql = sql.replace("?", "%s")
+        with self._connect() as conn:
+            return self._fetchall_dicts(conn.execute(sql, tuple(params)))
+
     def get_score_calibration_summaries_since(self, since_iso: str, min_score: int = 70) -> list[dict[str, Any]]:
         score_bucket_expr = """
             CASE

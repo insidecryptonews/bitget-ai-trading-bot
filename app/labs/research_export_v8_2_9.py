@@ -43,6 +43,9 @@ from .research_pack_consistency_check_v8_2_9_2 import (
     run_consistency_check_v8_2_9_2,
 )
 from .score_gate_sandbox_v8_2_9 import run_score_gate_sandbox
+from .signal_path_metrics_bridge_v8_2_9_5 import bridge_candidates
+from .canonical_outcome_real_v8_2_9_5 import canonicalize_real
+from .strategy_tournament_real_outcomes_v8_2_9_5 import run_tournament_real
 
 
 EXPORT_SUBDIR_V829 = Path("training_exports") / "research_v8_2_9"
@@ -114,6 +117,37 @@ EDGEGUARD_DEDUP_COLUMNS: tuple[str, ...] = (
     "edgeguard_repeat_seen_again",
 )
 
+# V8.2.9.5 columns.
+SIGNAL_PATH_BRIDGE_COLUMNS: tuple[str, ...] = (
+    "observation_id", "symbol", "timestamp", "side", "entry_price",
+    "path_status", "path_join_method",
+    "real_final_return_pct", "real_max_favorable_pct", "real_max_adverse_pct",
+    "real_first_barrier_hit", "real_bars_tracked",
+    "real_bars_to_mfe", "real_bars_to_mae", "real_outcome_win",
+    "real_outcome_source",
+    "proxy_net_pnl_est", "proxy_vs_real_delta",
+    "proxy_matches_real_sign", "proxy_mismatch_type",
+)
+
+CANONICAL_REAL_COLUMNS: tuple[str, ...] = (
+    "observation_id", "symbol", "timestamp", "side",
+    "canonical_source", "canonical_is_real",
+    "canonical_net_pnl_est", "canonical_win",
+    "canonical_mfe_pct", "canonical_mae_pct",
+    "canonical_first_barrier_hit",
+    "canonical_quality", "canonical_warning",
+)
+
+TOURNAMENT_REAL_COLUMNS: tuple[str, ...] = (
+    "name", "side", "logic", "samples",
+    "train_samples", "validation_samples", "test_samples",
+    "winrate", "test_winrate", "pf", "test_pf",
+    "net_ev_pct", "test_net_ev_pct",
+    "test_net_ev_realistic_pct", "test_net_ev_stress_pct",
+    "single_symbol_share", "time_cluster_share", "sign_bug_ratio",
+    "status", "reason",
+)
+
 SCORE_SANDBOX_COLUMNS: tuple[str, ...] = (
     "variant", "samples", "winrate",
     "net_ev_avg_pct", "net_ev_after_cost_pct",
@@ -173,6 +207,44 @@ def _sha1_file(path: Path) -> str:
         for chunk in iter(lambda: f.read(65536), b""):
             sha.update(chunk)
     return sha.hexdigest()
+
+
+def _fetch_path_rows(
+    db: Any,
+    candidates: list[dict[str, Any]],
+    *,
+    hours: int,
+    limit: int,
+) -> list[dict[str, Any]]:
+    """V8.2.9.5 read-only fetch of ``signal_path_metrics`` scoped to the
+    candidate observation_ids / symbols. Returns [] when ``db`` is None
+    or the reader is unavailable — callers treat that as zero real
+    coverage (NEED_MORE_DATA), never inventing outcomes."""
+    if db is None:
+        return []
+    obs_ids = []
+    symbols = set()
+    for c in candidates:
+        oid = c.get("observation_id") or c.get("signal_id")
+        if oid is not None:
+            try:
+                obs_ids.append(int(oid))
+            except (TypeError, ValueError):
+                pass
+        sym = str(c.get("symbol") or "").upper()
+        if sym:
+            symbols.add(sym)
+    reader = getattr(db, "fetch_signal_path_metrics", None)
+    if not callable(reader):
+        return []
+    try:
+        return reader(
+            observation_ids=obs_ids or None,
+            symbols=sorted(symbols) or None,
+            limit=int(limit or 50000),
+        )
+    except Exception:
+        return []
 
 
 def export_research_v829(
@@ -240,6 +312,17 @@ def export_research_v829(
     # V8.2.9.2 — reconcile the V8.2.8 vs V8.2.9 rebound outcome gap.
     reconciliation = reconcile_rebound_outcome(
         db, hours=hours, limit=limit, rows=dataset,
+    )
+
+    # V8.2.9.5 — bridge candidates to REAL path outcomes + canonical real
+    # + tournament on real outcomes. Read-only: pulls signal_path_metrics
+    # from the db when available; otherwise path coverage is 0 and the
+    # tournament correctly returns NEED_MORE_DATA.
+    path_rows = _fetch_path_rows(db, deduped_candidates, hours=hours, limit=limit)
+    bridge = bridge_candidates(deduped_candidates, path_rows, hours=hours)
+    canonical_real = canonicalize_real(deduped_candidates, path_rows, hours=hours)
+    tournament_real = run_tournament_real(
+        deduped_candidates, path_rows, hours=hours,
     )
 
     # V8.2.9.2 — consistency check across the pipeline. Runs BEFORE the
@@ -371,6 +454,26 @@ def export_research_v829(
         consistency_csv,
         [{"finding": f} for f in consistency.consistency_findings],
         CONSISTENCY_COLUMNS,
+    )
+
+    # V8.2.9.5 — signal path bridge + canonical real + tournament real.
+    bridge_csv = base / "signal_path_metrics_bridge_v1.csv"
+    _write_csv(
+        bridge_csv,
+        [_sanitise_row(r) for r in bridge.rows],
+        SIGNAL_PATH_BRIDGE_COLUMNS,
+    )
+    canonical_real_csv = base / "canonical_outcome_real_v1.csv"
+    _write_csv(
+        canonical_real_csv,
+        [_sanitise_row(r) for r in canonical_real.rows],
+        CANONICAL_REAL_COLUMNS,
+    )
+    tournament_real_csv = base / "strategy_tournament_real_outcomes_v1.csv"
+    _write_csv(
+        tournament_real_csv,
+        [_sanitise_row(r) for r in tournament_real.results],
+        TOURNAMENT_REAL_COLUMNS,
     )
 
     summary_txt = base / "research_v8_2_9_summary.txt"
@@ -526,6 +629,40 @@ def export_research_v829(
             )
         else:
             f.write("consistency_findings: NONE\n")
+        # V8.2.9.5 — signal path bridge + canonical real + tournament real.
+        f.write(
+            f"signal_path_metrics_coverage_ratio: {bridge.path_coverage_ratio:.4f}\n"
+        )
+        f.write(f"path_found_count: {bridge.path_found_count}\n")
+        f.write(f"path_missing_count: {bridge.path_missing_count}\n")
+        f.write(f"path_ambiguous_count: {bridge.path_ambiguous_count}\n")
+        f.write(
+            f"proxy_sign_mismatch_ratio: {bridge.proxy_sign_mismatch_ratio:.4f}\n"
+        )
+        f.write(f"proxy_net_ev_avg: {bridge.proxy_net_ev_avg:.4f}\n")
+        f.write(f"real_net_ev_avg: {bridge.real_net_ev_avg:.4f}\n")
+        f.write(f"real_winrate: {bridge.real_winrate:.4f}\n")
+        f.write(
+            f"canonical_real_ok_ratio: {canonical_real.canonical_real_ok_ratio:.4f}\n"
+        )
+        f.write(
+            f"canonical_source_top: {canonical_real.canonical_source_top or 'NONE'}\n"
+        )
+        f.write(
+            f"tournament_real_status: {tournament_real.tournament_real_status}\n"
+        )
+        f.write(
+            f"tournament_real_best_strategy: "
+            f"{tournament_real.tournament_real_best_strategy or 'NONE'}\n"
+        )
+        f.write(
+            f"tournament_real_best_status: "
+            f"{tournament_real.tournament_real_best_status}\n"
+        )
+        f.write(
+            f"paper_sandbox_candidates_real: "
+            f"{tournament_real.paper_sandbox_candidates_real}\n"
+        )
         f.write("research_only: true\n")
         f.write("paper_filter_enabled: false\n")
         f.write("can_send_real_orders: false\n")
@@ -537,10 +674,11 @@ def export_research_v829(
         reconciliation_csv, consistency_csv,
         sign_integrity_csv, canonical_csv, bar_by_bar_csv,
         strict_canonical_csv,
+        bridge_csv, canonical_real_csv, tournament_real_csv,
         summary_txt,
     ]
     manifest: dict[str, Any] = {
-        "version": "v8.2.9.v4",
+        "version": "v8.2.9.v5",
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "base_dir": str(base),
         "files": [],
@@ -599,6 +737,21 @@ def export_research_v829(
         "bar_replay_intrabar_rule": "STOP_BEFORE_TP",
         "bar_replay_trailing_uses_previous_bar_only": True,
         "canonical_supports_short_ohlcv_replay": True,
+        # V8.2.9.5 keys — real outcome bridge.
+        "signal_path_metrics_coverage_ratio": bridge.path_coverage_ratio,
+        "path_found_count": bridge.path_found_count,
+        "path_missing_count": bridge.path_missing_count,
+        "path_ambiguous_count": bridge.path_ambiguous_count,
+        "proxy_sign_mismatch_ratio": bridge.proxy_sign_mismatch_ratio,
+        "proxy_net_ev_avg": bridge.proxy_net_ev_avg,
+        "real_net_ev_avg": bridge.real_net_ev_avg,
+        "real_winrate": bridge.real_winrate,
+        "canonical_real_ok_ratio": canonical_real.canonical_real_ok_ratio,
+        "canonical_real_source_top": canonical_real.canonical_source_top,
+        "tournament_real_status": tournament_real.tournament_real_status,
+        "tournament_real_best_strategy": tournament_real.tournament_real_best_strategy,
+        "tournament_real_best_status": tournament_real.tournament_real_best_status,
+        "paper_sandbox_candidates_real": tournament_real.paper_sandbox_candidates_real,
         "adversarial_audit_status": audit.audit_status,
         "blockers": audit.blockers,
         "research_only": True,
@@ -710,9 +863,16 @@ def build_pack_v829(
         duplicate_ratio_after=deduped_candidate_report.duplicate_ratio_after,
         input_is_deduped=True,
     )
+    # V8.2.9.5 — real outcome bridge + canonical real + tournament real.
+    path_rows = _fetch_path_rows(db, deduped_candidates, hours=hours, limit=limit)
+    bridge = bridge_candidates(deduped_candidates, path_rows, hours=hours)
+    canonical_real = canonicalize_real(deduped_candidates, path_rows, hours=hours)
+    tournament_real = run_tournament_real(
+        deduped_candidates, path_rows, hours=hours,
+    )
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(),
-        "pack_version": "research_v8_2_9_v3",
+        "pack_version": "research_v8_2_9_v5",
         "hours": int(hours),
         "limit": int(limit),
         "rebound_extractor": extractor.as_dict(),
@@ -727,6 +887,9 @@ def build_pack_v829(
         "canonical_outcome": canonical.as_dict(),
         "bar_by_bar_replay": bar_by_bar.as_dict(),
         "strict_oos_canonical": strict_oos_canonical.as_dict(),
+        "signal_path_metrics_bridge": bridge.as_dict(),
+        "canonical_outcome_real": canonical_real.as_dict(),
+        "strategy_tournament_real": tournament_real.as_dict(),
         "research_only": True,
         "paper_filter_enabled": False,
         "can_send_real_orders": False,

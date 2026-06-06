@@ -3033,6 +3033,141 @@ class ResearchLab:
             text += "\n" + warning
         return text
 
+    # ---- V8.2.9.5 Signal Path Metrics Bridge + Real Outcomes ----
+
+    def _v8295_candidates_and_paths(self, hours: int, limit: int):
+        from .labs.counterfactual_training_dataset import build_dataset
+        from .labs.edgeguard_repeat_dedup_v8_2_9 import dedup_edgeguard_repeats
+        from .labs.rebound_long_candidate_extractor_v8_2_9 import (
+            extract_rebound_long_candidates,
+        )
+        from .labs.research_export_v8_2_9 import _fetch_path_rows
+        dataset, _ = build_dataset(self.db, hours=int(hours), limit=int(limit))
+        extractor = extract_rebound_long_candidates(
+            self.db, hours=int(hours), limit=int(limit), rows=dataset,
+        )
+        deduped, _ = dedup_edgeguard_repeats(extractor.candidates, hours=int(hours))
+        path_rows = _fetch_path_rows(self.db, deduped, hours=int(hours), limit=int(limit))
+        return deduped, path_rows
+
+    def signal_path_bridge_v8295_cli(self, hours: int = 168, limit: int = 50000) -> str:
+        from .labs.signal_path_metrics_bridge_v8_2_9_5 import bridge_candidates
+        deduped, path_rows = self._v8295_candidates_and_paths(hours, limit)
+        r = bridge_candidates(deduped, path_rows, hours=int(hours))
+        lines = ["SIGNAL PATH METRICS BRIDGE V8.2.9.5 START"]
+        lines.append(f"hours: {r.hours} status: {r.status}")
+        lines.append(f"total_candidates: {r.total_candidates}")
+        lines.append(f"path_found_count: {r.path_found_count}")
+        lines.append(f"path_missing_count: {r.path_missing_count}")
+        lines.append(f"path_ambiguous_count: {r.path_ambiguous_count}")
+        lines.append(f"path_coverage_ratio: {r.path_coverage_ratio:.4f}")
+        lines.append(f"proxy_sign_mismatch_ratio: {r.proxy_sign_mismatch_ratio:.4f}")
+        lines.append(f"proxy_net_ev_avg: {r.proxy_net_ev_avg:.4f}")
+        lines.append(f"real_net_ev_avg: {r.real_net_ev_avg:.4f}")
+        lines.append(f"real_winrate: {r.real_winrate:.4f}")
+        lines.extend(self._v82_safety_footer())
+        warning = self._v82_heavy_warning(hours)
+        if warning:
+            lines.append(warning)
+        lines.append("SIGNAL PATH METRICS BRIDGE V8.2.9.5 END")
+        return "\n".join(lines)
+
+    def canonical_real_outcome_v8295_cli(self, hours: int = 168, limit: int = 50000) -> str:
+        from .labs.canonical_outcome_real_v8_2_9_5 import canonicalize_real
+        deduped, path_rows = self._v8295_candidates_and_paths(hours, limit)
+        r = canonicalize_real(deduped, path_rows, hours=int(hours))
+        lines = ["CANONICAL REAL OUTCOME V8.2.9.5 START"]
+        lines.append(f"hours: {r.hours} status: {r.status}")
+        lines.append(f"rows_audited: {r.rows_audited}")
+        lines.append(f"real_path_count: {r.real_path_count}")
+        lines.append(f"ohlcv_replay_count: {r.ohlcv_replay_count}")
+        lines.append(f"proxy_only_count: {r.proxy_only_count}")
+        lines.append(f"need_data_count: {r.need_data_count}")
+        lines.append(f"canonical_real_ok_ratio: {r.canonical_real_ok_ratio:.4f}")
+        lines.append(f"canonical_source_top: {r.canonical_source_top or 'NONE'}")
+        for k, v in r.by_source.items():
+            lines.append(f"by_source {k}: {v}")
+        lines.extend(self._v82_safety_footer())
+        warning = self._v82_heavy_warning(hours)
+        if warning:
+            lines.append(warning)
+        lines.append("CANONICAL REAL OUTCOME V8.2.9.5 END")
+        return "\n".join(lines)
+
+    def strategy_tournament_real_v8295_cli(self, hours: int = 168, limit: int = 50000) -> str:
+        from .labs.strategy_tournament_real_outcomes_v8_2_9_5 import (
+            run_tournament_real,
+        )
+        deduped, path_rows = self._v8295_candidates_and_paths(hours, limit)
+        r = run_tournament_real(deduped, path_rows, hours=int(hours))
+        lines = ["STRATEGY TOURNAMENT REAL OUTCOMES V8.2.9.5 START"]
+        lines.append(f"hours: {r.hours} status: {r.status}")
+        lines.append(f"candidates_input: {r.candidates_input}")
+        lines.append(f"canonical_real_ok_ratio: {r.canonical_real_ok_ratio:.4f}")
+        lines.append(f"real_rows_used: {r.real_rows_used}")
+        lines.append(f"coverage_sufficient: {str(r.coverage_sufficient).lower()}")
+        lines.append(f"tournament_real_status: {r.tournament_real_status}")
+        lines.append(
+            f"tournament_real_best_strategy: {r.tournament_real_best_strategy or 'NONE'}"
+        )
+        lines.append(
+            f"tournament_real_best_status: {r.tournament_real_best_status}"
+        )
+        lines.append(
+            f"paper_sandbox_candidates_real: {r.paper_sandbox_candidates_real}"
+        )
+        for res in r.results:
+            lines.append(
+                f"strategy {res['name']}: status={res['status']} "
+                f"test_ev_realistic={res['test_net_ev_realistic_pct']:.4f}"
+            )
+        lines.extend(self._v82_safety_footer())
+        warning = self._v82_heavy_warning(hours)
+        if warning:
+            lines.append(warning)
+        lines.append("STRATEGY TOURNAMENT REAL OUTCOMES V8.2.9.5 END")
+        return "\n".join(lines)
+
+    def export_research_v8295_cli(self, hours: int = 168, limit: int = 50000) -> str:
+        from .labs.research_export_v8_2_9 import export_research_v829
+        manifest = export_research_v829(self.db, hours=int(hours), limit=int(limit))
+        lines = ["EXPORT RESEARCH V8.2.9.5 START"]
+        lines.append(f"hours: {int(hours)} limit: {int(limit)}")
+        lines.append(f"base_dir: {manifest.get('base_dir')}")
+        lines.append(f"version: {manifest.get('version')}")
+        lines.append(
+            f"signal_path_metrics_coverage_ratio: "
+            f"{manifest.get('signal_path_metrics_coverage_ratio')}"
+        )
+        lines.append(
+            f"canonical_real_ok_ratio: {manifest.get('canonical_real_ok_ratio')}"
+        )
+        lines.append(
+            f"tournament_real_status: {manifest.get('tournament_real_status')}"
+        )
+        lines.append(
+            f"paper_sandbox_candidates_real: "
+            f"{manifest.get('paper_sandbox_candidates_real')}"
+        )
+        zip_info = manifest.get("zip") or {}
+        if zip_info:
+            lines.append(f"zip: {zip_info.get('name')} sha1={zip_info.get('sha1')}")
+        lines.extend(self._v82_safety_footer())
+        warning = self._v82_heavy_warning(hours)
+        if warning:
+            lines.append(warning)
+        lines.append("EXPORT RESEARCH V8.2.9.5 END")
+        return "\n".join(lines)
+
+    def research_pack_v8295_cli(self, hours: int = 168, limit: int = 50000) -> str:
+        from .labs.research_export_v8_2_9 import build_pack_v829, render_pack_v829_text
+        payload = build_pack_v829(self.db, hours=int(hours), limit=int(limit))
+        text = render_pack_v829_text(payload)
+        warning = self._v82_heavy_warning(hours)
+        if warning:
+            text += "\n" + warning
+        return text
+
     def rebound_sign_integrity_v8293_cli(
         self, hours: int = 168, limit: int = 50000,
     ) -> str:
@@ -4027,6 +4162,11 @@ def build_argument_parser() -> argparse.ArgumentParser:
             "canonical-outcome-v8293",
             "exit-bar-replay-v8293",
             "rebound-strict-oos-canonical-v8293",
+            "signal-path-bridge-v8295",
+            "canonical-real-outcome-v8295",
+            "strategy-tournament-real-v8295",
+            "export-research-v8295",
+            "research-pack-v8295",
             "ohlcv-replay-loader-smoke-test",
             "ohlcv-replay-loader-audit",
             "duplicate-module-audit-smoke-test",
@@ -4802,6 +4942,21 @@ def main() -> None:
                 hours=args.hours, limit=limit_arg,
             )
         )
+    elif args.command == "signal-path-bridge-v8295":
+        limit_arg = int(getattr(args, "limit", 50000) or 50000)
+        print(lab.signal_path_bridge_v8295_cli(hours=args.hours, limit=limit_arg))
+    elif args.command == "canonical-real-outcome-v8295":
+        limit_arg = int(getattr(args, "limit", 50000) or 50000)
+        print(lab.canonical_real_outcome_v8295_cli(hours=args.hours, limit=limit_arg))
+    elif args.command == "strategy-tournament-real-v8295":
+        limit_arg = int(getattr(args, "limit", 50000) or 50000)
+        print(lab.strategy_tournament_real_v8295_cli(hours=args.hours, limit=limit_arg))
+    elif args.command == "export-research-v8295":
+        limit_arg = int(getattr(args, "limit", 50000) or 50000)
+        print(lab.export_research_v8295_cli(hours=args.hours, limit=limit_arg))
+    elif args.command == "research-pack-v8295":
+        limit_arg = int(getattr(args, "limit", 50000) or 50000)
+        print(lab.research_pack_v8295_cli(hours=args.hours, limit=limit_arg))
     elif args.command == "ohlcv-replay-loader-smoke-test":
         print(lab.ohlcv_replay_loader_smoke_test())
     elif args.command == "ohlcv-replay-loader-audit":

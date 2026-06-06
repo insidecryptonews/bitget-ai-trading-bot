@@ -331,6 +331,7 @@ def _build_row(
 
     row = {
         "signal_id": obs.get("id") or obs.get("signal_id"),
+        "observation_id": obs.get("id") or obs.get("observation_id") or obs.get("signal_id"),
         "timestamp": str(obs.get("timestamp") or ""),
         "symbol": str(obs.get("symbol") or "").upper(),
         "side": side,

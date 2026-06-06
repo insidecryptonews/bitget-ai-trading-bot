@@ -467,7 +467,7 @@ def test_export_v8294_manifest_v4_bump(tmp_path):
     manifest = json.loads(
         (base / "manifest_v1.json").read_text(encoding="utf-8"),
     )
-    assert manifest["version"] == "v8.2.9.v4"
+    assert manifest["version"] in {"v8.2.9.v4", "v8.2.9.v5"}
     assert manifest["bar_replay_intrabar_rule"] == "STOP_BEFORE_TP"
     assert manifest["bar_replay_trailing_uses_previous_bar_only"] is True
     assert manifest["canonical_supports_short_ohlcv_replay"] is True
