@@ -27,12 +27,18 @@ from . import FINAL_RECOMMENDATION_NO_LIVE
 from .adversarial_research_audit_v8_2_9 import audit_v829
 from .counterfactual_training_dataset import _sanitise_row, build_dataset
 from .edgeguard_repeat_dedup_v8_2_9 import dedup_edgeguard_repeats
+from .exit_bar_by_bar_replay_v8_2_9_3 import run_bar_by_bar_replay
 from .exit_monetization_audit_v8_2_9 import run_exit_monetization_audit
+from .outcome_field_canonicalizer_v8_2_9_3 import canonicalize_rows
 from .rebound_long_candidate_extractor_v8_2_9 import (
     extract_rebound_long_candidates,
 )
+from .rebound_long_strict_oos_canonical_v8_2_9_3 import (
+    run_strict_oos_canonical,
+)
 from .rebound_long_strict_oos_v8_2_9 import run_strict_oos_rebound
 from .rebound_outcome_reconciliation_v8_2_9 import reconcile_rebound_outcome
+from .rebound_outcome_sign_integrity_v8_2_9_3 import audit_sign_integrity
 from .research_pack_consistency_check_v8_2_9_2 import (
     run_consistency_check_v8_2_9_2,
 )
@@ -59,6 +65,47 @@ RECONCILIATION_COLUMNS: tuple[str, ...] = (
 
 CONSISTENCY_COLUMNS: tuple[str, ...] = (
     "finding",
+)
+
+# V8.2.9.3 columns.
+SIGN_INTEGRITY_COLUMNS: tuple[str, ...] = (
+    "symbol", "timestamp", "side",
+    "entry_price", "baseline_net_pnl_est", "baseline_gross_pnl",
+    "ret_1h_pct_diagnostic", "ret_4h_pct_diagnostic",
+    "mfe_pct_diagnostic", "mae_pct_diagnostic",
+    "first_barrier_hit_diagnostic", "expected_long_direction",
+    "outcome_sign_from_net_pnl",
+    "outcome_sign_from_future_return",
+    "outcome_sign_from_barrier",
+    "mismatch_type", "reason",
+)
+
+CANONICAL_OUTCOME_COLUMNS: tuple[str, ...] = (
+    "symbol", "timestamp", "side",
+    "canonical_outcome_status", "canonical_net_pnl_est",
+    "canonical_win", "canonical_source", "reason",
+)
+
+BAR_BY_BAR_REPLAY_COLUMNS: tuple[str, ...] = (
+    "policy", "slice_label", "samples", "winrate", "avg_net_pct",
+    "pf", "max_loss_pct",
+    "avg_profit_capture_ratio", "avg_missed_profit_pct",
+    "net_ev_cost_normal_pct", "net_ev_cost_realistic_pct",
+    "net_ev_cost_stress_pct", "oos_status",
+    "used_future_return_features_for_input",
+    "same_bar_ambiguity_rule",
+)
+
+STRICT_OOS_CANONICAL_COLUMNS: tuple[str, ...] = (
+    "rule_id",
+    "train_samples", "validation_samples", "test_samples",
+    "train_net_ev_pct", "validation_net_ev_pct", "test_net_ev_pct",
+    "test_net_ev_after_cost_realistic_pct",
+    "test_net_ev_after_cost_stress_pct",
+    "test_pf", "test_winrate",
+    "test_cluster_ratio", "test_symbol_concentration",
+    "duplicate_ratio_after",
+    "final_status", "reject_reason",
 )
 
 EDGEGUARD_DEDUP_COLUMNS: tuple[str, ...] = (
@@ -272,6 +319,46 @@ def export_research_v829(
     audit_csv = base / "adversarial_research_audit_v1.csv"
     _write_csv(audit_csv, audit.findings, AUDIT_COLUMNS)
 
+    # V8.2.9.3 — sign integrity, canonical outcome, bar-by-bar replay,
+    # strict OOS canonical.
+    sign_integrity = audit_sign_integrity(
+        deduped_candidates, dataset_rows=dataset, hours=hours,
+    )
+    canonical = canonicalize_rows(deduped_candidates, hours=hours)
+    bar_by_bar = run_bar_by_bar_replay(deduped_candidates, hours=hours)
+    strict_oos_canonical = run_strict_oos_canonical(
+        deduped_candidates, hours=hours,
+        score_anti_calibrated=bool(score_anti_calibrated),
+        duplicate_ratio_after=deduped_candidate_report.duplicate_ratio_after,
+        input_is_deduped=True,
+    )
+
+    sign_integrity_csv = base / "rebound_outcome_sign_integrity_v1.csv"
+    _write_csv(
+        sign_integrity_csv,
+        [_sanitise_row(r) for r in sign_integrity.rows],
+        SIGN_INTEGRITY_COLUMNS,
+    )
+    canonical_csv = base / "canonical_outcome_v1.csv"
+    _write_csv(
+        canonical_csv,
+        [_sanitise_row(r) for r in canonical.rows],
+        CANONICAL_OUTCOME_COLUMNS,
+    )
+    bar_by_bar_csv = base / "exit_bar_by_bar_replay_v1.csv"
+    _write_csv(bar_by_bar_csv, bar_by_bar.by_policy, BAR_BY_BAR_REPLAY_COLUMNS)
+    strict_canonical_csv = base / "rebound_long_strict_oos_canonical_v1.csv"
+    canonical_rules = (
+        strict_oos_canonical.paper_sandbox_candidates
+        + strict_oos_canonical.research_candidates
+        + strict_oos_canonical.watch_only
+        + strict_oos_canonical.rejected
+        + strict_oos_canonical.need_more_data
+    )
+    _write_csv(
+        strict_canonical_csv, canonical_rules, STRICT_OOS_CANONICAL_COLUMNS,
+    )
+
     # V8.2.9.2 — new CSVs.
     reconciliation_csv = base / "rebound_outcome_reconciliation_v1.csv"
     _write_csv(
@@ -361,6 +448,61 @@ def export_research_v829(
             f"exit_policy_candidate_status: "
             f"{exit_audit.exit_policy_candidate_status}\n"
         )
+        # V8.2.9.3 sign integrity + canonical + bar-by-bar replay +
+        # strict OOS canonical.
+        sign_status = (
+            "PASS" if sign_integrity.sign_bug_ratio <= 0.05 else "FAIL"
+        )
+        f.write(f"sign_integrity_status: {sign_status}\n")
+        f.write(f"sign_bug_ratio: {sign_integrity.sign_bug_ratio:.4f}\n")
+        outcome_field_mismatch_ratio = (
+            sign_integrity.outcome_field_mismatch_count
+            / max(sign_integrity.total_candidates, 1)
+        )
+        f.write(
+            f"outcome_field_mismatch_ratio: {outcome_field_mismatch_ratio:.4f}\n"
+        )
+        f.write(
+            f"canonical_outcome_ok_ratio: {canonical.canonical_outcome_ok_ratio:.4f}\n"
+        )
+        f.write(
+            f"canonical_outcome_source_top: "
+            f"{canonical.canonical_outcome_source_top or 'NONE'}\n"
+        )
+        f.write(
+            f"bar_by_bar_replay_available: "
+            f"{str(bar_by_bar.bar_by_bar_replay_available).lower()}\n"
+        )
+        f.write(
+            f"best_policy_bar_by_bar: {bar_by_bar.best_policy_bar_by_bar or 'NONE'}\n"
+        )
+        f.write(
+            f"best_policy_bar_by_bar_status: {bar_by_bar.best_policy_bar_by_bar_status}\n"
+        )
+        f.write(
+            f"strict_oos_canonical_status: "
+            f"{strict_oos_canonical.final_status_top_level}\n"
+        )
+        f.write(
+            f"paper_sandbox_candidates_canonical: "
+            f"{len(strict_oos_canonical.paper_sandbox_candidates)}\n"
+        )
+        # V8.2.9.4 trazability flags.
+        f.write(
+            f"sign_integrity_join_method_top: "
+            f"{sign_integrity.join_method_top or 'NONE'}\n"
+        )
+        f.write(
+            f"sign_integrity_ambiguous_join_count: "
+            f"{sign_integrity.ambiguous_join_count}\n"
+        )
+        f.write(
+            f"sign_integrity_join_symbol_mismatch_count: "
+            f"{sign_integrity.join_symbol_mismatch_count}\n"
+        )
+        f.write("bar_replay_intrabar_rule: STOP_BEFORE_TP\n")
+        f.write("bar_replay_trailing_uses_previous_bar_only: true\n")
+        f.write("canonical_supports_short_ohlcv_replay: true\n")
         # V8.2.9.2 reconciliation + consistency.
         f.write(
             f"rebound_reconciliation_reason: {reconciliation.reason_for_gap}\n"
@@ -392,10 +534,13 @@ def export_research_v829(
     files = [
         rebound_csv, dedup_csv, score_csv,
         exit_audit_csv, exit_policy_csv, rerun_csv, audit_csv,
-        reconciliation_csv, consistency_csv, summary_txt,
+        reconciliation_csv, consistency_csv,
+        sign_integrity_csv, canonical_csv, bar_by_bar_csv,
+        strict_canonical_csv,
+        summary_txt,
     ]
     manifest: dict[str, Any] = {
-        "version": "v8.2.9.v2",
+        "version": "v8.2.9.v4",
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "base_dir": str(base),
         "files": [],
@@ -427,6 +572,33 @@ def export_research_v829(
         "v829_dedup_winrate": reconciliation.winrate_v829_dedup,
         "consistency_check_status": consistency.consistency_check_status,
         "consistency_findings": consistency.consistency_findings,
+        # V8.2.9.3 keys.
+        "sign_integrity_status": (
+            "PASS" if sign_integrity.sign_bug_ratio <= 0.05 else "FAIL"
+        ),
+        "sign_bug_ratio": sign_integrity.sign_bug_ratio,
+        "outcome_field_mismatch_ratio": (
+            sign_integrity.outcome_field_mismatch_count
+            / max(sign_integrity.total_candidates, 1)
+        ),
+        "canonical_outcome_ok_ratio": canonical.canonical_outcome_ok_ratio,
+        "canonical_outcome_source_top": canonical.canonical_outcome_source_top,
+        "bar_by_bar_replay_available": bar_by_bar.bar_by_bar_replay_available,
+        "best_policy_bar_by_bar": bar_by_bar.best_policy_bar_by_bar,
+        "best_policy_bar_by_bar_status": bar_by_bar.best_policy_bar_by_bar_status,
+        "strict_oos_canonical_status": strict_oos_canonical.final_status_top_level,
+        "paper_sandbox_candidates_canonical": len(
+            strict_oos_canonical.paper_sandbox_candidates
+        ),
+        # V8.2.9.4 trazability.
+        "sign_integrity_join_method_top": sign_integrity.join_method_top,
+        "sign_integrity_ambiguous_join_count": sign_integrity.ambiguous_join_count,
+        "sign_integrity_join_symbol_mismatch_count": (
+            sign_integrity.join_symbol_mismatch_count
+        ),
+        "bar_replay_intrabar_rule": "STOP_BEFORE_TP",
+        "bar_replay_trailing_uses_previous_bar_only": True,
+        "canonical_supports_short_ohlcv_replay": True,
         "adversarial_audit_status": audit.audit_status,
         "blockers": audit.blockers,
         "research_only": True,
@@ -527,9 +699,20 @@ def build_pack_v829(
         ),
         consistency_findings=consistency.consistency_findings,
     )
+    sign_integrity = audit_sign_integrity(
+        deduped_candidates, dataset_rows=dataset, hours=hours,
+    )
+    canonical = canonicalize_rows(deduped_candidates, hours=hours)
+    bar_by_bar = run_bar_by_bar_replay(deduped_candidates, hours=hours)
+    strict_oos_canonical = run_strict_oos_canonical(
+        deduped_candidates, hours=hours,
+        score_anti_calibrated=bool(score_anti_calibrated),
+        duplicate_ratio_after=deduped_candidate_report.duplicate_ratio_after,
+        input_is_deduped=True,
+    )
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(),
-        "pack_version": "research_v8_2_9_v2",
+        "pack_version": "research_v8_2_9_v3",
         "hours": int(hours),
         "limit": int(limit),
         "rebound_extractor": extractor.as_dict(),
@@ -540,6 +723,10 @@ def build_pack_v829(
         "rebound_outcome_reconciliation": reconciliation.as_dict(),
         "consistency_check": consistency.as_dict(),
         "adversarial_audit": audit.as_dict(),
+        "sign_integrity": sign_integrity.as_dict(),
+        "canonical_outcome": canonical.as_dict(),
+        "bar_by_bar_replay": bar_by_bar.as_dict(),
+        "strict_oos_canonical": strict_oos_canonical.as_dict(),
         "research_only": True,
         "paper_filter_enabled": False,
         "can_send_real_orders": False,
@@ -579,6 +766,41 @@ def render_pack_v829_text(payload: dict[str, Any]) -> str:
     )
     audit = payload.get("adversarial_audit") or {}
     lines.append(f"adversarial_audit_status: {audit.get('audit_status')}")
+    sign = payload.get("sign_integrity") or {}
+    if sign:
+        lines.append(
+            f"sign_bug_ratio: {sign.get('sign_bug_ratio', 0.0):.4f}"
+        )
+    canonical = payload.get("canonical_outcome") or {}
+    if canonical:
+        lines.append(
+            f"canonical_outcome_ok_ratio: "
+            f"{canonical.get('canonical_outcome_ok_ratio', 0.0):.4f}"
+        )
+        lines.append(
+            f"canonical_outcome_source_top: "
+            f"{canonical.get('canonical_outcome_source_top') or 'NONE'}"
+        )
+    bbr = payload.get("bar_by_bar_replay") or {}
+    if bbr:
+        lines.append(
+            f"bar_by_bar_replay_available: "
+            f"{str(bbr.get('bar_by_bar_replay_available')).lower()}"
+        )
+        lines.append(
+            f"best_policy_bar_by_bar: "
+            f"{bbr.get('best_policy_bar_by_bar') or 'NONE'}"
+        )
+        lines.append(
+            f"best_policy_bar_by_bar_status: "
+            f"{bbr.get('best_policy_bar_by_bar_status')}"
+        )
+    soc = payload.get("strict_oos_canonical") or {}
+    if soc:
+        lines.append(
+            f"strict_oos_canonical_status: "
+            f"{soc.get('final_status_top_level')}"
+        )
     lines.extend([
         "research_only: true",
         "paper_filter_enabled: false",

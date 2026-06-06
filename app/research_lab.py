@@ -3033,6 +3033,164 @@ class ResearchLab:
             text += "\n" + warning
         return text
 
+    def rebound_sign_integrity_v8293_cli(
+        self, hours: int = 168, limit: int = 50000,
+    ) -> str:
+        from .labs.counterfactual_training_dataset import build_dataset
+        from .labs.edgeguard_repeat_dedup_v8_2_9 import dedup_edgeguard_repeats
+        from .labs.rebound_long_candidate_extractor_v8_2_9 import (
+            extract_rebound_long_candidates,
+        )
+        from .labs.rebound_outcome_sign_integrity_v8_2_9_3 import (
+            audit_sign_integrity,
+        )
+        dataset, _ = build_dataset(self.db, hours=int(hours), limit=int(limit))
+        extractor = extract_rebound_long_candidates(
+            self.db, hours=int(hours), limit=int(limit), rows=dataset,
+        )
+        deduped, _ = dedup_edgeguard_repeats(extractor.candidates, hours=int(hours))
+        r = audit_sign_integrity(deduped, dataset_rows=dataset, hours=int(hours))
+        lines = ["REBOUND SIGN INTEGRITY V8.2.9.3 START"]
+        lines.append(f"hours: {r.hours} status: {r.status}")
+        lines.append(f"total_candidates: {r.total_candidates}")
+        lines.append(f"sign_bug_count: {r.sign_bug_count}")
+        lines.append(f"sign_bug_ratio: {r.sign_bug_ratio:.4f}")
+        lines.append(
+            f"outcome_field_mismatch_count: {r.outcome_field_mismatch_count}"
+        )
+        for k, v in r.by_mismatch_type.items():
+            lines.append(f"by_mismatch {k}: {v}")
+        lines.extend(self._v82_safety_footer())
+        warning = self._v82_heavy_warning(hours)
+        if warning:
+            lines.append(warning)
+        lines.append("REBOUND SIGN INTEGRITY V8.2.9.3 END")
+        return "\n".join(lines)
+
+    def canonical_outcome_v8293_cli(
+        self, hours: int = 168, limit: int = 50000,
+    ) -> str:
+        from .labs.counterfactual_training_dataset import build_dataset
+        from .labs.edgeguard_repeat_dedup_v8_2_9 import dedup_edgeguard_repeats
+        from .labs.outcome_field_canonicalizer_v8_2_9_3 import canonicalize_rows
+        from .labs.rebound_long_candidate_extractor_v8_2_9 import (
+            extract_rebound_long_candidates,
+        )
+        dataset, _ = build_dataset(self.db, hours=int(hours), limit=int(limit))
+        extractor = extract_rebound_long_candidates(
+            self.db, hours=int(hours), limit=int(limit), rows=dataset,
+        )
+        deduped, _ = dedup_edgeguard_repeats(extractor.candidates, hours=int(hours))
+        r = canonicalize_rows(deduped, hours=int(hours))
+        lines = ["CANONICAL OUTCOME V8.2.9.3 START"]
+        lines.append(f"hours: {r.hours} status: {r.status}")
+        lines.append(f"rows_audited: {r.rows_audited}")
+        lines.append(f"ok_count: {r.ok_count}")
+        lines.append(f"need_ohlcv_path_count: {r.need_ohlcv_path_count}")
+        lines.append(f"field_mismatch_count: {r.field_mismatch_count}")
+        lines.append(f"sign_suspect_count: {r.sign_suspect_count}")
+        lines.append(f"need_data_count: {r.need_data_count}")
+        lines.append(
+            f"canonical_outcome_ok_ratio: {r.canonical_outcome_ok_ratio:.4f}"
+        )
+        lines.append(
+            f"canonical_outcome_source_top: {r.canonical_outcome_source_top or 'NONE'}"
+        )
+        for k, v in r.by_source.items():
+            lines.append(f"by_source {k}: {v}")
+        lines.extend(self._v82_safety_footer())
+        warning = self._v82_heavy_warning(hours)
+        if warning:
+            lines.append(warning)
+        lines.append("CANONICAL OUTCOME V8.2.9.3 END")
+        return "\n".join(lines)
+
+    def exit_bar_replay_v8293_cli(
+        self, hours: int = 168, limit: int = 50000,
+    ) -> str:
+        from .labs.counterfactual_training_dataset import build_dataset
+        from .labs.edgeguard_repeat_dedup_v8_2_9 import dedup_edgeguard_repeats
+        from .labs.exit_bar_by_bar_replay_v8_2_9_3 import run_bar_by_bar_replay
+        from .labs.rebound_long_candidate_extractor_v8_2_9 import (
+            extract_rebound_long_candidates,
+        )
+        dataset, _ = build_dataset(self.db, hours=int(hours), limit=int(limit))
+        extractor = extract_rebound_long_candidates(
+            self.db, hours=int(hours), limit=int(limit), rows=dataset,
+        )
+        deduped, _ = dedup_edgeguard_repeats(extractor.candidates, hours=int(hours))
+        r = run_bar_by_bar_replay(deduped, hours=int(hours))
+        lines = ["EXIT BAR-BY-BAR REPLAY V8.2.9.3 START"]
+        lines.append(f"hours: {r.hours} status: {r.status}")
+        lines.append(f"rows_audited: {r.rows_audited}")
+        lines.append(f"replay_rows: {r.replay_rows}")
+        lines.append(f"need_data_rows: {r.need_data_rows}")
+        lines.append(
+            f"bar_by_bar_replay_available: "
+            f"{str(r.bar_by_bar_replay_available).lower()}"
+        )
+        lines.append(
+            f"best_policy_bar_by_bar: {r.best_policy_bar_by_bar or 'NONE'}"
+        )
+        lines.append(
+            f"best_policy_bar_by_bar_status: {r.best_policy_bar_by_bar_status}"
+        )
+        lines.extend(self._v82_safety_footer())
+        warning = self._v82_heavy_warning(hours)
+        if warning:
+            lines.append(warning)
+        lines.append("EXIT BAR-BY-BAR REPLAY V8.2.9.3 END")
+        return "\n".join(lines)
+
+    def rebound_strict_oos_canonical_v8293_cli(
+        self, hours: int = 168, limit: int = 50000,
+    ) -> str:
+        from .labs.counterfactual_training_dataset import build_dataset
+        from .labs.edgeguard_repeat_dedup_v8_2_9 import dedup_edgeguard_repeats
+        from .labs.rebound_long_candidate_extractor_v8_2_9 import (
+            extract_rebound_long_candidates,
+        )
+        from .labs.rebound_long_strict_oos_canonical_v8_2_9_3 import (
+            run_strict_oos_canonical,
+        )
+        dataset, _ = build_dataset(self.db, hours=int(hours), limit=int(limit))
+        extractor = extract_rebound_long_candidates(
+            self.db, hours=int(hours), limit=int(limit), rows=dataset,
+        )
+        deduped, dedup_report = dedup_edgeguard_repeats(
+            extractor.candidates, hours=int(hours),
+        )
+        r = run_strict_oos_canonical(
+            deduped, hours=int(hours),
+            score_anti_calibrated=True,
+            duplicate_ratio_after=dedup_report.duplicate_ratio_after,
+            input_is_deduped=True,
+        )
+        lines = ["REBOUND STRICT OOS CANONICAL V8.2.9.3 START"]
+        lines.append(f"hours: {r.hours} status: {r.status}")
+        lines.append(f"candidates_input: {r.candidates_input}")
+        lines.append(
+            f"candidates_with_canonical_ok: {r.candidates_with_canonical_ok}"
+        )
+        lines.append(f"canonical_ok_ratio: {r.canonical_ok_ratio:.4f}")
+        lines.append(f"sign_bug_ratio: {r.sign_bug_ratio:.4f}")
+        lines.append(f"final_status_top_level: {r.final_status_top_level}")
+        lines.append(
+            f"rejected_for_sign_bug: {str(r.rejected_for_sign_bug).lower()}"
+        )
+        lines.append(
+            f"rejected_for_canonical_insufficient: "
+            f"{str(r.rejected_for_canonical_insufficient).lower()}"
+        )
+        for k, v in r.by_final_status.items():
+            lines.append(f"by_final_status {k}: {v}")
+        lines.extend(self._v82_safety_footer())
+        warning = self._v82_heavy_warning(hours)
+        if warning:
+            lines.append(warning)
+        lines.append("REBOUND STRICT OOS CANONICAL V8.2.9.3 END")
+        return "\n".join(lines)
+
     def rebound_outcome_reconciliation_v829_cli(
         self, hours: int = 168, limit: int = 50000,
     ) -> str:
@@ -3865,6 +4023,10 @@ def build_argument_parser() -> argparse.ArgumentParser:
             "export-research-v829",
             "research-pack-v829",
             "rebound-outcome-reconciliation-v829",
+            "rebound-sign-integrity-v8293",
+            "canonical-outcome-v8293",
+            "exit-bar-replay-v8293",
+            "rebound-strict-oos-canonical-v8293",
             "ohlcv-replay-loader-smoke-test",
             "ohlcv-replay-loader-audit",
             "duplicate-module-audit-smoke-test",
@@ -4609,6 +4771,34 @@ def main() -> None:
         limit_arg = int(getattr(args, "limit", 50000) or 50000)
         print(
             lab.rebound_outcome_reconciliation_v829_cli(
+                hours=args.hours, limit=limit_arg,
+            )
+        )
+    elif args.command == "rebound-sign-integrity-v8293":
+        limit_arg = int(getattr(args, "limit", 50000) or 50000)
+        print(
+            lab.rebound_sign_integrity_v8293_cli(
+                hours=args.hours, limit=limit_arg,
+            )
+        )
+    elif args.command == "canonical-outcome-v8293":
+        limit_arg = int(getattr(args, "limit", 50000) or 50000)
+        print(
+            lab.canonical_outcome_v8293_cli(
+                hours=args.hours, limit=limit_arg,
+            )
+        )
+    elif args.command == "exit-bar-replay-v8293":
+        limit_arg = int(getattr(args, "limit", 50000) or 50000)
+        print(
+            lab.exit_bar_replay_v8293_cli(
+                hours=args.hours, limit=limit_arg,
+            )
+        )
+    elif args.command == "rebound-strict-oos-canonical-v8293":
+        limit_arg = int(getattr(args, "limit", 50000) or 50000)
+        print(
+            lab.rebound_strict_oos_canonical_v8293_cli(
                 hours=args.hours, limit=limit_arg,
             )
         )

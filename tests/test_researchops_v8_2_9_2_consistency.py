@@ -548,7 +548,10 @@ def test_export_v829_2_manifest_v2_keys(tmp_path):
     base = tmp_path / "v8292_manifest"
     export_research_v829(None, rows=rows, base_dir=base)
     manifest = json.loads((base / "manifest_v1.json").read_text(encoding="utf-8"))
-    assert manifest["version"] == "v8.2.9.v2"
+    # V8.2.9.2 introduced the v2 manifest; later hotfixes (V8.2.9.3+,
+    # V8.2.9.4+) bump the patch suffix but the V8.2.9.2-required keys
+    # must stay.
+    assert manifest["version"] in {"v8.2.9.v2", "v8.2.9.v3", "v8.2.9.v4"}
     for key in (
         "duplicate_ratio_before",
         "duplicate_ratio_after",
