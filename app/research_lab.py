@@ -2683,6 +2683,117 @@ class ResearchLab:
             text += "\n" + warning
         return text
 
+    # ---- V8.2.8 Dual-Side Root Cause Fix ----
+
+    def dual_side_barrier_audit_v828_cli(self, hours: int = 168, limit: int = 50000) -> str:
+        from .labs.dual_side_barrier_truth_audit_v8_2_8 import audit_dual_side_barriers
+        r = audit_dual_side_barriers(self.db, hours=int(hours), limit=int(limit))
+        lines = ["DUAL SIDE BARRIER AUDIT V8.2.8 START"]
+        lines.append(f"hours: {r.hours} status: {r.status}")
+        lines.append(f"long_verdict: {r.long_verdict}")
+        lines.append(f"short_verdict: {r.short_verdict}")
+        for side_label, metrics in (("LONG", r.long_metrics), ("SHORT", r.short_metrics)):
+            lines.append(
+                f"{side_label} samples={metrics.total_rows} evaluable={metrics.evaluable_rows} "
+                f"suspicious_ratio={metrics.suspicious_ratio:.4f} "
+                f"sign_bug_ratio={metrics.sign_bug_ratio:.4f} "
+                f"barrier_bug_ratio={metrics.barrier_bug_ratio:.4f}"
+            )
+        lines.extend(self._v82_safety_footer())
+        warning = self._v82_heavy_warning(hours)
+        if warning:
+            lines.append(warning)
+        lines.append("DUAL SIDE BARRIER AUDIT V8.2.8 END")
+        return "\n".join(lines)
+
+    def duplicate_root_cause_v828_cli(self, hours: int = 168, limit: int = 50000) -> str:
+        from .labs.duplicate_source_root_cause_v8_2_8 import audit_duplicate_root_cause
+        r = audit_duplicate_root_cause(self.db, hours=int(hours), limit=int(limit))
+        lines = ["DUPLICATE ROOT CAUSE V8.2.8 START"]
+        lines.append(f"hours: {r.hours} status: {r.status}")
+        lines.append(f"evaluable_rows: {r.evaluable_rows}")
+        lines.append(f"duplicate_ratio: {r.duplicate_ratio:.4f}")
+        for cause, count in r.by_root_cause.items():
+            lines.append(f"root_cause {cause}: {count}")
+        for fix in r.proposed_fixes:
+            lines.append(f"proposed_fix: {fix}")
+        lines.extend(self._v82_safety_footer())
+        warning = self._v82_heavy_warning(hours)
+        if warning:
+            lines.append(warning)
+        lines.append("DUPLICATE ROOT CAUSE V8.2.8 END")
+        return "\n".join(lines)
+
+    def side_aware_score_calibration_v828_cli(self, hours: int = 168, limit: int = 50000) -> str:
+        from .labs.side_aware_score_calibration_v8_2_8 import calibrate_score_by_side
+        r = calibrate_score_by_side(self.db, hours=int(hours), limit=int(limit))
+        lines = ["SIDE AWARE SCORE CALIBRATION V8.2.8 START"]
+        lines.append(f"hours: {r.hours} status: {r.status} samples: {r.samples}")
+        lines.append(f"global_corr_net: {r.global_correlation_score_vs_net_pnl:.4f}")
+        lines.append(f"score_usable_long: {r.score_usable_long}")
+        lines.append(f"score_usable_short: {r.score_usable_short}")
+        lines.append(f"long_usefulness: {r.long_block.usefulness}")
+        lines.append(f"short_usefulness: {r.short_block.usefulness}")
+        lines.append(f"score_only_diagnostic: {r.score_only_diagnostic}")
+        lines.append(f"score_excluded_as_gate: {r.score_excluded_as_gate}")
+        lines.extend(self._v82_safety_footer())
+        warning = self._v82_heavy_warning(hours)
+        if warning:
+            lines.append(warning)
+        lines.append("SIDE AWARE SCORE CALIBRATION V8.2.8 END")
+        return "\n".join(lines)
+
+    def rebound_regime_turn_lab_v828_cli(self, hours: int = 168, limit: int = 50000) -> str:
+        from .labs.rebound_regime_turn_lab_v8_2_8 import detect_rebound_setups
+        r = detect_rebound_setups(self.db, hours=int(hours), limit=int(limit))
+        lines = ["REBOUND REGIME TURN LAB V8.2.8 START"]
+        lines.append(f"hours: {r.hours} status: {r.status}")
+        lines.append(f"rebound_candidates_count: {r.rebound_candidates_count}")
+        lines.append(f"rebound_good_count: {r.rebound_good_count}")
+        lines.append(f"rebound_bad_count: {r.rebound_bad_count}")
+        lines.append(f"net_ev_est_pct: {r.net_ev_est_pct:.4f}")
+        lines.append(f"readiness: {r.readiness}")
+        lines.append(f"detection_mode: {r.report_detection_mode}")
+        lines.append(
+            f"used_future_return_features: "
+            f"{str(bool(r.used_future_return_features)).lower()}"
+        )
+        lines.append(f"prefix_only_count: {r.prefix_only_count}")
+        lines.append(f"need_data_count: {r.need_data_count}")
+        lines.extend(self._v82_safety_footer())
+        warning = self._v82_heavy_warning(hours)
+        if warning:
+            lines.append(warning)
+        lines.append("REBOUND REGIME TURN LAB V8.2.8 END")
+        return "\n".join(lines)
+
+    def export_research_v828_cli(self, hours: int = 168, limit: int = 50000) -> str:
+        from .labs.research_export_v8_2_8 import export_research_v828
+        manifest = export_research_v828(self.db, hours=int(hours), limit=int(limit))
+        lines = ["EXPORT RESEARCH V8.2.8 START"]
+        lines.append(f"hours: {int(hours)} limit: {int(limit)}")
+        lines.append(f"base_dir: {manifest.get('base_dir')}")
+        for f in manifest.get("files") or []:
+            lines.append(f"file: {f.get('name')} size={f.get('size_bytes')} sha1={f.get('sha1')}")
+        z = manifest.get("zip")
+        if z:
+            lines.append(f"zip: {z.get('name')} size={z.get('size_bytes')} sha1={z.get('sha1')}")
+        lines.extend(self._v82_safety_footer())
+        warning = self._v82_heavy_warning(hours)
+        if warning:
+            lines.append(warning)
+        lines.append("EXPORT RESEARCH V8.2.8 END")
+        return "\n".join(lines)
+
+    def research_pack_v828_cli(self, hours: int = 168, limit: int = 50000) -> str:
+        from .labs.research_export_v8_2_8 import build_pack_v828, render_pack_v828_text
+        payload = build_pack_v828(self.db, hours=int(hours), limit=int(limit))
+        text = render_pack_v828_text(payload)
+        warning = self._v82_heavy_warning(hours)
+        if warning:
+            text += "\n" + warning
+        return text
+
     def _render_training_summary(self, summary, *, hours: int, limit: int) -> str:
         lines = ["COUNTERFACTUAL TRAINING SUMMARY START"]
         lines.append(f"hours: {int(hours)} limit: {int(limit)}")
@@ -3465,6 +3576,12 @@ def build_argument_parser() -> argparse.ArgumentParser:
             "final-rule-gate-v827",
             "export-research-v827",
             "research-pack-v827",
+            "dual-side-barrier-audit-v828",
+            "duplicate-root-cause-v828",
+            "side-aware-score-calibration-v828",
+            "rebound-regime-turn-lab-v828",
+            "export-research-v828",
+            "research-pack-v828",
             "ohlcv-replay-loader-smoke-test",
             "ohlcv-replay-loader-audit",
             "duplicate-module-audit-smoke-test",
@@ -4163,6 +4280,24 @@ def main() -> None:
     elif args.command == "research-pack-v827":
         limit_arg = int(getattr(args, "limit", 50000) or 50000)
         print(lab.research_pack_v827_cli(hours=args.hours, limit=limit_arg))
+    elif args.command == "dual-side-barrier-audit-v828":
+        limit_arg = int(getattr(args, "limit", 50000) or 50000)
+        print(lab.dual_side_barrier_audit_v828_cli(hours=args.hours, limit=limit_arg))
+    elif args.command == "duplicate-root-cause-v828":
+        limit_arg = int(getattr(args, "limit", 50000) or 50000)
+        print(lab.duplicate_root_cause_v828_cli(hours=args.hours, limit=limit_arg))
+    elif args.command == "side-aware-score-calibration-v828":
+        limit_arg = int(getattr(args, "limit", 50000) or 50000)
+        print(lab.side_aware_score_calibration_v828_cli(hours=args.hours, limit=limit_arg))
+    elif args.command == "rebound-regime-turn-lab-v828":
+        limit_arg = int(getattr(args, "limit", 50000) or 50000)
+        print(lab.rebound_regime_turn_lab_v828_cli(hours=args.hours, limit=limit_arg))
+    elif args.command == "export-research-v828":
+        limit_arg = int(getattr(args, "limit", 50000) or 50000)
+        print(lab.export_research_v828_cli(hours=args.hours, limit=limit_arg))
+    elif args.command == "research-pack-v828":
+        limit_arg = int(getattr(args, "limit", 50000) or 50000)
+        print(lab.research_pack_v828_cli(hours=args.hours, limit=limit_arg))
     elif args.command == "ohlcv-replay-loader-smoke-test":
         print(lab.ohlcv_replay_loader_smoke_test())
     elif args.command == "ohlcv-replay-loader-audit":
