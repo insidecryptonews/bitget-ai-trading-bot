@@ -50,12 +50,25 @@ MM_AMBIGUOUS_JOIN = "AMBIGUOUS_JOIN"
 
 REAL_OUTCOME_SOURCE = "SIGNAL_PATH_METRICS"
 
-# A path row is considered usable when its status indicates a closed /
-# completed observation (not still active / pending).
-COMPLETED_STATUSES = frozenset({"completed", "closed", "done", "finalized"})
+# V8.2.9.6 schema compatibility fix. The production DB finalizes a path
+# with status ``matured`` (127k+ rows), NOT ``completed``. Both count as
+# final. ``active`` is an in-progress path and NEVER counts as a real,
+# usable outcome for edge validation.
+FINAL_PATH_STATUSES = frozenset({"matured", "completed"})
+ACTIVE_PATH_STATUSES = frozenset({"active"})
+# Legacy alias kept for backward compatibility with any external import.
+COMPLETED_STATUSES = FINAL_PATH_STATUSES
 
 # Magnitude mismatch tolerance (percentage points) between proxy and real.
 MAGNITUDE_TOLERANCE_PCT = 0.50
+
+
+def _is_final_status(status: Any) -> bool:
+    return str(status or "").strip().lower() in FINAL_PATH_STATUSES
+
+
+def _is_active_status(status: Any) -> bool:
+    return str(status or "").strip().lower() in ACTIVE_PATH_STATUSES
 
 
 @dataclass
@@ -91,10 +104,15 @@ class BridgeReport:
     generated_at: str
     total_candidates: int = 0
     path_found_count: int = 0
+    # V8.2.9.6 — numeric_real_return_count is STRICTER than path_found:
+    # a path is "found" when it joins a final-status row, but only counts
+    # as a numeric real outcome when ``final_return_pct`` is numeric.
+    numeric_real_return_count: int = 0
     path_missing_count: int = 0
     path_ambiguous_count: int = 0
     path_incomplete_count: int = 0
     path_coverage_ratio: float = 0.0
+    numeric_real_outcome_coverage_ratio: float = 0.0
     proxy_sign_mismatch_count: int = 0
     proxy_sign_mismatch_ratio: float = 0.0
     proxy_magnitude_mismatch_count: int = 0
@@ -103,6 +121,24 @@ class BridgeReport:
     real_net_ev_avg: float = 0.0
     proxy_winrate: float = 0.0
     proxy_net_ev_avg: float = 0.0
+    # V8.2.9.6 — raw path-status breakdown (from the path_rows handed to
+    # the bridge; scoped to candidate observation_ids in the export).
+    raw_signal_path_metrics_total: int = 0
+    raw_signal_path_metrics_matured: int = 0
+    raw_signal_path_metrics_completed: int = 0
+    raw_signal_path_metrics_active: int = 0
+    # V8.2.9.6 — global join stats (filled by the export from a dedicated
+    # read-only DB count; 0 when not supplied).
+    joined_observations_to_matured_path: int = 0
+    joined_long_to_matured_path: int = 0
+    joined_short_to_matured_path: int = 0
+    # V8.2.9.6 — candidate-side join diagnostics.
+    candidate_observation_id_present_count: int = 0
+    candidate_observation_id_missing_count: int = 0
+    candidate_path_found_by_observation_id: int = 0
+    candidate_path_missing_even_with_observation_id: int = 0
+    candidate_path_found_by_symbol_timestamp: int = 0
+    candidate_path_ambiguous_symbol_timestamp: int = 0
     rows: list[dict[str, Any]] = field(default_factory=list)
     status: str = STATUS_NEED_DATA
     research_only: bool = True
@@ -153,7 +189,12 @@ def build_path_indexes(
         if oid is not None:
             by_obs.setdefault(oid, r)
         sym = str(r.get("symbol") or "").upper()
-        ts = str(r.get("timestamp") or r.get("created_at") or "")
+        # V8.2.9.6 — do NOT use signal_path_metrics.created_at as a
+        # semantic substitute for the signal timestamp. Only index by
+        # (symbol, timestamp) when a real signal ``timestamp`` exists on
+        # the path row; otherwise the (symbol, timestamp) fallback is
+        # disabled for that row (safer than a created_at false match).
+        ts = str(r.get("timestamp") or "")
         if sym and ts:
             key = (sym, ts)
             st_counts[key] = st_counts.get(key, 0) + 1
@@ -167,12 +208,24 @@ def _join(
     by_st: dict[tuple[str, str], dict[str, Any]],
     st_counts: dict[tuple[str, str], int],
 ) -> tuple[dict[str, Any] | None, str]:
-    """Resolve the path row for a candidate. Returns ``(path_row, method)``."""
+    """Resolve the path row for a candidate. Returns ``(path_row, method)``.
+
+    V8.2.9.6.1 — strict observation_id contract: if the candidate carries
+    a non-empty ``observation_id`` (or ``signal_id``) but it does NOT
+    match a path row, the join FAILS as ``JOIN_MISSING``. The
+    ``(symbol, timestamp)`` fallback is forbidden in that case because a
+    coincidental same-symbol same-timestamp match would be a different
+    observation. The fallback is reserved for candidates with NO id.
+    """
     oid = _norm_id(candidate.get("observation_id")) or _norm_id(
         candidate.get("signal_id")
     )
-    if oid is not None and oid in by_obs:
-        return by_obs[oid], JOIN_OBSERVATION_ID
+    if oid is not None:
+        # Candidate has a real ID — it MUST match by ID or the join
+        # fails. No temporal fallback for ID-bearing candidates.
+        if oid in by_obs:
+            return by_obs[oid], JOIN_OBSERVATION_ID
+        return None, JOIN_MISSING
     sym = str(candidate.get("symbol") or "").upper()
     ts = str(candidate.get("timestamp") or "")
     if sym and ts:
@@ -217,21 +270,65 @@ def _classify_mismatch(
     return MM_MATCH, delta, True
 
 
+def _raw_status_breakdown(path_rows: list[dict[str, Any]]) -> tuple[int, int, int, int]:
+    """Return ``(total, matured, completed, active)`` over path rows."""
+    total = matured = completed = active = 0
+    for r in path_rows:
+        total += 1
+        s = str(r.get("status") or "").strip().lower()
+        if s == "matured":
+            matured += 1
+        elif s == "completed":
+            completed += 1
+        elif s in ACTIVE_PATH_STATUSES:
+            active += 1
+    return total, matured, completed, active
+
+
 def bridge_candidates(
     candidates: Iterable[dict[str, Any]] | None,
     path_rows: Iterable[dict[str, Any]] | None,
     *,
     hours: int = 168,
+    global_path_stats: dict[str, Any] | None = None,
 ) -> BridgeReport:
     """Join candidates to real path outcomes and compute proxy-vs-real
-    diagnostics."""
+    diagnostics.
+
+    V8.2.9.6:
+    - A path counts as ``PATH_FOUND`` only when the joined row has a
+      FINAL status (``matured`` or ``completed``). ``active`` →
+      ``PATH_INCOMPLETE`` and never feeds real EV.
+    - ``numeric_real_return_count`` is tracked separately and is the
+      basis for real EV / winrate — a found path without numeric
+      ``final_return_pct`` does NOT count as a real outcome.
+    - Rich candidate-side join diagnostics are recorded so a low
+      coverage run reveals exactly WHY (missing obs_id, join miss,
+      status, etc.).
+    """
     report = BridgeReport(
         hours=int(hours),
         generated_at=datetime.now(timezone.utc).isoformat(),
     )
     cand_list = list(candidates or [])
+    path_list = list(path_rows or [])
     report.total_candidates = len(cand_list)
-    by_obs, by_st, st_counts = build_path_indexes(path_rows or [])
+    (report.raw_signal_path_metrics_total,
+     report.raw_signal_path_metrics_matured,
+     report.raw_signal_path_metrics_completed,
+     report.raw_signal_path_metrics_active) = _raw_status_breakdown(path_list)
+    # Global join stats (filled by the export from a read-only DB count).
+    gps = dict(global_path_stats or {})
+    report.joined_observations_to_matured_path = int(
+        gps.get("joined_observations_to_matured_path", 0) or 0
+    )
+    report.joined_long_to_matured_path = int(
+        gps.get("joined_long_to_matured_path", 0) or 0
+    )
+    report.joined_short_to_matured_path = int(
+        gps.get("joined_short_to_matured_path", 0) or 0
+    )
+    by_obs, by_st, st_counts = build_path_indexes(path_list)
     if not cand_list:
         return report
 
@@ -243,7 +340,23 @@ def bridge_candidates(
     proxy_n = 0
     for c in cand_list:
         proxy = _f(c.get("net_pnl_est"))
+        cand_oid = _norm_id(c.get("observation_id")) or _norm_id(c.get("signal_id"))
+        if cand_oid is not None:
+            report.candidate_observation_id_present_count += 1
+        else:
+            report.candidate_observation_id_missing_count += 1
         path_row, method = _join(c, by_obs, by_st, st_counts)
+        # Candidate-side join diagnostics.
+        if method == JOIN_OBSERVATION_ID:
+            report.candidate_path_found_by_observation_id += 1
+        elif method == JOIN_SYMBOL_TIMESTAMP_UNIQUE:
+            report.candidate_path_found_by_symbol_timestamp += 1
+        elif method == JOIN_AMBIGUOUS:
+            report.candidate_path_ambiguous_symbol_timestamp += 1
+        elif method == JOIN_MISSING and cand_oid is not None:
+            # Had an observation_id but still no path row matched.
+            report.candidate_path_missing_even_with_observation_id += 1
+
         if path_row is None:
             path_status = (
                 PATH_AMBIGUOUS_JOIN if method == JOIN_AMBIGUOUS else PATH_MISSING
@@ -265,23 +378,24 @@ def bridge_candidates(
             real_bmfe = _i(path_row.get("bars_to_mfe"))
             real_bmae = _i(path_row.get("bars_to_mae"))
             real_win = _real_win(path_row)
-            status_val = str(path_row.get("status") or "").lower()
-            if real_fr is None and not real_barrier:
-                path_status = PATH_INCOMPLETE
-                report.path_incomplete_count += 1
-            elif status_val and status_val not in COMPLETED_STATUSES and real_fr is None:
+            status_val = path_row.get("status")
+            # V8.2.9.6 — PATH_FOUND requires a FINAL status (matured /
+            # completed). Active or unknown status → INCOMPLETE.
+            if not _is_final_status(status_val):
                 path_status = PATH_INCOMPLETE
                 report.path_incomplete_count += 1
             else:
                 path_status = PATH_FOUND
                 report.path_found_count += 1
+                # Numeric real return is the STRICT requirement for EV.
                 if real_fr is not None:
+                    report.numeric_real_return_count += 1
                     real_nets.append(real_fr)
                     real_n += 1
                     if real_fr > 0:
                         real_wins += 1
         mismatch_type, delta, matches_sign = _classify_mismatch(
-            proxy, real_fr, method,
+            proxy, real_fr if path_status == PATH_FOUND else None, method,
         )
         if proxy is not None:
             proxy_nets.append(proxy)
@@ -317,6 +431,9 @@ def bridge_candidates(
 
     n = max(report.total_candidates, 1)
     report.path_coverage_ratio = report.path_found_count / n
+    report.numeric_real_outcome_coverage_ratio = (
+        report.numeric_real_return_count / n
+    )
     report.proxy_sign_mismatch_ratio = report.proxy_sign_mismatch_count / n
     report.proxy_magnitude_mismatch_ratio = (
         report.proxy_magnitude_mismatch_count / n

@@ -83,6 +83,10 @@ class CanonicalRealReport:
     ohlcv_replay_count: int = 0
     proxy_only_count: int = 0
     need_data_count: int = 0
+    # V8.2.9.6 — strict count of rows with canonical_is_real=True AND a
+    # numeric canonical_net_pnl_est. This (not path_found) is the basis
+    # for canonical_real_ok_ratio and any edge conclusion.
+    numeric_real_outcome_count: int = 0
     canonical_real_ok_ratio: float = 0.0
     canonical_source_top: str = ""
     by_source: dict[str, int] = field(default_factory=dict)
@@ -116,24 +120,30 @@ def _canonical_from_bridge(bridged: dict[str, Any], candidate: dict[str, Any]) -
     obs = bridged.get("observation_id") or candidate.get("observation_id")
     path_status = str(bridged.get("path_status") or "")
 
-    # 1. SIGNAL_PATH_METRICS — highest authority.
+    # 1. SIGNAL_PATH_METRICS — highest authority. V8.2.9.6: a found path
+    # is only a REAL outcome when ``final_return_pct`` is NUMERIC. A
+    # final-status path with no numeric return (e.g. only first_barrier_hit)
+    # does NOT count as real — fall through to proxy / need_data.
     if path_status == PATH_FOUND:
         real_fr = _f(bridged.get("real_final_return_pct"))
-        warning = WARN_NONE
-        if bridged.get("proxy_mismatch_type") == "SIGN_MISMATCH":
-            warning = WARN_SIGN_MISMATCH
-        return CanonicalRealRow(
-            observation_id=obs, symbol=symbol, timestamp=ts, side=side,
-            canonical_source=SOURCE_SIGNAL_PATH_METRICS,
-            canonical_is_real=True,
-            canonical_net_pnl_est=real_fr,
-            canonical_win=(real_fr > 0) if real_fr is not None else bridged.get("real_outcome_win"),
-            canonical_mfe_pct=_f(bridged.get("real_max_favorable_pct")),
-            canonical_mae_pct=_f(bridged.get("real_max_adverse_pct")),
-            canonical_first_barrier_hit=str(bridged.get("real_first_barrier_hit") or ""),
-            canonical_quality=QUALITY_REAL_PATH,
-            canonical_warning=warning,
-        )
+        if real_fr is not None:
+            warning = WARN_NONE
+            if bridged.get("proxy_mismatch_type") == "SIGN_MISMATCH":
+                warning = WARN_SIGN_MISMATCH
+            return CanonicalRealRow(
+                observation_id=obs, symbol=symbol, timestamp=ts, side=side,
+                canonical_source=SOURCE_SIGNAL_PATH_METRICS,
+                canonical_is_real=True,
+                canonical_net_pnl_est=real_fr,
+                canonical_win=real_fr > 0,
+                canonical_mfe_pct=_f(bridged.get("real_max_favorable_pct")),
+                canonical_mae_pct=_f(bridged.get("real_max_adverse_pct")),
+                canonical_first_barrier_hit=str(bridged.get("real_first_barrier_hit") or ""),
+                canonical_quality=QUALITY_REAL_PATH,
+                canonical_warning=warning,
+            )
+        # PATH_FOUND but no numeric final_return_pct → not real. Continue
+        # to OHLCV replay / proxy fallback below.
 
     # 2. OHLCV_BARRIER_REPLAY — candidate carries a valid bar path.
     path = candidate.get("ohlcv_path")
@@ -250,9 +260,15 @@ def canonicalize_real(
             report.proxy_only_count += 1
         else:
             report.need_data_count += 1
+        # V8.2.9.6 — strict numeric-real gate: is_real AND numeric net.
+        if row.canonical_is_real and isinstance(row.canonical_net_pnl_est, (int, float)):
+            report.numeric_real_outcome_count += 1
     report.by_source = by_source
-    real_ok = report.real_path_count + report.ohlcv_replay_count
-    report.canonical_real_ok_ratio = real_ok / max(report.rows_audited, 1)
+    # canonical_real_ok_ratio is based on the STRICT numeric-real count,
+    # not merely "path found".
+    report.canonical_real_ok_ratio = (
+        report.numeric_real_outcome_count / max(report.rows_audited, 1)
+    )
     if by_source:
         report.canonical_source_top = max(by_source.items(), key=lambda kv: kv[1])[0]
     report.rows = report.rows[:5000]

@@ -551,7 +551,7 @@ def test_export_v829_2_manifest_v2_keys(tmp_path):
     # V8.2.9.2 introduced the v2 manifest; later hotfixes (V8.2.9.3+,
     # V8.2.9.4+) bump the patch suffix but the V8.2.9.2-required keys
     # must stay.
-    assert manifest["version"] in {"v8.2.9.v2", "v8.2.9.v3", "v8.2.9.v4", "v8.2.9.v5"}
+    assert manifest["version"] in {"v8.2.9.v2", "v8.2.9.v3", "v8.2.9.v4", "v8.2.9.v5", "v8.2.9.v6"}
     for key in (
         "duplicate_ratio_before",
         "duplicate_ratio_after",

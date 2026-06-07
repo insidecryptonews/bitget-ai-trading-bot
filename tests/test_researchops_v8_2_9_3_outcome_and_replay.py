@@ -536,7 +536,7 @@ def test_export_v8293_manifest_v3_bump(tmp_path):
     manifest = json.loads((base / "manifest_v1.json").read_text(encoding="utf-8"))
     # V8.2.9.3 introduced the v3 manifest; V8.2.9.4+ bumps further but
     # the V8.2.9.3-required keys must stay.
-    assert manifest["version"] in {"v8.2.9.v3", "v8.2.9.v4", "v8.2.9.v5"}
+    assert manifest["version"] in {"v8.2.9.v3", "v8.2.9.v4", "v8.2.9.v5", "v8.2.9.v6"}
     for key in (
         "sign_integrity_status",
         "sign_bug_ratio",

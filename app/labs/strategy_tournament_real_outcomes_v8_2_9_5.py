@@ -124,7 +124,21 @@ def run_tournament_real(
     report.need_data_count = canonical.need_data_count
 
     merged = _merge_real_outcome(cand_list, canonical.rows)
-    real_rows = [r for r in merged if r.get("canonical_is_real") is True]
+    # V8.2.9.6.1 — strict local contract. Even though the canonicalizer
+    # is supposed to guarantee both invariants, the tournament refuses
+    # to depend blindly on it: a row contributes only when
+    # ``canonical_is_real is True`` AND ``canonical_net_pnl_est`` is a
+    # finite numeric value (no None, no NaN, no bool). Anything else is
+    # excluded — proxy or partial outcomes can never reach a sandbox
+    # status this way.
+    def _is_numeric_real_row(r: dict) -> bool:
+        if r.get("canonical_is_real") is not True:
+            return False
+        v = r.get("canonical_net_pnl_est")
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            return False
+        return v == v  # excludes NaN
+    real_rows = [r for r in merged if _is_numeric_real_row(r)]
     report.real_rows_used = len(real_rows)
 
     coverage_ok = (

@@ -317,7 +317,7 @@ def test_export_v8295_manifest_v5(tmp_path):
     base = tmp_path / "v8295_manifest"
     export_research_v829(None, rows=rows, base_dir=base)
     manifest = json.loads((base / "manifest_v1.json").read_text(encoding="utf-8"))
-    assert manifest["version"] == "v8.2.9.v5"
+    assert manifest["version"] in {"v8.2.9.v5", "v8.2.9.v6"}
     for key in (
         "signal_path_metrics_coverage_ratio",
         "path_found_count", "path_missing_count", "path_ambiguous_count",

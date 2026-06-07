@@ -19,7 +19,7 @@ import csv
 import hashlib
 import json
 import zipfile
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -247,6 +247,40 @@ def _fetch_path_rows(
         return []
 
 
+def _fetch_path_join_stats(db: Any, *, since_iso: str | None = None) -> dict[str, Any]:
+    """V8.2.9.6 read-only path-join stats. Returns ``{}`` when the db /
+    reader is unavailable.
+
+    V8.2.9.6.2 — STRICT ``since_iso`` contract. The reader MUST accept
+    ``since_iso`` as a keyword arg. There is no silent fallback to the
+    global-stats overload anymore: a TypeError from a reader that
+    doesn't accept the kwarg is allowed to surface up to the caller,
+    so a stale stub is detected at test time instead of silently
+    contaminating the export with global counters labelled
+    ``window_*``. Callers that pass ``since_iso=None`` still get the
+    parameterless behaviour.
+    """
+    if db is None:
+        return {}
+    reader = getattr(db, "fetch_signal_path_join_stats", None)
+    if not callable(reader):
+        return {}
+    if since_iso is None:
+        try:
+            return reader() or {}
+        except Exception:
+            return {}
+    # since_iso provided → call must accept it. Other errors are
+    # swallowed (e.g. transient DB issue) but a TypeError on the kwarg
+    # propagates so the test suite catches the contract violation.
+    try:
+        return reader(since_iso=since_iso) or {}
+    except TypeError:
+        raise
+    except Exception:
+        return {}
+
+
 def export_research_v829(
     db: Any = None,
     *,
@@ -319,7 +353,16 @@ def export_research_v829(
     # from the db when available; otherwise path coverage is 0 and the
     # tournament correctly returns NEED_MORE_DATA.
     path_rows = _fetch_path_rows(db, deduped_candidates, hours=hours, limit=limit)
-    bridge = bridge_candidates(deduped_candidates, path_rows, hours=hours)
+    # V8.2.9.6.1 — scope the join counters to the requested window so
+    # the summary/manifest never mix global stats with window stats.
+    _since_iso = (
+        datetime.now(timezone.utc) - timedelta(hours=int(hours))
+    ).isoformat()
+    _global_path_stats = _fetch_path_join_stats(db, since_iso=_since_iso)
+    bridge = bridge_candidates(
+        deduped_candidates, path_rows, hours=hours,
+        global_path_stats=_global_path_stats,
+    )
     canonical_real = canonicalize_real(deduped_candidates, path_rows, hours=hours)
     tournament_real = run_tournament_real(
         deduped_candidates, path_rows, hours=hours,
@@ -633,9 +676,72 @@ def export_research_v829(
         f.write(
             f"signal_path_metrics_coverage_ratio: {bridge.path_coverage_ratio:.4f}\n"
         )
+        f.write(
+            f"numeric_real_outcome_coverage_ratio: "
+            f"{bridge.numeric_real_outcome_coverage_ratio:.4f}\n"
+        )
         f.write(f"path_found_count: {bridge.path_found_count}\n")
+        f.write(f"numeric_real_return_count: {bridge.numeric_real_return_count}\n")
         f.write(f"path_missing_count: {bridge.path_missing_count}\n")
         f.write(f"path_ambiguous_count: {bridge.path_ambiguous_count}\n")
+        # V8.2.9.6 — raw path-status breakdown + global join stats.
+        f.write(
+            f"raw_signal_path_metrics_matured: "
+            f"{bridge.raw_signal_path_metrics_matured}\n"
+        )
+        f.write(
+            f"raw_signal_path_metrics_completed: "
+            f"{bridge.raw_signal_path_metrics_completed}\n"
+        )
+        f.write(
+            f"raw_signal_path_metrics_active: "
+            f"{bridge.raw_signal_path_metrics_active}\n"
+        )
+        f.write(
+            f"joined_observations_to_matured_path: "
+            f"{bridge.joined_observations_to_matured_path}\n"
+        )
+        f.write(
+            f"joined_long_to_matured_path: {bridge.joined_long_to_matured_path}\n"
+        )
+        f.write(
+            f"joined_short_to_matured_path: {bridge.joined_short_to_matured_path}\n"
+        )
+        # V8.2.9.6.1 — same numbers exposed as window-scoped explicit
+        # keys so the operator can never confuse them with global stats.
+        f.write(
+            f"window_joined_observations_to_matured_path: "
+            f"{bridge.joined_observations_to_matured_path}\n"
+        )
+        f.write(
+            f"window_joined_long_to_matured_path: "
+            f"{bridge.joined_long_to_matured_path}\n"
+        )
+        f.write(
+            f"window_joined_short_to_matured_path: "
+            f"{bridge.joined_short_to_matured_path}\n"
+        )
+        f.write(f"window_hours: {hours}\n")
+        # V8.2.9.6.2 — explicit scope + since_iso so the operator can
+        # always tell whether the counters are window-scoped.
+        f.write("window_stats_scope: window_since_iso\n")
+        f.write(f"window_stats_since_iso: {_since_iso}\n")
+        f.write(
+            f"candidate_observation_id_present_count: "
+            f"{bridge.candidate_observation_id_present_count}\n"
+        )
+        f.write(
+            f"candidate_observation_id_missing_count: "
+            f"{bridge.candidate_observation_id_missing_count}\n"
+        )
+        f.write(
+            f"candidate_path_found_by_observation_id: "
+            f"{bridge.candidate_path_found_by_observation_id}\n"
+        )
+        f.write(
+            f"candidate_path_missing_even_with_observation_id: "
+            f"{bridge.candidate_path_missing_even_with_observation_id}\n"
+        )
         f.write(
             f"proxy_sign_mismatch_ratio: {bridge.proxy_sign_mismatch_ratio:.4f}\n"
         )
@@ -678,7 +784,7 @@ def export_research_v829(
         summary_txt,
     ]
     manifest: dict[str, Any] = {
-        "version": "v8.2.9.v5",
+        "version": "v8.2.9.v6",
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "base_dir": str(base),
         "files": [],
@@ -752,6 +858,29 @@ def export_research_v829(
         "tournament_real_best_strategy": tournament_real.tournament_real_best_strategy,
         "tournament_real_best_status": tournament_real.tournament_real_best_status,
         "paper_sandbox_candidates_real": tournament_real.paper_sandbox_candidates_real,
+        # V8.2.9.6 keys — schema compatibility diagnostics.
+        "numeric_real_outcome_coverage_ratio": bridge.numeric_real_outcome_coverage_ratio,
+        "numeric_real_return_count": bridge.numeric_real_return_count,
+        "raw_signal_path_metrics_matured": bridge.raw_signal_path_metrics_matured,
+        "raw_signal_path_metrics_completed": bridge.raw_signal_path_metrics_completed,
+        "raw_signal_path_metrics_active": bridge.raw_signal_path_metrics_active,
+        "joined_observations_to_matured_path": bridge.joined_observations_to_matured_path,
+        "joined_long_to_matured_path": bridge.joined_long_to_matured_path,
+        "joined_short_to_matured_path": bridge.joined_short_to_matured_path,
+        # V8.2.9.6.1 — window-scoped aliases.
+        "window_hours": int(hours),
+        "window_joined_observations_to_matured_path": (
+            bridge.joined_observations_to_matured_path
+        ),
+        "window_joined_long_to_matured_path": bridge.joined_long_to_matured_path,
+        "window_joined_short_to_matured_path": bridge.joined_short_to_matured_path,
+        # V8.2.9.6.2 — explicit scope + since_iso.
+        "window_stats_scope": "window_since_iso",
+        "window_stats_since_iso": _since_iso,
+        "candidate_observation_id_present_count": bridge.candidate_observation_id_present_count,
+        "candidate_observation_id_missing_count": bridge.candidate_observation_id_missing_count,
+        "candidate_path_found_by_observation_id": bridge.candidate_path_found_by_observation_id,
+        "candidate_path_missing_even_with_observation_id": bridge.candidate_path_missing_even_with_observation_id,
         "adversarial_audit_status": audit.audit_status,
         "blockers": audit.blockers,
         "research_only": True,
@@ -865,14 +994,23 @@ def build_pack_v829(
     )
     # V8.2.9.5 — real outcome bridge + canonical real + tournament real.
     path_rows = _fetch_path_rows(db, deduped_candidates, hours=hours, limit=limit)
-    bridge = bridge_candidates(deduped_candidates, path_rows, hours=hours)
+    # V8.2.9.6.1 — scope the join counters to the requested window so
+    # the summary/manifest never mix global stats with window stats.
+    _since_iso = (
+        datetime.now(timezone.utc) - timedelta(hours=int(hours))
+    ).isoformat()
+    _global_path_stats = _fetch_path_join_stats(db, since_iso=_since_iso)
+    bridge = bridge_candidates(
+        deduped_candidates, path_rows, hours=hours,
+        global_path_stats=_global_path_stats,
+    )
     canonical_real = canonicalize_real(deduped_candidates, path_rows, hours=hours)
     tournament_real = run_tournament_real(
         deduped_candidates, path_rows, hours=hours,
     )
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(),
-        "pack_version": "research_v8_2_9_v5",
+        "pack_version": "research_v8_2_9_v6",
         "hours": int(hours),
         "limit": int(limit),
         "rebound_extractor": extractor.as_dict(),

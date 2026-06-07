@@ -3168,6 +3168,34 @@ class ResearchLab:
             text += "\n" + warning
         return text
 
+    # ---- V8.2.9.6 aliases (schema compatibility fix; same lab funcs) ----
+    # The bridge / canonical / tournament / export now honour matured
+    # status + numeric final_return_pct (V8.2.9.6). These aliases give
+    # clean traceability without breaking the v8295 commands.
+
+    def signal_path_bridge_v8296_cli(self, hours: int = 168, limit: int = 50000) -> str:
+        return self.signal_path_bridge_v8295_cli(hours=hours, limit=limit).replace(
+            "V8.2.9.5", "V8.2.9.6", 2
+        )
+
+    def canonical_real_outcome_v8296_cli(self, hours: int = 168, limit: int = 50000) -> str:
+        return self.canonical_real_outcome_v8295_cli(hours=hours, limit=limit).replace(
+            "V8.2.9.5", "V8.2.9.6", 2
+        )
+
+    def strategy_tournament_real_v8296_cli(self, hours: int = 168, limit: int = 50000) -> str:
+        return self.strategy_tournament_real_v8295_cli(hours=hours, limit=limit).replace(
+            "V8.2.9.5", "V8.2.9.6", 2
+        )
+
+    def export_research_v8296_cli(self, hours: int = 168, limit: int = 50000) -> str:
+        return self.export_research_v8295_cli(hours=hours, limit=limit).replace(
+            "V8.2.9.5", "V8.2.9.6", 2
+        )
+
+    def research_pack_v8296_cli(self, hours: int = 168, limit: int = 50000) -> str:
+        return self.research_pack_v8295_cli(hours=hours, limit=limit)
+
     def rebound_sign_integrity_v8293_cli(
         self, hours: int = 168, limit: int = 50000,
     ) -> str:
@@ -4167,6 +4195,11 @@ def build_argument_parser() -> argparse.ArgumentParser:
             "strategy-tournament-real-v8295",
             "export-research-v8295",
             "research-pack-v8295",
+            "signal-path-bridge-v8296",
+            "canonical-real-outcome-v8296",
+            "strategy-tournament-real-v8296",
+            "export-research-v8296",
+            "research-pack-v8296",
             "ohlcv-replay-loader-smoke-test",
             "ohlcv-replay-loader-audit",
             "duplicate-module-audit-smoke-test",
@@ -4957,6 +4990,21 @@ def main() -> None:
     elif args.command == "research-pack-v8295":
         limit_arg = int(getattr(args, "limit", 50000) or 50000)
         print(lab.research_pack_v8295_cli(hours=args.hours, limit=limit_arg))
+    elif args.command == "signal-path-bridge-v8296":
+        limit_arg = int(getattr(args, "limit", 50000) or 50000)
+        print(lab.signal_path_bridge_v8296_cli(hours=args.hours, limit=limit_arg))
+    elif args.command == "canonical-real-outcome-v8296":
+        limit_arg = int(getattr(args, "limit", 50000) or 50000)
+        print(lab.canonical_real_outcome_v8296_cli(hours=args.hours, limit=limit_arg))
+    elif args.command == "strategy-tournament-real-v8296":
+        limit_arg = int(getattr(args, "limit", 50000) or 50000)
+        print(lab.strategy_tournament_real_v8296_cli(hours=args.hours, limit=limit_arg))
+    elif args.command == "export-research-v8296":
+        limit_arg = int(getattr(args, "limit", 50000) or 50000)
+        print(lab.export_research_v8296_cli(hours=args.hours, limit=limit_arg))
+    elif args.command == "research-pack-v8296":
+        limit_arg = int(getattr(args, "limit", 50000) or 50000)
+        print(lab.research_pack_v8296_cli(hours=args.hours, limit=limit_arg))
     elif args.command == "ohlcv-replay-loader-smoke-test":
         print(lab.ohlcv_replay_loader_smoke_test())
     elif args.command == "ohlcv-replay-loader-audit":

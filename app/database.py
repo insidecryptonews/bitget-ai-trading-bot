@@ -3182,6 +3182,77 @@ class Database:
         with self._connect() as conn:
             return self._fetchall_dicts(conn.execute(sql, tuple(params)))
 
+    def fetch_signal_path_join_stats(self, *, since_iso: str | None = None) -> dict[str, int]:
+        """V8.2.9.6 research-only diagnostic counts. SELECT only.
+
+        Returns global join breakdown so the bridge can report whether
+        matured paths exist and how they split by side, independent of
+        the candidate subset. Uses ``signal_observations.timestamp`` as
+        the temporal filter (NOT ``created_at``). Never writes.
+        """
+        out: dict[str, int] = {
+            "raw_signal_path_metrics_total": 0,
+            "raw_signal_path_metrics_matured": 0,
+            "raw_signal_path_metrics_completed": 0,
+            "raw_signal_path_metrics_active": 0,
+            "joined_observations_to_matured_path": 0,
+            "joined_long_to_matured_path": 0,
+            "joined_short_to_matured_path": 0,
+        }
+        ph = "%s" if self._use_postgres else "?"
+        try:
+            with self._connect() as conn:
+                # Raw status breakdown over signal_path_metrics.
+                rows = self._fetchall_dicts(conn.execute(
+                    "SELECT LOWER(COALESCE(status,'')) AS s, COUNT(*) AS c "
+                    "FROM signal_path_metrics GROUP BY LOWER(COALESCE(status,''))"
+                ))
+                for r in rows:
+                    s = str(r.get("s") or "")
+                    c = int(r.get("c") or 0)
+                    out["raw_signal_path_metrics_total"] += c
+                    if s == "matured":
+                        out["raw_signal_path_metrics_matured"] = c
+                    elif s == "completed":
+                        out["raw_signal_path_metrics_completed"] = c
+                    elif s == "active":
+                        out["raw_signal_path_metrics_active"] = c
+                # Joined obs->matured path, optionally time-filtered by
+                # signal_observations.timestamp.
+                time_clause = ""
+                params: tuple[Any, ...] = ()
+                if since_iso:
+                    time_clause = f" AND so.timestamp >= {ph}"
+                    params = (since_iso,)
+                base = (
+                    "FROM signal_observations so "
+                    "JOIN signal_path_metrics spm ON spm.observation_id = so.id "
+                    "WHERE LOWER(COALESCE(spm.status,'')) = 'matured'" + time_clause
+                )
+                row = conn.execute(
+                    f"SELECT COUNT(*) AS c {base}", params
+                ).fetchone()
+                out["joined_observations_to_matured_path"] = int(
+                    self._row_value(row, "c", 0, 0) or 0
+                )
+                row_l = conn.execute(
+                    f"SELECT COUNT(*) AS c {base} AND UPPER(COALESCE(so.side,''))='LONG'",
+                    params,
+                ).fetchone()
+                out["joined_long_to_matured_path"] = int(
+                    self._row_value(row_l, "c", 0, 0) or 0
+                )
+                row_s = conn.execute(
+                    f"SELECT COUNT(*) AS c {base} AND UPPER(COALESCE(so.side,''))='SHORT'",
+                    params,
+                ).fetchone()
+                out["joined_short_to_matured_path"] = int(
+                    self._row_value(row_s, "c", 0, 0) or 0
+                )
+        except Exception:
+            return out
+        return out
+
     def fetch_ohlcv_path_for_observation(
         self,
         *,
