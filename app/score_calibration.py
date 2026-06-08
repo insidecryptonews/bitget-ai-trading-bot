@@ -93,7 +93,7 @@ class ScoreCalibration:
         return "\n".join(lines)
 
 
-def load_score_rows(db: Any, *, hours: int = 24) -> list[dict[str, Any]]:
+def load_score_rows(db: Any, *, hours: int = 24, include_market_probe: bool = False) -> list[dict[str, Any]]:
     since = (datetime.now(timezone.utc) - timedelta(hours=max(1, int(hours or 24)))).isoformat()
     labels = _safe(lambda: db.fetch_labeled_signal_rows_since(since, limit=50000), [])
     paths = _safe(lambda: db.fetch_signal_path_metrics_since(since, limit=50000), [])
@@ -106,9 +106,18 @@ def load_score_rows(db: Any, *, hours: int = 24) -> list[dict[str, Any]]:
     seen_obs: set[str] = set()
     for label in labels:
         obs_id = str(label.get("observation_id") or label.get("id") or "")
+        if obs_id and obs_id in seen_obs:
+            continue
         path = paths_by_obs.get(obs_id, {})
         row = _normalize_row(label, path)
         if row:
+            if row.get("source") == "market_probe" and not include_market_probe:
+                if obs_id:
+                    seen_obs.add(obs_id)
+                continue
+            row["clean_view"] = True
+            row["raw_contaminated_excluded"] = True
+            row["market_probe_excluded"] = True
             rows.append(row)
             if obs_id:
                 seen_obs.add(obs_id)
@@ -118,6 +127,11 @@ def load_score_rows(db: Any, *, hours: int = 24) -> list[dict[str, Any]]:
             continue
         row = _normalize_row(path, path)
         if row:
+            if row.get("source") == "market_probe" and not include_market_probe:
+                continue
+            row["clean_view"] = True
+            row["raw_contaminated_excluded"] = True
+            row["market_probe_excluded"] = True
             rows.append(row)
     return rows
 

@@ -183,6 +183,8 @@ class ExecutionSafetyAudit:
         hardening = validate_config_hardening(self.config)
         pending = reconcile_pending_executions(self.db, mode=self.config.mode) if self.db is not None else {"status": "UNKNOWN", "pending_count": 0}
         clock = check_clock_drift(exchange_time=None)
+        clock_status = str(clock.get("clock_drift_status") or "UNKNOWN").upper()
+        pre_live_clock_gate = "OK" if clock_status == "OK" else f"BLOCKED_CLOCK_DRIFT_{clock_status}"
         lines = [
             "EXECUTION SAFETY AUDIT START",
             "mode: research_shadow_paper_safe",
@@ -194,6 +196,7 @@ class ExecutionSafetyAudit:
             "emergency_stop_failsafe: OK",
             "circuit_breaker_magnitude: OK",
             f"clock_drift: {clock.get('clock_drift_status')}",
+            f"pre_live_readiness_clock_gate: {pre_live_clock_gate}",
             f"config_hardening: {hardening.get('config_hardening_status')}",
             "LIVE_TRADING=false" if not self.config.live_trading else "LIVE_TRADING=true_BLOCKED",
             f"DRY_RUN={str(self.config.dry_run).lower()}",

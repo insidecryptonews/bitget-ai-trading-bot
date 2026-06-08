@@ -1208,9 +1208,21 @@ class Database:
             conn.execute(sql, params)
 
     def record_signal_label(self, label: dict[str, Any]) -> int:
+        observation_id = label.get("observation_id")
+        if observation_id is not None:
+            try:
+                existing = self.fetch_signal_label_for_observation(int(observation_id))
+            except (TypeError, ValueError):
+                existing = None
+            if existing:
+                # Safety guard: labels are an outcome contract, so a second row
+                # for the same observation would contaminate EV/PF aggregation.
+                # Keep the first persisted label and return its id instead of
+                # inserting a duplicate.
+                return int(existing.get("id") or 0)
         payload = {
             "timestamp": label.get("timestamp", iso_utc()),
-            "observation_id": label.get("observation_id"),
+            "observation_id": observation_id,
             "label": label.get("label"),
             "first_barrier_hit": label.get("first_barrier_hit"),
             "bars_to_outcome": label.get("bars_to_outcome"),

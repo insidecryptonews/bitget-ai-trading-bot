@@ -44,7 +44,10 @@ class CandidateIncubator:
         self.costs = cost_config(config)
 
     def build(self, *, hours: int = 24) -> dict[str, Any]:
-        rows = load_score_rows(self.db, hours=hours)
+        # CandidateIncubator is allowed to surface market probes only as
+        # explicitly non-actionable research pockets. Score/NetEdge/ranking use
+        # the default clean loader that excludes probes.
+        rows = load_score_rows(self.db, hours=hours, include_market_probe=True)
         groups = _candidate_groups(rows)
         candidates = [self._candidate(group_rows) for group_rows in groups.values()]
         candidates.sort(key=lambda row: (status_rank(row.get("candidate_status")), safe_float(row.get("net_EV_est")), safe_float(row.get("net_PF_est"))), reverse=True)

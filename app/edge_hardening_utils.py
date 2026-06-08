@@ -83,8 +83,41 @@ def fetch_group_metrics(
     if not group_expr:
         return []
     sql = f"""
+        WITH latest_labels AS (
+            SELECT *
+            FROM (
+                SELECT
+                    sl.*,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY sl.observation_id
+                        ORDER BY sl.timestamp DESC, sl.id DESC
+                    ) AS rn
+                FROM signal_labels sl
+                WHERE sl.timestamp >= ?
+                  AND sl.observation_id IS NOT NULL
+            ) ranked_labels
+            WHERE rn = 1
+        ),
+        clean_rows AS (
+            SELECT
+                sl.*,
+                so.symbol,
+                so.side,
+                so.market_regime,
+                so.score_bucket,
+                so.strategy_type,
+                so.confidence_score,
+                so.shadow_strategy,
+                so.funding_rate,
+                so.spread_pct,
+                COALESCE(spm.source, CASE WHEN COALESCE(so.shadow_strategy, 0) = 1 THEN 'shadow_signal' ELSE 'trade_signal' END) AS clean_source
+            FROM latest_labels sl
+            JOIN signal_observations so ON so.id = sl.observation_id
+            LEFT JOIN signal_path_metrics spm ON spm.observation_id = so.id
+            WHERE COALESCE(spm.source, CASE WHEN COALESCE(so.shadow_strategy, 0) = 1 THEN 'shadow_signal' ELSE 'trade_signal' END) <> 'market_probe'
+        )
         SELECT
-            {group_expr} AS group_value,
+            {group_expr.replace("so.", "cr.").replace("spm.source", "cr.clean_source")} AS group_value,
             COALESCE(so.symbol, 'NA') AS symbol,
             COALESCE(so.side, 'NA') AS side,
             COALESCE(so.market_regime, 'NA') AS market_regime,
@@ -92,22 +125,21 @@ def fetch_group_metrics(
             COALESCE(so.strategy_type, 'NA') AS strategy,
             COALESCE(spm.source, CASE WHEN COALESCE(so.shadow_strategy, 0) = 1 THEN 'shadow_signal' ELSE 'trade_signal' END) AS source,
             COUNT(*) AS samples,
-            SUM(CASE WHEN sl.first_barrier_hit = 'TIME' THEN 1 ELSE 0 END) AS time_count,
-            SUM(CASE WHEN sl.first_barrier_hit = 'SL' THEN 1 ELSE 0 END) AS sl_count,
-            SUM(CASE WHEN sl.first_barrier_hit = 'TP1' THEN 1 ELSE 0 END) AS tp1_count,
-            SUM(CASE WHEN sl.first_barrier_hit = 'TP2' THEN 1 ELSE 0 END) AS tp2_count,
-            AVG(COALESCE(sl.realized_return_pct, 0)) AS gross_expectancy,
-            AVG(COALESCE(sl.bars_to_outcome, 0)) AS avg_bars_to_outcome,
+            SUM(CASE WHEN cr.first_barrier_hit = 'TIME' THEN 1 ELSE 0 END) AS time_count,
+            SUM(CASE WHEN cr.first_barrier_hit = 'SL' THEN 1 ELSE 0 END) AS sl_count,
+            SUM(CASE WHEN cr.first_barrier_hit = 'TP1' THEN 1 ELSE 0 END) AS tp1_count,
+            SUM(CASE WHEN cr.first_barrier_hit = 'TP2' THEN 1 ELSE 0 END) AS tp2_count,
+            AVG(COALESCE(cr.realized_return_pct, 0)) AS gross_expectancy,
+            AVG(COALESCE(cr.bars_to_outcome, 0)) AS avg_bars_to_outcome,
             AVG(COALESCE(so.funding_rate, 0)) AS avg_funding_rate,
             AVG(COALESCE(so.spread_pct, 0)) AS avg_spread_pct,
-            MIN(COALESCE(sl.realized_return_pct, 0)) AS worst_return,
-            SUM(CASE WHEN COALESCE(sl.realized_return_pct, 0) > 0 THEN COALESCE(sl.realized_return_pct, 0) ELSE 0 END) AS gross_gains,
-            SUM(CASE WHEN COALESCE(sl.realized_return_pct, 0) < 0 THEN COALESCE(sl.realized_return_pct, 0) ELSE 0 END) AS gross_losses
-        FROM signal_labels sl
-        JOIN signal_observations so ON so.id = sl.observation_id
+            MIN(COALESCE(cr.realized_return_pct, 0)) AS worst_return,
+            SUM(CASE WHEN COALESCE(cr.realized_return_pct, 0) > 0 THEN COALESCE(cr.realized_return_pct, 0) ELSE 0 END) AS gross_gains,
+            SUM(CASE WHEN COALESCE(cr.realized_return_pct, 0) < 0 THEN COALESCE(cr.realized_return_pct, 0) ELSE 0 END) AS gross_losses
+        FROM clean_rows cr
+        JOIN signal_observations so ON so.id = cr.observation_id
         LEFT JOIN signal_path_metrics spm ON spm.observation_id = so.id
-        WHERE sl.timestamp >= ?
-        GROUP BY {group_expr}
+        GROUP BY {group_expr.replace("so.", "cr.").replace("spm.source", "cr.clean_source")}
         HAVING COUNT(*) >= ?
         ORDER BY samples DESC
         LIMIT ?
@@ -119,7 +151,12 @@ def fetch_group_metrics(
             rows = db._fetchall_dicts(conn.execute(sql, (since, int(min_samples), int(limit))))
     except Exception:
         return []
-    return [enrich_metrics(row, group_key=group_key) for row in rows]
+    out = [enrich_metrics(row, group_key=group_key) for row in rows]
+    for row in out:
+        row["clean_view"] = True
+        row["raw_contaminated_excluded"] = True
+        row["market_probe_excluded"] = True
+    return out
 
 
 def fetch_recent_event_counts(db: Any, *, since: str) -> dict[str, int]:
