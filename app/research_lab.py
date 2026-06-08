@@ -3196,6 +3196,248 @@ class ResearchLab:
     def research_pack_v8296_cli(self, hours: int = 168, limit: int = 50000) -> str:
         return self.research_pack_v8295_cli(hours=hours, limit=limit)
 
+    # ---- ResearchOps V10 — Edge Discovery Foundation (research-only) ----
+
+    def edge_data_foundation_v10_cli(
+        self, hours: int = 24, external_data_path: str = "",
+    ) -> str:
+        from .labs.edge_data_foundation_v10 import (
+            assess_foundation,
+            load_external_data,
+            render_readiness_text,
+        )
+        rows, source_label = load_external_data(external_data_path or None)
+        r = assess_foundation(
+            rows, source_label=source_label,
+            required_data=["funding_rate", "open_interest", "liquidation_usd"],
+            value_fields=("funding_rate", "open_interest", "liquidation_usd", "metric_value"),
+        )
+        return "\n".join(render_readiness_text("EDGE DATA FOUNDATION V10", r))
+
+    def funding_oi_liquidation_research_v10_cli(
+        self, hours: int = 24, external_data_path: str = "",
+    ) -> str:
+        from .labs.funding_oi_liquidation_research_v10 import (
+            run_funding_oi_liquidation_research,
+        )
+        r = run_funding_oi_liquidation_research(
+            hours=int(hours), external_data_path=external_data_path or None,
+        )
+        lines = ["FUNDING OI LIQUIDATION RESEARCH V10 START"]
+        lines.append(f"hours: {r.hours} source_label: {r.source_label or 'NONE'}")
+        lines.append(f"rows_loaded: {r.rows_loaded}")
+        lines.append(f"valid_rows: {r.valid_rows}")
+        lines.append(f"funding_points: {r.funding_points}")
+        lines.append(f"oi_points: {r.oi_points}")
+        lines.append(f"liquidation_points: {r.liquidation_points}")
+        lines.append(f"funding_extreme_events: {r.funding_extreme_events}")
+        lines.append(f"oi_extreme_events: {r.oi_extreme_events}")
+        lines.append(f"oi_price_divergence_events: {r.oi_price_divergence_events}")
+        lines.append(f"crowded_long_flush_events: {r.crowded_long_flush_events}")
+        lines.append(f"crowded_short_squeeze_events: {r.crowded_short_squeeze_events}")
+        lines.append(f"event_count: {r.event_count}")
+        lines.append(f"data_quality_status: {r.data_quality_status}")
+        lines.append(f"freshness_status: {r.freshness_status}")
+        lines.append(f"event_study_ready: {str(r.event_study_ready).lower()}")
+        lines.append(f"backtest_ready: {str(r.backtest_ready).lower()}")
+        lines.append(f"best_hypothesis: {r.best_hypothesis}")
+        lines.append(
+            "required_data_missing: "
+            + (",".join(r.required_data_missing) if r.required_data_missing else "NONE")
+        )
+        lines.append("blockers: " + (",".join(r.blockers) if r.blockers else "NONE"))
+        lines.append(f"decision: {r.decision}")
+        lines.extend(self._v82_safety_footer())
+        lines.append("FUNDING OI LIQUIDATION RESEARCH V10 END")
+        return "\n".join(lines)
+
+    def token_unlock_post_listing_research_v10_cli(
+        self, hours: int = 720, external_data_path: str = "",
+    ) -> str:
+        from .labs.token_unlock_post_listing_research_v10 import (
+            run_unlock_post_listing_research,
+        )
+        r = run_unlock_post_listing_research(
+            hours=int(hours), external_data_path=external_data_path or None,
+        )
+        lines = ["TOKEN UNLOCK POST LISTING RESEARCH V10 START"]
+        lines.append(f"hours: {r.hours} source_label: {r.source_label or 'NONE'}")
+        lines.append(f"events_loaded: {r.events_loaded}")
+        lines.append(f"valid_events: {r.valid_events}")
+        lines.append(f"embargoed_events: {r.embargoed_events}")
+        lines.append(
+            f"not_actionable_low_reliability: {r.not_actionable_low_reliability}"
+        )
+        lines.append(f"material_unlock_events: {r.material_unlock_events}")
+        lines.append(f"high_fdv_events: {r.high_fdv_events}")
+        lines.append(f"risk_score: {r.risk_score}")
+        lines.append(f"short_bias_score: {r.short_bias_score}")
+        lines.append(
+            "affected_symbols: "
+            + (",".join(r.affected_symbols) if r.affected_symbols else "NONE")
+        )
+        lines.append(f"data_quality_status: {r.data_quality_status}")
+        lines.append(f"event_study_ready: {str(r.event_study_ready).lower()}")
+        lines.append(
+            "required_data_missing: "
+            + (",".join(r.required_data_missing) if r.required_data_missing else "NONE")
+        )
+        lines.append("blockers: " + (",".join(r.blockers) if r.blockers else "NONE"))
+        lines.append(f"decision: {r.decision}")
+        lines.extend(self._v82_safety_footer())
+        lines.append("TOKEN UNLOCK POST LISTING RESEARCH V10 END")
+        return "\n".join(lines)
+
+    def intraday_volatility_breakdown_v10_cli(
+        self, hours: int = 168, symbols: str = "", timeframe: str = "5m",
+    ) -> str:
+        from .labs.intraday_volatility_breakdown_v10 import (
+            run_intraday_volatility_breakdown,
+        )
+        sym_list = [s.strip().upper() for s in (symbols or "").split(",") if s.strip()] or None
+        r = run_intraday_volatility_breakdown(
+            self.db, symbols=sym_list, timeframe=timeframe, hours=int(hours),
+        )
+        lines = ["INTRADAY VOLATILITY BREAKDOWN V10 START"]
+        lines.append(f"hours: {r.hours} timeframe: {r.timeframe}")
+        lines.append(
+            "symbols_requested: "
+            + (",".join(r.symbols_requested) if r.symbols_requested else "NONE")
+        )
+        lines.append(
+            "symbols_with_data: "
+            + (",".join(r.symbols_with_data) if r.symbols_with_data else "NONE")
+        )
+        lines.append(f"bars_loaded: {r.bars_loaded}")
+        lines.append(f"freshness_status: {r.freshness_status}")
+        lines.append(f"data_quality_status: {r.data_quality_status}")
+        lines.append(f"rules_evaluated: {r.rules_evaluated}")
+        lines.append("blockers: " + (",".join(r.blockers) if r.blockers else "NONE"))
+        if r.best_rule:
+            br = r.best_rule
+            lines.append(
+                f"best_rule: {br.get('rule_id')} trades={br.get('trades')} "
+                f"net_ev_pct={br.get('net_ev_pct')} net_pf={br.get('net_pf')} "
+                f"winrate={br.get('winrate')} decision={br.get('decision')}"
+            )
+        lines.append(f"decision: {r.decision}")
+        lines.extend(self._v82_safety_footer())
+        warning = self._v82_heavy_warning(hours)
+        if warning:
+            lines.append(warning)
+        lines.append("INTRADAY VOLATILITY BREAKDOWN V10 END")
+        return "\n".join(lines)
+
+    def micro_tp_viability_v10_cli(self, hours: int = 168) -> str:
+        from .labs.micro_tp_viability_v10 import run_micro_tp_viability
+        r = run_micro_tp_viability(hours=int(hours))
+        lines = ["MICRO TP VIABILITY V10 START"]
+        lines.append(f"hours: {r.hours}")
+        lines.append(f"combos_evaluated: {r.combos_evaluated}")
+        lines.append(f"realistic_feasible_combos: {r.realistic_feasible_combos}")
+        lines.append(f"maker_maker_feasible_combos: {r.maker_maker_feasible_combos}")
+        lines.append(
+            f"best_realistic_min_winrate: {r.best_realistic_min_winrate}"
+        )
+        lines.append(f"gross_green_net_negative: {str(r.gross_green_net_negative).lower()}")
+        lines.append(f"viable_after_costs: {str(r.viable_after_costs).lower()}")
+        lines.append(f"maker_only_required: {str(r.maker_only_required).lower()}")
+        lines.append(f"need_websocket: {str(r.need_websocket).lower()}")
+        lines.append("blockers: " + (",".join(r.blockers) if r.blockers else "NONE"))
+        lines.append(f"decision: {r.decision}")
+        lines.extend(self._v82_safety_footer())
+        lines.append("MICRO TP VIABILITY V10 END")
+        return "\n".join(lines)
+
+    def event_catalyst_layer_v10_cli(
+        self, hours: int = 720, external_data_path: str = "",
+    ) -> str:
+        from .labs.event_catalyst_layer_v10 import run_event_catalyst_layer
+        r = run_event_catalyst_layer(
+            hours=int(hours), external_data_path=external_data_path or None,
+        )
+        lines = ["EVENT CATALYST LAYER V10 START"]
+        lines.append(f"hours: {r.hours} source_label: {r.source_label or 'NONE'}")
+        lines.append(f"rows_loaded: {r.rows_loaded}")
+        lines.append(f"valid_events: {r.valid_events}")
+        lines.append(f"invalid_events: {r.invalid_events}")
+        lines.append(f"embargoed_events: {r.embargoed_events}")
+        lines.append(
+            f"not_actionable_low_reliability: {r.not_actionable_low_reliability}"
+        )
+        for k, v in r.by_type.items():
+            lines.append(f"by_type {k}: {v}")
+        for k, v in r.by_actionability.items():
+            lines.append(f"by_actionability {k}: {v}")
+        lines.append(f"data_quality_status: {r.data_quality_status}")
+        lines.append(f"decision: {r.decision}")
+        lines.extend(self._v82_safety_footer())
+        lines.append("EVENT CATALYST LAYER V10 END")
+        return "\n".join(lines)
+
+    def edge_discovery_orchestrator_v10_cli(
+        self, hours: int = 24, external_data_path: str = "",
+        symbols: str = "", timeframe: str = "5m",
+    ) -> str:
+        from .labs.edge_discovery_orchestrator_v10 import (
+            run_edge_discovery_orchestrator,
+        )
+        # Pull clock-drift status + clean-N from the existing reliability
+        # layer when available; default to UNKNOWN (which blocks pre-live).
+        clock_status = "UNKNOWN"
+        clean_n = 0
+        try:
+            from .execution_safety import check_clock_drift
+            clock_status = str(
+                (check_clock_drift(exchange_time=None) or {}).get("clock_drift_status")
+                or "UNKNOWN"
+            ).upper()
+        except Exception:
+            clock_status = "UNKNOWN"
+        try:
+            from .score_calibration import load_score_rows
+            clean_n = len(load_score_rows(self.db, hours=int(hours)))
+        except Exception:
+            clean_n = 0
+        sym_list = [s.strip().upper() for s in (symbols or "").split(",") if s.strip()] or None
+        r = run_edge_discovery_orchestrator(
+            self.db, hours=int(hours), external_data_path=external_data_path or None,
+            clock_drift_status=clock_status, clean_n=clean_n,
+            data_quality_status="OK" if clean_n >= 40 else "NEED_DATA",
+            symbols=sym_list, timeframe=timeframe, run_volatility=False,
+        )
+        lines = ["EDGE DISCOVERY ORCHESTRATOR V10 START"]
+        lines.append(f"hours: {r.hours}")
+        lines.append(f"clock_drift_status: {r.clock_drift_status}")
+        lines.append(f"pre_live_clock_gate: {r.pre_live_clock_gate}")
+        lines.append(f"clean_n: {clean_n}")
+        for fam in r.families:
+            lines.append(
+                f"family {fam['family_id']}: status={fam['family_status']} "
+                f"native={fam['native_decision']}"
+            )
+        lines.append(f"best_family: {r.best_family or 'NONE'}")
+        lines.append(f"best_family_status: {r.best_family_status}")
+        lines.append(f"best_next_experiment: {r.best_next_experiment or 'NONE'}")
+        lines.append(
+            "rejected_families: "
+            + (",".join(r.rejected_families) if r.rejected_families else "NONE")
+        )
+        lines.append(
+            "required_data: " + (",".join(r.required_data) if r.required_data else "NONE")
+        )
+        lines.append(
+            "global_blockers: "
+            + (",".join(r.global_blockers) if r.global_blockers else "NONE")
+        )
+        lines.append(f"next_action: {r.next_action}")
+        lines.append(f"shadow_ready: {str(r.shadow_ready).lower()}")
+        lines.append(f"paper_ready: {str(r.paper_ready).lower()}")
+        lines.append(f"live_ready: {str(r.live_ready).lower()}")
+        lines.extend(self._v82_safety_footer())
+        lines.append("EDGE DISCOVERY ORCHESTRATOR V10 END")
+        return "\n".join(lines)
+
     def rebound_sign_integrity_v8293_cli(
         self, hours: int = 168, limit: int = 50000,
     ) -> str:
@@ -4200,6 +4442,13 @@ def build_argument_parser() -> argparse.ArgumentParser:
             "strategy-tournament-real-v8296",
             "export-research-v8296",
             "research-pack-v8296",
+            "edge-data-foundation-v10",
+            "funding-oi-liquidation-research-v10",
+            "token-unlock-post-listing-research-v10",
+            "intraday-volatility-breakdown-v10",
+            "micro-tp-viability-v10",
+            "event-catalyst-layer-v10",
+            "edge-discovery-orchestrator-v10",
             "ohlcv-replay-loader-smoke-test",
             "ohlcv-replay-loader-audit",
             "duplicate-module-audit-smoke-test",
@@ -4318,6 +4567,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--capital", type=float, default=40.0, help="Capital total USDT for capital-leverage-sim (default 40).")
     parser.add_argument("--margins", default="2,5,10,20", help="Margins (csv USDT) for capital-leverage-sim (default 2,5,10,20).")
     parser.add_argument("--leverages", default="1,3,5,10,20,50", help="Leverages (csv) for capital-leverage-sim (default 1,3,5,10,20,50).")
+    parser.add_argument("--external-data-path", default="", help="Local CSV/JSON path with external edge data (funding/OI/liq/unlock/catalyst) for ResearchOps V10 labs. No network, no APIs.")
     return parser
 
 
@@ -5005,6 +5255,37 @@ def main() -> None:
     elif args.command == "research-pack-v8296":
         limit_arg = int(getattr(args, "limit", 50000) or 50000)
         print(lab.research_pack_v8296_cli(hours=args.hours, limit=limit_arg))
+    elif args.command == "edge-data-foundation-v10":
+        print(lab.edge_data_foundation_v10_cli(
+            hours=args.hours, external_data_path=getattr(args, "external_data_path", ""),
+        ))
+    elif args.command == "funding-oi-liquidation-research-v10":
+        print(lab.funding_oi_liquidation_research_v10_cli(
+            hours=args.hours, external_data_path=getattr(args, "external_data_path", ""),
+        ))
+    elif args.command == "token-unlock-post-listing-research-v10":
+        print(lab.token_unlock_post_listing_research_v10_cli(
+            hours=args.hours, external_data_path=getattr(args, "external_data_path", ""),
+        ))
+    elif args.command == "intraday-volatility-breakdown-v10":
+        print(lab.intraday_volatility_breakdown_v10_cli(
+            hours=args.hours,
+            symbols=getattr(args, "symbols", ""),
+            timeframe=getattr(args, "timeframe", "5m"),
+        ))
+    elif args.command == "micro-tp-viability-v10":
+        print(lab.micro_tp_viability_v10_cli(hours=args.hours))
+    elif args.command == "event-catalyst-layer-v10":
+        print(lab.event_catalyst_layer_v10_cli(
+            hours=args.hours, external_data_path=getattr(args, "external_data_path", ""),
+        ))
+    elif args.command == "edge-discovery-orchestrator-v10":
+        print(lab.edge_discovery_orchestrator_v10_cli(
+            hours=args.hours,
+            external_data_path=getattr(args, "external_data_path", ""),
+            symbols=getattr(args, "symbols", ""),
+            timeframe=getattr(args, "timeframe", "5m"),
+        ))
     elif args.command == "ohlcv-replay-loader-smoke-test":
         print(lab.ohlcv_replay_loader_smoke_test())
     elif args.command == "ohlcv-replay-loader-audit":
