@@ -3569,6 +3569,7 @@ class ResearchLab:
         from .labs.external_event_study_v10_1 import (
             DEFAULT_HORIZONS_H,
             EVENT_HORIZONS_H,
+            FUNDING_OI_LOOKBACK_BARS,
             build_market_series,
             define_big_unlock_events,
             define_funding_oi_extreme_events,
@@ -3582,24 +3583,41 @@ class ResearchLab:
             events = define_funding_oi_extreme_events(mbs)
             horizons = DEFAULT_HORIZONS_H
             primary = 24.0
+            lookback_bars = FUNDING_OI_LOOKBACK_BARS
         elif module in ("unlocks", "unlock", "token_unlock"):
             unlock_clean, _ = self._v101_load_clean("token_unlock_events")
             events = define_big_unlock_events(unlock_clean)
             horizons = EVENT_HORIZONS_H
             primary = 168.0
+            lookback_bars = 0
         elif module in ("listings", "listing", "post_listing"):
             listing_clean, _ = self._v101_load_clean("listing_events")
             events = define_post_listing_events(listing_clean)
             horizons = EVENT_HORIZONS_H
             primary = 168.0
+            lookback_bars = 0
         else:
             return f"EXTERNAL EVENT STUDY V10.1: unknown module '{module}'"
+        # --hours <= 0 => no window filter (use all available data, transparent).
+        hours_arg = int(hours) if (hours is not None and int(hours) > 0) else None
         r = run_event_study(
             events, mbs, module=module, horizons_h=horizons, primary_horizon_h=primary,
             cost=0.0018, bootstrap_n=2000, baseline_n=500, seed=7,
+            hours=hours_arg, lookback_bars_for_events=lookback_bars,
         )
         lines = ["EXTERNAL EVENT STUDY V10.1 START"]
-        lines.append(f"module: {r.module} hours: {int(hours)}")
+        lines.append(f"module: {r.module}")
+        lines.append(f"hours_requested: {r.hours_requested if r.hours_requested is not None else 'null'}")
+        lines.append(f"filter_applied: {str(r.filter_applied).lower()}")
+        lines.append(f"reference_now: {r.reference_now_iso or 'NONE'}")
+        lines.append(f"cutoff_timestamp: {r.cutoff_timestamp or 'NONE'}")
+        lines.append(f"lookback_required: {str(r.lookback_required).lower()}")
+        lines.append(f"lookback_ms: {r.lookback_ms}")
+        lines.append(f"effective_start_timestamp: {r.effective_start_timestamp or 'NONE'}")
+        lines.append(f"rows_before_filter: {r.rows_before_filter}")
+        lines.append(f"rows_after_filter: {r.rows_after_filter}")
+        lines.append(f"events_before_filter: {r.events_before_filter}")
+        lines.append(f"events_after_filter: {r.events_after_filter}")
         lines.append(f"event_count: {r.event_count}")
         lines.append(f"matched_events: {r.matched_events}")
         lines.append("symbols: " + (",".join(r.symbols) if r.symbols else "NONE"))

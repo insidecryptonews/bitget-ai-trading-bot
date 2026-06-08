@@ -188,6 +188,99 @@ def test_never_paper_or_live_ready():
     assert r.status in (STATUS_GREEN, STATUS_WATCH, STATUS_REJECT, STATUS_NEED_MORE)
 
 
+# ---------------------------------------------------------------------------
+# V10.1 --hours window filter (Codex mini-fix)
+# ---------------------------------------------------------------------------
+
+def _long_series(n=1000, p0=100.0, up=0.0005):
+    closes = [p0 * (1 + up) ** i for i in range(n)]
+    return _series(closes)
+
+
+def _hours_setup():
+    n = 1000
+    mbs = {"BTCUSDT": _long_series(n)}
+    ts = mbs["BTCUSDT"]["ts"]
+    now_ms = ts[-1]
+    old = [{"symbol": "BTCUSDT", "timestamp_ms": ts[i], "direction": 1} for i in range(50, 90)]
+    recent = [{"symbol": "BTCUSDT", "timestamp_ms": ts[i], "direction": 1} for i in range(800, 840)]
+    return mbs, old + recent, now_ms, ts
+
+
+def test_hours_filter_drops_old_events_and_market():
+    mbs, events, now_ms, ts = _hours_setup()
+    r = run_event_study(events, mbs, primary_horizon_h=24, hours=200, now_ms=now_ms,
+                        lookback_bars_for_events=48, bootstrap_n=100, baseline_n=100, min_events=20)
+    assert r.filter_applied is True
+    assert r.hours_requested == 200
+    assert r.events_before_filter == 80
+    assert r.events_after_filter == 40  # only recent kept
+    assert r.rows_after_filter < r.rows_before_filter  # old market trimmed
+    # cutoff = now - 200h = ts[799]; events kept are >= cutoff
+    assert r.cutoff_timestamp_ms == ts[799]
+    # lookback retained BEFORE cutoff (48 bars * 1h)
+    assert r.lookback_required is True
+    assert r.effective_start_timestamp_ms == ts[799] - 48 * STEP
+
+
+def test_hours_filter_old_events_excluded_from_study():
+    mbs, events, now_ms, ts = _hours_setup()
+    r = run_event_study(events, mbs, primary_horizon_h=24, hours=200, now_ms=now_ms,
+                        lookback_bars_for_events=48, bootstrap_n=100, baseline_n=100, min_events=20)
+    # matched events cannot exceed the in-window events
+    assert r.matched_events <= r.events_after_filter
+
+
+def test_hours_filter_tight_window_need_more_data():
+    mbs, events, now_ms, ts = _hours_setup()
+    r = run_event_study(events, mbs, primary_horizon_h=24, hours=5, now_ms=now_ms,
+                        lookback_bars_for_events=48, bootstrap_n=50, baseline_n=50, min_events=20)
+    assert r.status in (STATUS_NEED_MORE, STATUS_NEED_DATA)
+    assert r.paper_ready is False and r.live_ready is False
+
+
+def test_hours_filter_metadata_present():
+    mbs, events, now_ms, ts = _hours_setup()
+    r = run_event_study(events, mbs, primary_horizon_h=24, hours=200, now_ms=now_ms,
+                        lookback_bars_for_events=48, bootstrap_n=50, baseline_n=50, min_events=20)
+    d = r.as_dict()
+    for key in ("filter_applied", "hours_requested", "cutoff_timestamp",
+                "rows_before_filter", "rows_after_filter",
+                "events_before_filter", "events_after_filter",
+                "effective_start_timestamp", "lookback_required", "lookback_ms"):
+        assert key in d, f"missing {key}"
+    assert d["filter_applied"] is True
+    assert d["final_recommendation"] == "NO LIVE"
+
+
+def test_no_hours_means_filter_not_applied():
+    mbs, events, now_ms, ts = _hours_setup()
+    r = run_event_study(events, mbs, primary_horizon_h=24, hours=None,
+                        bootstrap_n=50, baseline_n=50, min_events=20)
+    assert r.filter_applied is False
+    assert r.hours_requested is None
+    assert r.events_after_filter == r.events_before_filter == 80
+
+
+def test_hours_filter_does_not_break_empty_need_data():
+    r = run_event_study([], {}, hours=720)
+    assert r.status == STATUS_NEED_DATA
+    assert r.final_recommendation == "NO LIVE"
+
+
+def test_lookback_retained_but_no_future_used():
+    # An event exactly at the cutoff must still be measurable (forward bars
+    # after cutoff are retained); bars strictly before effective_start are
+    # dropped (only old data removed, never the future).
+    mbs, events, now_ms, ts = _hours_setup()
+    r = run_event_study(events, mbs, primary_horizon_h=24, hours=200, now_ms=now_ms,
+                        lookback_bars_for_events=48, bootstrap_n=50, baseline_n=50, min_events=20)
+    # effective_start is strictly before cutoff (lookback into the past only)
+    assert r.effective_start_timestamp_ms < r.cutoff_timestamp_ms
+    # and effective_start is not in the future relative to reference_now
+    assert r.effective_start_timestamp_ms < r.reference_now_ms
+
+
 def test_build_market_series_from_clean_rows():
     rows = [{"symbol": "BTCUSDT", "timestamp_ms": BASE + i * STEP, "price_close": 100 + i,
              "price_high": 101 + i, "price_low": 99 + i, "funding_rate": 0.0001,

@@ -44,6 +44,45 @@ EVENT_HORIZONS_H = (24.0, 72.0, 168.0)
 MS_PER_HOUR = 3_600_000.0
 MAX_EVENT_DOMINANCE = 0.40
 MAX_SYMBOL_DOMINANCE = 0.60
+# Trailing window (bars) used by funding/OI event definition. The hours
+# filter must keep this much lookback BEFORE the cutoff so z-scores are
+# computed on the same history they would have had unfiltered.
+FUNDING_OI_LOOKBACK_BARS = 48
+
+
+def _ms_iso(ms: int | None) -> str:
+    if ms is None:
+        return ""
+    from datetime import datetime, timezone
+    return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).isoformat()
+
+
+def _ev_ts(ev: dict[str, Any]) -> int | None:
+    t = ev.get("timestamp_ms")
+    if t is None:
+        t = normalize_timestamp_to_ms(ev.get("timestamp") or ev.get("event_time"))
+    return int(t) if t is not None else None
+
+
+def _median_delta(market_by_symbol: dict[str, dict[str, list]]) -> float:
+    deltas: list[int] = []
+    for s in market_by_symbol.values():
+        ts = sorted(set(s.get("ts", [])))
+        deltas.extend(b - a for a, b in zip(ts, ts[1:]) if b > a)
+    return float(statistics.median(deltas)) if deltas else 0.0
+
+
+def _filter_market(market_by_symbol: dict[str, dict[str, list]], start_ms: int) -> dict[str, dict[str, list]]:
+    """Keep only points with ts >= start_ms (drops OLD data only; never
+    touches the future). Rebuilds the parallel arrays index-aligned."""
+    out: dict[str, dict[str, list]] = {}
+    for sym, s in market_by_symbol.items():
+        ts = s.get("ts", [])
+        keep = [i for i, t in enumerate(ts) if t >= start_ms]
+        if not keep:
+            continue
+        out[sym] = {k: [s[k][i] for i in keep] for k in ("ts", "close", "high", "low", "funding", "oi")}
+    return out
 
 
 @dataclass
@@ -56,6 +95,21 @@ class EventStudyReport:
     horizons_h: list[float] = field(default_factory=list)
     primary_horizon_h: float = 24.0
     cost_pct: float = 0.0
+    # V10.1 hours-window filter (transparent + conservative, no lookahead).
+    hours_requested: float | None = None
+    filter_applied: bool = False
+    reference_now_ms: int | None = None
+    reference_now_iso: str = ""
+    cutoff_timestamp_ms: int | None = None
+    cutoff_timestamp: str = ""
+    lookback_required: bool = False
+    lookback_ms: int = 0
+    effective_start_timestamp_ms: int | None = None
+    effective_start_timestamp: str = ""
+    rows_before_filter: int = 0
+    rows_after_filter: int = 0
+    events_before_filter: int = 0
+    events_after_filter: int = 0
     # Per-horizon aggregates (net, after cost).
     per_horizon: list[dict[str, Any]] = field(default_factory=list)
     # Primary-horizon headline.
@@ -271,6 +325,9 @@ def run_event_study(
     bootstrap_n: int = 2000,
     seed: int = 7,
     min_events: int = MIN_EVENTS,
+    hours: float | None = None,
+    now_ms: int | None = None,
+    lookback_bars_for_events: int = 0,
 ) -> EventStudyReport:
     report = EventStudyReport(
         module=module,
@@ -281,12 +338,69 @@ def run_event_study(
     )
     ev_list = list(events or [])
     report.event_count = len(ev_list)
+    report.events_before_filter = len(ev_list)
     primary = primary_horizon_h if primary_horizon_h is not None else max(horizons_h)
     report.primary_horizon_h = primary
 
-    if not market_by_symbol or not ev_list:
+    mbs = market_by_symbol or {}
+    report.rows_before_filter = sum(len(s.get("ts", [])) for s in mbs.values())
+    report.hours_requested = hours if (hours is not None and hours > 0) else None
+
+    if not mbs or not ev_list:
         report.status = STATUS_NEED_DATA
-        report.blockers = ["no_market_series" if not market_by_symbol else "no_events"]
+        report.blockers = ["no_market_series" if not mbs else "no_events"]
+        report.rows_after_filter = report.rows_before_filter
+        report.events_after_filter = len(ev_list)
+        return report
+
+    # ---- V10.1 time-window filter (transparent, conservative, no lookahead) ----
+    # The events were DEFINED on the full series (so trailing z-score windows
+    # are intact). Here we keep only events within the last ``hours`` and trim
+    # market history to ``cutoff - lookback`` so the study cannot silently use
+    # all available history while reporting an N-hour window. We only ever drop
+    # OLD data; forward-return bars (after each event) are always retained.
+    if hours is not None and hours > 0:
+        report.filter_applied = True
+        all_ts: list[int] = []
+        for s in mbs.values():
+            all_ts.extend(int(t) for t in s.get("ts", []))
+        for ev in ev_list:
+            t = _ev_ts(ev)
+            if t is not None:
+                all_ts.append(t)
+        ref_now = int(now_ms) if now_ms is not None else (max(all_ts) if all_ts else None)
+        if ref_now is not None:
+            report.reference_now_ms = ref_now
+            report.reference_now_iso = _ms_iso(ref_now)
+            cutoff = int(ref_now - hours * MS_PER_HOUR)
+            report.cutoff_timestamp_ms = cutoff
+            report.cutoff_timestamp = _ms_iso(cutoff)
+            report.lookback_required = lookback_bars_for_events > 0
+            lookback_ms = 0
+            if lookback_bars_for_events > 0:
+                med = _median_delta(mbs)
+                lookback_ms = int(lookback_bars_for_events * med) if med else 0
+            report.lookback_ms = lookback_ms
+            eff_start = cutoff - lookback_ms
+            report.effective_start_timestamp_ms = eff_start
+            report.effective_start_timestamp = _ms_iso(eff_start)
+            ev_list = [e for e in ev_list if (_ev_ts(e) is not None and _ev_ts(e) >= cutoff)]
+            mbs = _filter_market(mbs, eff_start)
+    else:
+        report.filter_applied = False
+
+    market_by_symbol = mbs
+    report.events_after_filter = len(ev_list)
+    report.rows_after_filter = sum(len(s.get("ts", [])) for s in mbs.values())
+
+    if not mbs:
+        report.status = STATUS_NEED_DATA
+        report.blockers = ["no_market_series_after_filter"]
+        return report
+    if not ev_list:
+        # Events existed but the window filtered them all out.
+        report.status = STATUS_NEED_MORE if report.events_before_filter > 0 else STATUS_NEED_DATA
+        report.blockers = ["all_events_outside_window"]
         return report
 
     max_h = max(horizons_h)
