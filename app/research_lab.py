@@ -3438,6 +3438,61 @@ class ResearchLab:
         lines.append("EDGE DISCOVERY ORCHESTRATOR V10 END")
         return "\n".join(lines)
 
+    def alpha_ensemble_v10_cli(
+        self, hours: int = 2160, symbols: str = "", timeframe: str = "15m",
+    ) -> str:
+        from .labs.alpha_ensemble_v10 import run_alpha_ensemble
+        sym_list = [s.strip().upper() for s in (symbols or "").split(",") if s.strip()] or None
+        r = run_alpha_ensemble(self.db, symbols=sym_list, timeframe=timeframe, hours=int(hours))
+        lines = ["ALPHA ENSEMBLE V10 START"]
+        lines.append(f"hours: {r.hours} timeframe: {r.timeframe}")
+        lines.append(
+            "symbols_with_data: "
+            + (",".join(r.symbols_with_data) if r.symbols_with_data else "NONE")
+        )
+        lines.append(f"bars_loaded: {r.bars_loaded}")
+        lines.append(f"total_trades: {r.total_trades}")
+        lines.append(f"cost_pct: {r.cost_pct}")
+        lines.append(f"net_ev_pct: {r.net_ev_pct}")
+        lines.append(f"net_pf: {r.net_pf}")
+        lines.append(f"winrate: {r.winrate}")
+        lines.append(f"trade_sharpe: {r.trade_sharpe}")
+        lines.append(f"cagr_pct: {r.cagr_pct}")
+        lines.append(f"max_drawdown_pct: {r.max_drawdown_pct}")
+        lines.append(f"final_equity_mult: {r.final_equity_mult}")
+        lines.append(f"concentration: {r.concentration} top_symbol: {r.top_symbol or 'NONE'}")
+        for ps in r.per_strategy:
+            lines.append(
+                f"strategy {ps['strategy']}: trades={ps['trades']} "
+                f"net_ev_pct={ps['net_ev_pct']} net_pf={ps['net_pf']} "
+                f"winrate={ps['winrate']} avg_r={ps['avg_r']}"
+            )
+        for pair, c in r.correlation.items():
+            lines.append(f"correlation {pair}: {c}")
+        lines.append(
+            f"oos_trades: {r.oos_trades} oos_net_ev_pct: {r.oos_net_ev_pct} "
+            f"oos_net_pf: {r.oos_net_pf} oos_sign_consistent: {str(r.oos_sign_consistent).lower()}"
+        )
+        lines.append(f"oos_method: {r.oos_method}")
+        lines.append(f"walk_forward_ready: {str(r.walk_forward_ready).lower()}")
+        lines.append(f"walk_forward_status: {r.walk_forward_status}")
+        for cs in r.cost_stress:
+            lines.append(
+                f"cost_stress cost={cs['cost_pct']} trades={cs['trades']} "
+                f"net_ev_pct={cs['net_ev_pct']} net_pf={cs['net_pf']} pass={str(cs['pass']).lower()}"
+            )
+        lines.append(f"cost_stress_all_pass: {str(r.cost_stress_all_pass).lower()}")
+        lines.append("blockers: " + (",".join(r.blockers) if r.blockers else "NONE"))
+        lines.append(f"verdict: {r.verdict}")
+        lines.append(f"paper_ready: {str(r.paper_ready).lower()}")
+        lines.append(f"live_ready: {str(r.live_ready).lower()}")
+        lines.extend(self._v82_safety_footer())
+        warning = self._v82_heavy_warning(hours)
+        if warning:
+            lines.append(warning)
+        lines.append("ALPHA ENSEMBLE V10 END")
+        return "\n".join(lines)
+
     def rebound_sign_integrity_v8293_cli(
         self, hours: int = 168, limit: int = 50000,
     ) -> str:
@@ -4449,6 +4504,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
             "micro-tp-viability-v10",
             "event-catalyst-layer-v10",
             "edge-discovery-orchestrator-v10",
+            "alpha-ensemble-v10",
             "ohlcv-replay-loader-smoke-test",
             "ohlcv-replay-loader-audit",
             "duplicate-module-audit-smoke-test",
@@ -5285,6 +5341,12 @@ def main() -> None:
             external_data_path=getattr(args, "external_data_path", ""),
             symbols=getattr(args, "symbols", ""),
             timeframe=getattr(args, "timeframe", "5m"),
+        ))
+    elif args.command == "alpha-ensemble-v10":
+        print(lab.alpha_ensemble_v10_cli(
+            hours=args.hours,
+            symbols=getattr(args, "symbols", ""),
+            timeframe=getattr(args, "timeframe", "15m"),
         ))
     elif args.command == "ohlcv-replay-loader-smoke-test":
         print(lab.ohlcv_replay_loader_smoke_test())
