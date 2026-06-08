@@ -18,3 +18,15 @@ reports/
 bot_state.db
 .deps/
 .tmp/
+# ResearchOps V10.1 — never commit real external data; keep dir structure (.gitkeep)
+external_data/raw/**/*.csv
+external_data/raw/**/*.tsv
+external_data/raw/**/*.json
+external_data/raw/**/*.ndjson
+external_data/raw/**/*.jsonl
+external_data/clean/**/*.csv
+external_data/clean/**/*.json
+external_data/clean/**/*.ndjson
+external_data/reports/**/*.csv
+external_data/reports/**/*.json
+external_data/reports/**/*.txt

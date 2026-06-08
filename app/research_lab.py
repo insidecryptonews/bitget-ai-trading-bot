@@ -3493,6 +3493,143 @@ class ResearchLab:
         lines.append("ALPHA ENSEMBLE V10 END")
         return "\n".join(lines)
 
+    # ---- ResearchOps V10.1 — External Edge Data + Event Study ----
+
+    _V101_RAW = "external_data/raw"
+    _V101_CLEAN = "external_data/clean"
+    _V101_REPORTS = "external_data/reports"
+
+    def _v101_load_clean(self, dataset: str):
+        """Read raw (or clean) local files for a dataset and validate them.
+        Returns (clean_rows, report). No DB, no network."""
+        from .labs.external_edge_ingest_v10_1 import ingest_rows, read_input_dir
+        rows, _used = read_input_dir(f"{self._V101_RAW}/{dataset}")
+        if not rows:
+            rows, _used = read_input_dir(f"{self._V101_CLEAN}/{dataset}")
+        report, clean = ingest_rows(rows, dataset)
+        return clean, report
+
+    def external_edge_ingest_v101_cli(
+        self, dataset: str = "perp_market_state",
+        input_path: str = "", input_dir: str = "",
+    ) -> str:
+        from .labs.external_edge_ingest_v10_1 import ingest_file_or_dir
+        if not input_path and not input_dir:
+            input_dir = f"{self._V101_RAW}/{dataset}"
+        r = ingest_file_or_dir(
+            dataset, input_path=input_path or None, input_dir=input_dir or None,
+            clean_dir=self._V101_CLEAN, reports_dir=self._V101_REPORTS, write=True,
+        )
+        lines = ["EXTERNAL EDGE INGEST V10.1 START"]
+        lines.append(f"dataset: {r.dataset}")
+        lines.append("inputs: " + (",".join(r.inputs) if r.inputs else "NONE"))
+        lines.append(f"rows_raw: {r.rows_raw}")
+        lines.append(f"rows_valid: {r.rows_valid}")
+        lines.append(f"rows_invalid: {r.rows_invalid}")
+        lines.append(f"duplicate_count: {r.duplicate_count}")
+        lines.append(f"gap_count: {r.gap_count}")
+        lines.append("symbols: " + (",".join(r.symbols) if r.symbols else "NONE"))
+        lines.append(f"min_timestamp: {r.min_timestamp_iso or 'NONE'}")
+        lines.append(f"max_timestamp: {r.max_timestamp_iso or 'NONE'}")
+        lines.append(f"invalid_rate: {r.invalid_rate}")
+        lines.append(f"duplicate_rate: {r.duplicate_rate}")
+        lines.append(f"gap_rate: {r.gap_rate}")
+        lines.append(f"top_error: {r.top_error or 'NONE'}")
+        lines.append(f"data_quality_status: {r.data_quality_status}")
+        lines.append(f"output_clean_csv: {r.output_clean_csv or 'NONE'}")
+        lines.append(f"output_clean_ndjson: {r.output_clean_ndjson or 'NONE'}")
+        lines.append(f"db_writes: {r.db_writes}")
+        lines.extend(self._v82_safety_footer())
+        lines.append("EXTERNAL EDGE INGEST V10.1 END")
+        return "\n".join(lines)
+
+    def external_data_health_v101_cli(self) -> str:
+        from .labs.external_edge_schemas_v10_1 import ALL_DATASETS
+        lines = ["EXTERNAL DATA HEALTH V10.1 START"]
+        any_data = False
+        for ds in ALL_DATASETS:
+            clean, rep = self._v101_load_clean(ds)
+            if rep.rows_raw > 0:
+                any_data = True
+            lines.append(
+                f"dataset {ds}: rows_raw={rep.rows_raw} rows_valid={rep.rows_valid} "
+                f"duplicates={rep.duplicate_count} gaps={rep.gap_count} "
+                f"status={rep.data_quality_status}"
+            )
+        lines.append(f"any_external_data: {str(any_data).lower()}")
+        lines.append(
+            "overall_status: "
+            + ("DATA_AVAILABLE_RESEARCH_ONLY" if any_data else "NEED_DATA")
+        )
+        lines.extend(self._v82_safety_footer())
+        lines.append("EXTERNAL DATA HEALTH V10.1 END")
+        return "\n".join(lines)
+
+    def external_event_study_v101_cli(self, module: str = "funding_oi_liq", hours: int = 720) -> str:
+        from .labs.external_event_study_v10_1 import (
+            DEFAULT_HORIZONS_H,
+            EVENT_HORIZONS_H,
+            build_market_series,
+            define_big_unlock_events,
+            define_funding_oi_extreme_events,
+            define_post_listing_events,
+            run_event_study,
+        )
+        market_clean, _mrep = self._v101_load_clean("perp_market_state")
+        mbs = build_market_series(market_clean)
+        module = (module or "funding_oi_liq").strip().lower()
+        if module in ("funding_oi_liq", "funding", "funding_oi"):
+            events = define_funding_oi_extreme_events(mbs)
+            horizons = DEFAULT_HORIZONS_H
+            primary = 24.0
+        elif module in ("unlocks", "unlock", "token_unlock"):
+            unlock_clean, _ = self._v101_load_clean("token_unlock_events")
+            events = define_big_unlock_events(unlock_clean)
+            horizons = EVENT_HORIZONS_H
+            primary = 168.0
+        elif module in ("listings", "listing", "post_listing"):
+            listing_clean, _ = self._v101_load_clean("listing_events")
+            events = define_post_listing_events(listing_clean)
+            horizons = EVENT_HORIZONS_H
+            primary = 168.0
+        else:
+            return f"EXTERNAL EVENT STUDY V10.1: unknown module '{module}'"
+        r = run_event_study(
+            events, mbs, module=module, horizons_h=horizons, primary_horizon_h=primary,
+            cost=0.0018, bootstrap_n=2000, baseline_n=500, seed=7,
+        )
+        lines = ["EXTERNAL EVENT STUDY V10.1 START"]
+        lines.append(f"module: {r.module} hours: {int(hours)}")
+        lines.append(f"event_count: {r.event_count}")
+        lines.append(f"matched_events: {r.matched_events}")
+        lines.append("symbols: " + (",".join(r.symbols) if r.symbols else "NONE"))
+        lines.append(f"primary_horizon_h: {r.primary_horizon_h}")
+        lines.append(f"cost_pct: {r.cost_pct}")
+        lines.append(f"net_ev_pct: {r.net_ev_pct}")
+        lines.append(f"gross_ev_pct: {r.gross_ev_pct}")
+        lines.append(f"winrate: {r.winrate}")
+        lines.append(f"baseline_net_ev_pct: {r.baseline_net_ev_pct}")
+        lines.append(f"edge_vs_baseline_pct: {r.edge_vs_baseline_pct}")
+        lines.append(f"bootstrap_ci_low: {r.bootstrap_ci_low} bootstrap_ci_high: {r.bootstrap_ci_high}")
+        for p in r.per_horizon:
+            lines.append(
+                f"horizon {p['horizon_h']}h: net_ev_pct={p['net_ev_pct']} "
+                f"winrate={p['winrate']} samples={p['samples']}"
+            )
+        lines.append(f"avg_mfe_pct: {r.avg_mfe_pct} avg_mae_pct: {r.avg_mae_pct}")
+        lines.append(f"median_time_to_tp_h: {r.median_time_to_tp_h}")
+        lines.append(f"median_time_to_sl_h: {r.median_time_to_sl_h}")
+        lines.append(f"one_event_dominance: {r.one_event_dominance}")
+        lines.append(f"one_symbol_dominance: {r.one_symbol_dominance} top_symbol: {r.top_symbol or 'NONE'}")
+        lines.append(f"sample_count: {r.sample_count}")
+        lines.append("blockers: " + (",".join(r.blockers) if r.blockers else "NONE"))
+        lines.append(f"status: {r.status}")
+        lines.append(f"paper_ready: {str(r.paper_ready).lower()}")
+        lines.append(f"live_ready: {str(r.live_ready).lower()}")
+        lines.extend(self._v82_safety_footer())
+        lines.append("EXTERNAL EVENT STUDY V10.1 END")
+        return "\n".join(lines)
+
     def rebound_sign_integrity_v8293_cli(
         self, hours: int = 168, limit: int = 50000,
     ) -> str:
@@ -4505,6 +4642,9 @@ def build_argument_parser() -> argparse.ArgumentParser:
             "event-catalyst-layer-v10",
             "edge-discovery-orchestrator-v10",
             "alpha-ensemble-v10",
+            "external-edge-ingest-v101",
+            "external-data-health-v101",
+            "external-event-study-v101",
             "ohlcv-replay-loader-smoke-test",
             "ohlcv-replay-loader-audit",
             "duplicate-module-audit-smoke-test",
@@ -4624,6 +4764,10 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--margins", default="2,5,10,20", help="Margins (csv USDT) for capital-leverage-sim (default 2,5,10,20).")
     parser.add_argument("--leverages", default="1,3,5,10,20,50", help="Leverages (csv) for capital-leverage-sim (default 1,3,5,10,20,50).")
     parser.add_argument("--external-data-path", default="", help="Local CSV/JSON path with external edge data (funding/OI/liq/unlock/catalyst) for ResearchOps V10 labs. No network, no APIs.")
+    parser.add_argument("--dataset", default="perp_market_state", help="V10.1 dataset: perp_market_state|perp_liquidations|token_unlock_events|listing_events.")
+    parser.add_argument("--input", default="", help="V10.1 single local input file (CSV/JSON/NDJSON) for external-edge-ingest-v101.")
+    parser.add_argument("--input-dir", default="", help="V10.1 input directory of local files for external-edge-ingest-v101.")
+    parser.add_argument("--module", default="funding_oi_liq", help="V10.1 event-study module: funding_oi_liq|unlocks|listings.")
     return parser
 
 
@@ -5347,6 +5491,19 @@ def main() -> None:
             hours=args.hours,
             symbols=getattr(args, "symbols", ""),
             timeframe=getattr(args, "timeframe", "15m"),
+        ))
+    elif args.command == "external-edge-ingest-v101":
+        print(lab.external_edge_ingest_v101_cli(
+            dataset=getattr(args, "dataset", "perp_market_state"),
+            input_path=getattr(args, "input", ""),
+            input_dir=getattr(args, "input_dir", ""),
+        ))
+    elif args.command == "external-data-health-v101":
+        print(lab.external_data_health_v101_cli())
+    elif args.command == "external-event-study-v101":
+        print(lab.external_event_study_v101_cli(
+            module=getattr(args, "module", "funding_oi_liq"),
+            hours=args.hours,
         ))
     elif args.command == "ohlcv-replay-loader-smoke-test":
         print(lab.ohlcv_replay_loader_smoke_test())
