@@ -3653,8 +3653,12 @@ class ResearchLab:
         from datetime import datetime, timezone
         from pathlib import Path
 
+        import csv as _csv
+
         from .labs.external_funding_oi_diagnostics_v10_1 import (
             STATUS_NEED_DATA,
+            TABLE_COLUMNS,
+            diagnostics_table_rows,
             run_funding_oi_diagnostics,
         )
         market_clean, mrep = self._v101_load_clean("perp_market_state")
@@ -3684,6 +3688,7 @@ class ResearchLab:
         lines.append(f"report_status: {r.status}")
         # Persist a research report (external_data/reports is git-ignored).
         report_path = "NONE"
+        csv_path = "NONE"
         if r.status != STATUS_NEED_DATA:
             try:
                 rdir = Path("external_data/reports")
@@ -3695,9 +3700,19 @@ class ResearchLab:
                 p = rdir / f"funding_oi_diagnostics_{stamp}.json"
                 p.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
                 report_path = str(p)
+                # FIX-4: auditable CSV table (bucket_id..exact_blocker..status).
+                table = diagnostics_table_rows(r)
+                cp = rdir / f"funding_oi_diagnostics_{stamp}.csv"
+                with cp.open("w", encoding="utf-8", newline="") as fh:
+                    w = _csv.DictWriter(fh, fieldnames=TABLE_COLUMNS)
+                    w.writeheader()
+                    for row in table:
+                        w.writerow(row)
+                csv_path = str(cp)
             except OSError:
                 report_path = "WRITE_FAILED"
         lines.append(f"report_json: {report_path}")
+        lines.append(f"report_csv: {csv_path}")
         lines.append(f"paper_ready: {str(r.paper_ready).lower()}")
         lines.append(f"live_ready: {str(r.live_ready).lower()}")
         lines.extend(self._v82_safety_footer())

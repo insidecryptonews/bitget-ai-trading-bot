@@ -281,6 +281,50 @@ def test_lookback_retained_but_no_future_used():
     assert r.effective_start_timestamp_ms < r.reference_now_ms
 
 
+# ---------------------------------------------------------------------------
+# FIX-2 — direction-matched baseline
+# ---------------------------------------------------------------------------
+
+def _drift_series(p0, n=600, drift=0.002):
+    ts = [BASE + i * STEP for i in range(n)]
+    close = [p0 * (1 + drift) ** i for i in range(n)]
+    return {"ts": ts, "close": close, "high": list(close), "low": list(close),
+            "funding": [0.0] * n, "oi": [0.0] * n}
+
+
+def test_baseline_direction_matched_long_vs_short():
+    from app.labs.external_event_study_v10_1 import _random_baseline
+    mbs = {"BTCUSDT": _drift_series(100, drift=0.002)}  # uptrend
+    base_long = _random_baseline(mbs, {"BTCUSDT"}, 24.0, 0.0018, n=300, seed=7, direction=1)
+    base_short = _random_baseline(mbs, {"BTCUSDT"}, 24.0, 0.0018, n=300, seed=7, direction=-1)
+    # In an uptrend a random long wins, a random short loses: the baseline is
+    # direction-matched (the sign flips with direction).
+    assert base_long > 0 > base_short
+
+
+def test_short_baseline_not_inflated_by_bearish_drift():
+    from app.labs.external_event_study_v10_1 import _random_baseline
+    mbs = {"ETHUSDT": _drift_series(3600, drift=-0.002)}  # downtrend
+    # A SHORT bucket must be compared to a SHORT baseline (which also rides the
+    # drift), so the drift does NOT inflate edge_vs_baseline.
+    base_short = _random_baseline(mbs, {"ETHUSDT"}, 24.0, 0.0018, n=300, seed=7, direction=-1)
+    assert base_short > 0  # short profits from the down-drift in the BASELINE too
+
+
+def test_run_event_study_sets_baseline_direction():
+    mbs = {"ETHUSDT": _drift_series(3600, drift=-0.001)}
+    ev = [{"symbol": "ETHUSDT", "timestamp_ms": BASE + i * STEP, "direction": -1}
+          for i in range(0, 200, 2)]
+    r = run_event_study(ev, mbs, primary_horizon_h=24, cost=0.0018,
+                        bootstrap_n=100, baseline_n=100, min_events=50)
+    assert r.baseline_direction == "SHORT"
+    ev_l = [{"symbol": "ETHUSDT", "timestamp_ms": BASE + i * STEP, "direction": 1}
+            for i in range(0, 200, 2)]
+    r2 = run_event_study(ev_l, mbs, primary_horizon_h=24, cost=0.0018,
+                         bootstrap_n=100, baseline_n=100, min_events=50)
+    assert r2.baseline_direction == "LONG"
+
+
 def test_build_market_series_from_clean_rows():
     rows = [{"symbol": "BTCUSDT", "timestamp_ms": BASE + i * STEP, "price_close": 100 + i,
              "price_high": 101 + i, "price_low": 99 + i, "funding_rate": 0.0001,

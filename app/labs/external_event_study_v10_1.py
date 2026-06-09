@@ -118,6 +118,7 @@ class EventStudyReport:
     winrate: float = 0.0
     baseline_net_ev_pct: float = 0.0
     edge_vs_baseline_pct: float = 0.0
+    baseline_direction: str = ""  # LONG/SHORT — baseline is direction-matched
     bootstrap_ci_low: float = 0.0
     bootstrap_ci_high: float = 0.0
     bootstrap_n: int = 0
@@ -522,9 +523,17 @@ def run_event_study(
     report.bootstrap_ci_low, report.bootstrap_ci_high = _bootstrap_ci(
         primary_nets, n=bootstrap_n, seed=seed)
 
-    # Random baseline: uniform anchors over the same symbols (reproducible).
+    # Random baseline: uniform anchors over the same symbols (reproducible),
+    # DIRECTION-MATCHED to the bucket so edge_vs_baseline measures the
+    # conditional edge (signal vs random same-direction entries), not the
+    # market drift. The representative direction is the (sign) majority of
+    # the bucket's events; diagnostics buckets are single-direction.
+    dirs = [int(e.get("direction", 1) or 1) for e in ev_list]
+    baseline_dir = 1 if (sum(dirs) >= 0) else -1
+    report.baseline_direction = "LONG" if baseline_dir == 1 else "SHORT"
     report.baseline_net_ev_pct = _random_baseline(
-        market_by_symbol, symbols_seen, primary, cost, n=baseline_n, seed=seed)
+        market_by_symbol, symbols_seen, primary, cost, n=baseline_n, seed=seed,
+        direction=baseline_dir)
     report.edge_vs_baseline_pct = round(report.net_ev_pct - report.baseline_net_ev_pct, 4)
 
     # Dominance (on absolute contribution at primary horizon).
@@ -536,8 +545,13 @@ def run_event_study(
     return report
 
 
-def _random_baseline(market_by_symbol, symbols, horizon_h, cost, *, n, seed) -> float:
+def _random_baseline(market_by_symbol, symbols, horizon_h, cost, *, n, seed, direction: int = 1) -> float:
+    """Mean net forward return of random entries over the same symbols,
+    DIRECTION-MATCHED. ``direction`` (+1 long / -1 short) is applied to the
+    forward return so the baseline is a fair "random entry of the same
+    side" reference — isolating conditional edge from market drift."""
     rng = random.Random(seed * 31 + 1)
+    d = 1 if direction >= 0 else -1
     rets = []
     syms = [s for s in symbols if s in market_by_symbol and len(market_by_symbol[s]["ts"]) > 3]
     if not syms:
@@ -557,8 +571,7 @@ def _random_baseline(market_by_symbol, symbols, horizon_h, cost, *, n, seed) -> 
         pf = s["close"][j]
         if pf is None or pf <= 0:
             continue
-        # baseline is long-only neutral reference (no direction edge)
-        gross = (pf - anchor) / anchor * 100.0
+        gross = (pf - anchor) / anchor * 100.0 * d  # direction-matched
         rets.append(gross - cost * 100.0)
     return round(statistics.fmean(rets), 4) if rets else 0.0
 

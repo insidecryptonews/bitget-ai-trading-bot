@@ -68,15 +68,18 @@ class BucketResult:
     gross_ev_pct: float = 0.0
     winrate: float = 0.0
     baseline_net_ev_pct: float = 0.0
+    baseline_direction: str = ""
     edge_vs_baseline_pct: float = 0.0
     bootstrap_ci_low: float = 0.0
     bootstrap_ci_high: float = 0.0
     one_event_dominance: float = 0.0
     one_symbol_dominance: float = 0.0
+    symbol_dominance_blocking: bool = False
     avg_mfe_pct: float = 0.0
     avg_mae_pct: float = 0.0
     median_time_to_tp_h: float | None = None
     median_time_to_sl_h: float | None = None
+    exact_blocker: str = ""
     status: str = STATUS_NEED_MORE
 
     def as_dict(self) -> dict[str, Any]:
@@ -246,20 +249,33 @@ def _bucket_specs() -> list[tuple[str, str, int, Callable[[dict], bool]]]:
     ]
 
 
-def _bucket_verdict(rep) -> str:
+def _bucket_verdict(rep, *, symbol_scope: str = "ALL") -> tuple[str, str]:
+    """Conservative verdict + the exact blocker.
+
+    FIX-1: ``one_symbol_dominance`` is only a blocker for ``ALL`` scope. For
+    a per-symbol bucket (``symbol_scope != "ALL"``) it is 1.0 BY
+    CONSTRUCTION (every event is that symbol), so using it as a blocker is
+    tautological — it is reported but not enforced. ``one_event_dominance``
+    is always enforced."""
     ev = rep.matched_events
     net = rep.net_ev_pct
     if ev < WATCH_MIN_EVENTS:
-        return STATUS_NEED_MORE
-    if net <= 0 or rep.edge_vs_baseline_pct <= 0:
-        return STATUS_REJECT
-    dom_ok = (rep.one_event_dominance < MAX_EVENT_DOMINANCE
-              and rep.one_symbol_dominance < MAX_SYMBOL_DOMINANCE)
-    if (ev >= GREEN_MIN_EVENTS and rep.bootstrap_ci_low > 0 and dom_ok):
-        return STATUS_GREEN
-    if (rep.bootstrap_ci_high > 0 and dom_ok):
-        return STATUS_WATCH
-    return STATUS_REJECT
+        return STATUS_NEED_MORE, f"insufficient_events({ev}<{WATCH_MIN_EVENTS})"
+    if net <= 0:
+        return STATUS_REJECT, "net_ev_non_positive"
+    if rep.edge_vs_baseline_pct <= 0:
+        return STATUS_REJECT, "no_edge_vs_baseline"
+    if rep.one_event_dominance >= MAX_EVENT_DOMINANCE:
+        return STATUS_REJECT, "one_event_dominance"
+    symbol_dom_block = (symbol_scope == "ALL"
+                        and rep.one_symbol_dominance >= MAX_SYMBOL_DOMINANCE)
+    if symbol_dom_block:
+        return STATUS_REJECT, "one_symbol_dominance"
+    if ev >= GREEN_MIN_EVENTS and rep.bootstrap_ci_low > 0:
+        return STATUS_GREEN, ""
+    if rep.bootstrap_ci_high > 0:
+        return STATUS_WATCH, "ci_low<=0_watch_only"
+    return STATUS_REJECT, "bootstrap_ci_high_non_positive"
 
 
 def _net_by_horizon(rep) -> dict[float, float]:
@@ -320,6 +336,7 @@ def run_funding_oi_diagnostics(
                 min_events=WATCH_MIN_EVENTS,
             )
             nbh = _net_by_horizon(rep)
+            status, blocker = _bucket_verdict(rep, symbol_scope=scope_label)
             br = BucketResult(
                 name=name, hypothesis=hyp, direction=direction, symbol_scope=scope_label,
                 event_count=rep.events_after_filter or rep.event_count,
@@ -328,15 +345,21 @@ def run_funding_oi_diagnostics(
                 net_ev_8h=nbh.get(8.0, 0.0), net_ev_24h=nbh.get(24.0, 0.0),
                 gross_ev_pct=rep.gross_ev_pct, winrate=rep.winrate,
                 baseline_net_ev_pct=rep.baseline_net_ev_pct,
+                baseline_direction=rep.baseline_direction,
                 edge_vs_baseline_pct=rep.edge_vs_baseline_pct,
                 bootstrap_ci_low=rep.bootstrap_ci_low, bootstrap_ci_high=rep.bootstrap_ci_high,
                 one_event_dominance=rep.one_event_dominance,
                 one_symbol_dominance=rep.one_symbol_dominance,
+                # one_symbol_dominance is informative for per-symbol buckets,
+                # only a blocker for ALL scope (FIX-1).
+                symbol_dominance_blocking=(scope_label == "ALL"
+                                           and rep.one_symbol_dominance >= MAX_SYMBOL_DOMINANCE),
                 avg_mfe_pct=rep.avg_mfe_pct, avg_mae_pct=rep.avg_mae_pct,
                 median_time_to_tp_h=rep.median_time_to_tp_h,
                 median_time_to_sl_h=rep.median_time_to_sl_h,
+                exact_blocker=blocker,
             )
-            br.status = _bucket_verdict(rep)
+            br.status = status
             results.append(br)
 
     report.buckets_evaluated = len(results)
@@ -355,3 +378,43 @@ def run_funding_oi_diagnostics(
     ]
     report.status = STATUS_OK_LABEL
     return report
+
+
+# Auditable table columns (FIX-4).
+TABLE_COLUMNS = [
+    "bucket_id", "symbol_scope", "direction", "event_count", "matched_events",
+    "net_ev_1h", "net_ev_4h", "net_ev_8h", "net_ev_24h",
+    "baseline_ev_24h", "baseline_direction", "edge_vs_baseline_24h",
+    "bootstrap_ci_low", "bootstrap_ci_high",
+    "one_event_dominance", "one_symbol_dominance", "symbol_dominance_blocking",
+    "exact_blocker", "status", "final_recommendation",
+]
+
+
+def diagnostics_table_rows(report: FundingOiDiagnosticsReport) -> list[dict[str, Any]]:
+    """Flatten the report buckets into the auditable FIX-4 table rows."""
+    rows: list[dict[str, Any]] = []
+    for b in report.buckets:
+        rows.append({
+            "bucket_id": b.get("name", ""),
+            "symbol_scope": b.get("symbol_scope", ""),
+            "direction": "SHORT" if b.get("direction", 0) < 0 else "LONG",
+            "event_count": b.get("event_count", 0),
+            "matched_events": b.get("matched_events", 0),
+            "net_ev_1h": b.get("net_ev_1h", 0.0),
+            "net_ev_4h": b.get("net_ev_4h", 0.0),
+            "net_ev_8h": b.get("net_ev_8h", 0.0),
+            "net_ev_24h": b.get("net_ev_24h", 0.0),
+            "baseline_ev_24h": b.get("baseline_net_ev_pct", 0.0),
+            "baseline_direction": b.get("baseline_direction", ""),
+            "edge_vs_baseline_24h": b.get("edge_vs_baseline_pct", 0.0),
+            "bootstrap_ci_low": b.get("bootstrap_ci_low", 0.0),
+            "bootstrap_ci_high": b.get("bootstrap_ci_high", 0.0),
+            "one_event_dominance": b.get("one_event_dominance", 0.0),
+            "one_symbol_dominance": b.get("one_symbol_dominance", 0.0),
+            "symbol_dominance_blocking": str(bool(b.get("symbol_dominance_blocking", False))).lower(),
+            "exact_blocker": b.get("exact_blocker", "") or "NONE",
+            "status": b.get("status", ""),
+            "final_recommendation": FINAL_RECOMMENDATION_NO_LIVE,
+        })
+    return rows

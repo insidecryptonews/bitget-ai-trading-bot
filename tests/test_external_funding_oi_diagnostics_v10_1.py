@@ -130,6 +130,79 @@ def test_aggregate_liquidations():
     assert agg["BTCUSDT"][BASE]["short"] == 40.0
 
 
+# ---------------------------------------------------------------------------
+# FIX-1 — gate is scope-aware (single-symbol not blocked by symbol dominance)
+# ---------------------------------------------------------------------------
+
+def _stub(**kw):
+    from types import SimpleNamespace
+    base = dict(matched_events=160, net_ev_pct=1.49, edge_vs_baseline_pct=1.91,
+                one_event_dominance=0.01, one_symbol_dominance=1.0,
+                bootstrap_ci_low=1.16, bootstrap_ci_high=1.8)
+    base.update(kw)
+    return SimpleNamespace(**base)
+
+
+def test_fix1_single_symbol_can_be_green():
+    from app.labs.external_funding_oi_diagnostics_v10_1 import _bucket_verdict, STATUS_GREEN
+    # matched>100, net>0, edge>0, ci_low>0, one_event<0.25, one_symbol=1.0
+    status, blocker = _bucket_verdict(_stub(), symbol_scope="ETHUSDT")
+    assert status == STATUS_GREEN
+    assert blocker == ""  # symbol dominance is NOT a blocker for a per-symbol bucket
+
+
+def test_fix1_all_scope_symbol_dominance_blocks():
+    from app.labs.external_funding_oi_diagnostics_v10_1 import _bucket_verdict, STATUS_REJECT
+    status, blocker = _bucket_verdict(_stub(one_symbol_dominance=0.80), symbol_scope="ALL")
+    assert status == STATUS_REJECT
+    assert blocker == "one_symbol_dominance"
+    # same metrics, balanced symbols => GREEN for ALL
+    from app.labs.external_funding_oi_diagnostics_v10_1 import STATUS_GREEN
+    status2, _ = _bucket_verdict(_stub(one_symbol_dominance=0.50), symbol_scope="ALL")
+    assert status2 == STATUS_GREEN
+
+
+def test_fix1_event_dominance_still_blocks_both_scopes():
+    from app.labs.external_funding_oi_diagnostics_v10_1 import _bucket_verdict, STATUS_REJECT
+    s, b = _bucket_verdict(_stub(one_event_dominance=0.40), symbol_scope="ETHUSDT")
+    assert s == STATUS_REJECT and b == "one_event_dominance"
+
+
+def test_exact_blocker_reasons():
+    from app.labs.external_funding_oi_diagnostics_v10_1 import _bucket_verdict, STATUS_NEED_MORE, STATUS_REJECT
+    s, b = _bucket_verdict(_stub(matched_events=10), symbol_scope="ALL")
+    assert s == STATUS_NEED_MORE and b.startswith("insufficient_events")
+    s, b = _bucket_verdict(_stub(net_ev_pct=-0.3), symbol_scope="ALL")
+    assert s == STATUS_REJECT and b == "net_ev_non_positive"
+    s, b = _bucket_verdict(_stub(edge_vs_baseline_pct=-0.1), symbol_scope="ALL")
+    assert s == STATUS_REJECT and b == "no_edge_vs_baseline"
+
+
+def test_fix4_table_columns_and_rows():
+    from app.labs.external_funding_oi_diagnostics_v10_1 import (
+        TABLE_COLUMNS, diagnostics_table_rows)
+    r = run_funding_oi_diagnostics(_market(), [], hours=100000,
+                                   bootstrap_n=120, baseline_n=80, per_symbol=True)
+    rows = diagnostics_table_rows(r)
+    assert rows, "expected table rows"
+    for row in rows:
+        assert set(row.keys()) == set(TABLE_COLUMNS)
+        assert row["final_recommendation"] == "NO LIVE"
+        assert row["direction"] in ("LONG", "SHORT")
+    # per-symbol buckets carry symbol_dominance_blocking=false (informative)
+    persym = [row for row in rows if row["symbol_scope"] != "ALL"]
+    assert persym
+    assert all(row["symbol_dominance_blocking"] == "false" for row in persym)
+
+
+def test_buckets_carry_baseline_direction_and_blocker():
+    r = run_funding_oi_diagnostics(_market(), [], hours=100000,
+                                   bootstrap_n=120, baseline_n=80, per_symbol=False)
+    for b in r.buckets:
+        assert b["baseline_direction"] in ("LONG", "SHORT")
+        assert "exact_blocker" in b
+
+
 def test_safety_scan_module():
     mod = "app.labs.external_funding_oi_diagnostics_v10_1"
     src = pathlib.Path(importlib.import_module(mod).__file__).read_text(encoding="utf-8")
