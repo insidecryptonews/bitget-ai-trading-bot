@@ -22,13 +22,19 @@ places orders, never enables paper filter, never touches `.env`.
   `ENABLE_PAPER_POLICY_FILTER=False`, `can_send_real_orders=false`.
 - `COINALYZE_API_KEY` exported in the shell env (NOT in `.env`, NOT in Git).
 
-## 1. Backup first (R2 / Data Vault)
+## 1. Backup first (R2 / Data Vault) — but DO NOT archive/delete raw yet
 
 ```bash
 # Back up current state BEFORE any change (use the project's existing vault tooling).
 python -m app.research_lab data-vault-status
 python -m app.research_lab post-migration-backup    # or your standard vault backup
 ```
+
+> ⚠️ **V10.2.1 change:** do **NOT** archive or delete `external_data/raw/*` before
+> the new download is confirmed. The earlier flow archived old data first and a
+> failed fetch left us restoring manually. The chunked fetcher (step 4) downloads
+> into an isolated **staging** dir and only touches `raw/` on a fully successful
+> publish, so old data is never at risk from an API failure.
 
 ## 2. Verify the key is present (never printed)
 
@@ -48,20 +54,58 @@ python -m pytest -q           # must be fully green before proceeding
 curl -s localhost:<port>/health   # expect ok
 ```
 
-## 4. Download BTC/ETH — 180 days first (explicit symbol override)
+## 4. Download BTC/ETH — chunked, STAGING-ONLY first (safe; never touches raw)
+
+Use the V10.2.1 chunked fetcher. It downloads in 30-day chunks into an
+isolated staging dir and, in `staging-only` mode, does NOT publish to `raw/`
+and does NOT archive/delete old data. A mid-download API failure leaves
+`raw/` and old data fully intact.
 
 ```bash
-python scripts/fetch_coinalyze_v101.py \
+# 180 days, 30-day chunks, staging-only (default). Symbol override avoids discovery issues.
+python scripts/fetch_coinalyze_chunked_v102.py \
   --coinalyze-symbols "BTCUSDT=BTCUSDT_PERP.A,ETHUSDT=ETHUSDT_PERP.A" \
-  --days 180 --interval 1hour
+  --days 180 --interval 1hour --chunk-days 30 \
+  --publish-mode staging-only
 ```
 
-Optional, only if 180d looks clean:
+Inspect the printed report + `external_data/reports/coinalyze_chunked_fetch_*.json`:
+- `report_status` should be `PARTIAL_STAGING_ONLY`.
+- `chunks_ok == chunks_total`, `chunks_failed == 0`.
+- `old_data_touched: false`.
+- review `rows_market_state`, `rows_liquidations`, `min/max_timestamp`, `duplicates_removed`.
+
+If a chunk failed (e.g. `report_status: FAILED`), the staging dir is intact and
+`raw/` is untouched. Re-run with `--resume` (completed chunks are skipped):
 
 ```bash
-python scripts/fetch_coinalyze_v101.py \
+python scripts/fetch_coinalyze_chunked_v102.py \
   --coinalyze-symbols "BTCUSDT=BTCUSDT_PERP.A,ETHUSDT=ETHUSDT_PERP.A" \
-  --days 365 --interval 1hour
+  --days 180 --interval 1hour --chunk-days 30 --resume \
+  --staging-dir external_data/staging/coinalyze_long_history_<the_same_timestamp> \
+  --publish-mode staging-only
+```
+
+## 4b. Publish ONLY after staging looks correct
+
+```bash
+# Replace mode: archives the current raw files (only now, after success) and publishes the new ones.
+python scripts/fetch_coinalyze_chunked_v102.py \
+  --coinalyze-symbols "BTCUSDT=BTCUSDT_PERP.A,ETHUSDT=ETHUSDT_PERP.A" \
+  --days 180 --interval 1hour --chunk-days 30 \
+  --publish-mode replace
+```
+
+Optional, only if 180d is clean — extend to 365 days (staging-only first, then replace):
+
+```bash
+python scripts/fetch_coinalyze_chunked_v102.py \
+  --coinalyze-symbols "BTCUSDT=BTCUSDT_PERP.A,ETHUSDT=ETHUSDT_PERP.A" \
+  --days 365 --interval 1hour --chunk-days 30 --publish-mode staging-only
+# inspect, then:
+python scripts/fetch_coinalyze_chunked_v102.py \
+  --coinalyze-symbols "BTCUSDT=BTCUSDT_PERP.A,ETHUSDT=ETHUSDT_PERP.A" \
+  --days 365 --interval 1hour --chunk-days 30 --publish-mode replace
 ```
 
 ## 5. Re-ingest (validation + clean output; no DB writes)

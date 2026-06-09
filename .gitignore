@@ -30,3 +30,6 @@ external_data/clean/**/*.ndjson
 external_data/reports/**/*.csv
 external_data/reports/**/*.json
 external_data/reports/**/*.txt
+# V10.2.1 — chunked staging + archived raw snapshots: never commit data
+external_data/staging/
+external_data/archive/
