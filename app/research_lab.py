@@ -3789,6 +3789,124 @@ class ResearchLab:
         lines.append("EXTERNAL FUNDING/OI STABILITY V10.1 END")
         return "\n".join(lines)
 
+    def external_missing_oi_audit_v102_cli(self, hours: int = 2160) -> str:
+        import csv as _csv
+        import json
+        from datetime import datetime, timezone
+        from pathlib import Path
+
+        from .labs.external_edge_ingest_v10_1 import read_input_dir
+        from .labs.external_missing_oi_audit_v10_2 import (
+            AUDIT_TABLE_COLUMNS,
+            STATUS_NEED_MORE,
+            audit_table_rows,
+            run_missing_oi_audit,
+        )
+        # Missing OI is only visible in RAW (clean drops rows lacking OI).
+        raw_rows, _used = read_input_dir(f"{self._V101_RAW}/perp_market_state")
+        r = run_missing_oi_audit(raw_rows, hours=int(hours))
+        lines = ["EXTERNAL MISSING OI AUDIT V10.2 START"]
+        lines.append(f"hours: {r.hours}")
+        lines.append(f"total_rows: {r.total_rows} rows_missing_oi: {r.rows_missing_oi}")
+        lines.append(f"missing_ratio_global: {r.missing_ratio_global:.4f} ({r.missing_ratio_global:.2%})")
+        for sym, d in sorted(r.per_symbol.items()):
+            lines.append(f"per_symbol {sym}: missing={d['missing']}/{d['total']} ratio={d['ratio']}")
+        lines.append(f"worst_symbol: {r.worst_symbol or 'NONE'} eth_worse_than_btc: {str(r.eth_worse_than_btc).lower()}")
+        lines.append(f"first_half_missing_ratio: {r.first_half_missing_ratio} second_half_missing_ratio: {r.second_half_missing_ratio}")
+        lines.append(f"max_consecutive_missing: {r.max_consecutive_missing} clustered_fraction: {r.clustered_fraction} clustered: {str(r.clustered).lower()}")
+        lines.append(f"worst_day: {r.worst_day or 'NONE'} worst_day_ratio: {r.worst_day_ratio}")
+        lines.append(f"funding_extreme_bars: {r.funding_extreme_bars} with_missing_oi: {r.funding_extreme_with_missing_oi} ratio: {r.funding_extreme_missing_ratio}")
+        for n in r.notes:
+            lines.append(f"note: {n}")
+        lines.append(f"status: {r.status}")
+        lines.append("recommendations: " + (",".join(r.recommendations) if r.recommendations else "NONE"))
+        lines.append(f"primary_recommendation: {r.primary_recommendation or 'NONE'}")
+        report_json = "NONE"
+        report_csv = "NONE"
+        if r.status != STATUS_NEED_MORE:
+            try:
+                rdir = Path("external_data/reports")
+                rdir.mkdir(parents=True, exist_ok=True)
+                stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+                p = rdir / f"missing_oi_audit_{stamp}.json"
+                p.write_text(json.dumps(r.as_dict(), indent=2, default=str), encoding="utf-8")
+                report_json = str(p)
+                cp = rdir / f"missing_oi_audit_{stamp}.csv"
+                with cp.open("w", encoding="utf-8", newline="") as fh:
+                    w = _csv.DictWriter(fh, fieldnames=AUDIT_TABLE_COLUMNS)
+                    w.writeheader()
+                    for row in audit_table_rows(r):
+                        w.writerow(row)
+                report_csv = str(cp)
+            except OSError:
+                report_json = "WRITE_FAILED"
+        lines.append(f"report_json: {report_json}")
+        lines.append(f"report_csv: {report_csv}")
+        lines.extend(self._v82_safety_footer())
+        lines.append("EXTERNAL MISSING OI AUDIT V10.2 END")
+        return "\n".join(lines)
+
+    def external_long_history_validation_v102_cli(self, hours: int = 8760) -> str:
+        import json
+        from datetime import datetime, timezone
+        from pathlib import Path
+
+        from .labs.external_edge_ingest_v10_1 import read_input_dir
+        from .labs.external_long_history_validation_v10_2 import (
+            STATUS_NEED_DATA,
+            run_long_history_validation,
+        )
+        market_clean, _mrep = self._v101_load_clean("perp_market_state")
+        liq_clean, _lrep = self._v101_load_clean("perp_liquidations")
+        raw_rows, _used = read_input_dir(f"{self._V101_RAW}/perp_market_state")
+        r = run_long_history_validation(market_clean, liq_clean, raw_rows, hours=int(hours))
+        lines = ["EXTERNAL LONG HISTORY VALIDATION V10.2 START"]
+        lines.append(f"hours: {r.hours}")
+        lines.append(f"market_rows: {r.market_rows} liq_rows: {r.liq_rows}")
+        lines.append("symbols: " + (",".join(r.symbols) if r.symbols else "NONE"))
+        lines.append(f"days_covered: {r.days_covered}")
+        lines.append(f"history_status: {r.history_status}")
+        lines.append(f"data_health.status: {r.data_health.get('status')}")
+        lines.append(
+            f"missing_oi_audit.status: {r.missing_oi_audit.get('status')} "
+            f"global={r.missing_oi_audit.get('missing_ratio_global')} "
+            f"primary_rec={r.missing_oi_audit.get('primary_recommendation')}"
+        )
+        lines.append(
+            "stability_green: "
+            + (",".join(r.stability_summary.get("stability_green", [])) or "NONE")
+        )
+        lines.append(
+            "stability_watch_only: "
+            + (",".join(r.stability_summary.get("watch_only", [])) or "NONE")
+        )
+        nrd = r.next_research_decision or {}
+        lines.append(f"next_research_decision.history_status: {nrd.get('history_status')}")
+        lines.append(f"next_research_decision.any_stability_green: {str(nrd.get('any_stability_green', False)).lower()}")
+        lines.append(f"next_research_decision.eth_specific_candidate: {str(nrd.get('eth_specific_candidate', False)).lower()}")
+        lines.append(f"next_research_decision.suggested_next_code_prompt_type: {nrd.get('suggested_next_code_prompt_type')}")
+        lines.append(f"next_research_decision.dashboard_next_phase: {nrd.get('dashboard_next_phase')}")
+        lines.append(f"next_research_decision.max_label: {nrd.get('max_label')}")
+        lines.append(f"next_research_decision.rationale: {nrd.get('rationale')}")
+        lines.append(f"report_status: {r.status}")
+        report_json = "NONE"
+        if r.status != STATUS_NEED_DATA:
+            try:
+                rdir = Path("external_data/reports")
+                rdir.mkdir(parents=True, exist_ok=True)
+                stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+                p = rdir / f"long_history_validation_{stamp}.json"
+                p.write_text(json.dumps(r.as_dict(), indent=2, default=str), encoding="utf-8")
+                report_json = str(p)
+            except OSError:
+                report_json = "WRITE_FAILED"
+        lines.append(f"report_json: {report_json}")
+        lines.append(f"paper_ready: {str(r.paper_ready).lower()}")
+        lines.append(f"live_ready: {str(r.live_ready).lower()}")
+        lines.extend(self._v82_safety_footer())
+        lines.append("EXTERNAL LONG HISTORY VALIDATION V10.2 END")
+        return "\n".join(lines)
+
     def rebound_sign_integrity_v8293_cli(
         self, hours: int = 168, limit: int = 50000,
     ) -> str:
@@ -4806,6 +4924,8 @@ def build_argument_parser() -> argparse.ArgumentParser:
             "external-event-study-v101",
             "external-funding-oi-diagnostics-v101",
             "external-funding-oi-stability-v101",
+            "external-missing-oi-audit-v102",
+            "external-long-history-validation-v102",
             "ohlcv-replay-loader-smoke-test",
             "ohlcv-replay-loader-audit",
             "duplicate-module-audit-smoke-test",
@@ -5670,6 +5790,10 @@ def main() -> None:
         print(lab.external_funding_oi_diagnostics_v101_cli(hours=args.hours))
     elif args.command == "external-funding-oi-stability-v101":
         print(lab.external_funding_oi_stability_v101_cli(hours=args.hours))
+    elif args.command == "external-missing-oi-audit-v102":
+        print(lab.external_missing_oi_audit_v102_cli(hours=args.hours))
+    elif args.command == "external-long-history-validation-v102":
+        print(lab.external_long_history_validation_v102_cli(hours=args.hours))
     elif args.command == "ohlcv-replay-loader-smoke-test":
         print(lab.ohlcv_replay_loader_smoke_test())
     elif args.command == "ohlcv-replay-loader-audit":
