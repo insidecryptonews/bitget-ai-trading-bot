@@ -224,34 +224,81 @@ def _get(session, path: str, params: dict, key: str, *, retries: int = 4):
     return resp.json()
 
 
-def discover_bitget_symbols(session, key: str, wanted_norm: set[str]) -> dict[str, str]:
-    """Return {normalized_symbol -> coinalyze_symbol} for Bitget perps.
-    Discovers the real Coinalyze symbol; never assumes a suffix."""
-    exchanges = _get(session, "/exchanges", {}, key)
-    bitget_code = None
-    for ex in exchanges or []:
-        if str(ex.get("name", "")).lower() == "bitget" or "bitget" in str(ex.get("name", "")).lower():
-            bitget_code = ex.get("code")
-            break
-    markets = _get(session, "/future-markets", {}, key)
+# Coinalyze exchange-code suffix observed for Bitget perps (e.g.
+# ``BTCUSDT_PERP.A``). Used as a preference tiebreaker, NOT a hard
+# requirement — field matching is the real selector.
+BITGET_COINALYZE_SUFFIX = ".A"
+
+
+def parse_symbol_override(spec: str | None) -> dict[str, str]:
+    """Parse ``--coinalyze-symbols`` like
+    ``BTCUSDT=BTCUSDT_PERP.A,ETHUSDT=ETHUSDT_PERP.A`` into
+    {normalized_symbol -> coinalyze_symbol}. Never raises."""
     out: dict[str, str] = {}
+    for pair in (spec or "").split(","):
+        pair = pair.strip()
+        if not pair or "=" not in pair:
+            continue
+        norm, csym = pair.split("=", 1)
+        norm = norm.strip().upper()
+        csym = csym.strip()
+        if norm and csym:
+            out[norm] = csym
+    return out
+
+
+def select_bitget_symbols(
+    markets: list[dict] | None,
+    wanted_norm: set[str],
+    *,
+    preferred_suffix: str = BITGET_COINALYZE_SUFFIX,
+) -> dict[str, str]:
+    """Pure selector: pick Coinalyze perp symbols by MARKET FIELDS, not by
+    an exchange name in ``/exchanges`` (Coinalyze exposes letter codes like
+    ``exchange="A"``). A market qualifies when:
+
+    - ``is_perpetual == True``
+    - ``quote_asset == "USDT"``
+    - ``has_ohlcv_data == True``
+    - ``margined == "STABLE"`` IF the field is present (else not enforced)
+    - normalized symbol (``symbol_on_exchange`` or ``base+quote``) is wanted
+
+    When several markets match the same normalized symbol, the one whose
+    Coinalyze ``symbol`` ends with ``preferred_suffix`` (observed Bitget
+    code) wins; otherwise the first match. This explicitly accepts
+    ``BTCUSDT_PERP.A`` / ``ETHUSDT_PERP.A`` for Bitget."""
+    candidates: dict[str, list[str]] = {}
     for m in markets or []:
         if not m.get("is_perpetual"):
             continue
-        base = str(m.get("base_asset", "")).upper()
-        quote = str(m.get("quote_asset", "")).upper()
-        norm = f"{base}{quote}"
+        if str(m.get("quote_asset", "")).upper() != "USDT":
+            continue
+        if not m.get("has_ohlcv_data", False):
+            continue
+        margined = m.get("margined")
+        if margined is not None and str(margined).upper() != "STABLE":
+            continue
+        soe = str(m.get("symbol_on_exchange", "")).strip().upper()
+        base = str(m.get("base_asset", "")).strip().upper()
+        quote = str(m.get("quote_asset", "")).strip().upper()
+        norm = soe if soe in wanted_norm else f"{base}{quote}"
         if norm not in wanted_norm:
             continue
-        ex_code = m.get("exchange")
-        if bitget_code is not None and ex_code != bitget_code:
-            continue
-        if bitget_code is None and "bitget" not in str(m.get("exchange", "")).lower():
-            # fallback if /exchanges lacked a clean code
-            continue
-        # Prefer the first match per normalized symbol.
-        out.setdefault(norm, m.get("symbol"))
+        csym = m.get("symbol")
+        if csym:
+            candidates.setdefault(norm, []).append(str(csym))
+    out: dict[str, str] = {}
+    for norm, syms in candidates.items():
+        preferred = [s for s in syms if s.endswith(preferred_suffix)]
+        out[norm] = preferred[0] if preferred else syms[0]
     return out
+
+
+def discover_bitget_symbols(session, key: str, wanted_norm: set[str]) -> dict[str, str]:
+    """Fetch ``/future-markets`` and select by field matching. Does NOT
+    depend on ``/exchanges`` resolving a 'Bitget' name."""
+    markets = _get(session, "/future-markets", {}, key)
+    return select_bitget_symbols(markets, wanted_norm)
 
 
 def _chunks(frm_s: int, to_s: int, days: int):
@@ -306,6 +353,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--symbols", default="BTCUSDT,ETHUSDT")
     ap.add_argument("--days", type=int, default=75)
     ap.add_argument("--interval", default="1hour")
+    ap.add_argument("--coinalyze-symbols", default="",
+                    help="Manual override mapping, e.g. "
+                         "'BTCUSDT=BTCUSDT_PERP.A,ETHUSDT=ETHUSDT_PERP.A'. "
+                         "If set, skips automatic discovery.")
     args = ap.parse_args(argv)
 
     key = os.environ.get("COINALYZE_API_KEY")
@@ -329,15 +380,27 @@ def main(argv: list[str] | None = None) -> int:
     to_s = int(datetime.now(timezone.utc).timestamp())
     frm_s = to_s - args.days * 86400
 
-    try:
-        sym_map = discover_bitget_symbols(session, key, wanted)
-    except Exception as exc:
-        print(f"ABORT: symbol discovery failed ({type(exc).__name__}). No files written. NO LIVE.")
-        return 0
+    override = parse_symbol_override(args.coinalyze_symbols)
+    if override:
+        sym_map = {k: v for k, v in override.items() if k in wanted}
+        source_mode = "manual_override"
+    else:
+        try:
+            sym_map = discover_bitget_symbols(session, key, wanted)
+        except Exception as exc:
+            print(f"ABORT: symbol discovery failed ({type(exc).__name__}). No files written. NO LIVE.")
+            return 0
+        source_mode = "auto_discovery"
     if not sym_map:
         print("ABORT: no matching Bitget perpetual symbols found on Coinalyze. NO LIVE.")
         return 0
-    print("discovered_symbols: " + ", ".join(f"{k}->{v}" for k, v in sym_map.items()))
+    # Require ALL wanted symbols (e.g. both BTC and ETH); abort clean if any missing.
+    missing = sorted(wanted - set(sym_map.keys()))
+    if missing:
+        print(f"ABORT: missing required symbols {missing} ({source_mode}). No files written. NO LIVE.")
+        return 0
+    print("symbol_mode: " + source_mode)
+    print("discovered_symbols: " + " ".join(f"{k}={sym_map[k]}" for k in sorted(sym_map)))
     csymbols = list(sym_map.values())
     coinalyze_to_norm = {v: k for k, v in sym_map.items()}
 

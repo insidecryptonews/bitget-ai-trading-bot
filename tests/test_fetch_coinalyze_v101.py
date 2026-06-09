@@ -161,3 +161,108 @@ def test_writes_only_under_external_data_raw():
     src = pathlib.Path(fc.__file__).read_text(encoding="utf-8")
     assert 'RAW_MARKET_DIR = "external_data/raw/perp_market_state"' in src
     assert 'RAW_LIQ_DIR = "external_data/raw/perp_liquidations"' in src
+
+
+# ---------------------------------------------------------------------------
+# Symbol-mapping fix (Coinalyze exchange letter codes, e.g. ".A" = Bitget)
+# ---------------------------------------------------------------------------
+
+# Exactly what the VPS diagnosis returned from /future-markets.
+_VPS_MARKETS = [
+    {"symbol": "BTCUSDT_PERP.A", "exchange": "A", "symbol_on_exchange": "BTCUSDT",
+     "base_asset": "BTC", "quote_asset": "USDT", "expire_at": None,
+     "has_buy_sell_data": True, "is_perpetual": True, "margined": "STABLE",
+     "oi_lq_vol_denominated_in": "BASE_ASSET", "has_long_short_ratio_data": True,
+     "has_ohlcv_data": True},
+    {"symbol": "ETHUSDT_PERP.A", "exchange": "A", "symbol_on_exchange": "ETHUSDT",
+     "base_asset": "ETH", "quote_asset": "USDT", "expire_at": None,
+     "has_buy_sell_data": True, "is_perpetual": True, "margined": "STABLE",
+     "oi_lq_vol_denominated_in": "BASE_ASSET", "has_long_short_ratio_data": True,
+     "has_ohlcv_data": True},
+    # decoys that must be ignored by field matching:
+    {"symbol": "BTCUSD_PERP.Z", "exchange": "Z", "symbol_on_exchange": "BTCUSD",
+     "base_asset": "BTC", "quote_asset": "USD", "is_perpetual": True,
+     "margined": "COIN", "has_ohlcv_data": True},  # not USDT, coin-margined
+    {"symbol": "BTCUSDT.X", "exchange": "X", "symbol_on_exchange": "BTCUSDT",
+     "base_asset": "BTC", "quote_asset": "USDT", "is_perpetual": False,
+     "has_ohlcv_data": True},  # not perpetual
+    {"symbol": "ETHUSDT_PERP.Q", "exchange": "Q", "symbol_on_exchange": "ETHUSDT",
+     "base_asset": "ETH", "quote_asset": "USDT", "is_perpetual": True,
+     "margined": "STABLE", "has_ohlcv_data": False},  # no ohlcv data
+]
+
+
+def test_select_bitget_symbols_field_match_no_exchanges_name():
+    # /exchanges never resolved "Bitget" by name; selection is field-based.
+    out = fc.select_bitget_symbols(_VPS_MARKETS, {"BTCUSDT", "ETHUSDT"})
+    assert out == {"BTCUSDT": "BTCUSDT_PERP.A", "ETHUSDT": "ETHUSDT_PERP.A"}
+
+
+def test_select_prefers_dot_a_suffix_when_multiple():
+    markets = _VPS_MARKETS + [
+        {"symbol": "BTCUSDT_PERP.6", "exchange": "6", "symbol_on_exchange": "BTCUSDT",
+         "base_asset": "BTC", "quote_asset": "USDT", "is_perpetual": True,
+         "margined": "STABLE", "has_ohlcv_data": True},
+    ]
+    out = fc.select_bitget_symbols(markets, {"BTCUSDT", "ETHUSDT"})
+    assert out["BTCUSDT"] == "BTCUSDT_PERP.A"  # .A preferred over .6
+
+
+def test_select_missing_symbol_not_invented():
+    out = fc.select_bitget_symbols(_VPS_MARKETS, {"BTCUSDT", "ETHUSDT", "SOLUSDT"})
+    assert "SOLUSDT" not in out  # no SOL market present => not fabricated
+
+
+def test_parse_symbol_override():
+    out = fc.parse_symbol_override("BTCUSDT=BTCUSDT_PERP.A,ETHUSDT=ETHUSDT_PERP.A")
+    assert out == {"BTCUSDT": "BTCUSDT_PERP.A", "ETHUSDT": "ETHUSDT_PERP.A"}
+    assert fc.parse_symbol_override("") == {}
+    assert fc.parse_symbol_override("garbage_no_equals") == {}
+
+
+def test_main_manual_override_used_and_no_network(monkeypatch, capsys):
+    fake = "SECRET_OVERRIDE_KEY_9999"
+    monkeypatch.setenv("COINALYZE_API_KEY", fake)
+    # discovery must NOT be called when override is provided
+    def _boom(*a, **k):
+        raise AssertionError("discovery should be skipped with override")
+    monkeypatch.setattr(fc, "discover_bitget_symbols", _boom)
+    # neutralize network + file writes
+    monkeypatch.setattr(fc, "fetch_history", lambda *a, **k: [])
+    monkeypatch.setattr(fc, "_write_csv", lambda *a, **k: None)
+    rc = fc.main(["--coinalyze-symbols", "BTCUSDT=BTCUSDT_PERP.A,ETHUSDT=ETHUSDT_PERP.A"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "symbol_mode: manual_override" in out
+    assert "discovered_symbols: BTCUSDT=BTCUSDT_PERP.A ETHUSDT=ETHUSDT_PERP.A" in out
+    assert fake not in out  # key never printed
+
+
+def test_main_aborts_when_required_symbol_missing(monkeypatch, capsys):
+    fake = "SECRET_MISSING_KEY_7777"
+    monkeypatch.setenv("COINALYZE_API_KEY", fake)
+    monkeypatch.setattr(fc, "fetch_history", lambda *a, **k: [])
+    # override only has BTC, ETH missing => clean abort BEFORE any fetch
+    rc = fc.main(["--coinalyze-symbols", "BTCUSDT=BTCUSDT_PERP.A"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "ABORT: missing required symbols" in out
+    assert "ETHUSDT" in out
+    assert fake not in out
+    assert "NO LIVE" in out
+
+
+def test_main_discovery_path_prints_equals_format(monkeypatch, capsys):
+    fake = "SECRET_DISCOVERY_KEY_5555"
+    monkeypatch.setenv("COINALYZE_API_KEY", fake)
+    # discovery returns the VPS-style mapping; neutralize network + writes
+    monkeypatch.setattr(fc, "discover_bitget_symbols",
+                        lambda *a, **k: {"BTCUSDT": "BTCUSDT_PERP.A", "ETHUSDT": "ETHUSDT_PERP.A"})
+    monkeypatch.setattr(fc, "fetch_history", lambda *a, **k: [])
+    monkeypatch.setattr(fc, "_write_csv", lambda *a, **k: None)
+    rc = fc.main([])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "symbol_mode: auto_discovery" in out
+    assert "discovered_symbols: BTCUSDT=BTCUSDT_PERP.A ETHUSDT=ETHUSDT_PERP.A" in out
+    assert fake not in out
