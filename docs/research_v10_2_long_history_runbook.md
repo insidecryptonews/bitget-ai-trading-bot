@@ -108,6 +108,40 @@ python scripts/fetch_coinalyze_chunked_v102.py \
   --days 365 --interval 1hour --chunk-days 30 --publish-mode replace
 ```
 
+## 4c. UNDERCOVERAGE (V10.2.2) — do NOT publish incomplete history
+
+If the report says `report_status: UNDERCOVERAGE` (coverage by days OR by rows
+< 80% of the requested window), the fetcher **blocks all publishing** even in
+`--publish-mode replace`: `publish_allowed=false`, `do_not_replace_raw=true`,
+`old_data_touched=false`. This is the safe outcome — **do NOT override it.**
+
+What to do on UNDERCOVERAGE:
+- **Do NOT publish.** Never replace good raw with incomplete staging.
+- Try a shorter window the API can actually serve: `--days 90`.
+- Try finer chunks: `--chunk-days 15`.
+- If `possible_api_range_cap_or_ignored_from_to: true` or chunk markers show
+  empty/overlapping old chunks, the Coinalyze plan likely **caps historical
+  range** — investigate the API/plan limits before retrying bigger windows.
+- Inspect `external_data/staging/.../chunk_*.done.json` markers: `endpoint_rows`,
+  `min/max_timestamp`, `empty_endpoints`, `chunk_status` reveal which chunks
+  came back empty.
+- **Do NOT advance to `external-long-history-validation-v102` as a 180d
+  validation** — it would be a false "long history".
+- ~84d of extra recent data may be used as `intermediate_extra_history` for
+  exploratory diagnostics, but **NOT** as a 180d validation and **NOT** to
+  replace the good restored raw.
+
+```bash
+# Smaller window the API can serve, staging-only (never touches raw):
+python scripts/fetch_coinalyze_chunked_v102.py \
+  --coinalyze-symbols "BTCUSDT=BTCUSDT_PERP.A,ETHUSDT=ETHUSDT_PERP.A" \
+  --days 90 --interval 1hour --chunk-days 15 --publish-mode staging-only
+```
+
+The future backtester stub refuses to run on incomplete data:
+`python -m app.research_lab strategy-replay-backtest-v103` returns
+`NEED_LONG_HISTORY` (<180d) or `UNDERCOVERAGE_BLOCK` (latest fetch undercovered).
+
 ## 5. Re-ingest (validation + clean output; no DB writes)
 
 ```bash

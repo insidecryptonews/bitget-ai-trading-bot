@@ -54,6 +54,16 @@ ST_OK = "OK"
 ST_FAILED = "FAILED"
 ST_PARTIAL_STAGING = "PARTIAL_STAGING_ONLY"
 ST_NEED_KEY = "NEED_KEY"
+ST_UNDERCOVERAGE = "UNDERCOVERAGE"
+
+# Coverage gate: a download requested for N days must cover >= 80% (by days
+# AND by rows) or it is UNDERCOVERAGE and publishing is blocked.
+COVERAGE_MIN = 0.80
+HOURS_PER_DAY = 24
+# Overlap thresholds (on the OHLCV spine).
+OVERLAP_DETECT = 0.02   # any non-trivial cross-chunk duplication
+OVERLAP_CAP = 0.50      # heavy duplication => API likely caps/ignores from/to
+MS_PER_DAY = 86_400_000.0
 
 MARKET_HISTORY_ENDPOINTS = [
     ("/ohlcv-history", "ohlcv", None),
@@ -170,6 +180,57 @@ def _acc_to_list(acc: dict[str, dict[int, dict]]) -> list[dict]:
     return [{"symbol": s, "history": [pts[t] for t in sorted(pts)]} for s, pts in acc.items()]
 
 
+def _iso_s(unix_s: int | None) -> str | None:
+    if unix_s is None:
+        return None
+    return datetime.fromtimestamp(int(unix_s), tz=timezone.utc).isoformat()
+
+
+def _iso_ms(unix_ms: int | None) -> str | None:
+    if unix_ms is None:
+        return None
+    return datetime.fromtimestamp(int(unix_ms) / 1000, tz=timezone.utc).isoformat()
+
+
+# endpoint accumulator key -> marker field name
+_EP_NAME = {"ohlcv": "ohlcv", "oi": "open_interest", "funding": "funding",
+            "liq": "liquidations", "lsr": "long_short_ratio"}
+
+
+def _build_chunk_marker(idx, a, b, symbols, chunk_data, norm) -> dict[str, Any]:
+    """Auditable per-chunk summary: lets us see empty chunks / API range caps."""
+    endpoint_rows: dict[str, int] = {}
+    empty: list[str] = []
+    for akey, mname in _EP_NAME.items():
+        rows = sum(len(e.get("history") or []) for e in (chunk_data.get(akey) or []))
+        endpoint_rows[mname] = rows
+        if rows == 0:
+            empty.append(mname)
+    ms_rows = v101.build_market_rows(
+        ohlcv=chunk_data.get("ohlcv", []), oi=chunk_data.get("oi", []),
+        funding=chunk_data.get("funding", []), lsr=chunk_data.get("lsr", []),
+        coinalyze_to_norm=norm)
+    pl = v101.price_lookup_from_market_rows(ms_rows)
+    liq_rows, _ = v101.build_liquidation_rows(
+        liquidations=chunk_data.get("liq", []), coinalyze_to_norm=norm, price_by_symbol_ts=pl)
+    ts = [int(r["timestamp"]) for r in ms_rows] if ms_rows else []
+    mn = min(ts) if ts else None
+    mx = max(ts) if ts else None
+    return {
+        "chunk_index": idx,
+        "chunk_start": a, "chunk_end": b,
+        "chunk_start_iso": _iso_s(a), "chunk_end_iso": _iso_s(b),
+        "symbols": list(symbols),
+        "endpoint_rows": endpoint_rows,
+        "market_state_rows_built": len(ms_rows),
+        "liquidation_rows_built": len(liq_rows),
+        "min_timestamp": mn, "max_timestamp": mx,
+        "min_timestamp_iso": _iso_ms(mn), "max_timestamp_iso": _iso_ms(mx),
+        "empty_endpoints": empty,
+        "chunk_status": "OK" if len(ms_rows) > 0 else "EMPTY",
+    }
+
+
 @dataclass
 class ChunkedReport:
     report_status: str = ST_NEED_KEY
@@ -185,6 +246,23 @@ class ChunkedReport:
     min_timestamp: str = ""
     max_timestamp: str = ""
     duplicates_removed: int = 0
+    # Coverage (V10.2.2 undercoverage detector).
+    requested_days: int = 0
+    actual_days_covered: float = 0.0
+    expected_market_rows: int = 0
+    actual_market_rows: int = 0
+    coverage_ratio_by_days: float = 0.0
+    coverage_ratio_by_rows: float = 0.0
+    undercoverage: bool = False
+    publish_allowed: bool = False
+    publish_blocker: str = ""
+    do_not_replace_raw: bool = False
+    # Overlap / range-cap diagnostics.
+    chunk_overlap_detected: bool = False
+    overlap_ratio: float = 0.0
+    unique_timestamps: int = 0
+    raw_chunk_rows_before_dedup: int = 0
+    possible_api_range_cap_or_ignored_from_to: bool = False
     staging_dir: str = ""
     publish_mode: str = "staging-only"
     published_files: list[str] = field(default_factory=list)
@@ -241,17 +319,22 @@ def run_chunked_fetch(
     liq: dict[str, dict[int, dict]] = {}
     acc_by_key = {"ohlcv": ohlcv, "oi": oi, "funding": funding, "lsr": lsr, "liq": liq}
     dups = 0
+    raw_ohlcv_inserts = 0  # total OHLCV points fetched across chunks (pre-dedup)
 
     for idx, (a, b) in enumerate(ranges):
         marker = Path(staging_dir) / f"chunk_{idx:03d}.done.json"
         if marker.exists():  # --resume support
             try:
                 cached = json.loads(marker.read_text(encoding="utf-8"))
-                for kkey, data in cached.items():
-                    dups += _merge_history(acc_by_key[kkey], data)
+                data_by_ep = cached.get("_endpoint_data") or {}
+                for akey, data in data_by_ep.items():
+                    if akey == "ohlcv":
+                        raw_ohlcv_inserts += sum(len(e.get("history") or []) for e in data)
+                    if akey in acc_by_key:
+                        dups += _merge_history(acc_by_key[akey], data)
                 rep.chunks_ok += 1
                 continue
-            except (OSError, ValueError, KeyError):
+            except (OSError, ValueError, KeyError, TypeError):
                 pass  # fall through and refetch this chunk
         chunk_data: dict[str, list] = {}
         for path, akey, extra in MARKET_HISTORY_ENDPOINTS + [LIQ_ENDPOINT]:
@@ -272,11 +355,18 @@ def run_chunked_fetch(
                 rep.failure = err.as_dict()
                 rep.report_status = ST_FAILED
                 rep.old_data_touched = False
+                rep.publish_allowed = False
+                rep.do_not_replace_raw = True
+                rep.publish_blocker = "chunk_fetch_failed"
                 _write_report(rep)
                 return rep
-            dups += _merge_history(acc_by_key[akey], data)
             chunk_data[akey] = data
-        marker.write_text(json.dumps(chunk_data, default=str), encoding="utf-8")
+            if akey == "ohlcv":
+                raw_ohlcv_inserts += sum(len(e.get("history") or []) for e in data)
+            dups += _merge_history(acc_by_key[akey], data)
+        marker_obj = _build_chunk_marker(idx, a, b, rep.symbols, chunk_data, norm)
+        marker_obj["_endpoint_data"] = chunk_data  # kept for --resume
+        marker.write_text(json.dumps(marker_obj, default=str), encoding="utf-8")
         rep.chunks_ok += 1
         sleep_fn(min(retry_sleep, 1.6))  # gentle pacing between chunks
 
@@ -291,12 +381,34 @@ def run_chunked_fetch(
         liquidations=_acc_to_list(liq), coinalyze_to_norm=norm, price_by_symbol_ts=price_lookup)
     rep.rows_market_state = len(market_rows)
     rep.rows_liquidations = len(liq_rows)
-    if market_rows:
-        ts = [int(r["timestamp"]) for r in market_rows]
-        rep.min_timestamp = datetime.fromtimestamp(min(ts) / 1000, tz=timezone.utc).isoformat()
-        rep.max_timestamp = datetime.fromtimestamp(max(ts) / 1000, tz=timezone.utc).isoformat()
+    ts_ms: list[int] = [int(r["timestamp"]) for r in market_rows] if market_rows else []
+    if ts_ms:
+        rep.min_timestamp = _iso_ms(min(ts_ms))
+        rep.max_timestamp = _iso_ms(max(ts_ms))
 
-    # Write final staging files.
+    # ---- coverage (undercoverage detector) ----
+    n_syms = max(1, len(symbols_map))
+    rep.requested_days = int(days)
+    rep.expected_market_rows = int(days) * HOURS_PER_DAY * n_syms
+    rep.actual_market_rows = len(market_rows)
+    if ts_ms:
+        rep.actual_days_covered = round((max(ts_ms) - min(ts_ms)) / MS_PER_DAY, 2)
+    rep.coverage_ratio_by_rows = round(rep.actual_market_rows / rep.expected_market_rows, 4) if rep.expected_market_rows else 0.0
+    rep.coverage_ratio_by_days = round(rep.actual_days_covered / rep.requested_days, 4) if rep.requested_days else 0.0
+
+    # ---- overlap / range-cap diagnostics (OHLCV spine) ----
+    unique_ohlcv = sum(len(b) for b in ohlcv.values())
+    rep.unique_timestamps = unique_ohlcv
+    rep.raw_chunk_rows_before_dedup = raw_ohlcv_inserts
+    ohlcv_dups = max(0, raw_ohlcv_inserts - unique_ohlcv)
+    rep.overlap_ratio = round(ohlcv_dups / raw_ohlcv_inserts, 4) if raw_ohlcv_inserts else 0.0
+    rep.chunk_overlap_detected = rep.overlap_ratio > OVERLAP_DETECT
+    rep.possible_api_range_cap_or_ignored_from_to = bool(
+        rep.overlap_ratio >= OVERLAP_CAP
+        or (rep.chunk_overlap_detected and rep.coverage_ratio_by_days < 0.5))
+
+    # Write final staging files (always, so the operator can inspect even on
+    # undercoverage). This NEVER touches external_data/raw.
     final_dir = Path(staging_dir) / "final"
     final_dir.mkdir(parents=True, exist_ok=True)
     fm = final_dir / "perp_market_state.csv"
@@ -304,7 +416,22 @@ def run_chunked_fetch(
     v101._write_csv(market_rows, v101.MARKET_FIELDS, fm)
     v101._write_csv(liq_rows, v101.LIQ_FIELDS, fl)
 
-    # Publish.
+    # ---- undercoverage gate: blocks ALL publishing (incl. replace) ----
+    rep.undercoverage = bool(
+        rep.coverage_ratio_by_days < COVERAGE_MIN or rep.coverage_ratio_by_rows < COVERAGE_MIN)
+    if rep.undercoverage:
+        rep.report_status = ST_UNDERCOVERAGE
+        rep.publish_allowed = False
+        rep.publish_blocker = "insufficient_history_coverage"
+        rep.do_not_replace_raw = True
+        rep.old_data_touched = False
+        rep.published_files = []
+        _write_report(rep)
+        return rep
+
+    rep.publish_allowed = True
+
+    # Publish (coverage is sufficient and all chunks OK).
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     if publish_mode == "staging-only":
         rep.report_status = ST_PARTIAL_STAGING
@@ -314,7 +441,7 @@ def run_chunked_fetch(
             rep.old_data_touched = True
             for dataset, raw_dir in (("perp_market_state", raw_market_dir),
                                      ("perp_liquidations", raw_liq_dir)):
-                arch = Path(archive_base) / f"pre_v10_2_1_{stamp}" / dataset
+                arch = Path(archive_base) / f"pre_v10_2_2_{stamp}" / dataset
                 src = Path(raw_dir)
                 if src.exists():
                     arch.mkdir(parents=True, exist_ok=True)
@@ -331,6 +458,7 @@ def run_chunked_fetch(
         rep.report_status = ST_OK
     else:
         rep.report_status = ST_FAILED
+        rep.publish_allowed = False
         rep.failure = {"kind": "unknown_publish_mode", "publish_mode": publish_mode}
 
     _write_report(rep)
@@ -349,11 +477,21 @@ def _write_report(rep: ChunkedReport) -> str:
             w = csv.writer(fh)
             w.writerow(["report_status", "symbols", "days", "chunk_days", "chunks_total",
                         "chunks_ok", "chunks_failed", "rows_market_state", "rows_liquidations",
-                        "duplicates_removed", "publish_mode", "old_data_touched",
-                        "final_recommendation"])
+                        "duplicates_removed", "requested_days", "actual_days_covered",
+                        "expected_market_rows", "actual_market_rows", "coverage_ratio_by_days",
+                        "coverage_ratio_by_rows", "undercoverage", "publish_allowed",
+                        "publish_blocker", "do_not_replace_raw", "chunk_overlap_detected",
+                        "overlap_ratio", "possible_api_range_cap_or_ignored_from_to",
+                        "publish_mode", "old_data_touched", "final_recommendation"])
             w.writerow([rep.report_status, ";".join(rep.symbols), rep.days, rep.chunk_days,
                         rep.chunks_total, rep.chunks_ok, rep.chunks_failed,
                         rep.rows_market_state, rep.rows_liquidations, rep.duplicates_removed,
+                        rep.requested_days, rep.actual_days_covered, rep.expected_market_rows,
+                        rep.actual_market_rows, rep.coverage_ratio_by_days,
+                        rep.coverage_ratio_by_rows, str(rep.undercoverage).lower(),
+                        str(rep.publish_allowed).lower(), rep.publish_blocker or "NONE",
+                        str(rep.do_not_replace_raw).lower(), str(rep.chunk_overlap_detected).lower(),
+                        rep.overlap_ratio, str(rep.possible_api_range_cap_or_ignored_from_to).lower(),
                         rep.publish_mode, str(rep.old_data_touched).lower(),
                         rep.final_recommendation])
         return str(p)
@@ -370,6 +508,19 @@ def _print_report(rep: ChunkedReport) -> None:
     print(f"rows_market_state: {rep.rows_market_state} rows_liquidations: {rep.rows_liquidations}")
     print(f"duplicates_removed: {rep.duplicates_removed}")
     print(f"min_timestamp: {rep.min_timestamp or 'NONE'} max_timestamp: {rep.max_timestamp or 'NONE'}")
+    print(f"requested_days: {rep.requested_days}")
+    print(f"actual_days_covered: {rep.actual_days_covered}")
+    print(f"expected_market_rows: {rep.expected_market_rows}")
+    print(f"actual_market_rows: {rep.actual_market_rows}")
+    print(f"coverage_ratio_by_days: {rep.coverage_ratio_by_days}")
+    print(f"coverage_ratio_by_rows: {rep.coverage_ratio_by_rows}")
+    print(f"undercoverage: {str(rep.undercoverage).lower()}")
+    print(f"publish_allowed: {str(rep.publish_allowed).lower()}")
+    print(f"publish_blocker: {rep.publish_blocker or 'NONE'}")
+    print(f"do_not_replace_raw: {str(rep.do_not_replace_raw).lower()}")
+    print(f"chunk_overlap_detected: {str(rep.chunk_overlap_detected).lower()} overlap_ratio: {rep.overlap_ratio}")
+    print(f"unique_timestamps: {rep.unique_timestamps} raw_chunk_rows_before_dedup: {rep.raw_chunk_rows_before_dedup}")
+    print(f"possible_api_range_cap_or_ignored_from_to: {str(rep.possible_api_range_cap_or_ignored_from_to).lower()}")
     print(f"staging_dir: {rep.staging_dir}")
     print(f"publish_mode: {rep.publish_mode}")
     print("published_files: " + (";".join(rep.published_files) if rep.published_files else "NONE"))

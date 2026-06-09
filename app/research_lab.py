@@ -3907,6 +3907,45 @@ class ResearchLab:
         lines.append("EXTERNAL LONG HISTORY VALIDATION V10.2 END")
         return "\n".join(lines)
 
+    def strategy_replay_backtest_v103_cli(self, hours: int = 8760) -> str:
+        import json as _json
+        from pathlib import Path as _Path
+
+        from .labs.external_edge_ingest_v10_1 import read_input_dir
+        from .labs.external_missing_oi_audit_v10_2 import run_missing_oi_audit
+        from .labs.strategy_replay_backtest_v103_stub import run_replay_backtest_stub
+        market_clean, _mrep = self._v101_load_clean("perp_market_state")
+        # Missing OI from raw.
+        raw_rows, _u = read_input_dir(f"{self._V101_RAW}/perp_market_state")
+        miss = run_missing_oi_audit(raw_rows, hours=int(hours)).missing_ratio_global
+        # Detect undercoverage from the most recent chunked-fetch report (read-only).
+        undercoverage = False
+        try:
+            rdir = _Path("external_data/reports")
+            reps = sorted(rdir.glob("coinalyze_chunked_fetch_*.json")) if rdir.exists() else []
+            if reps:
+                latest = _json.loads(reps[-1].read_text(encoding="utf-8"))
+                undercoverage = bool(latest.get("undercoverage")) or latest.get("report_status") == "UNDERCOVERAGE"
+        except (OSError, ValueError):
+            undercoverage = False
+        r = run_replay_backtest_stub(market_clean, undercoverage=undercoverage,
+                                     missing_oi_ratio=miss, uses_oi=False)
+        lines = ["STRATEGY REPLAY BACKTEST V10.3 (STUB) START"]
+        lines.append(f"candidate: {r.candidate}")
+        lines.append(f"days_covered: {r.days_covered} min_days_required: {r.min_days_required}")
+        lines.append(f"undercoverage: {str(r.undercoverage).lower()}")
+        lines.append(f"missing_oi_ratio: {r.missing_oi_ratio} uses_oi: {str(r.uses_oi).lower()}")
+        lines.append(f"engine_implemented: {str(r.engine_implemented).lower()}")
+        lines.append(f"status: {r.status}")
+        lines.append(f"blocker: {r.blocker or 'NONE'}")
+        lines.append(f"note: {r.note}")
+        lines.append("promotion_ladder: " + " -> ".join(r.promotion_ladder))
+        lines.append(f"paper_ready: {str(r.paper_ready).lower()}")
+        lines.append(f"live_ready: {str(r.live_ready).lower()}")
+        lines.extend(self._v82_safety_footer())
+        lines.append("STRATEGY REPLAY BACKTEST V10.3 (STUB) END")
+        return "\n".join(lines)
+
     def rebound_sign_integrity_v8293_cli(
         self, hours: int = 168, limit: int = 50000,
     ) -> str:
@@ -4926,6 +4965,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
             "external-funding-oi-stability-v101",
             "external-missing-oi-audit-v102",
             "external-long-history-validation-v102",
+            "strategy-replay-backtest-v103",
             "ohlcv-replay-loader-smoke-test",
             "ohlcv-replay-loader-audit",
             "duplicate-module-audit-smoke-test",
@@ -5794,6 +5834,8 @@ def main() -> None:
         print(lab.external_missing_oi_audit_v102_cli(hours=args.hours))
     elif args.command == "external-long-history-validation-v102":
         print(lab.external_long_history_validation_v102_cli(hours=args.hours))
+    elif args.command == "strategy-replay-backtest-v103":
+        print(lab.strategy_replay_backtest_v103_cli(hours=args.hours))
     elif args.command == "ohlcv-replay-loader-smoke-test":
         print(lab.ohlcv_replay_loader_smoke_test())
     elif args.command == "ohlcv-replay-loader-audit":
