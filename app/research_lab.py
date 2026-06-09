@@ -3719,6 +3719,76 @@ class ResearchLab:
         lines.append("EXTERNAL FUNDING/OI DIAGNOSTICS V10.1 END")
         return "\n".join(lines)
 
+    def external_funding_oi_stability_v101_cli(self, hours: int = 2160) -> str:
+        import csv as _csv
+        import json
+        from datetime import datetime, timezone
+        from pathlib import Path
+
+        from .labs.external_funding_oi_stability_v10_1 import (
+            STABILITY_TABLE_COLUMNS,
+            STATUS_NEED_DATA,
+            run_funding_oi_stability,
+            stability_table_rows,
+        )
+        market_clean, mrep = self._v101_load_clean("perp_market_state")
+        liq_clean, _lrep = self._v101_load_clean("perp_liquidations")
+        miss = int((mrep.error_breakdown or {}).get("missing_oi_usd_close", 0))
+        raw = int(mrep.rows_raw or 0)
+        miss_ratio = (miss / raw) if raw else 0.0
+        r = run_funding_oi_stability(market_clean, liq_clean, hours=int(hours),
+                                     missing_oi_ratio=miss_ratio)
+
+        lines = ["EXTERNAL FUNDING/OI STABILITY V10.1 START"]
+        lines.append(f"hours: {r.hours} cost_x1: {r.cost_x1}")
+        lines.append("symbols: " + (",".join(r.symbols) if r.symbols else "NONE"))
+        lines.append(f"market_rows: {r.market_rows} liq_rows: {r.liq_rows}")
+        lines.append(f"missing_oi_ratio: {r.missing_oi_ratio:.4f} ({r.missing_oi_ratio:.2%})")
+        lines.append("stability_green: " + (",".join(r.stability_green) if r.stability_green else "NONE"))
+        lines.append("watch_only: " + (",".join(r.watch_only) if r.watch_only else "NONE"))
+        for b in r.buckets:
+            lines.append(
+                f"bucket {b['bucket_id']}[{b['symbol_scope']}]: "
+                f"total_matched={b['total_matched']} status={b['stability_status']} "
+                f"fh_net24={b['first_half_net_ev_24h']} sh_net24={b['second_half_net_ev_24h']} "
+                f"cost_x2_net24={b['cost_x2_net_ev_24h']} horizon_risk={str(b['horizon_risk']).lower()} "
+                f"missing_oi_risk={str(b['missing_oi_risk']).lower()} "
+                f"regime_unstable={str(b['regime_unstable']).lower()} blocker={b['stability_blocker'] or 'NONE'}"
+            )
+        nrd = r.next_research_decision or {}
+        lines.append(f"next_research_decision.best_candidate: {nrd.get('best_candidate') or 'NONE'}")
+        lines.append(f"next_research_decision.eth_specific_candidate: {str(nrd.get('eth_specific_candidate', False)).lower()}")
+        lines.append(f"next_research_decision.suggested_next_code_prompt_type: {nrd.get('suggested_next_code_prompt_type', '')}")
+        lines.append(f"next_research_decision.max_label: {nrd.get('max_label', '')}")
+        lines.append(f"next_research_decision.recommendation: {nrd.get('recommendation', '')}")
+        lines.append(f"report_status: {r.status}")
+        report_path = "NONE"
+        csv_path = "NONE"
+        if r.status != STATUS_NEED_DATA:
+            try:
+                rdir = Path("external_data/reports")
+                rdir.mkdir(parents=True, exist_ok=True)
+                stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+                p = rdir / f"funding_oi_stability_{stamp}.json"
+                p.write_text(json.dumps(r.as_dict(), indent=2, default=str), encoding="utf-8")
+                report_path = str(p)
+                cp = rdir / f"funding_oi_stability_{stamp}.csv"
+                with cp.open("w", encoding="utf-8", newline="") as fh:
+                    w = _csv.DictWriter(fh, fieldnames=STABILITY_TABLE_COLUMNS)
+                    w.writeheader()
+                    for row in stability_table_rows(r):
+                        w.writerow(row)
+                csv_path = str(cp)
+            except OSError:
+                report_path = "WRITE_FAILED"
+        lines.append(f"report_json: {report_path}")
+        lines.append(f"report_csv: {csv_path}")
+        lines.append(f"paper_ready: {str(r.paper_ready).lower()}")
+        lines.append(f"live_ready: {str(r.live_ready).lower()}")
+        lines.extend(self._v82_safety_footer())
+        lines.append("EXTERNAL FUNDING/OI STABILITY V10.1 END")
+        return "\n".join(lines)
+
     def rebound_sign_integrity_v8293_cli(
         self, hours: int = 168, limit: int = 50000,
     ) -> str:
@@ -4735,6 +4805,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
             "external-data-health-v101",
             "external-event-study-v101",
             "external-funding-oi-diagnostics-v101",
+            "external-funding-oi-stability-v101",
             "ohlcv-replay-loader-smoke-test",
             "ohlcv-replay-loader-audit",
             "duplicate-module-audit-smoke-test",
@@ -5597,6 +5668,8 @@ def main() -> None:
         ))
     elif args.command == "external-funding-oi-diagnostics-v101":
         print(lab.external_funding_oi_diagnostics_v101_cli(hours=args.hours))
+    elif args.command == "external-funding-oi-stability-v101":
+        print(lab.external_funding_oi_stability_v101_cli(hours=args.hours))
     elif args.command == "ohlcv-replay-loader-smoke-test":
         print(lab.ohlcv_replay_loader_smoke_test())
     elif args.command == "ohlcv-replay-loader-audit":
