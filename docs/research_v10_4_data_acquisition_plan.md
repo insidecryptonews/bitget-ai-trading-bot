@@ -55,8 +55,26 @@ long_short_ratio (when applicable).
 | `coverage_ratio < 0.80` | `UNDERCOVERAGE_BLOCK` — promote blocked, never replaces raw |
 | `clean_days < 180` | `NEED_LONG_HISTORY` — promote blocked |
 | gap ratio > 0.05, dup ratio > 0.02, or missing checksums | `QUALITY_GATE_FAIL` |
-| all gates pass, `180 ≤ clean_days < 365` | `PROMOTE_ALLOWED_RESEARCH_ONLY` + `INITIAL_VALIDATION_READY` class |
-| all gates pass, `clean_days ≥ 365` | `PROMOTE_ALLOWED_RESEARCH_ONLY` + `STRONGER_RESEARCH_READY` class |
+| quality OK but **no explicit human authorization** | `AUTHORIZATION_REQUIRED` — promote blocked |
+| all gates + authorization pass, `180 ≤ clean_days < 365` | `PROMOTE_ALLOWED_RESEARCH_ONLY` + `INITIAL_VALIDATION_READY` class |
+| all gates + authorization pass, `clean_days ≥ 365` | `PROMOTE_ALLOWED_RESEARCH_ONLY` + `STRONGER_RESEARCH_READY` class |
+
+## Explicit human authorization gate (V10.4.1 — Codex P1)
+
+A promote can **never** be allowed by data quality alone. The manifest must
+also carry, set by a human:
+
+- `explicit_human_authorization: true` (exact boolean — `"yes"`/`"1"` do not count)
+- `license_terms_confirmed: true`
+- `authorization_reference`: non-empty approval reference (who/when)
+- `paid_download_authorized: true` for any non-free source — and any unknown
+  or unlisted provider is treated as paid (conservative default)
+
+Missing fields mean **not authorized** (`AUTHORIZATION_REQUIRED`, blockers
+`missing_explicit_human_authorization` / `paid_download_not_authorized` /
+`license_terms_not_confirmed` / `missing_authorization_reference`,
+`do_not_replace_raw=true`). Only `bitget_official` and `binance_okx_proxy`
+are treated as known-free.
 
 OI policy (same conservative rule as V10.3.1): OI status unknown / no audit /
 `NEED_MORE_DATA` / clustered / high / moderate, or ratio > 0.10 →

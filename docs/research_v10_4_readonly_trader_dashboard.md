@@ -28,14 +28,39 @@ existing dashboard.
 | `/api/researchops/v104/dashboard-state` | aggregate of all of the above (the polling target) |
 
 Every handler is lazy-imported and wrapped in try/except: a labs failure can
-never break `/health` or the existing dashboard. Unknown v104 paths return a
-read-only error JSON ending in `NO LIVE`.
+never break `/health` or the existing dashboard.
+
+## V10.4.1 hardening (Codex P2)
+
+- **Unknown v104 endpoints return HTTP 404** with the sanitized payload
+  `{"error": "unknown_researchops_v104_endpoint", "final_recommendation": "NO LIVE"}`
+  (auth is still checked first when a token is configured).
+- **Errors are sanitized**: public payloads only ever say
+  `component_unavailable` / `data_temporarily_unavailable` /
+  `research_endpoint_error` — no paths, no stack traces, no exception text.
+  The real error goes to the internal logger (`app.health_server.v104`).
+- **The 7s polling endpoint never computes heavy work** (single-threaded
+  `HTTPServer` protection): `dashboard-state` composes from existing caches
+  only. Cold/expired heavy sections answer `data_status: STALE_OR_PENDING`
+  or `STALE` instead of computing.
+- Heavy builders (`data-readiness` TTL 300s; `candidates`/`net-edge` TTL
+  600s) run at most once concurrently (non-blocking lock): a second request
+  during a build gets the stale copy or a pending placeholder.
+- Light builders (`safety`, `overview`, `paper-monitor`, `signal-monitor`,
+  `provider-readiness`, `provider-verification` — pure/in-memory) stay
+  synchronous and cheap; `/health` stays fast.
 
 ## Near-real-time behaviour
 
 - The page polls `GET /api/researchops/v104/dashboard-state` every **7s**
-  (server-configurable via `dashboard_refresh_seconds`, clamped 3–60s).
-- The ONLY JavaScript network call is that GET fetch. No WebSocket, no POST.
+  (server-configurable via `dashboard_refresh_seconds`, clamped 3–60s) —
+  ultra-light cache-peek on the server.
+- A slow warm loop calls the heavy read-only endpoints (`data-readiness`,
+  `candidates`, `net-edge`) on load and every **300s** so caches stay warm
+  without making the fast polling expensive.
+- ALL JavaScript network traffic goes through one `getJSON()` helper that
+  hard-rejects any path outside `/api/researchops/v104/` and only issues GET.
+  No WebSocket, no POST.
 - Connection badge states: `LOADING` → `LIVE-POLL` → `STALE` (a poll failed
   but the last success is recent) → `ERROR` (no success for >3 intervals),
   plus a visible "data may be outdated" warning.

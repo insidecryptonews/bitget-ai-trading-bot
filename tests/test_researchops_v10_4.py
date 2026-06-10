@@ -24,7 +24,9 @@ from app.labs.edge_hunter_contract_v10_4 import (
     evaluate_edge_hunter_gate,
 )
 from app.labs.external_data_acquisition_plan_v10_4 import (
+    MANIFEST_AUTHORIZATION_FIELDS,
     MANIFEST_REQUIRED_FIELDS,
+    ST_AUTHORIZATION_REQUIRED,
     ST_INVALID_MANIFEST,
     ST_NEED_LONG_HISTORY,
     ST_PROMOTE_ALLOWED,
@@ -40,7 +42,9 @@ from app.labs.external_provider_verification_v10_4 import (
 from app.labs.external_research_intake_v10_4 import (
     NEEDS_BACKTEST,
     NEEDS_DATA,
+    NEEDS_RISK_REVIEW,
     NEEDS_WALK_FORWARD,
+    PAPER_CANDIDATE_PENDING,
     REJECT_LOOKAHEAD,
     REJECT_OVERFIT,
     REJECT_UNTRADABLE,
@@ -137,6 +141,11 @@ def _manifest(**over):
         "gap_count": 0, "duplicate_count": 0,
         "coverage_ratio": 0.97, "clean_days": 200.0,
         "checksums_sha256": {"perp_market_state.csv": "ab" * 32},
+        # V10.4.1 — explicit human authorization (tests opt OUT to verify the gate)
+        "explicit_human_authorization": True,
+        "paid_download_authorized": True,
+        "license_terms_confirmed": True,
+        "authorization_reference": "HUMAN-APPROVAL-TEST-001",
     })
     man.update(over)
     return man
@@ -188,10 +197,70 @@ def test_acquisition_promote_allowed_is_research_only():
     ev = evaluate_acquisition_manifest(_manifest())
     assert ev.status == ST_PROMOTE_ALLOWED
     assert ev.promote_allowed is True
+    assert ev.authorization_ok is True
     assert ev.oi_bucket_policy == "ALLOW_OI_BUCKETS_WITH_CARE"
     assert ev.paper_ready is False
     assert ev.live_ready is False
     assert ev.final_recommendation == "NO LIVE"
+
+
+# --- V10.4.1 (Codex P1): explicit human authorization gate ---
+
+def test_acquisition_perfect_quality_without_authorization_is_blocked():
+    """Even with every quality gate passing, no authorization => no promote."""
+    ev = evaluate_acquisition_manifest(_manifest(
+        explicit_human_authorization=None, paid_download_authorized=None,
+        license_terms_confirmed=None, authorization_reference=None,
+    ))
+    assert ev.status == ST_AUTHORIZATION_REQUIRED
+    assert ev.promote_allowed is False
+    assert ev.do_not_replace_raw is True
+    assert "missing_explicit_human_authorization" in ev.blockers
+
+
+def test_acquisition_missing_authorization_fields_means_not_authorized():
+    """Absent fields are NOT treated as safe defaults."""
+    man = _manifest()
+    for f in MANIFEST_AUTHORIZATION_FIELDS:
+        man.pop(f, None)
+    ev = evaluate_acquisition_manifest(man)
+    assert ev.status == ST_AUTHORIZATION_REQUIRED
+    assert ev.promote_allowed is False
+
+
+def test_acquisition_paid_provider_requires_paid_download_authorization():
+    ev = evaluate_acquisition_manifest(_manifest(paid_download_authorized=False))
+    assert ev.status == ST_AUTHORIZATION_REQUIRED
+    assert "paid_download_not_authorized" in ev.blockers
+
+
+def test_acquisition_unknown_provider_treated_as_paid():
+    ev = evaluate_acquisition_manifest(_manifest(
+        source_provider="some_new_vendor", paid_download_authorized=False,
+    ))
+    assert ev.status == ST_AUTHORIZATION_REQUIRED
+    assert "paid_download_not_authorized" in ev.blockers
+
+
+def test_acquisition_license_and_reference_required():
+    ev = evaluate_acquisition_manifest(_manifest(license_terms_confirmed=False))
+    assert ev.status == ST_AUTHORIZATION_REQUIRED
+    assert "license_terms_not_confirmed" in ev.blockers
+    ev2 = evaluate_acquisition_manifest(_manifest(authorization_reference="  "))
+    assert ev2.status == ST_AUTHORIZATION_REQUIRED
+    assert "missing_authorization_reference" in ev2.blockers
+
+
+def test_acquisition_authorization_truthy_strings_are_not_enough():
+    """Only the exact boolean True authorizes — '1'/'yes' strings do not."""
+    ev = evaluate_acquisition_manifest(_manifest(explicit_human_authorization="yes"))
+    assert ev.status == ST_AUTHORIZATION_REQUIRED
+
+
+def test_acquisition_contract_declares_authorization_rule():
+    c = build_importer_contract()
+    assert "missing_explicit_human_authorization" in c["blocks_import"]
+    assert set(c["authorization_required_fields"]) == set(MANIFEST_AUTHORIZATION_FIELDS)
 
 
 # ---------------------------------------------------------------------------
@@ -223,6 +292,44 @@ def test_intake_progression_to_shadow_ceiling():
     assert classify_idea(_idea(backtested=False)) == NEEDS_BACKTEST
     assert classify_idea(_idea(backtested=True, walk_forward_passed=False)) == NEEDS_WALK_FORWARD
     assert classify_idea(_idea(backtested=True, walk_forward_passed=True)) == SHADOW_ELIGIBLE
+
+
+# --- V10.4.1 (Codex P1): unknown risk is not safe ---
+
+def test_intake_unknown_lookahead_risk_never_reaches_shadow():
+    idea = _idea(backtested=True, walk_forward_passed=True, lookahead_risk="unknown")
+    status = classify_idea(idea)
+    assert status == NEEDS_RISK_REVIEW
+    assert status not in (SHADOW_ELIGIBLE, PAPER_CANDIDATE_PENDING)
+
+
+def test_intake_unknown_overfit_risk_never_reaches_shadow():
+    idea = _idea(backtested=True, walk_forward_passed=True, overfit_risk="unknown")
+    assert classify_idea(idea) == NEEDS_RISK_REVIEW
+
+
+def test_intake_missing_or_empty_risks_never_reach_shadow():
+    for risk in ("", None, "  ", "medium", "tbd", "n/a"):
+        idea = _idea(backtested=True, walk_forward_passed=True,
+                     lookahead_risk=risk, overfit_risk="low")
+        assert classify_idea(idea) == NEEDS_RISK_REVIEW, repr(risk)
+        idea2 = _idea(backtested=True, walk_forward_passed=True,
+                      lookahead_risk="low", overfit_risk=risk)
+        assert classify_idea(idea2) == NEEDS_RISK_REVIEW, repr(risk)
+
+
+def test_intake_high_risks_still_rejected_not_parked():
+    assert classify_idea(_idea(lookahead_risk="high")) == REJECT_LOOKAHEAD
+    assert classify_idea(_idea(overfit_risk="severe")) == REJECT_OVERFIT
+
+
+def test_intake_only_explicit_low_risks_reach_shadow_max():
+    idea = _idea(backtested=True, walk_forward_passed=True,
+                 lookahead_risk="low", overfit_risk="controlled")
+    assert classify_idea(idea) == SHADOW_ELIGIBLE  # ceiling, never paper/live
+    rep = run_research_intake([idea])
+    assert rep.paper_ready is False
+    assert rep.live_ready is False
 
 
 def test_intake_never_returns_live_or_paper_ready():
@@ -325,11 +432,24 @@ def test_dashboard_html_no_forms_no_mutable_methods():
 
 def test_dashboard_html_fetch_only_readonly_get_endpoints():
     html = _html()
-    targets = re.findall(r'POLL_URL\s*=\s*"([^"]+)"', html)
-    assert targets, "polling endpoint must be defined"
+    targets = re.findall(r'"(/api/[^"]+)"', html)
+    assert targets, "polling/warm endpoints must be defined"
     assert all(t.startswith("/api/researchops/v104/") for t in targets)
-    # the only fetch call uses POLL_URL
+    # a single fetch call lives inside the getJSON helper, which hard-rejects
+    # any path outside the read-only v104 namespace
     assert html.count("fetch(") == 1
+    assert "blocked: non-readonly endpoint" in html
+
+
+def test_dashboard_contract_declares_all_ten_endpoints():
+    c = dashboard_contract()
+    expected = {f"/api/researchops/v104/{e}" for e in (
+        "overview", "safety", "data-readiness", "provider-readiness",
+        "provider-verification", "candidates", "net-edge", "paper-monitor",
+        "signal-monitor", "dashboard-state")}
+    assert expected == set(c["readonly_api_endpoints"])
+    assert c["polling_never_computes_heavy_work"] is True
+    assert all(w.startswith("/api/researchops/v104/") for w in c["warm_endpoints"])
 
 
 def test_dashboard_html_has_update_timestamp_and_connection_states():
@@ -441,11 +561,60 @@ def test_server_v104_endpoints_all_respond_no_live(v104_server):
         assert "NO LIVE" in text or payload.get("final_recommendation") == "NO LIVE", ep
 
 
-def test_server_unknown_v104_endpoint_is_safe(v104_server):
-    status, body = _get(v104_server, "/api/researchops/v104/enable-live")
+def test_server_unknown_v104_endpoint_returns_404(v104_server):
+    """V10.4.1 (Codex P2): unknown v104 endpoints are 404, payload sanitized."""
+    try:
+        _get(v104_server, "/api/researchops/v104/enable-live")
+        raise AssertionError("expected HTTP 404")
+    except urllib.error.HTTPError as exc:
+        assert exc.code == 404
+        payload = json.loads(exc.read().decode("utf-8"))
+        assert payload["error"] == "unknown_researchops_v104_endpoint"
+        assert payload["final_recommendation"] == "NO LIVE"
+
+
+def test_server_errors_are_sanitized_no_internal_paths(v104_server):
+    """V10.4.1 (Codex P2): public error payloads never leak paths/details.
+    With db=None the candidates lab fails internally; the public payload must
+    be generic."""
+    status, body = _get(v104_server, "/api/researchops/v104/candidates")
+    assert status == 200
     payload = json.loads(body)
-    assert payload.get("error")
+    text = json.dumps(payload)
+    for leak in ("C:\\\\", "/home/", "Traceback", ".env", "site-packages",
+                 "bitget-ai-trading-bot"):
+        assert leak not in text, leak
+    if payload.get("error"):
+        assert payload["error"] in ("component_unavailable",
+                                    "data_temporarily_unavailable",
+                                    "research_endpoint_error")
     assert payload["final_recommendation"] == "NO LIVE"
+
+
+def test_server_dashboard_state_polling_never_computes_heavy(v104_server):
+    """V10.4.1 (Codex P2): with cold caches, dashboard-state must answer with
+    STALE_OR_PENDING placeholders instead of running heavy builders."""
+    import app.health_server as hs
+
+    hs._V104_CACHE.pop("data_readiness", None)
+    hs._V104_CACHE.pop("candidates", None)
+    hs._V104_CACHE.pop("net_edge", None)
+    started = time.perf_counter()
+    status, body = _get(v104_server, "/api/researchops/v104/dashboard-state")
+    elapsed = time.perf_counter() - started
+    assert status == 200
+    payload = json.loads(body)
+    assert payload["candidates"].get("data_status") == "STALE_OR_PENDING"
+    assert payload["net_edge"].get("data_status") == "STALE_OR_PENDING"
+    assert payload["data_readiness"].get("data_status") == "STALE_OR_PENDING"
+    assert elapsed < 5.0  # light compose, no heavy lab work
+
+
+def test_server_health_stays_fast_alongside_v104(v104_server):
+    started = time.perf_counter()
+    status, _body = _get(v104_server, "/health")
+    assert status == 200
+    assert (time.perf_counter() - started) < 2.0
 
 
 def test_server_post_to_v104_routes_is_rejected(v104_server):
@@ -468,3 +637,72 @@ def test_health_server_source_has_no_mutable_v104_routes():
     assert "do_POST" not in src
     assert "do_PUT" not in src
     assert "do_DELETE" not in src
+
+
+# ---------------------------------------------------------------------------
+# G. V10.4.1 (Codex P2) — real token-auth coverage
+# ---------------------------------------------------------------------------
+
+class _TokenConfig(_FakeConfig):
+    dashboard_auth_token = "test-secret-token-v1041"
+
+
+@pytest.fixture(scope="module")
+def v104_auth_server():
+    from app.health_server import HealthState, start_health_server
+
+    state = HealthState(mode="paper")
+    port = 18978
+    thread = start_health_server(
+        state, port, logging.getLogger("test-v104-auth"),
+        config=_TokenConfig(), db=None, training_pulse=None, telegram_notifier=None,
+    )
+    assert thread.server_ready.wait(5)
+    time.sleep(0.2)
+    yield f"http://127.0.0.1:{port}"
+    server = thread.server_box.get("server")
+    if server is not None:
+        server.shutdown()
+
+
+def _get_code(base, path):
+    try:
+        with urllib.request.urlopen(base + path, timeout=20) as resp:
+            return resp.status, resp.read().decode("utf-8")
+    except urllib.error.HTTPError as exc:
+        return exc.code, exc.read().decode("utf-8")
+
+
+def test_auth_trader_terminal_requires_token(v104_auth_server):
+    code, _ = _get_code(v104_auth_server, "/trader-terminal")
+    assert code == 401
+    code, body = _get_code(v104_auth_server, "/trader-terminal?token=test-secret-token-v1041")
+    assert code == 200
+    assert "NO LIVE" in body
+
+
+def test_auth_v104_api_requires_token(v104_auth_server):
+    code, _ = _get_code(v104_auth_server, "/api/researchops/v104/safety")
+    assert code == 401
+    code, body = _get_code(v104_auth_server, "/api/researchops/v104/safety?token=test-secret-token-v1041")
+    assert code == 200
+    assert json.loads(body)["final_recommendation"] == "NO LIVE"
+
+
+def test_auth_wrong_token_rejected(v104_auth_server):
+    code, _ = _get_code(v104_auth_server, "/api/researchops/v104/safety?token=wrong")
+    assert code == 401
+
+
+def test_auth_unknown_endpoint_auth_first_then_404(v104_auth_server):
+    code, _ = _get_code(v104_auth_server, "/api/researchops/v104/unknown-thing")
+    assert code == 401  # auth gate first, no information leak
+    code, body = _get_code(
+        v104_auth_server, "/api/researchops/v104/unknown-thing?token=test-secret-token-v1041")
+    assert code == 404
+    assert json.loads(body)["error"] == "unknown_researchops_v104_endpoint"
+
+
+def test_auth_health_stays_public(v104_auth_server):
+    code, _ = _get_code(v104_auth_server, "/health")
+    assert code == 200

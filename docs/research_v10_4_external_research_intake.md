@@ -26,7 +26,8 @@ tradable_on_bitget, validation_plan, promotion_gate, final_status`
 | `NEEDS_DATA` | data requirements not yet available (e.g. 180d clean OI) |
 | `NEEDS_BACKTEST` | tradable + data available but never backtested |
 | `NEEDS_WALK_FORWARD` | backtested but no OOS/walk-forward validation |
-| `SHADOW_ELIGIBLE` | passed backtest + walk-forward → may run as shadow (research ceiling) |
+| `NEEDS_RISK_REVIEW` | (V10.4.1) risks not explicitly assessed as low/controlled — parked until a human reviews them |
+| `SHADOW_ELIGIBLE` | passed backtest + walk-forward + risks explicitly low → may run as shadow (research ceiling) |
 | `IDEA_ONLY` | default backlog state |
 | `PAPER_CANDIDATE_PENDING_VALIDATION` | backlog label only — still requires full V10.5+ gates |
 
@@ -35,7 +36,11 @@ tradable_on_bitget, validation_plan, promotion_gate, final_status`
 - **No external idea can enable the paper filter or live trading.** The
   classification ceiling is `SHADOW_ELIGIBLE`.
 - `lookahead_risk`/`overfit_risk` marked high/severe/critical/yes → immediate
-  reject; unknown risk does NOT pass as safe.
+  reject.
+- **Unknown risk is not safe (V10.4.1 — Codex P1):** unknown, empty, missing
+  or medium risk values can never reach `SHADOW_ELIGIBLE` or
+  `PAPER_CANDIDATE_PENDING_VALIDATION`; the idea parks in `NEEDS_RISK_REVIEW`
+  until both risks are explicitly assessed as low/controlled/mitigated.
 - The report always returns `paper_ready=false`, `live_ready=false`,
   `paper_filter_enabled=false`, `final_recommendation: NO LIVE`.
 - The CLI loads no external ideas by default (no invented data); it prints the

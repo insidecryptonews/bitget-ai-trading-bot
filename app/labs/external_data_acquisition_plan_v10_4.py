@@ -43,6 +43,16 @@ MANIFEST_REQUIRED_FIELDS = [
     "clean_days", "checksums_sha256",
 ]
 
+# V10.4.1 (Codex P1) — explicit authorization fields. A promote can NEVER be
+# allowed without explicit human authorization, even if every quality gate
+# passes. Absence of these fields means NOT authorized (never default-safe).
+MANIFEST_AUTHORIZATION_FIELDS = [
+    "explicit_human_authorization",   # must be exactly True
+    "paid_download_authorized",       # must be exactly True for non-free sources
+    "license_terms_confirmed",        # must be exactly True
+    "authorization_reference",        # non-empty human approval reference
+]
+
 # Quality-gate thresholds.
 MAX_GAP_RATIO = 0.05
 MAX_DUP_RATIO = 0.02
@@ -53,7 +63,12 @@ ST_INVALID_MANIFEST = "INVALID_MANIFEST"
 ST_UNDERCOVERAGE = "UNDERCOVERAGE_BLOCK"
 ST_NEED_LONG_HISTORY = "NEED_LONG_HISTORY"
 ST_QUALITY_FAIL = "QUALITY_GATE_FAIL"
+ST_AUTHORIZATION_REQUIRED = "AUTHORIZATION_REQUIRED"
 ST_PROMOTE_ALLOWED = "PROMOTE_ALLOWED_RESEARCH_ONLY"
+
+# Providers whose data is known free. Anything else (paid, freemium,
+# enterprise, unknown, unlisted) requires paid_download_authorized=True.
+_KNOWN_FREE_PROVIDERS = frozenset({"bitget_official", "binance_okx_proxy"})
 
 
 def build_importer_contract() -> dict[str, Any]:
@@ -87,7 +102,16 @@ def build_importer_contract() -> dict[str, Any]:
             "coverage_ratio_below_0.80",
             "checksum_mismatch",
             "no_paid_download_authorization",
+            "missing_explicit_human_authorization",
+            "license_terms_not_confirmed",
         ],
+        "authorization_required_fields": list(MANIFEST_AUTHORIZATION_FIELDS),
+        "authorization_rule": "promote is NEVER allowed without "
+                              "explicit_human_authorization=true + "
+                              "license_terms_confirmed=true + non-empty "
+                              "authorization_reference; paid/unknown-cost "
+                              "sources additionally require "
+                              "paid_download_authorized=true",
         "allows_research_only": [
             "intermediate_history_for_diagnostics",
             "staging_inspection_without_publish",
@@ -119,6 +143,11 @@ class AcquisitionEvaluation:
     missing_oi_status: str = ""
     data_classification: str = CLASS_NO_DATA
     oi_bucket_policy: str = OI_POLICY_BLOCK
+    explicit_human_authorization: bool = False
+    paid_download_authorized: bool = False
+    license_terms_confirmed: bool = False
+    authorization_reference: str = ""
+    authorization_ok: bool = False
     promote_allowed: bool = False
     do_not_replace_raw: bool = True
     paid_download_requires_authorization: bool = True
@@ -216,10 +245,39 @@ def evaluate_acquisition_manifest(manifest: dict[str, Any] | None) -> Acquisitio
         ev.blockers = blockers
         return ev
 
+    # 5) V10.4.1 (Codex P1) — explicit human authorization gate. Even when
+    # every quality gate passes, a promote is NEVER allowed without explicit
+    # human authorization. Missing/None/falsy fields mean NOT authorized.
+    ev.explicit_human_authorization = m.get("explicit_human_authorization") is True
+    ev.license_terms_confirmed = m.get("license_terms_confirmed") is True
+    ev.authorization_reference = str(m.get("authorization_reference")
+                                     or m.get("human_approval_reference") or "").strip()
+    paid_auth_field = m.get("paid_download_authorized") is True
+    source = str(m.get("source_provider") or "").strip().lower()
+    requires_paid_auth = source not in _KNOWN_FREE_PROVIDERS
+    ev.paid_download_authorized = paid_auth_field
+
+    if not ev.explicit_human_authorization:
+        blockers.append("missing_explicit_human_authorization")
+    if not ev.license_terms_confirmed:
+        blockers.append("license_terms_not_confirmed")
+    if not ev.authorization_reference:
+        blockers.append("missing_authorization_reference")
+    if requires_paid_auth and not paid_auth_field:
+        blockers.append("paid_download_not_authorized")
+    if blockers:
+        ev.status = ST_AUTHORIZATION_REQUIRED
+        ev.promote_allowed = False
+        ev.do_not_replace_raw = True
+        ev.authorization_ok = False
+        ev.blockers = blockers
+        return ev
+    ev.authorization_ok = True
+
     # Promote allowed (research-only). Still NEVER paper/live ready, and OI
     # buckets remain blocked if OI is bad.
     ev.status = ST_PROMOTE_ALLOWED
     ev.promote_allowed = True
-    ev.do_not_replace_raw = False  # a valid, covered, quality-passing manifest may replace
+    ev.do_not_replace_raw = False  # valid + covered + quality + human-authorized
     ev.blockers = []
     return ev

@@ -41,12 +41,23 @@ READONLY_API_ENDPOINTS = [
     "/api/researchops/v104/safety",
     "/api/researchops/v104/data-readiness",
     "/api/researchops/v104/provider-readiness",
+    "/api/researchops/v104/provider-verification",
     "/api/researchops/v104/candidates",
     "/api/researchops/v104/net-edge",
     "/api/researchops/v104/paper-monitor",
     "/api/researchops/v104/signal-monitor",
     "/api/researchops/v104/dashboard-state",
 ]
+
+# Heavy read-only endpoints the terminal warms on a SLOW schedule so the
+# fast 7s polling endpoint can stay cache-peek only (server never computes
+# heavy work inside the polling path).
+WARM_ENDPOINTS = [
+    "/api/researchops/v104/data-readiness",
+    "/api/researchops/v104/candidates",
+    "/api/researchops/v104/net-edge",
+]
+WARM_INTERVAL_SECONDS = 300
 
 
 def _safe(d: dict | None, key: str, default: Any) -> Any:
@@ -142,6 +153,11 @@ def dashboard_contract() -> dict[str, Any]:
         "poll_method": "GET",
         "poll_endpoint": POLL_ENDPOINT,
         "default_refresh_seconds": DEFAULT_REFRESH_SECONDS,
+        "warm_endpoints": list(WARM_ENDPOINTS),
+        "warm_interval_seconds": WARM_INTERVAL_SECONDS,
+        "polling_never_computes_heavy_work": True,
+        "unknown_endpoint_behavior": "HTTP 404 + sanitized payload",
+        "errors_sanitized": True,
         "disabled_controls": list(DISABLED_CONTROLS),
         "guarantees": ["no_order_buttons", "no_go_live", "no_leverage_margin_sizing_controls",
                        "no_env_edit", "no_db_writes", "no_post_put_delete_routes",
@@ -165,6 +181,8 @@ RING_CIRC = 2 * math.pi * RING_RADIUS
 
 def render_dashboard_html(vm: dict[str, Any], refresh_seconds: int = DEFAULT_REFRESH_SECONDS) -> str:
     refresh = max(3, min(60, int(refresh_seconds or DEFAULT_REFRESH_SECONDS)))
+    warm_urls_json = json.dumps(list(WARM_ENDPOINTS))
+    warm_interval = max(60, int(WARM_INTERVAL_SECONDS))
     initial_state = json.dumps(vm, ensure_ascii=True, default=str)
     # </script> breaking out of the JSON block would be an injection vector.
     initial_state = initial_state.replace("</", "<\\/")
@@ -344,13 +362,28 @@ no real orders · no mutable controls · polling GET {_esc(POLL_ENDPOINT)} every
 <script id="initial-state" type="application/json">{initial_state}</script>
 <script>
 "use strict";
-// READ-ONLY terminal. The ONLY network call below is a GET fetch to the
-// read-only state endpoint. There are no mutable endpoints and no handlers
-// on the locked buttons.
+// READ-ONLY terminal. The ONLY network call below is getJSON(), a GET fetch
+// restricted to /api/researchops/v104/* read-only endpoints. There are no
+// mutable endpoints and no handlers on the locked buttons.
+// Fast loop: poll dashboard-state (cache-peek only on the server).
+// Slow loop: warm the heavy read-only caches so polling stays cheap.
 var REFRESH_MS = {refresh} * 1000;
 var POLL_URL = "{POLL_ENDPOINT}";
+var WARM_URLS = {warm_urls_json};
+var WARM_MS = {warm_interval} * 1000;
 var token = new URLSearchParams(window.location.search).get("token");
 var lastOkAt = 0;
+
+function getJSON(path) {{
+  if (path.indexOf("/api/researchops/v104/") !== 0) {{
+    return Promise.reject(new Error("blocked: non-readonly endpoint"));
+  }}
+  var url = path + (token ? "?token=" + encodeURIComponent(token) : "");
+  return fetch(url, {{ method: "GET", cache: "no-store" }}).then(function (r) {{
+    if (!r.ok) throw new Error("http " + r.status);
+    return r.json();
+  }});
+}}
 
 function esc(v) {{
   return String(v == null ? "" : v).replace(/[&<>"']/g, function (c) {{
@@ -408,8 +441,8 @@ function applyState(s) {{
   txt("ring-pct", pct.toFixed(0) + "%");
   txt("ring-cap", "clean days / " + req + " required");
   txt("dr-provider", dr.current_provider || "—");
-  txt("dr-class", dr.data_classification || "—");
-  txt("dr-backtester", dr.backtester_readiness || "—");
+  txt("dr-class", dr.data_classification || dr.data_status || "—");
+  txt("dr-backtester", dr.backtester_readiness || dr.data_status || "—");
   txt("dr-oi", ((Number(dr.current_missing_oi_ratio || 0) * 100).toFixed(1)) + "% · " + (dr.missing_oi_status || "—"));
   txt("dr-oi-policy", dr.oi_bucket_policy || "—");
   var bar = document.getElementById("dr-bar"); if (bar) bar.style.width = pct.toFixed(0) + "%";
@@ -430,10 +463,10 @@ function applyState(s) {{
   (dr.data_blockers || []).forEach(function (b) {{ blockers += "<li>" + esc(b) + "</li>"; }});
   document.getElementById("dr-blockers").innerHTML = blockers || "<li>none</li>";
 
-  txt("cd-status", cd.status || cd.overall_status || "NOT_COMPUTED_YET");
-  txt("cd-text", (cd.text || "").slice(0, 2200) || "no candidate-ranking output yet");
-  txt("ne-status", ne.status || ne.overall_status || "NOT_COMPUTED_YET");
-  txt("ne-text", (ne.text || "").slice(0, 2200) || "no net-edge output yet");
+  txt("cd-status", cd.status || cd.overall_status || cd.data_status || "NOT_COMPUTED_YET");
+  txt("cd-text", (cd.text || "").slice(0, 2200) || "no candidate-ranking output yet (cache warming)");
+  txt("ne-status", ne.status || ne.overall_status || ne.data_status || "NOT_COMPUTED_YET");
+  txt("ne-text", (ne.text || "").slice(0, 2200) || "no net-edge output yet (cache warming)");
 
   var opens = pm.open_positions_detail || [];
   txt("pm-open", opens.length);
@@ -459,13 +492,8 @@ function applyState(s) {{
 }}
 
 function poll() {{
-  var url = POLL_URL + (token ? "?token=" + encodeURIComponent(token) : "");
-  // GET only — read-only state endpoint; no mutable routes exist for V10.4.
-  fetch(url, {{ method: "GET", cache: "no-store" }})
-    .then(function (r) {{
-      if (!r.ok) throw new Error("http " + r.status);
-      return r.json();
-    }})
+  // GET only — ultra-light read-only state endpoint (server cache peek).
+  getJSON(POLL_URL)
     .then(function (s) {{
       applyState(s);
       lastOkAt = Date.now();
@@ -479,6 +507,16 @@ function poll() {{
     }});
 }}
 
+function warm() {{
+  // Slow loop: warm the HEAVY read-only caches (sequentially, GET only) so
+  // the fast polling never makes the server compute heavy work.
+  var chain = Promise.resolve();
+  WARM_URLS.forEach(function (u) {{
+    chain = chain.then(function () {{ return getJSON(u).catch(function () {{}}); }});
+  }});
+  chain.then(function () {{ poll(); }});
+}}
+
 try {{
   var seed = JSON.parse(document.getElementById("initial-state").textContent);
   applyState(seed);
@@ -487,5 +525,7 @@ try {{
 setConn("loading", "LOADING");
 poll();
 setInterval(poll, REFRESH_MS);
+warm();
+setInterval(warm, WARM_MS);
 </script>
 </body></html>"""

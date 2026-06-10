@@ -18,6 +18,7 @@ IDEA_ONLY = "IDEA_ONLY"
 NEEDS_DATA = "NEEDS_DATA"
 NEEDS_BACKTEST = "NEEDS_BACKTEST"
 NEEDS_WALK_FORWARD = "NEEDS_WALK_FORWARD"
+NEEDS_RISK_REVIEW = "NEEDS_RISK_REVIEW"  # V10.4.1 — unknown risk is not safe
 REJECT_LOOKAHEAD = "REJECT_LOOKAHEAD_RISK"
 REJECT_OVERFIT = "REJECT_OVERFIT_RISK"
 REJECT_UNTRADABLE = "REJECT_UNTRADABLE"
@@ -25,6 +26,9 @@ SHADOW_ELIGIBLE = "SHADOW_ELIGIBLE"
 PAPER_CANDIDATE_PENDING = "PAPER_CANDIDATE_PENDING_VALIDATION"  # backlog label only
 
 _HIGH = {"high", "severe", "critical", "yes", "true", True}
+# Only an EXPLICIT low/controlled assessment counts as safe. Unknown, empty,
+# missing, medium or anything else blocks the path to shadow (Codex P1).
+_LOW = {"low", "controlled", "mitigated", "none"}
 
 
 @dataclass
@@ -57,8 +61,19 @@ def _is_high(v: Any) -> bool:
     return (str(v).strip().lower() in {"high", "severe", "critical", "yes", "true"}) or v is True
 
 
+def _is_explicitly_low(v: Any) -> bool:
+    """Unknown risk is not safe: only explicit low/controlled passes."""
+    return str(v or "").strip().lower() in _LOW
+
+
 def classify_idea(idea: ResearchIdea) -> str:
-    """Conservative classification. Rejections first; ceiling SHADOW_ELIGIBLE."""
+    """Conservative classification. Rejections first; ceiling SHADOW_ELIGIBLE.
+
+    V10.4.1 (Codex P1): an idea whose lookahead/overfit risk is unknown,
+    empty or missing can NEVER reach SHADOW_ELIGIBLE — at best it parks in
+    NEEDS_RISK_REVIEW until a human explicitly assesses the risks as
+    low/controlled.
+    """
     if _is_high(idea.lookahead_risk):
         return REJECT_LOOKAHEAD
     if _is_high(idea.overfit_risk):
@@ -71,7 +86,10 @@ def classify_idea(idea: ResearchIdea) -> str:
         return NEEDS_BACKTEST
     if not idea.walk_forward_passed:
         return NEEDS_WALK_FORWARD
-    # Backtested + walk-forward passed => the MAX research status is shadow.
+    if not (_is_explicitly_low(idea.lookahead_risk) and _is_explicitly_low(idea.overfit_risk)):
+        return NEEDS_RISK_REVIEW
+    # Backtested + walk-forward passed + risks explicitly low => the MAX
+    # research status is shadow. Never paper, never live.
     return SHADOW_ELIGIBLE
 
 

@@ -4031,6 +4031,7 @@ class ResearchLab:
     def external_data_acquisition_plan_v104_cli(self) -> str:
         from .labs.external_data_acquisition_plan_v10_4 import (
             ACQUISITION_DIRS,
+            MANIFEST_AUTHORIZATION_FIELDS,
             MANIFEST_REQUIRED_FIELDS,
             MAX_DUP_RATIO,
             MAX_GAP_RATIO,
@@ -4041,10 +4042,24 @@ class ResearchLab:
         contract = build_importer_contract()
         # With no real staged manifest, the gate must block (proves no-replace).
         empty_eval = evaluate_acquisition_manifest(None)
+        # V10.4.1 — a perfect-quality manifest WITHOUT explicit human
+        # authorization must still be blocked (proves the authorization gate).
+        perfect_unauthorized = {f: 0 for f in MANIFEST_REQUIRED_FIELDS}
+        perfect_unauthorized.update({
+            "source_provider": "tardis_dev", "license_terms": "research",
+            "rows_by_type": {"perp_market_state": 4320},
+            "missing_oi_ratio": 0.02, "missing_oi_status": "DATA_OK",
+            "gap_count": 0, "duplicate_count": 0,
+            "coverage_ratio": 0.97, "clean_days": 200.0,
+            "checksums_sha256": {"perp_market_state.csv": "x"},
+        })
+        unauth_eval = evaluate_acquisition_manifest(perfect_unauthorized)
         lines = ["EXTERNAL DATA ACQUISITION PLAN V10.4 START"]
         for key, path in ACQUISITION_DIRS.items():
             lines.append(f"dir {key}: {path}")
         lines.append("manifest_required_fields: " + ",".join(MANIFEST_REQUIRED_FIELDS))
+        lines.append("manifest_authorization_fields: " + ",".join(MANIFEST_AUTHORIZATION_FIELDS))
+        lines.append(f"authorization_rule: {contract['authorization_rule']}")
         lines.append(f"min_coverage_ratio: {MIN_COVERAGE_RATIO}")
         lines.append(f"max_gap_ratio: {MAX_GAP_RATIO}")
         lines.append(f"max_duplicate_ratio: {MAX_DUP_RATIO}")
@@ -4056,6 +4071,9 @@ class ResearchLab:
         lines.append(f"no_manifest_eval_status: {empty_eval.status}")
         lines.append(f"no_manifest_promote_allowed: {str(empty_eval.promote_allowed).lower()}")
         lines.append(f"no_manifest_do_not_replace_raw: {str(empty_eval.do_not_replace_raw).lower()}")
+        lines.append(f"perfect_quality_without_authorization_status: {unauth_eval.status}")
+        lines.append(f"perfect_quality_without_authorization_promote_allowed: {str(unauth_eval.promote_allowed).lower()}")
+        lines.append("perfect_quality_without_authorization_blockers: " + ",".join(unauth_eval.blockers))
         lines.append(f"paid_download_requires_authorization: {str(empty_eval.paid_download_requires_authorization).lower()}")
         lines.append(f"paper_ready: {str(empty_eval.paper_ready).lower()}")
         lines.append(f"live_ready: {str(empty_eval.live_ready).lower()}")
@@ -4068,6 +4086,7 @@ class ResearchLab:
             IDEA_ONLY,
             NEEDS_BACKTEST,
             NEEDS_DATA,
+            NEEDS_RISK_REVIEW,
             NEEDS_WALK_FORWARD,
             PAPER_CANDIDATE_PENDING,
             REJECT_LOOKAHEAD,
@@ -4080,12 +4099,13 @@ class ResearchLab:
         # intake contract + an empty backlog so the invariants are auditable.
         rep = run_research_intake(None)
         statuses = [IDEA_ONLY, NEEDS_DATA, NEEDS_BACKTEST, NEEDS_WALK_FORWARD,
-                    REJECT_LOOKAHEAD, REJECT_OVERFIT, REJECT_UNTRADABLE,
-                    SHADOW_ELIGIBLE, PAPER_CANDIDATE_PENDING]
+                    NEEDS_RISK_REVIEW, REJECT_LOOKAHEAD, REJECT_OVERFIT,
+                    REJECT_UNTRADABLE, SHADOW_ELIGIBLE, PAPER_CANDIDATE_PENDING]
         lines = ["EXTERNAL RESEARCH INTAKE V10.4 START"]
         lines.append("intake_statuses: " + ",".join(statuses))
         lines.append("classification_ceiling: SHADOW_ELIGIBLE")
         lines.append("rule: no_idea_can_enable_paper_filter_or_live")
+        lines.append("rule: unknown_risk_is_not_safe_needs_risk_review")
         lines.append(f"ideas_count: {rep.ideas_count}")
         lines.append("by_status: " + (",".join(f"{k}={v}" for k, v in rep.by_status.items()) if rep.by_status else "NONE"))
         lines.append("shadow_eligible: " + (",".join(rep.shadow_eligible) if rep.shadow_eligible else "NONE"))
@@ -4154,7 +4174,9 @@ class ResearchLab:
         html = render_dashboard_html(vm)
         lower = html.lower()
         import re as _re
-        fetch_targets = _re.findall(r'POLL_URL\s*=\s*"([^"]+)"', html)
+        # Every /api/ URL referenced anywhere in the page must live under the
+        # read-only researchops v104 namespace (poll + warm endpoints).
+        fetch_targets = _re.findall(r'"(/api/[^"]+)"', html)
         fetch_readonly_only = all(
             t.startswith("/api/researchops/v104/") for t in fetch_targets
         ) and bool(fetch_targets)
@@ -4166,6 +4188,11 @@ class ResearchLab:
         lines.append(f"poll_method: {contract['poll_method']}")
         lines.append(f"poll_endpoint: {contract['poll_endpoint']}")
         lines.append(f"default_refresh_seconds: {contract['default_refresh_seconds']}")
+        lines.append("warm_endpoints: " + ",".join(contract["warm_endpoints"]))
+        lines.append(f"warm_interval_seconds: {contract['warm_interval_seconds']}")
+        lines.append(f"polling_never_computes_heavy_work: {str(contract['polling_never_computes_heavy_work']).lower()}")
+        lines.append(f"unknown_endpoint_behavior: {contract['unknown_endpoint_behavior']}")
+        lines.append(f"errors_sanitized: {str(contract['errors_sanitized']).lower()}")
         lines.append("readonly_api_endpoints: " + ",".join(contract["readonly_api_endpoints"]))
         lines.append("panels: " + ",".join(contract["panels"]))
         lines.append("mutable_endpoints: " + (",".join(contract["mutable_endpoints"]) if contract["mutable_endpoints"] else "NONE"))
