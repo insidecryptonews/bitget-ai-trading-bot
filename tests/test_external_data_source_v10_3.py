@@ -104,8 +104,40 @@ def test_audit_missing_oi_clustered_blocks_oi_buckets():
     assert r.current_missing_oi_ratio > 0.10
 
 
-def test_audit_180d_ready_but_never_live():
+def test_audit_missing_oi_raw_absent_blocks_oi_buckets_even_with_180d_clean():
     r = run_data_source_audit(_clean(200 * 24), [], hours=8760)
+    assert r.missing_oi_status == "NEED_MORE_DATA"
+    assert r.oi_bucket_policy == OI_POLICY_BLOCK
+    assert "missing_oi_audit_unavailable" in r.data_blockers
+    assert "oi_pure_buckets_promotion" in r.blocked_actions
+    assert r.paper_ready is False
+    assert r.live_ready is False
+    assert r.final_recommendation == "NO LIVE"
+
+
+def test_audit_no_clean_data_blocks_oi_buckets_and_live():
+    r = run_data_source_audit([], [], hours=8760)
+    assert r.backtester_readiness == READY_NEED_LONG_HISTORY
+    assert r.data_classification == CLASS_NO_DATA
+    assert r.oi_bucket_policy == OI_POLICY_BLOCK
+    assert "missing_oi_audit_unavailable" in r.data_blockers
+    assert r.paper_ready is False
+    assert r.live_ready is False
+    assert r.final_recommendation == "NO LIVE"
+
+
+def test_audit_high_missing_oi_ratio_blocks_oi_buckets():
+    raw = _raw(2000)
+    for i in range(0, len(raw), 5):
+        raw[i]["oi_usd_close"] = ""
+    r = run_data_source_audit(_clean(200 * 24), raw, hours=8760)
+    assert r.current_missing_oi_ratio > 0.10
+    assert r.oi_bucket_policy == OI_POLICY_BLOCK
+    assert "oi_pure_buckets_promotion" in r.blocked_actions
+
+
+def test_audit_180d_ready_but_never_live():
+    r = run_data_source_audit(_clean(200 * 24), _raw(200 * 24), hours=8760)
     assert r.data_classification == CLASS_INITIAL
     assert r.backtester_readiness == READY_INITIAL
     assert r.oi_bucket_policy == OI_POLICY_ALLOW
@@ -118,6 +150,7 @@ def test_audit_no_data():
     r = run_data_source_audit([], [], hours=8760)
     assert r.data_classification == CLASS_NO_DATA
     assert r.backtester_readiness == READY_NEED_LONG_HISTORY
+    assert r.oi_bucket_policy == OI_POLICY_BLOCK
 
 
 def test_audit_always_blocks_paper_and_live():

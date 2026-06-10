@@ -32,6 +32,7 @@ from .external_missing_oi_audit_v10_2 import (
     STATUS_CLUSTERED,
     STATUS_HIGH,
     STATUS_MODERATE,
+    STATUS_NEED_MORE,
     run_missing_oi_audit,
 )
 
@@ -61,6 +62,15 @@ CLASS_INITIAL = "INITIAL_VALIDATION_READY"
 CLASS_STRONGER = "STRONGER_VALIDATION_READY"
 OI_POLICY_BLOCK = "BLOCK_OI_BUCKETS"
 OI_POLICY_ALLOW = "ALLOW_OI_BUCKETS_WITH_CARE"
+OI_UNKNOWN_STATUSES = frozenset({
+    "",
+    "NEED_DATA",
+    STATUS_NEED_MORE,
+    "UNKNOWN",
+    "NO_AUDIT",
+    "NO_RAW_OI",
+    "NOT_AVAILABLE",
+})
 
 
 @dataclass
@@ -254,7 +264,12 @@ def run_data_source_audit(
     audit = run_missing_oi_audit(raw_market_rows, hours=hours)
     rep.current_missing_oi_ratio = audit.missing_ratio_global
     rep.missing_oi_status = audit.status
-    missing_bad = audit.status in (STATUS_CLUSTERED, STATUS_HIGH, STATUS_MODERATE) \
+    oi_audit_unavailable = (
+        str(audit.status or "").upper() in OI_UNKNOWN_STATUSES
+        or int(getattr(audit, "total_rows", 0) or 0) <= 0
+    )
+    missing_bad = oi_audit_unavailable \
+        or audit.status in (STATUS_CLUSTERED, STATUS_HIGH, STATUS_MODERATE) \
         or audit.missing_ratio_global > MISSING_OI_BLOCK_RATIO
     rep.oi_bucket_policy = OI_POLICY_BLOCK if missing_bad else OI_POLICY_ALLOW
 
@@ -288,7 +303,9 @@ def run_data_source_audit(
     blockers: list[str] = []
     if d < REQUIRED_MIN_HISTORY_DAYS:
         blockers.append(f"insufficient_clean_history(days={d}<{REQUIRED_MIN_HISTORY_DAYS})")
-    if missing_bad:
+    if oi_audit_unavailable:
+        blockers.append("missing_oi_audit_unavailable")
+    elif missing_bad:
         blockers.append(f"missing_oi({audit.status},{audit.missing_ratio_global})")
     if current_provider == "coinalyze":
         blockers.append("current_provider_intraday_retention_cap_~84d")

@@ -33,7 +33,7 @@ Answers to the audit questions:
 8. **Backtester minimum data?** 180d+ clean 1h with OHLCV + funding (+ OI/liq
    when missing-OI < 10%). Below that → `NEED_LONG_HISTORY`.
 9. **Stay blocked while data insufficient?** Yes — `NEED_LONG_HISTORY`,
-   `oi_bucket_policy=BLOCK_OI_BUCKETS` on clustered/high missing OI,
+   `oi_bucket_policy=BLOCK_OI_BUCKETS` on unavailable/clustered/high missing OI,
    `paper_ready=false`, `live_ready=false`. Always `NO LIVE`.
 
 ## 2. Provider matrix (objective)
@@ -82,7 +82,8 @@ the registry shortlist is **`tardis_dev`** (primary) and **`coinglass`**
 ## 4. Data-readiness gating (enforced in code)
 - `current_clean_days < 180` → `backtester_readiness=NEED_LONG_HISTORY`,
   `paper_ready=false`, `live_ready=false`.
-- missing OI clustered / > 10% → `oi_bucket_policy=BLOCK_OI_BUCKETS`.
+- missing OI unavailable / `NEED_MORE_DATA` / clustered / > 10% →
+  `oi_bucket_policy=BLOCK_OI_BUCKETS`.
 - ~84d (or any `<180d`) → `data_classification=INTERMEDIATE_RESEARCH_ONLY`.
 - 180–365d → `INITIAL_VALIDATION_READY`; ≥365d → `STRONGER_VALIDATION_READY`.
 - `live_ready` is **always false** in this phase.
