@@ -62,6 +62,36 @@ def _safe(d: dict | None, key: str, default: Any) -> Any:
     return default if value is None else value
 
 
+def derive_worker_lock_view(raw_lock: Any) -> dict[str, Any]:
+    """V10.4.3 — derive the worker-lock panel from the bot's OWN /health
+    worker_lock payload (single source of truth). The dashboard must NEVER
+    recompute the lock with a fresh WorkerLockManager: a new manager gets a
+    new instance_id and falsely reports ``blocked_duplicate`` against the
+    real worker. Unknown stays unknown — never invented."""
+    if isinstance(raw_lock, dict) and raw_lock:
+        status = str(raw_lock.get("lock_status") or "unknown")
+        acquired = raw_lock.get("acquired")
+        warning = str(raw_lock.get("warning_if_duplicate_worker") or "")
+        if status == "unknown" and acquired is None:
+            return {"worker_lock": "unknown", "worker_acquired": "unknown",
+                    "duplicate_worker": "UNKNOWN"}
+        duplicate = "YES" if (warning or status == "blocked_duplicate") else "NO"
+        return {
+            "worker_lock": status,
+            "worker_acquired": bool(acquired) if acquired is not None else "unknown",
+            "duplicate_worker": duplicate,
+        }
+    if isinstance(raw_lock, str) and raw_lock and raw_lock != "unknown":
+        if raw_lock == "blocked_duplicate":
+            return {"worker_lock": raw_lock, "worker_acquired": False,
+                    "duplicate_worker": "YES"}
+        acquired = True if raw_lock in ("heartbeat", "acquired") else "unknown"
+        return {"worker_lock": raw_lock, "worker_acquired": acquired,
+                "duplicate_worker": "NO"}
+    return {"worker_lock": "unknown", "worker_acquired": "unknown",
+            "duplicate_worker": "UNKNOWN"}
+
+
 def derive_safety_view(safety: dict[str, Any] | None) -> dict[str, Any]:
     """Derive the safety panel from REAL flags. Never invents safe values."""
     s = dict(safety or {})
@@ -71,20 +101,29 @@ def derive_safety_view(safety: dict[str, Any] | None) -> dict[str, Any]:
     pfilter = bool(_safe(s, "paper_filter_enabled", False))
     can_send = live and not dry
     all_safe = (not live) and dry and paper and (not pfilter) and (not can_send)
+    worker = derive_worker_lock_view(s.get("worker_lock"))
+    security = "SAFE_PAPER_ONLY" if all_safe else "SAFETY_REVIEW_REQUIRED"
     return {
         "mode": str(_safe(s, "mode", "paper")).upper(),
         "live_trading": live,
         "dry_run": dry,
         "paper_trading": paper,
         "paper_filter_enabled": pfilter,
+        # Explicit uppercase aliases so external consumers/scripts that read
+        # the config-flag spelling never see None (V10.4.3 truth fix).
+        "LIVE_TRADING": live,
+        "DRY_RUN": dry,
+        "PAPER_TRADING": paper,
         "can_send_real_orders": can_send,
         "all_safe": all_safe,
-        "security_status": "SAFE_PAPER_ONLY" if all_safe else "SAFETY_REVIEW_REQUIRED",
+        "security_status": security,
+        "security": security,
         "paper_policy": "PAPER_ONLY" if all_safe else "REVIEW",
         "open_positions": int(_safe(s, "open_positions", 0) or 0),
         "circuit_breaker": bool(_safe(s, "circuit_breaker", False)),
-        "worker_lock": str(_safe(s, "worker_lock", "unknown")),
-        "duplicate_worker": str(_safe(s, "duplicate_worker", "NO")),
+        "worker_lock": worker["worker_lock"],
+        "worker_acquired": worker["worker_acquired"],
+        "duplicate_worker": worker["duplicate_worker"],
         "uptime": str(_safe(s, "uptime", "")),
     }
 
@@ -276,6 +315,7 @@ background:#0c121a;border:1px solid var(--line);border-radius:8px;padding:8px}}
     <div class="kv"><span>DRY_RUN</span><span class="v" id="sf-dry">—</span></div>
     <div class="kv"><span>PAPER_TRADING</span><span class="v" id="sf-paper">—</span></div>
     <div class="kv"><span>paper_filter_enabled</span><span class="v" id="sf-filter">—</span></div>
+    <div class="kv"><span>worker_acquired</span><span class="v" id="sf-acquired">—</span></div>
     <div class="kv"><span>duplicate_worker</span><span class="v" id="sf-dup">—</span></div>
   </div>
 
@@ -341,6 +381,8 @@ background:#0c121a;border:1px solid var(--line);border-radius:8px;padding:8px}}
     <div class="kv"><span>promotion ladder</span><span class="v">RESEARCH_ONLY &#8250; BACKTEST_CANDIDATE &#8250; WALK_FORWARD_CANDIDATE &#8250; SHADOW_ONLY &#8250; PAPER_ELIGIBLE_FUTURE</span></div>
     <div class="kv"><span>history target</span><span class="v">&#8805;180d clean (initial) · &#8805;365d clean (stronger)</span></div>
     <div class="kv"><span>OI rule</span><span class="v">if OI is not audited, OI buckets stay blocked</span></div>
+    <div class="kv"><span>what is blocking edge</span><span class="v warn" id="sr-blocking">—</span></div>
+    <div class="kv"><span>next best research action</span><span class="v" id="sr-next">—</span></div>
     <div class="kv"><span>research note</span><span class="v muted">no edge candidate is actionable until data + gates pass — the system reports this honestly</span></div>
   </div>
 
@@ -418,7 +460,8 @@ function applyState(s) {{
   semaphore("sf-dry", !!sf.dry_run, String(!!sf.dry_run));
   semaphore("sf-paper", !!sf.paper_trading, String(!!sf.paper_trading));
   semaphore("sf-filter", !sf.paper_filter_enabled, String(!!sf.paper_filter_enabled));
-  txt("sf-dup", sf.duplicate_worker || "NO");
+  txt("sf-acquired", sf.worker_acquired === undefined ? "unknown" : String(sf.worker_acquired));
+  txt("sf-dup", sf.duplicate_worker || "UNKNOWN");
   document.getElementById("violation").style.display = sf.all_safe === false ? "block" : "none";
 
   var clean = Number(dr.current_clean_days || 0);
@@ -452,6 +495,10 @@ function applyState(s) {{
   var blockers = "";
   (dr.data_blockers || []).forEach(function (b) {{ blockers += "<li>" + esc(b) + "</li>"; }});
   document.getElementById("dr-blockers").innerHTML = blockers || "<li>none</li>";
+
+  var ef = s.edge_focus || {{}};
+  txt("sr-blocking", (ef.what_is_blocking_edge || []).join(" · ") || "—");
+  txt("sr-next", ef.next_best_research_action || "—");
 
   txt("cd-status", cd.status || cd.overall_status || cd.data_status || "NOT_COMPUTED_YET");
   txt("cd-text", (cd.text || "").slice(0, 2200) || "no cached candidate-ranking output; run the CLI report");

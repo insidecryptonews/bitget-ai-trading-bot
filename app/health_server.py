@@ -3580,8 +3580,14 @@ def _v104_as_dict(obj: Any) -> dict[str, Any]:
 
 
 def _v104_safety(config: Any | None, db: Any | None, state: Any | None) -> dict[str, Any]:
+    """V10.4.3 — worker_lock truth fix: the dashboard reuses the worker_lock
+    payload the bot itself publishes in ``state.payload()`` (same source as
+    /health). It must NOT build a new WorkerLockManager here: a fresh manager
+    gets its own instance_id and falsely reports ``blocked_duplicate`` against
+    the real running worker. If the payload has no worker_lock, the dashboard
+    honestly reports unknown instead of recomputing."""
+    del db  # kept in the signature for call-site stability; not used (truth fix)
     health = state.payload() if state is not None else {}
-    worker = _worker_lock_status_payload(config, db)
     raw = {
         "mode": str(health.get("mode") or "paper"),
         "live_trading": bool(getattr(config, "live_trading", False)),
@@ -3591,15 +3597,18 @@ def _v104_safety(config: Any | None, db: Any | None, state: Any | None) -> dict[
         "open_positions": int(health.get("open_positions") or 0),
         "circuit_breaker": bool(health.get("circuit_breaker") or False),
         "uptime": str(health.get("uptime") or ""),
-        "worker_lock": str(worker.get("lock_status") or "unknown"),
-        "duplicate_worker": "YES" if worker.get("warning_if_duplicate_worker") else "NO",
+        "worker_lock": health.get("worker_lock"),  # dict from /health, or None
     }
     try:
         from .labs.trader_dashboard_v104 import derive_safety_view
 
         view = derive_safety_view(raw)
-    except Exception:
+    except Exception as exc:
+        _V104_LOG.warning("v104 safety view failed: %s", type(exc).__name__)
         view = raw
+        view["worker_lock"] = "unknown"
+        view["worker_acquired"] = "unknown"
+        view["duplicate_worker"] = "UNKNOWN"
     view["final_recommendation"] = "NO LIVE"
     return view
 
@@ -3698,20 +3707,48 @@ def _v104_overview(config: Any | None, db: Any | None, state: Any | None,
     }
 
 
+def _v104_edge_focus(candidates_peek: dict[str, Any],
+                     data_peek: dict[str, Any]) -> dict[str, Any]:
+    """V10.4.3 — LIGHT 'what is blocking edge / next best action' summary,
+    composed from cached dicts only (no computation, no IO)."""
+    blocking: list[str] = []
+    cand_status = str(candidates_peek.get("status")
+                      or candidates_peek.get("data_status") or "")
+    if cand_status == "NO_VALID_CANDIDATES":
+        blocking.append("no candidate with positive net EV (net_EV<=0 after costs)")
+        blocking.append("samples too small / TIME-death too high in watchlist")
+    elif cand_status in ("STALE_OR_PENDING", "STALE", ""):
+        blocking.append("no cached candidate snapshot; run CLI report")
+    data_status = str(data_peek.get("backtester_readiness")
+                      or data_peek.get("data_status") or "")
+    if data_status in ("NEED_LONG_HISTORY", "STALE_OR_PENDING", "STALE", ""):
+        blocking.append("clean history < 180d; OI buckets blocked until audited")
+    next_action = ("verify Tardis.dev/CoinGlass manually, then acquire 180/365d "
+                   "clean history (manifest + checksums + human authorization)")
+    return {
+        "what_is_blocking_edge": blocking,
+        "next_best_research_action": next_action,
+        "final_recommendation": "NO LIVE",
+    }
+
+
 def _v104_dashboard_state(config: Any | None, db: Any | None, state: Any | None,
                           training_pulse: Any | None) -> dict[str, Any]:
     """Ultra-light polling payload. Heavy sections are cache-peek only."""
+    candidates_peek = _v104_cache_peek("candidates")
+    data_peek = _v104_cache_peek("data_readiness")
     return {
         "banner": "NO LIVE — RESEARCH ONLY",
         "read_only": True,
         "live_allowed": False,
         "safety": _v104_safety(config, db, state),
-        "data_readiness": _v104_cache_peek("data_readiness"),
+        "data_readiness": data_peek,
         "provider_readiness": _v104_provider_readiness(),  # light, pure
-        "candidates": _v104_cache_peek("candidates"),
+        "candidates": candidates_peek,
         "net_edge": _v104_cache_peek("net_edge"),
         "paper_monitor": _v104_paper_monitor(config, db, state),
         "signal_monitor": _v104_signal_monitor(config, db, training_pulse),
+        "edge_focus": _v104_edge_focus(candidates_peek, data_peek),
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "final_recommendation": "NO LIVE",
     }

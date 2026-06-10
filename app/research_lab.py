@@ -4216,6 +4216,150 @@ class ResearchLab:
         lines.append("TRADER DASHBOARD CONTRACT V10.4 END")
         return "\n".join(lines)
 
+    # ---------------------------------------------------------------
+    # V10.4.3 — runtime health audit, learning/edge diagnostic and
+    # runtime efficiency diagnostic (all read-only; no writes, no APIs).
+    # ---------------------------------------------------------------
+    def _v1043_fetch_local_health(self) -> tuple[dict, str]:
+        """Best-effort GET of the bot's OWN local /health (no external API).
+        Returns (payload, source) where source is ok|unavailable."""
+        import json as _json
+        import urllib.request as _url
+        port = int(getattr(self.config, "port", 8080) or 8080)
+        try:
+            with _url.urlopen(f"http://127.0.0.1:{port}/health", timeout=2) as resp:
+                return _json.loads(resp.read().decode("utf-8")), "ok"
+        except Exception:
+            return {}, "unavailable"
+
+    def _v1043_git_commit(self) -> str:
+        import subprocess
+        try:
+            out = subprocess.run(
+                ["git", "rev-parse", "--short", "HEAD"],
+                capture_output=True, text=True, timeout=5, check=False,
+            )
+            return out.stdout.strip() if out.returncode == 0 else "unknown"
+        except Exception:
+            return "unknown"
+
+    def runtime_health_audit_v104_cli(self) -> str:
+        from .labs.runtime_audit_v10_4_3 import (
+            NEEDS_RUNTIME_CONTEXT,
+            build_runtime_health_audit,
+            count_db_tables,
+        )
+        from .labs.trader_dashboard_v104 import dashboard_contract
+        health, source = self._v1043_fetch_local_health()
+        report = build_runtime_health_audit(
+            config=self.config,
+            db_counts=count_db_tables(self.db),
+            health=health,
+            health_source=source,
+            git_commit=self._v1043_git_commit(),
+            dashboard_contract=dashboard_contract(),
+            log_audit=NEEDS_RUNTIME_CONTEXT,
+        )
+        lines = ["RUNTIME HEALTH AUDIT V10.4.3 START"]
+        lines.append(f"git_commit: {report['git_commit']}")
+        for key, value in report["runtime"].items():
+            lines.append(f"runtime {key}: {value}")
+        for key, value in report["safety"].items():
+            lines.append(f"safety {key}: {str(value).lower()}")
+        for key, value in report["dashboard"].items():
+            lines.append(f"dashboard {key}: {value}")
+        lines.append(f"log_audit: {report['log_audit']}")
+        for table, count in report["db_counts"].items():
+            lines.append(f"db {table}: {count}")
+        lines.append("warnings: " + (",".join(report["warnings"]) or "NONE"))
+        lines.append("attention: " + (",".join(report["attention"]) or "NONE"))
+        lines.append(f"verdict: {report['verdict']}")
+        lines.append(f"paper_ready: {str(report['paper_ready']).lower()}")
+        lines.append(f"live_ready: {str(report['live_ready']).lower()}")
+        lines.extend(self._v82_safety_footer())
+        lines.append("RUNTIME HEALTH AUDIT V10.4.3 END")
+        return "\n".join(lines)
+
+    def learning_edge_diagnostic_v104_cli(self, hours: int = 24) -> str:
+        from .candidate_ranking import CandidateRanking
+        from .labs.runtime_audit_v10_4_3 import (
+            build_learning_edge_diagnostic,
+            count_db_tables,
+        )
+        from .net_edge_lab import NetEdgeLab
+        try:
+            ranking = CandidateRanking(self.config, self.db).build(hours=int(hours))
+        except Exception:
+            ranking = {"status": "unavailable"}
+        try:
+            net_edge = NetEdgeLab(self.config, self.db).build(hours=int(hours))
+        except Exception:
+            net_edge = {}
+        report = build_learning_edge_diagnostic(
+            db_counts=count_db_tables(self.db),
+            ranking=ranking,
+            net_edge=net_edge,
+        )
+        lines = ["LEARNING EDGE DIAGNOSTIC V10.4.3 START"]
+        lines.append(f"hours: {int(hours)}")
+        lines.append(f"learning_status: {report['learning_status']}")
+        for key, value in report["learning_infra"].items():
+            lines.append(f"learning {key}: {value}")
+        lines.append("learning_gaps:")
+        lines.extend(f"- {g}" for g in report["learning_gaps"])
+        lines.append(f"edge_status: {report['edge_status']}")
+        lines.append(f"candidate_ranking_status: {report['candidate_ranking_status']}")
+        lines.append(f"top_candidates_count: {report['top_candidates_count']}")
+        lines.append(f"watchlist_count: {report['watchlist_count']}")
+        lines.append(f"reject_count: {report['reject_count']}")
+        for reason, count in sorted(report["reject_reasons"].items()):
+            lines.append(f"reject_reason {reason}: {count}")
+        lines.append("top_blockers:")
+        lines.extend(f"- {b}" for b in report["top_blockers"])
+        lines.append("false_hope_warnings:")
+        lines.extend(f"- {w}" for w in (report["false_hope_warnings"] or ["NONE"]))
+        lines.append("highest_value_next_steps:")
+        lines.extend(f"- {s}" for s in report["highest_value_next_steps"])
+        lines.append("what_not_to_do:")
+        lines.extend(f"- {w}" for w in report["what_not_to_do"])
+        lines.append(f"paper_ready: {str(report['paper_ready']).lower()}")
+        lines.append(f"live_ready: {str(report['live_ready']).lower()}")
+        lines.extend(self._v82_safety_footer())
+        lines.append("LEARNING EDGE DIAGNOSTIC V10.4.3 END")
+        return "\n".join(lines)
+
+    def runtime_efficiency_diagnostic_v104_cli(self) -> str:
+        from .labs.runtime_audit_v10_4_3 import (
+            build_runtime_efficiency,
+            count_db_tables,
+        )
+        memory_mb: float | None = None
+        try:
+            import resource
+            memory_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024.0
+        except Exception:
+            memory_mb = None
+        report = build_runtime_efficiency(
+            config=self.config,
+            db_counts=count_db_tables(self.db),
+            memory_mb=memory_mb,
+        )
+        lines = ["RUNTIME EFFICIENCY DIAGNOSTIC V10.4.3 START"]
+        lines.append(f"scan_interval_seconds: {report['scan_interval_seconds']}")
+        lines.append(f"worker_lightweight_mode: {str(report['worker_lightweight_mode']).lower()}")
+        lines.append(f"latency_metrics_rows: {report['latency_metrics_rows']}")
+        lines.append(f"signal_path_metrics_rows: {report['signal_path_metrics_rows']}")
+        lines.append(f"memory_mb: {report['memory_mb']}")
+        lines.append(f"cpu: {report['cpu']}")
+        lines.append("findings:")
+        lines.extend(f"- {f}" for f in report["findings"])
+        lines.append("recommendations_read_only:")
+        lines.extend(f"- {r}" for r in report["recommendations_read_only"])
+        lines.append(f"auto_tuning_applied: {str(report['auto_tuning_applied']).lower()}")
+        lines.extend(self._v82_safety_footer())
+        lines.append("RUNTIME EFFICIENCY DIAGNOSTIC V10.4.3 END")
+        return "\n".join(lines)
+
     def rebound_sign_integrity_v8293_cli(
         self, hours: int = 168, limit: int = 50000,
     ) -> str:
@@ -5243,6 +5387,9 @@ def build_argument_parser() -> argparse.ArgumentParser:
             "external-research-intake-v104",
             "edge-hunter-contract-v104",
             "trader-dashboard-contract-v104",
+            "runtime-health-audit-v104",
+            "learning-edge-diagnostic-v104",
+            "runtime-efficiency-diagnostic-v104",
             "ohlcv-replay-loader-smoke-test",
             "ohlcv-replay-loader-audit",
             "duplicate-module-audit-smoke-test",
@@ -6127,6 +6274,12 @@ def main() -> None:
         print(lab.edge_hunter_contract_v104_cli())
     elif args.command == "trader-dashboard-contract-v104":
         print(lab.trader_dashboard_contract_v104_cli())
+    elif args.command == "runtime-health-audit-v104":
+        print(lab.runtime_health_audit_v104_cli())
+    elif args.command == "learning-edge-diagnostic-v104":
+        print(lab.learning_edge_diagnostic_v104_cli(hours=args.hours))
+    elif args.command == "runtime-efficiency-diagnostic-v104":
+        print(lab.runtime_efficiency_diagnostic_v104_cli())
     elif args.command == "ohlcv-replay-loader-smoke-test":
         print(lab.ohlcv_replay_loader_smoke_test())
     elif args.command == "ohlcv-replay-loader-audit":

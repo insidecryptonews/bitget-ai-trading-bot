@@ -816,3 +816,269 @@ def test_auth_unknown_endpoint_auth_first_then_404(v104_auth_server):
 def test_auth_health_stays_public(v104_auth_server):
     code, _ = _get_code(v104_auth_server, "/health")
     assert code == 200
+
+
+# ---------------------------------------------------------------------------
+# H. V10.4.3 — dashboard truth fixes + runtime/learning audits
+# ---------------------------------------------------------------------------
+
+from app.labs.runtime_audit_v10_4_3 import (  # noqa: E402
+    DB_AUDIT_TABLES,
+    VERDICT_ATTENTION,
+    VERDICT_OK,
+    VERDICT_UNSAFE,
+    VERDICT_WARN,
+    build_learning_edge_diagnostic,
+    build_runtime_efficiency,
+    build_runtime_health_audit,
+    count_db_tables,
+    detect_false_hope,
+)
+from app.labs.trader_dashboard_v104 import derive_worker_lock_view  # noqa: E402
+
+
+def test_worker_lock_view_heartbeat_means_no_duplicate():
+    view = derive_worker_lock_view({
+        "enabled": True, "acquired": True, "lock_status": "heartbeat",
+        "warning_if_duplicate_worker": "",
+    })
+    assert view["worker_lock"] == "heartbeat"
+    assert view["worker_acquired"] is True
+    assert view["duplicate_worker"] == "NO"
+
+
+def test_worker_lock_view_blocked_duplicate_means_yes():
+    view = derive_worker_lock_view({
+        "enabled": True, "acquired": False, "lock_status": "blocked_duplicate",
+        "warning_if_duplicate_worker": "another worker holds the lock",
+    })
+    assert view["worker_lock"] == "blocked_duplicate"
+    assert view["worker_acquired"] is False
+    assert view["duplicate_worker"] == "YES"
+
+
+def test_worker_lock_view_missing_is_unknown_not_invented():
+    for raw in (None, {}, "", "unknown"):
+        view = derive_worker_lock_view(raw)
+        assert view["worker_lock"] == "unknown"
+        assert view["worker_acquired"] == "unknown"
+        assert view["duplicate_worker"] == "UNKNOWN"
+
+
+def test_safety_view_exposes_uppercase_flag_aliases():
+    view = derive_safety_view({
+        "live_trading": False, "dry_run": True, "paper_trading": True,
+        "paper_filter_enabled": False,
+        "worker_lock": {"acquired": True, "lock_status": "heartbeat",
+                        "warning_if_duplicate_worker": ""},
+    })
+    assert view["LIVE_TRADING"] is False
+    assert view["DRY_RUN"] is True
+    assert view["PAPER_TRADING"] is True
+    assert view["security"] == "SAFE_PAPER_ONLY"
+    assert view["worker_acquired"] is True
+    assert view["duplicate_worker"] == "NO"
+
+
+def test_v104_safety_does_not_recompute_worker_lock(monkeypatch):
+    """The dashboard must NOT build a fresh WorkerLockManager (truth fix)."""
+    import app.health_server as hs
+
+    def _boom(*_a, **_k):
+        raise AssertionError("V10.4 safety must not call _worker_lock_status_payload")
+
+    monkeypatch.setattr(hs, "_worker_lock_status_payload", _boom)
+    state = hs.HealthState(mode="paper")
+    state.extra["worker_lock"] = {"acquired": True, "lock_status": "heartbeat",
+                                  "warning_if_duplicate_worker": ""}
+    view = hs._v104_safety(_FakeConfig(), None, state)
+    assert view["worker_lock"] == "heartbeat"
+    assert view["duplicate_worker"] == "NO"
+    # And without worker_lock in the payload it stays unknown (no recompute).
+    state2 = hs.HealthState(mode="paper")
+    view2 = hs._v104_safety(_FakeConfig(), None, state2)
+    assert view2["worker_lock"] == "unknown"
+    assert view2["duplicate_worker"] == "UNKNOWN"
+
+
+def test_server_dashboard_state_matches_health_worker_lock(v104_server):
+    """dashboard-state must reflect the same worker-lock truth as /health."""
+    status, body = _get(v104_server, "/health")
+    health = json.loads(body)
+    status, body = _get(v104_server, "/api/researchops/v104/dashboard-state")
+    safety = json.loads(body)["safety"]
+    health_lock = health.get("worker_lock")
+    if isinstance(health_lock, dict):
+        assert safety["worker_lock"] == health_lock.get("lock_status")
+    else:
+        assert safety["worker_lock"] == "unknown"
+        assert safety["duplicate_worker"] == "UNKNOWN"
+    assert safety["LIVE_TRADING"] is False
+    assert safety["DRY_RUN"] is True
+    assert safety["PAPER_TRADING"] is True
+    assert safety["paper_filter_enabled"] is False
+    assert safety["can_send_real_orders"] is False
+
+
+def test_server_dashboard_state_has_edge_focus(v104_server):
+    status, body = _get(v104_server, "/api/researchops/v104/dashboard-state")
+    payload = json.loads(body)
+    focus = payload["edge_focus"]
+    assert focus["final_recommendation"] == "NO LIVE"
+    assert isinstance(focus["what_is_blocking_edge"], list)
+    assert "next_best_research_action" in focus
+
+
+def test_runtime_health_audit_unsafe_on_live_flags():
+    class UnsafeConfig:
+        live_trading = True
+        dry_run = False
+        paper_trading = False
+        enable_paper_policy_filter = False
+
+    report = build_runtime_health_audit(
+        config=UnsafeConfig(), db_counts={}, health={}, health_source="unavailable")
+    assert report["verdict"] == VERDICT_UNSAFE
+    assert report["final_recommendation"] == "NO LIVE"
+
+
+def test_runtime_health_audit_attention_on_real_blocked_duplicate():
+    class SafeConfig:
+        live_trading = False
+        dry_run = True
+        paper_trading = True
+        enable_paper_policy_filter = False
+
+    report = build_runtime_health_audit(
+        config=SafeConfig(), db_counts={"trades": 1},
+        health={"mode": "paper", "last_scan": "x",
+                "worker_lock": {"lock_status": "blocked_duplicate",
+                                "warning_if_duplicate_worker": "dup"}},
+        health_source="ok")
+    assert report["verdict"] == VERDICT_ATTENTION
+    assert "worker_lock_blocked_duplicate" in report["attention"]
+
+
+def test_runtime_health_audit_warns_without_runtime_context():
+    class SafeConfig:
+        live_trading = False
+        dry_run = True
+        paper_trading = True
+        enable_paper_policy_filter = False
+
+    report = build_runtime_health_audit(
+        config=SafeConfig(), db_counts={t: "db_unavailable" for t in DB_AUDIT_TABLES},
+        health={}, health_source="unavailable")
+    assert report["verdict"] == VERDICT_WARN
+    assert report["paper_ready"] is False
+    assert report["live_ready"] is False
+
+
+def test_runtime_health_audit_ok_when_everything_healthy():
+    class SafeConfig:
+        live_trading = False
+        dry_run = True
+        paper_trading = True
+        enable_paper_policy_filter = False
+
+    report = build_runtime_health_audit(
+        config=SafeConfig(), db_counts={"trades": 5},
+        health={"mode": "paper", "last_scan": "2026-06-10T22:00:00Z",
+                "circuit_breaker": False,
+                "worker_lock": {"lock_status": "heartbeat", "acquired": True,
+                                "warning_if_duplicate_worker": ""}},
+        health_source="ok", log_audit="0_errors")
+    assert report["verdict"] == VERDICT_OK
+
+
+def test_count_db_tables_degrades_gracefully():
+    from contextlib import contextmanager
+
+    assert count_db_tables(None) == {t: "db_unavailable" for t in DB_AUDIT_TABLES}
+
+    class FakeRow(dict):
+        def keys(self):
+            return ["n"]
+
+        def __getitem__(self, k):
+            return 7
+
+    class FakeCursor:
+        def fetchone(self):
+            return FakeRow()
+
+    class FakeConn:
+        def execute(self, sql):
+            return FakeCursor()
+
+    class FakeDb:
+        @contextmanager
+        def _connect(self):
+            yield FakeConn()
+
+    counts = count_db_tables(FakeDb())
+    assert all(v == 7 for v in counts.values())
+
+    class MissingConn:
+        def execute(self, sql):
+            raise RuntimeError("no such table: x")
+
+    class MissingDb:
+        @contextmanager
+        def _connect(self):
+            yield MissingConn()
+
+    assert all(v == "missing" for v in count_db_tables(MissingDb()).values())
+
+
+def test_false_hope_detector_names_the_traps():
+    rows = [
+        {"group_value": "RANGE", "samples": 880, "gross_PF": 5.15,
+         "net_EV": -0.176, "net_PF": 0.0, "time_ratio": 0.999},
+        {"group_value": "ADA_SHORT", "samples": 72, "gross_PF": 999.0,
+         "net_EV": -0.1636, "net_PF": 0.0, "time_ratio": 0.194},
+        {"group_value": "TINY", "samples": 20, "gross_PF": 1.8,
+         "net_EV": 0.01, "net_PF": 1.2, "time_ratio": 0.1},
+    ]
+    warnings = detect_false_hope(rows)
+    text = " ".join(warnings)
+    assert "RANGE" in text and "NOT edge" in text
+    assert "no-SL-in-sample artifact" in text
+    assert "TIME-death" in text
+    assert "noise" in text
+
+
+def test_learning_edge_diagnostic_honest_when_no_candidates():
+    report = build_learning_edge_diagnostic(
+        db_counts={"signal_observations": 100, "signal_labels": 0,
+                   "signal_path_metrics": 50, "latency_metrics": 0},
+        ranking={"status": "NO_VALID_CANDIDATES", "top_candidates": [],
+                 "watch_list": [], "reject_list": []},
+        net_edge={"rejects": []},
+    )
+    assert report["edge_status"] == "NO_EDGE_DEMONSTRATED"
+    assert report["top_candidates_count"] == 0
+    assert report["paper_ready"] is False
+    assert report["live_ready"] is False
+    assert report["final_recommendation"] == "NO LIVE"
+    assert any("gross_PF" in w for w in report["what_not_to_do"])
+
+
+def test_runtime_efficiency_never_auto_tunes():
+    class Cfg:
+        scan_interval_seconds = 30
+        worker_lightweight_mode = True
+
+    report = build_runtime_efficiency(config=Cfg(), db_counts={}, memory_mb=None)
+    assert report["auto_tuning_applied"] is False
+    assert report["memory_mb"] == "needs_vps_snapshot"
+    assert report["final_recommendation"] == "NO LIVE"
+
+
+def test_v1043_module_is_readonly_no_secrets():
+    import pathlib
+
+    src = pathlib.Path("app/labs/runtime_audit_v10_4_3.py").read_text(encoding="utf-8")
+    assert "os.getenv" not in src and "os.environ" not in src
+    assert "INSERT" not in src and "UPDATE " not in src and "DELETE FROM" not in src
+    assert "import requests" not in src and "urllib" not in src
