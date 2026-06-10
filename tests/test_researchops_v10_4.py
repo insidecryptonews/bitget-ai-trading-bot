@@ -509,22 +509,38 @@ class _FakeConfig:
     training_runtime_profile = "railway_lightweight"
 
 
-@pytest.fixture(scope="module")
-def v104_server():
+def _start_test_server(config):
+    """V10.4.3.1 (Codex P2) — ephemeral port (0) to avoid fixed-port
+    flakiness on Windows; caller must close via the returned closer."""
     from app.health_server import HealthState, start_health_server
 
     state = HealthState(mode="paper")
-    port = 18977
     thread = start_health_server(
-        state, port, logging.getLogger("test-v104"),
-        config=_FakeConfig(), db=None, training_pulse=None, telegram_notifier=None,
+        state, 0, logging.getLogger("test-v104"),
+        config=config, db=None, training_pulse=None, telegram_notifier=None,
     )
     assert thread.server_ready.wait(5)
-    time.sleep(0.2)
-    yield f"http://127.0.0.1:{port}"
     server = thread.server_box.get("server")
-    if server is not None:
-        server.shutdown()
+    assert server is not None, "test server failed to bind an ephemeral port"
+    port = server.server_address[1]
+    time.sleep(0.1)
+
+    def closer():
+        try:
+            server.shutdown()
+        finally:
+            server.server_close()
+
+    return f"http://127.0.0.1:{port}", closer, state
+
+
+@pytest.fixture(scope="module")
+def v104_server():
+    base, closer, _state = _start_test_server(_FakeConfig())
+    try:
+        yield base
+    finally:
+        closer()
 
 
 def _get(base, path):
@@ -759,20 +775,11 @@ class _TokenConfig(_FakeConfig):
 
 @pytest.fixture(scope="module")
 def v104_auth_server():
-    from app.health_server import HealthState, start_health_server
-
-    state = HealthState(mode="paper")
-    port = 18978
-    thread = start_health_server(
-        state, port, logging.getLogger("test-v104-auth"),
-        config=_TokenConfig(), db=None, training_pulse=None, telegram_notifier=None,
-    )
-    assert thread.server_ready.wait(5)
-    time.sleep(0.2)
-    yield f"http://127.0.0.1:{port}"
-    server = thread.server_box.get("server")
-    if server is not None:
-        server.shutdown()
+    base, closer, _state = _start_test_server(_TokenConfig())
+    try:
+        yield base
+    finally:
+        closer()
 
 
 def _get_code(base, path):
@@ -1082,3 +1089,174 @@ def test_v1043_module_is_readonly_no_secrets():
     assert "os.getenv" not in src and "os.environ" not in src
     assert "INSERT" not in src and "UPDATE " not in src and "DELETE FROM" not in src
     assert "import requests" not in src and "urllib" not in src
+
+
+# ---------------------------------------------------------------------------
+# I. V10.4.3.1 (Codex hotfix) — conservative runtime/edge audits
+# ---------------------------------------------------------------------------
+
+class _SafePaperConfig:
+    live_trading = False
+    dry_run = True
+    paper_trading = True
+    enable_paper_policy_filter = False
+
+
+_HEALTHY_LOCK = {"enabled": True, "acquired": True, "lock_status": "heartbeat",
+                 "warning_if_duplicate_worker": ""}
+_HEALTHY_HEALTH = {"mode": "paper", "last_scan": "2026-06-10T22:00:00Z",
+                   "circuit_breaker": False, "worker_lock": dict(_HEALTHY_LOCK)}
+
+
+def test_runtime_audit_paper_filter_enabled_is_unsafe_stop():
+    """Codex P1-1: paper filter ON can never end in OK_RESEARCH_RUNTIME."""
+    class FilterOnConfig(_SafePaperConfig):
+        enable_paper_policy_filter = True
+
+    report = build_runtime_health_audit(
+        config=FilterOnConfig(), db_counts={"trades": 1},
+        health=dict(_HEALTHY_HEALTH), health_source="ok", log_audit="0_errors")
+    assert report["verdict"] == VERDICT_UNSAFE
+    assert "paper_filter_enabled_unexpected" in report["unsafe_blockers"]
+    assert "paper_filter_must_remain_disabled" in report["unsafe_blockers"]
+    assert report["final_recommendation"] == "NO LIVE"
+
+
+def test_runtime_audit_lock_enabled_not_acquired_blocks_ok():
+    """Codex P1-2: enabled lock without acquisition can never be OK."""
+    health = dict(_HEALTHY_HEALTH)
+    health["worker_lock"] = {"enabled": True, "acquired": False,
+                             "lock_status": "expired",
+                             "warning_if_duplicate_worker": ""}
+    report = build_runtime_health_audit(
+        config=_SafePaperConfig(), db_counts={"trades": 1},
+        health=health, health_source="ok", log_audit="0_errors")
+    assert report["verdict"] != VERDICT_OK
+    assert report["verdict"] == VERDICT_ATTENTION
+    assert "worker_lock_not_acquired" in report["attention"]
+
+
+def test_runtime_audit_blocked_duplicate_minimum_needs_attention():
+    """Codex P1-2: blocked_duplicate => at least NEEDS_ATTENTION."""
+    health = dict(_HEALTHY_HEALTH)
+    health["worker_lock"] = {"enabled": True, "acquired": False,
+                             "lock_status": "blocked_duplicate",
+                             "warning_if_duplicate_worker": "dup"}
+    report = build_runtime_health_audit(
+        config=_SafePaperConfig(), db_counts={"trades": 1},
+        health=health, health_source="ok", log_audit="0_errors")
+    assert report["verdict"] in (VERDICT_ATTENTION, VERDICT_UNSAFE)
+    assert "duplicate_worker_detected" in report["attention"]
+
+
+def test_runtime_audit_unknown_lock_blocks_ok():
+    """Codex P1-2: unknown/missing acquired state can never be OK."""
+    health = dict(_HEALTHY_HEALTH)
+    health["worker_lock"] = {"lock_status": "unknown"}
+    report = build_runtime_health_audit(
+        config=_SafePaperConfig(), db_counts={"trades": 1},
+        health=health, health_source="ok", log_audit="0_errors")
+    assert report["verdict"] != VERDICT_OK
+    assert "worker_lock_unknown" in report["warnings"]
+
+
+def _top_row(**over):
+    row = {"group_value": "policy_TEST_SHORT", "samples": 300, "net_EV": 0.05,
+           "net_PF": 1.4, "gross_PF": 1.9, "time_ratio": 0.40,
+           "decision": "PAPER_CANDIDATE", "reason": "ok"}
+    row.update(over)
+    return row
+
+
+def _diag_with_top(top_rows):
+    return build_learning_edge_diagnostic(
+        db_counts={"signal_observations": 100, "signal_path_metrics": 50},
+        ranking={"status": "OK", "top_candidates": top_rows,
+                 "watch_list": [], "reject_list": []},
+        net_edge={"rejects": []},
+        data_readiness={"current_clean_days": 63.46,
+                        "current_history_status": "TOO_SHORT_FOR_FINAL_VALIDATION",
+                        "current_missing_oi_ratio": 0.2467,
+                        "missing_oi_status": "MISSING_OI_CLUSTERED",
+                        "backtester_readiness": "NEED_LONG_HISTORY",
+                        "oi_bucket_policy": "BLOCK_OI_BUCKETS"},
+    )
+
+
+def test_top_candidate_negative_net_ev_is_not_edge():
+    """Codex P1-3: a top candidate with net_EV=-0.20 is NOT pending edge."""
+    report = _diag_with_top([_top_row(net_EV=-0.20)])
+    assert report["edge_status"] == "NO_EDGE_DEMONSTRATED"
+    assert report["validated_top_candidates_count"] == 0
+    warnings = " ".join(report["false_hope_warnings"])
+    assert "top_candidate_failed_revalidation" in warnings
+    assert "negative_net_ev" in warnings
+
+
+def test_top_candidate_small_sample_is_not_edge():
+    report = _diag_with_top([_top_row(samples=40)])
+    assert report["edge_status"] == "NO_EDGE_DEMONSTRATED"
+    assert "insufficient_samples" in " ".join(report["false_hope_warnings"])
+
+
+def test_top_candidate_full_time_death_is_not_edge():
+    report = _diag_with_top([_top_row(time_ratio=1.0)])
+    assert report["edge_status"] == "NO_EDGE_DEMONSTRATED"
+    assert "high_time_death" in " ".join(report["false_hope_warnings"])
+
+
+def test_top_candidate_reject_decision_is_not_edge():
+    report = _diag_with_top([_top_row(decision="REJECT")])
+    assert report["edge_status"] == "NO_EDGE_DEMONSTRATED"
+    assert "rejected_decision" in " ".join(report["false_hope_warnings"])
+
+
+def test_top_candidate_disqualifying_reason_is_not_edge():
+    report = _diag_with_top([_top_row(reason="sample_too_small")])
+    assert report["edge_status"] == "NO_EDGE_DEMONSTRATED"
+    assert "reject_reason:sample_too_small" in " ".join(report["false_hope_warnings"])
+
+
+def test_top_candidate_missing_time_data_needs_review():
+    row = _top_row()
+    row.pop("time_ratio")
+    report = _diag_with_top([row])
+    assert report["edge_status"] == "NO_EDGE_DEMONSTRATED"
+    assert "needs_time_death_review" in " ".join(report["false_hope_warnings"])
+
+
+def test_top_candidate_passing_all_gates_is_pending_validation_only():
+    report = _diag_with_top([_top_row()])
+    assert report["edge_status"] == "EDGE_CANDIDATE_PRESENT_PENDING_VALIDATION"
+    assert report["validated_top_candidates_count"] == 1
+    assert report["paper_ready"] is False
+    assert report["live_ready"] is False
+    assert report["final_recommendation"] == "NO LIVE"
+
+
+def test_blockers_derived_not_hardcoded():
+    """Codex P1-4: no invented history figures. With a snapshot the numbers
+    come from it; without one the diagnostic says UNKNOWN/unavailable."""
+    with_snapshot = _diag_with_top([])
+    blockers = " ".join(with_snapshot["top_blockers"])
+    assert "clean_days=63.46" in blockers  # derived from the snapshot input
+    assert with_snapshot["data_readiness_derived"]["snapshot_available"] is True
+
+    without = build_learning_edge_diagnostic(
+        db_counts={}, ranking={"top_candidates": []}, net_edge={},
+        data_readiness=None)
+    blockers2 = " ".join(without["top_blockers"])
+    assert "data_readiness_snapshot_unavailable" in blockers2
+    assert "history_depth_unknown" in blockers2
+    assert "63" not in blockers2  # no invented figure
+    assert without["data_readiness_derived"]["clean_days"] == "UNKNOWN"
+
+
+def test_http_fixture_uses_ephemeral_port_and_closes(v104_server):
+    """Codex P2: the fixture binds port 0 (ephemeral) and exposes a live
+    server; closing is exercised by the module teardown."""
+    port = int(v104_server.rsplit(":", 1)[1])
+    assert port != 0
+    assert port not in (18977, 18978)  # no fixed test ports anymore
+    status, _ = _get(v104_server, "/health")
+    assert status == 200

@@ -42,8 +42,19 @@ DB_AUDIT_TABLES = [
 # Anti-false-hope thresholds (aligned with edge hunter contract V10.4).
 MIN_SAMPLES = 150
 HIGH_TIME_DEATH = 0.90
+EXTREME_TIME_DEATH_CANDIDATE = 0.80  # a "top candidate" above this is not validable
+MIN_NET_PF_CANDIDATE = 1.0
 SUSPICIOUS_GROSS_PF = 2.0
 ARTIFACT_GROSS_PF = 900.0  # gross_PF=999 means "no SL hits in sample" artifact
+
+# Reasons that immediately disqualify a row from being a pending candidate.
+DISQUALIFYING_REASONS = (
+    "sample_too_small",
+    "net_ev_not_positive",
+    "high_time_death",
+    "candidate_ranking_no_valid_candidates",
+    "time_death_or_quality_risk",
+)
 
 
 def count_db_tables(db: Any) -> dict[str, Any]:
@@ -90,15 +101,32 @@ def build_runtime_health_audit(
 
     warnings: list[str] = []
     attention: list[str] = []
+    unsafe: list[str] = []
+
+    # V10.4.3.1 (Codex P1-1) — in the V10.4.x phase the paper filter MUST be
+    # disabled. Finding it enabled is an unexpected, unsafe configuration.
+    if pfilter:
+        unsafe.append("paper_filter_enabled_unexpected")
+        unsafe.append("paper_filter_must_remain_disabled")
+    if live or can_send:
+        unsafe.append("live_flags_active")
 
     if health_source != "ok":
         warnings.append(f"health_endpoint_{health_source}")
+    # V10.4.3.1 (Codex P1-2) — a worker lock that is enabled but not acquired,
+    # duplicated, or unknown can NEVER end in OK_RESEARCH_RUNTIME.
     if isinstance(lock, dict) and lock:
-        if str(lock.get("lock_status")) == "blocked_duplicate":
+        status = str(lock.get("lock_status") or "unknown")
+        acquired = lock.get("acquired")
+        if status == "blocked_duplicate" or lock.get("warning_if_duplicate_worker"):
+            attention.append("duplicate_worker_detected")
             attention.append("worker_lock_blocked_duplicate")
-        if lock.get("warning_if_duplicate_worker"):
-            attention.append("duplicate_worker_warning_present")
+        if lock.get("enabled") is True and acquired is not True:
+            attention.append("worker_lock_not_acquired")
+        elif acquired is not True and status not in ("heartbeat", "acquired"):
+            warnings.append("worker_lock_unknown")
     elif health_source == "ok":
+        warnings.append("worker_lock_unknown")
         warnings.append("worker_lock_not_in_health_payload")
     if h.get("circuit_breaker") is True:
         attention.append("circuit_breaker_active")
@@ -113,7 +141,7 @@ def build_runtime_health_audit(
     elif missing_tables:
         warnings.append(f"db_tables_missing:{','.join(missing_tables)}")
 
-    if live or can_send:
+    if unsafe:
         verdict = VERDICT_UNSAFE
     elif attention:
         verdict = VERDICT_ATTENTION
@@ -155,6 +183,7 @@ def build_runtime_health_audit(
         "db_counts": db_counts,
         "warnings": warnings,
         "attention": attention,
+        "unsafe_blockers": unsafe,
         "verdict": verdict,
         "research_only": True,
         "paper_ready": False,
@@ -212,14 +241,55 @@ def detect_false_hope(rows: list[dict[str, Any]]) -> list[str]:
     return out[:15]
 
 
+def revalidate_top_candidates(
+    top: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """V10.4.3.1 (Codex P1-3) — never trust a 'top candidate' row as edge
+    without conservative revalidation. Returns (validated, failure_warnings).
+
+    A row only survives when ALL of these hold: net_EV > 0, net_PF >= 1.0,
+    samples >= 150, TIME-death < 0.80 (missing TIME data => fails as
+    needs_time_death_review), decision != REJECT and no disqualifying reason.
+    """
+    validated: list[dict[str, Any]] = []
+    failures: list[str] = []
+    for row in top or []:
+        rid = str(row.get("group_value") or row.get("policy_id") or "?")
+        fails: list[str] = []
+        if _num(row, "net_EV", "net_ev") <= 0:
+            fails.append("negative_net_ev")
+        if _num(row, "net_PF", "net_pf") < MIN_NET_PF_CANDIDATE:
+            fails.append("low_net_pf")
+        if int(_num(row, "samples")) < MIN_SAMPLES:
+            fails.append("insufficient_samples")
+        has_time = any(k in row for k in ("time_ratio", "TIME", "time_pct"))
+        if not has_time:
+            fails.append("needs_time_death_review")
+        elif _num(row, "time_ratio", "TIME", "time_pct") >= EXTREME_TIME_DEATH_CANDIDATE:
+            fails.append("high_time_death")
+        if str(row.get("decision") or "").upper() == "REJECT":
+            fails.append("rejected_decision")
+        reason = str(row.get("reason") or "").lower()
+        if any(bad in reason for bad in DISQUALIFYING_REASONS):
+            fails.append(f"reject_reason:{reason}")
+        if fails:
+            failures.append(
+                f"top_candidate_failed_revalidation: {rid} ({','.join(fails)})")
+        else:
+            validated.append(row)
+    return validated, failures
+
+
 def build_learning_edge_diagnostic(
     *,
     db_counts: dict[str, Any],
     ranking: dict[str, Any] | None,
     net_edge: dict[str, Any] | None,
+    data_readiness: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     rank = dict(ranking or {})
     edge = dict(net_edge or {})
+    readiness = dict(data_readiness or {})
 
     def _count(table: str) -> int:
         v = db_counts.get(table)
@@ -239,7 +309,6 @@ def build_learning_edge_diagnostic(
         gaps.append("no path metrics (MFE/MAE) counted in this view")
     if latency <= 0:
         gaps.append("no latency metrics counted in this view")
-    gaps.append("clean external history < 180d; OI/funding/liquidation buckets blocked")
 
     learning_status = ("LEARNING_INFRA_ACTIVE" if observations > 0 and path_metrics > 0
                        else "LEARNING_DATA_NOT_VISIBLE")
@@ -247,23 +316,50 @@ def build_learning_edge_diagnostic(
     top = list(rank.get("top_candidates") or [])
     watch = list(rank.get("watch_list") or [])
     rejects = list(rank.get("reject_list") or []) + list(edge.get("rejects") or [])
-    edge_status = ("EDGE_CANDIDATE_PRESENT_PENDING_VALIDATION" if top
+
+    # V10.4.3.1 (Codex P1-3) — conservative revalidation: rows in
+    # top_candidates are NOT edge until they survive EV/PF/sample/time gates.
+    validated_top, revalidation_failures = revalidate_top_candidates(top)
+    edge_status = ("EDGE_CANDIDATE_PRESENT_PENDING_VALIDATION" if validated_top
                    else "NO_EDGE_DEMONSTRATED")
 
-    false_hope = detect_false_hope(watch + rejects)
+    false_hope = revalidation_failures + detect_false_hope(watch + rejects)
 
     reject_reasons: dict[str, int] = {}
     for row in watch + rejects:
         reason = str(row.get("reason") or "unspecified")
         reject_reasons[reason] = reject_reasons.get(reason, 0) + 1
 
-    top_blockers = [
-        "net_EV <= 0 after realistic costs on every observed bucket",
-        f"samples below {MIN_SAMPLES} on most buckets (sample_too_small)",
-        "TIME-death dominates exits (positions expire, costs accrue, no TP)",
-        "clean history ~63d < 180d minimum; no validated long-history dataset",
-        "OI audit unavailable/clustered => OI buckets blocked",
-    ]
+    # V10.4.3.1 (Codex P1-4) — blockers are DERIVED from current inputs.
+    # Unknown stays UNKNOWN; no invented numbers.
+    clean_days: Any = readiness.get("current_clean_days", "UNKNOWN")
+    history_status: Any = readiness.get("current_history_status", "UNKNOWN")
+    missing_oi_ratio: Any = readiness.get("current_missing_oi_ratio", "UNKNOWN")
+    missing_oi_status: Any = readiness.get("missing_oi_status", "UNKNOWN")
+    backtester_readiness: Any = readiness.get("backtester_readiness", "UNKNOWN")
+    oi_policy: Any = readiness.get("oi_bucket_policy", "UNKNOWN")
+
+    top_blockers: list[str] = []
+    if not validated_top:
+        top_blockers.append(
+            "no candidate passed conservative revalidation "
+            "(net_EV>0, net_PF>=1.0, samples>=150, TIME<80%)")
+    for reason, count in sorted(reject_reasons.items(), key=lambda kv: -kv[1])[:3]:
+        top_blockers.append(f"dominant_reject_reason: {reason} ({count}x)")
+    if readiness:
+        if isinstance(clean_days, (int, float)) and clean_days < 180:
+            top_blockers.append(
+                f"clean_days={clean_days} below 180d minimum "
+                f"(history_status={history_status})")
+        if str(oi_policy) == "BLOCK_OI_BUCKETS" or str(missing_oi_status).startswith("MISSING_OI"):
+            top_blockers.append(
+                f"OI buckets blocked (missing_oi_status={missing_oi_status}, "
+                f"ratio={missing_oi_ratio})")
+        if str(backtester_readiness) not in ("", "UNKNOWN", "READY"):
+            top_blockers.append(f"backtester_readiness={backtester_readiness}")
+    else:
+        top_blockers.append("data_readiness_snapshot_unavailable")
+        top_blockers.append("history_depth_unknown — requires_180d_365d_verified_history")
 
     next_steps = [
         "1. manually verify Tardis.dev (pricing, Bitget perp 180/365d sample, OI/funding/liq completeness)",
@@ -275,7 +371,7 @@ def build_learning_edge_diagnostic(
     ]
 
     what_not_to_do = [
-        "do not treat gross_PF as edge (every current bucket has net_EV <= 0)",
+        "do not treat gross_PF as edge; only net EV after costs counts",
         "do not promote anything with samples < 150",
         "do not enable the paper filter or live from any of this",
         "do not use OI buckets while the OI audit blocks them",
@@ -294,9 +390,19 @@ def build_learning_edge_diagnostic(
             "strategy_lab_candidates": db_counts.get("strategy_lab_candidates", "unknown"),
         },
         "learning_gaps": gaps,
+        "data_readiness_derived": {
+            "snapshot_available": bool(readiness),
+            "clean_days": clean_days,
+            "history_status": history_status,
+            "missing_oi_ratio": missing_oi_ratio,
+            "missing_oi_status": missing_oi_status,
+            "backtester_readiness": backtester_readiness,
+            "oi_bucket_policy": oi_policy,
+        },
         "edge_status": edge_status,
         "candidate_ranking_status": rank.get("status", "unknown"),
         "top_candidates_count": len(top),
+        "validated_top_candidates_count": len(validated_top),
         "watchlist_count": len(watch),
         "reject_count": len(rejects),
         "reject_reasons": reject_reasons,
@@ -329,10 +435,10 @@ def build_runtime_efficiency(
         findings.append("memory: needs_vps_snapshot (no portable probe here)")
     else:
         findings.append(f"memory_mb~{memory_mb:.0f} (lightweight target <512)")
-    findings.append(f"scan_interval_seconds={scan_s} (full table logged every ~90s)")
+    findings.append(f"scan_interval_seconds={scan_s}")
     findings.append(f"worker_lightweight_mode={str(lightweight).lower()}")
-    findings.append("cpu: needs_vps_snapshot (~31.8% avg seen on VPS = continuous "
-                    "10-symbol scan + MFE/MAE tracking; consistent with design)")
+    findings.append("cpu: needs_vps_snapshot (no portable probe here; measure on "
+                    "the VPS before drawing any conclusion)")
     if isinstance(path_rows, int) and path_rows > 100_000:
         findings.append(f"signal_path_metrics rows={path_rows} — matured MFE/MAE volume is large")
         recommendations.append("consider pruning/archiving matured MFE/MAE rows older than the "

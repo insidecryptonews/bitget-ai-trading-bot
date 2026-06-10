@@ -4273,6 +4273,7 @@ class ResearchLab:
             lines.append(f"db {table}: {count}")
         lines.append("warnings: " + (",".join(report["warnings"]) or "NONE"))
         lines.append("attention: " + (",".join(report["attention"]) or "NONE"))
+        lines.append("unsafe_blockers: " + (",".join(report["unsafe_blockers"]) or "NONE"))
         lines.append(f"verdict: {report['verdict']}")
         lines.append(f"paper_ready: {str(report['paper_ready']).lower()}")
         lines.append(f"live_ready: {str(report['live_ready']).lower()}")
@@ -4295,10 +4296,22 @@ class ResearchLab:
             net_edge = NetEdgeLab(self.config, self.db).build(hours=int(hours))
         except Exception:
             net_edge = {}
+        # V10.4.3.1 — derive history/OI blockers from a REAL data-readiness
+        # snapshot when available; otherwise the diagnostic reports UNKNOWN.
+        try:
+            from .labs.external_data_provider_registry_v10_3 import run_data_source_audit
+            from .labs.external_edge_ingest_v10_1 import read_input_dir
+            market_clean, _m = self._v101_load_clean("perp_market_state")
+            raw_rows, _u = read_input_dir(f"{self._V101_RAW}/perp_market_state")
+            audit = run_data_source_audit(market_clean, raw_rows, hours=8760)
+            data_readiness = audit.as_dict() if hasattr(audit, "as_dict") else None
+        except Exception:
+            data_readiness = None
         report = build_learning_edge_diagnostic(
             db_counts=count_db_tables(self.db),
             ranking=ranking,
             net_edge=net_edge,
+            data_readiness=data_readiness,
         )
         lines = ["LEARNING EDGE DIAGNOSTIC V10.4.3 START"]
         lines.append(f"hours: {int(hours)}")
@@ -4307,9 +4320,12 @@ class ResearchLab:
             lines.append(f"learning {key}: {value}")
         lines.append("learning_gaps:")
         lines.extend(f"- {g}" for g in report["learning_gaps"])
+        for key, value in report["data_readiness_derived"].items():
+            lines.append(f"data_readiness {key}: {value}")
         lines.append(f"edge_status: {report['edge_status']}")
         lines.append(f"candidate_ranking_status: {report['candidate_ranking_status']}")
         lines.append(f"top_candidates_count: {report['top_candidates_count']}")
+        lines.append(f"validated_top_candidates_count: {report['validated_top_candidates_count']}")
         lines.append(f"watchlist_count: {report['watchlist_count']}")
         lines.append(f"reject_count: {report['reject_count']}")
         for reason, count in sorted(report["reject_reasons"].items()):
