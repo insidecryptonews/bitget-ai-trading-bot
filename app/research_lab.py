@@ -3946,6 +3946,56 @@ class ResearchLab:
         lines.append("STRATEGY REPLAY BACKTEST V10.3 (STUB) END")
         return "\n".join(lines)
 
+    def external_data_source_audit_v103_cli(self, hours: int = 8760) -> str:
+        from .labs.external_edge_ingest_v10_1 import read_input_dir
+        from .labs.external_data_provider_registry_v10_3 import run_data_source_audit
+        market_clean, _m = self._v101_load_clean("perp_market_state")
+        raw_rows, _u = read_input_dir(f"{self._V101_RAW}/perp_market_state")
+        r = run_data_source_audit(market_clean, raw_rows, hours=int(hours))
+        lines = ["EXTERNAL DATA SOURCE AUDIT V10.3 START"]
+        lines.append(f"current_provider: {r.current_provider}")
+        lines.append(f"current_clean_days: {r.current_clean_days}")
+        lines.append(f"required_min_history_days: {r.required_min_history_days}")
+        lines.append(f"stronger_history_days: {r.stronger_history_days}")
+        lines.append(f"current_history_status: {r.current_history_status}")
+        lines.append(f"current_missing_oi_ratio: {r.current_missing_oi_ratio}")
+        lines.append(f"missing_oi_status: {r.missing_oi_status}")
+        lines.append(f"oi_bucket_policy: {r.oi_bucket_policy}")
+        lines.append(f"data_classification: {r.data_classification}")
+        lines.append(f"backtester_readiness: {r.backtester_readiness}")
+        lines.append(f"recommended_next_provider: {r.recommended_next_provider}")
+        lines.append("provider_candidates: " + (",".join(r.provider_candidates) if r.provider_candidates else "NONE"))
+        lines.append("data_blockers: " + (",".join(r.data_blockers) if r.data_blockers else "NONE"))
+        lines.append("allowed_actions: " + ",".join(r.allowed_actions))
+        lines.append("blocked_actions: " + ",".join(r.blocked_actions))
+        lines.append(f"paper_ready: {str(r.paper_ready).lower()}")
+        lines.append(f"live_ready: {str(r.live_ready).lower()}")
+        lines.extend(self._v82_safety_footer())
+        lines.append("EXTERNAL DATA SOURCE AUDIT V10.3 END")
+        return "\n".join(lines)
+
+    def external_provider_readiness_v103_cli(self) -> str:
+        from .labs.external_data_provider_registry_v10_3 import run_provider_readiness
+        r = run_provider_readiness()
+        lines = ["EXTERNAL PROVIDER READINESS V10.3 START"]
+        lines.append(f"current_provider: {r.current_provider}")
+        lines.append(f"required_min_history_days: {r.required_min_history_days}")
+        lines.append(f"stronger_history_days: {r.stronger_history_days}")
+        lines.append(f"recommended_next_provider: {r.recommended_next_provider}")
+        lines.append("provider_candidates: " + (",".join(r.provider_candidates) if r.provider_candidates else "NONE"))
+        lines.append("needs_manual_verification: " + (",".join(r.needs_manual_verification) if r.needs_manual_verification else "NONE"))
+        for p in r.providers:
+            lines.append(
+                f"provider {p['provider_id']}: status={p['status']} "
+                f"bitget={p['bitget_perp_support']} hist_days={p['expected_history_days']} "
+                f"180d={p['suitable_for_180d']} 365d={p['suitable_for_365d']} paid={p['paid_data_risk']}"
+            )
+        lines.append(f"paper_ready: {str(r.paper_ready).lower()}")
+        lines.append(f"live_ready: {str(r.live_ready).lower()}")
+        lines.extend(self._v82_safety_footer())
+        lines.append("EXTERNAL PROVIDER READINESS V10.3 END")
+        return "\n".join(lines)
+
     def rebound_sign_integrity_v8293_cli(
         self, hours: int = 168, limit: int = 50000,
     ) -> str:
@@ -4966,6 +5016,8 @@ def build_argument_parser() -> argparse.ArgumentParser:
             "external-missing-oi-audit-v102",
             "external-long-history-validation-v102",
             "strategy-replay-backtest-v103",
+            "external-data-source-audit-v103",
+            "external-provider-readiness-v103",
             "ohlcv-replay-loader-smoke-test",
             "ohlcv-replay-loader-audit",
             "duplicate-module-audit-smoke-test",
@@ -5836,6 +5888,10 @@ def main() -> None:
         print(lab.external_long_history_validation_v102_cli(hours=args.hours))
     elif args.command == "strategy-replay-backtest-v103":
         print(lab.strategy_replay_backtest_v103_cli(hours=args.hours))
+    elif args.command == "external-data-source-audit-v103":
+        print(lab.external_data_source_audit_v103_cli(hours=args.hours))
+    elif args.command == "external-provider-readiness-v103":
+        print(lab.external_provider_readiness_v103_cli())
     elif args.command == "ohlcv-replay-loader-smoke-test":
         print(lab.ohlcv_replay_loader_smoke_test())
     elif args.command == "ohlcv-replay-loader-audit":
