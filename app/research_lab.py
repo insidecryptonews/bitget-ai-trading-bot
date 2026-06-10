@@ -3996,6 +3996,198 @@ class ResearchLab:
         lines.append("EXTERNAL PROVIDER READINESS V10.3 END")
         return "\n".join(lines)
 
+    # ---------------------------------------------------------------
+    # V10.4 — provider verification, acquisition plan, research intake,
+    # edge hunter contract, read-only trader dashboard (all research-only).
+    # ---------------------------------------------------------------
+    def external_provider_verification_v104_cli(self) -> str:
+        from .labs.external_provider_verification_v10_4 import (
+            run_provider_verification,
+        )
+        r = run_provider_verification()
+        lines = ["EXTERNAL PROVIDER VERIFICATION V10.4 START"]
+        lines.append(f"primary_candidate: {r.primary_candidate or 'NEEDS_MANUAL_VERIFICATION'}")
+        lines.append(f"fallback_candidate: {r.fallback_candidate or 'NEEDS_MANUAL_VERIFICATION'}")
+        lines.append(f"cross_check_provider: {r.cross_check_provider or 'NEEDS_MANUAL_VERIFICATION'}")
+        lines.append(f"proxy_provider: {r.proxy_provider or 'NEEDS_MANUAL_VERIFICATION'}")
+        lines.append(f"any_paid_download_authorized: {str(r.any_paid_download_authorized).lower()}")
+        lines.append(f"no_paid_download_without_authorization: {str(r.no_paid_download_without_authorization).lower()}")
+        for p in r.providers:
+            pending = ",".join(p["manual_checks_pending"]) if p["manual_checks_pending"] else "NONE"
+            lines.append(
+                f"provider {p['provider_id']}: status={p['status']} "
+                f"recommendation={p['recommendation']} bitget={p['bitget_perp_support']} "
+                f"180d={p['suitable_for_180d']} 365d={p['suitable_for_365d']} "
+                f"paid={p['paid_data_risk']} verification_complete={str(p['verification_complete']).lower()} "
+                f"paid_download_authorized={str(p['paid_download_authorized']).lower()}"
+            )
+            lines.append(f"  manual_checks_pending: {pending}")
+        lines.append(f"paper_ready: {str(r.paper_ready).lower()}")
+        lines.append(f"live_ready: {str(r.live_ready).lower()}")
+        lines.extend(self._v82_safety_footer())
+        lines.append("EXTERNAL PROVIDER VERIFICATION V10.4 END")
+        return "\n".join(lines)
+
+    def external_data_acquisition_plan_v104_cli(self) -> str:
+        from .labs.external_data_acquisition_plan_v10_4 import (
+            ACQUISITION_DIRS,
+            MANIFEST_REQUIRED_FIELDS,
+            MAX_DUP_RATIO,
+            MAX_GAP_RATIO,
+            MIN_COVERAGE_RATIO,
+            build_importer_contract,
+            evaluate_acquisition_manifest,
+        )
+        contract = build_importer_contract()
+        # With no real staged manifest, the gate must block (proves no-replace).
+        empty_eval = evaluate_acquisition_manifest(None)
+        lines = ["EXTERNAL DATA ACQUISITION PLAN V10.4 START"]
+        for key, path in ACQUISITION_DIRS.items():
+            lines.append(f"dir {key}: {path}")
+        lines.append("manifest_required_fields: " + ",".join(MANIFEST_REQUIRED_FIELDS))
+        lines.append(f"min_coverage_ratio: {MIN_COVERAGE_RATIO}")
+        lines.append(f"max_gap_ratio: {MAX_GAP_RATIO}")
+        lines.append(f"max_duplicate_ratio: {MAX_DUP_RATIO}")
+        lines.append("expected_input_files: " + ",".join(contract["expected_input_files"]))
+        lines.append("blocks_import: " + ",".join(contract["blocks_import"]))
+        lines.append("never: " + ",".join(contract["never"]))
+        lines.append(f"atomic_promote: {contract['atomic_promote']}")
+        lines.append(f"rollback: {contract['rollback']}")
+        lines.append(f"no_manifest_eval_status: {empty_eval.status}")
+        lines.append(f"no_manifest_promote_allowed: {str(empty_eval.promote_allowed).lower()}")
+        lines.append(f"no_manifest_do_not_replace_raw: {str(empty_eval.do_not_replace_raw).lower()}")
+        lines.append(f"paid_download_requires_authorization: {str(empty_eval.paid_download_requires_authorization).lower()}")
+        lines.append(f"paper_ready: {str(empty_eval.paper_ready).lower()}")
+        lines.append(f"live_ready: {str(empty_eval.live_ready).lower()}")
+        lines.extend(self._v82_safety_footer())
+        lines.append("EXTERNAL DATA ACQUISITION PLAN V10.4 END")
+        return "\n".join(lines)
+
+    def external_research_intake_v104_cli(self) -> str:
+        from .labs.external_research_intake_v10_4 import (
+            IDEA_ONLY,
+            NEEDS_BACKTEST,
+            NEEDS_DATA,
+            NEEDS_WALK_FORWARD,
+            PAPER_CANDIDATE_PENDING,
+            REJECT_LOOKAHEAD,
+            REJECT_OVERFIT,
+            REJECT_UNTRADABLE,
+            SHADOW_ELIGIBLE,
+            run_research_intake,
+        )
+        # No external ideas are auto-loaded (no invented data). This prints the
+        # intake contract + an empty backlog so the invariants are auditable.
+        rep = run_research_intake(None)
+        statuses = [IDEA_ONLY, NEEDS_DATA, NEEDS_BACKTEST, NEEDS_WALK_FORWARD,
+                    REJECT_LOOKAHEAD, REJECT_OVERFIT, REJECT_UNTRADABLE,
+                    SHADOW_ELIGIBLE, PAPER_CANDIDATE_PENDING]
+        lines = ["EXTERNAL RESEARCH INTAKE V10.4 START"]
+        lines.append("intake_statuses: " + ",".join(statuses))
+        lines.append("classification_ceiling: SHADOW_ELIGIBLE")
+        lines.append("rule: no_idea_can_enable_paper_filter_or_live")
+        lines.append(f"ideas_count: {rep.ideas_count}")
+        lines.append("by_status: " + (",".join(f"{k}={v}" for k, v in rep.by_status.items()) if rep.by_status else "NONE"))
+        lines.append("shadow_eligible: " + (",".join(rep.shadow_eligible) if rep.shadow_eligible else "NONE"))
+        lines.append("rejected: " + (",".join(rep.rejected) if rep.rejected else "NONE"))
+        lines.append(f"paper_filter_enabled: {str(rep.paper_filter_enabled).lower()}")
+        lines.append(f"paper_ready: {str(rep.paper_ready).lower()}")
+        lines.append(f"live_ready: {str(rep.live_ready).lower()}")
+        lines.extend(self._v82_safety_footer())
+        lines.append("EXTERNAL RESEARCH INTAKE V10.4 END")
+        return "\n".join(lines)
+
+    def edge_hunter_contract_v104_cli(self) -> str:
+        from .labs.edge_hunter_contract_v10_4 import (
+            MIN_HISTORY_DAYS,
+            MIN_SAMPLES,
+            build_edge_hunter_contract,
+        )
+        c = build_edge_hunter_contract()
+        lines = ["EDGE HUNTER CONTRACT V10.4 START"]
+        lines.append("operational: false")
+        lines.append(f"minimum_samples: {MIN_SAMPLES}")
+        lines.append(f"minimum_history_days: {MIN_HISTORY_DAYS}")
+        lines.append("candidate_definition: " + ",".join(c["candidate_definition"]))
+        lines.append("metrics_required: " + ",".join(c["metrics_required"]))
+        lines.append("validation: " + ",".join(c["validation"]))
+        lines.append("anti_lookahead: " + ",".join(c["anti_lookahead"]))
+        lines.append("reject_reasons: " + ",".join(c["reject_reasons"]))
+        lines.append("promotion_ladder: " + ",".join(c["promotion_ladder"]))
+        lines.append(f"output_ceiling: {c['output_ceiling']}")
+        lines.append("never: " + ",".join(c["never"]))
+        lines.append("paper_ready: false")
+        lines.append("live_ready: false")
+        lines.extend(self._v82_safety_footer())
+        lines.append("EDGE HUNTER CONTRACT V10.4 END")
+        return "\n".join(lines)
+
+    def trader_dashboard_contract_v104_cli(self) -> str:
+        from .labs.external_data_provider_registry_v10_3 import (
+            run_data_source_audit,
+            run_provider_readiness,
+        )
+        from .labs.external_edge_ingest_v10_1 import read_input_dir
+        from .labs.trader_dashboard_v104 import (
+            LOCK_TOOLTIP,
+            build_dashboard_view_model,
+            dashboard_contract,
+            render_dashboard_html,
+        )
+        contract = dashboard_contract()
+        # Build the view-model from REAL read-only state (no invented numbers).
+        try:
+            market_clean, _m = self._v101_load_clean("perp_market_state")
+            raw_rows, _u = read_input_dir(f"{self._V101_RAW}/perp_market_state")
+            audit = run_data_source_audit(market_clean, raw_rows)
+            data_readiness = audit.as_dict() if hasattr(audit, "as_dict") else None
+        except Exception:
+            data_readiness = None
+        try:
+            pr = run_provider_readiness()
+            provider_readiness = pr.as_dict() if hasattr(pr, "as_dict") else None
+        except Exception:
+            provider_readiness = None
+        vm = build_dashboard_view_model(
+            data_readiness=data_readiness, provider_readiness=provider_readiness,
+        )
+        html = render_dashboard_html(vm)
+        lower = html.lower()
+        import re as _re
+        fetch_targets = _re.findall(r'POLL_URL\s*=\s*"([^"]+)"', html)
+        fetch_readonly_only = all(
+            t.startswith("/api/researchops/v104/") for t in fetch_targets
+        ) and bool(fetch_targets)
+        lines = ["TRADER DASHBOARD CONTRACT V10.4 START"]
+        lines.append(f"name: {contract['name']}")
+        lines.append(f"read_only: {str(contract['read_only']).lower()}")
+        lines.append(f"route: {contract['route']}")
+        lines.append(f"near_real_time: {str(contract['near_real_time']).lower()}")
+        lines.append(f"poll_method: {contract['poll_method']}")
+        lines.append(f"poll_endpoint: {contract['poll_endpoint']}")
+        lines.append(f"default_refresh_seconds: {contract['default_refresh_seconds']}")
+        lines.append("readonly_api_endpoints: " + ",".join(contract["readonly_api_endpoints"]))
+        lines.append("panels: " + ",".join(contract["panels"]))
+        lines.append("mutable_endpoints: " + (",".join(contract["mutable_endpoints"]) if contract["mutable_endpoints"] else "NONE"))
+        lines.append(f"post_forms: {contract['post_forms']}")
+        lines.append("disabled_controls: " + ",".join(contract["disabled_controls"]))
+        lines.append("guarantees: " + ",".join(contract["guarantees"]))
+        lines.append(f"lock_tooltip: {LOCK_TOOLTIP}")
+        lines.append(f"render_html_bytes: {len(html)}")
+        lines.append(f"html_has_no_live_banner: {str('NO LIVE' in html).lower()}")
+        lines.append(f"html_has_research_only: {str('RESEARCH ONLY' in html).lower()}")
+        lines.append(f"html_has_disabled_buttons: {str('disabled' in lower).lower()}")
+        lines.append(f"html_has_last_update_timestamp: {str('last-update' in html).lower()}")
+        lines.append(f"html_has_connection_states: {str('STALE' in html and 'ERROR' in html and 'LOADING' in html).lower()}")
+        lines.append(f"html_has_post_form: {str('<form' in lower).lower()}")
+        lines.append(f"html_fetch_targets_readonly_only: {str(fetch_readonly_only).lower()}")
+        lines.append(f"live_allowed: {str(vm['live_allowed']).lower()}")
+        lines.append("paper_ready: false")
+        lines.append("live_ready: false")
+        lines.extend(self._v82_safety_footer())
+        lines.append("TRADER DASHBOARD CONTRACT V10.4 END")
+        return "\n".join(lines)
+
     def rebound_sign_integrity_v8293_cli(
         self, hours: int = 168, limit: int = 50000,
     ) -> str:
@@ -5018,6 +5210,11 @@ def build_argument_parser() -> argparse.ArgumentParser:
             "strategy-replay-backtest-v103",
             "external-data-source-audit-v103",
             "external-provider-readiness-v103",
+            "external-provider-verification-v104",
+            "external-data-acquisition-plan-v104",
+            "external-research-intake-v104",
+            "edge-hunter-contract-v104",
+            "trader-dashboard-contract-v104",
             "ohlcv-replay-loader-smoke-test",
             "ohlcv-replay-loader-audit",
             "duplicate-module-audit-smoke-test",
@@ -5892,6 +6089,16 @@ def main() -> None:
         print(lab.external_data_source_audit_v103_cli(hours=args.hours))
     elif args.command == "external-provider-readiness-v103":
         print(lab.external_provider_readiness_v103_cli())
+    elif args.command == "external-provider-verification-v104":
+        print(lab.external_provider_verification_v104_cli())
+    elif args.command == "external-data-acquisition-plan-v104":
+        print(lab.external_data_acquisition_plan_v104_cli())
+    elif args.command == "external-research-intake-v104":
+        print(lab.external_research_intake_v104_cli())
+    elif args.command == "edge-hunter-contract-v104":
+        print(lab.edge_hunter_contract_v104_cli())
+    elif args.command == "trader-dashboard-contract-v104":
+        print(lab.trader_dashboard_contract_v104_cli())
     elif args.command == "ohlcv-replay-loader-smoke-test":
         print(lab.ohlcv_replay_loader_smoke_test())
     elif args.command == "ohlcv-replay-loader-audit":

@@ -241,12 +241,20 @@ def start_health_server(
                 "/api/training/export/pre-move-events.csv",
                 "/api/training/export/candidates.csv",
                 "/api/training/short-report",
-            }:
+                "/trader-terminal",
+            } or path.startswith("/api/researchops/v104/"):
                 if not _authorized(config, query, self.headers):
                     self._send_json({"error": "unauthorized"}, status=401)
                     return
             if path == "/dashboard":
                 self._send_html(_dashboard_html(config))
+                return
+            # V10.4 — read-only Trader Terminal (GET only; no mutable routes).
+            if path == "/trader-terminal":
+                self._send_html(_v104_terminal_html(config, db, state, training_pulse))
+                return
+            if path.startswith("/api/researchops/v104/"):
+                self._send_json(_v104_api(path, config, db, state, training_pulse))
                 return
             if path == "/api/training/status":
                 self._send_json(_training_status(config, db, training_pulse, telegram_notifier))
@@ -3433,3 +3441,236 @@ def _public_value(value: Any) -> Any:
         lambda match: f"{match.group(1)}=***",
         value,
     )
+
+
+# ---------------------------------------------------------------------------
+# ResearchOps V10.4 — read-only Trader Terminal endpoints (GET only).
+# Additive layer: every handler is lazy-imported and wrapped in try/except so
+# a labs failure can never break /health or the existing dashboard. There are
+# NO mutable routes: nothing here writes to the DB, config, .env or files.
+# ---------------------------------------------------------------------------
+
+_V104_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
+
+
+def _v104_cached(key: str, ttl_seconds: float, builder) -> dict[str, Any]:
+    now = time.time()
+    hit = _V104_CACHE.get(key)
+    if hit is not None and (now - hit[0]) < ttl_seconds:
+        return hit[1]
+    try:
+        value = builder()
+    except Exception as exc:
+        value = {"error": str(exc)[:200], "final_recommendation": "NO LIVE"}
+    _V104_CACHE[key] = (now, value)
+    return value
+
+
+def _v104_as_dict(obj: Any) -> dict[str, Any]:
+    if isinstance(obj, dict):
+        return obj
+    if hasattr(obj, "as_dict"):
+        return obj.as_dict()
+    import dataclasses
+
+    return dataclasses.asdict(obj)
+
+
+def _v104_safety(config: Any | None, db: Any | None, state: Any | None) -> dict[str, Any]:
+    health = state.payload() if state is not None else {}
+    worker = _worker_lock_status_payload(config, db)
+    raw = {
+        "mode": str(health.get("mode") or "paper"),
+        "live_trading": bool(getattr(config, "live_trading", False)),
+        "dry_run": bool(getattr(config, "dry_run", True)),
+        "paper_trading": bool(getattr(config, "paper_trading", True)),
+        "paper_filter_enabled": bool(getattr(config, "enable_paper_policy_filter", False)),
+        "open_positions": int(health.get("open_positions") or 0),
+        "circuit_breaker": bool(health.get("circuit_breaker") or False),
+        "uptime": str(health.get("uptime") or ""),
+        "worker_lock": str(worker.get("lock_status") or "unknown"),
+        "duplicate_worker": "YES" if worker.get("warning_if_duplicate_worker") else "NO",
+    }
+    try:
+        from .labs.trader_dashboard_v104 import derive_safety_view
+
+        view = derive_safety_view(raw)
+    except Exception:
+        view = raw
+    view["final_recommendation"] = "NO LIVE"
+    return view
+
+
+def _v104_data_readiness() -> dict[str, Any]:
+    def build() -> dict[str, Any]:
+        from .labs.external_data_provider_registry_v10_3 import run_data_source_audit
+        from .labs.external_edge_ingest_v10_1 import ingest_rows, read_input_dir
+
+        rows, _used = read_input_dir("external_data/raw/perp_market_state")
+        if not rows:
+            rows, _used = read_input_dir("external_data/clean/perp_market_state")
+        _report, clean = ingest_rows(rows, "perp_market_state")
+        raw_rows, _u = read_input_dir("external_data/raw/perp_market_state")
+        audit = run_data_source_audit(clean, raw_rows, hours=8760)
+        return _v104_as_dict(audit)
+
+    return _v104_cached("data_readiness", 120.0, build)
+
+
+def _v104_provider_readiness() -> dict[str, Any]:
+    def build() -> dict[str, Any]:
+        from .labs.external_data_provider_registry_v10_3 import run_provider_readiness
+
+        return _v104_as_dict(run_provider_readiness())
+
+    return _v104_cached("provider_readiness", 600.0, build)
+
+
+def _v104_provider_verification() -> dict[str, Any]:
+    def build() -> dict[str, Any]:
+        from .labs.external_provider_verification_v10_4 import run_provider_verification
+
+        return _v104_as_dict(run_provider_verification())
+
+    return _v104_cached("provider_verification", 600.0, build)
+
+
+def _v104_candidates(config: Any | None, db: Any | None) -> dict[str, Any]:
+    return _v104_cached(
+        "candidates", 600.0,
+        lambda: _lab_payload(config, db, {}, "candidate ranking unavailable",
+                             ".candidate_ranking", "CandidateRanking"),
+    )
+
+
+def _v104_net_edge(config: Any | None, db: Any | None) -> dict[str, Any]:
+    return _v104_cached(
+        "net_edge", 600.0,
+        lambda: _lab_payload(config, db, {}, "net edge lab unavailable",
+                             ".net_edge_lab", "NetEdgeLab"),
+    )
+
+
+def _v104_paper_monitor(config: Any | None, db: Any | None, state: Any | None) -> dict[str, Any]:
+    edge = _edge_summary(config, db)
+    return {
+        "open_positions_detail": _open_paper_positions_detail(db),
+        "paper_pnl": float(getattr(state, "daily_pnl", 0.0) or 0.0),
+        "paper_pnl_is_real_money": False,
+        "profit_factor": float(edge.get("profit_factor") or 0.0),
+        "total_labels": int(edge.get("total_labels") or 0),
+        "note": "paper/shadow only — NOT real money",
+        "final_recommendation": "NO LIVE",
+    }
+
+
+def _v104_signal_monitor(config: Any | None, db: Any | None, training_pulse: Any | None) -> dict[str, Any]:
+    top_signals: list[Any] = []
+    top_blocks: list[Any] = []
+    try:
+        if training_pulse is not None and config is not None:
+            pulse = training_pulse.to_dict(config)
+            top_signals = list(pulse.get("top_signals") or [])[:10]
+            top_blocks = list(pulse.get("top_blocks") or [])[:10]
+    except Exception:
+        pass
+    return {
+        "top_signals": top_signals,
+        "top_blocks": top_blocks,
+        "final_recommendation": "NO LIVE",
+    }
+
+
+def _v104_overview(config: Any | None, db: Any | None, state: Any | None,
+                   training_pulse: Any | None) -> dict[str, Any]:
+    safety = _v104_safety(config, db, state)
+    dr = _v104_data_readiness()
+    return {
+        "banner": "NO LIVE — RESEARCH ONLY",
+        "read_only": True,
+        "mode": safety.get("mode", "PAPER"),
+        "security_status": safety.get("security_status", ""),
+        "data_classification": dr.get("data_classification", ""),
+        "backtester_readiness": dr.get("backtester_readiness", ""),
+        "oi_bucket_policy": dr.get("oi_bucket_policy", ""),
+        "paper_ready": False,
+        "live_ready": False,
+        "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "final_recommendation": "NO LIVE",
+    }
+
+
+def _v104_dashboard_state(config: Any | None, db: Any | None, state: Any | None,
+                          training_pulse: Any | None) -> dict[str, Any]:
+    return {
+        "banner": "NO LIVE — RESEARCH ONLY",
+        "read_only": True,
+        "live_allowed": False,
+        "safety": _v104_safety(config, db, state),
+        "data_readiness": _v104_data_readiness(),
+        "provider_readiness": _v104_provider_readiness(),
+        "candidates": _v104_candidates(config, db),
+        "net_edge": _v104_net_edge(config, db),
+        "paper_monitor": _v104_paper_monitor(config, db, state),
+        "signal_monitor": _v104_signal_monitor(config, db, training_pulse),
+        "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "final_recommendation": "NO LIVE",
+    }
+
+
+def _v104_api(path: str, config: Any | None, db: Any | None, state: Any | None,
+              training_pulse: Any | None) -> dict[str, Any]:
+    kind = path.rsplit("/", 1)[-1]
+    try:
+        if kind == "overview":
+            return _v104_overview(config, db, state, training_pulse)
+        if kind == "safety":
+            return _v104_safety(config, db, state)
+        if kind == "data-readiness":
+            return _v104_data_readiness()
+        if kind == "provider-readiness":
+            return _v104_provider_readiness()
+        if kind == "provider-verification":
+            return _v104_provider_verification()
+        if kind == "candidates":
+            return _v104_candidates(config, db)
+        if kind == "net-edge":
+            return _v104_net_edge(config, db)
+        if kind == "paper-monitor":
+            return _v104_paper_monitor(config, db, state)
+        if kind == "signal-monitor":
+            return _v104_signal_monitor(config, db, training_pulse)
+        if kind == "dashboard-state":
+            return _v104_dashboard_state(config, db, state, training_pulse)
+    except Exception as exc:
+        return {"error": str(exc)[:300], "final_recommendation": "NO LIVE"}
+    return {"error": "unknown researchops v104 endpoint", "final_recommendation": "NO LIVE"}
+
+
+def _v104_terminal_html(config: Any | None, db: Any | None, state: Any | None,
+                        training_pulse: Any | None) -> str:
+    try:
+        from .labs.trader_dashboard_v104 import (
+            build_dashboard_view_model,
+            render_dashboard_html,
+        )
+
+        snapshot = _v104_dashboard_state(config, db, state, training_pulse)
+        vm = build_dashboard_view_model(
+            safety=snapshot.get("safety"),
+            data_readiness=snapshot.get("data_readiness"),
+            provider_readiness=snapshot.get("provider_readiness"),
+            candidates=snapshot.get("candidates"),
+            net_edge=snapshot.get("net_edge"),
+            paper_monitor=snapshot.get("paper_monitor"),
+            signal_monitor=snapshot.get("signal_monitor"),
+        )
+        refresh = max(3, int(getattr(config, "dashboard_refresh_seconds", 7) or 7))
+        return render_dashboard_html(vm, refresh_seconds=refresh)
+    except Exception as exc:
+        # Even the failure page is read-only and explicit about NO LIVE.
+        return (
+            "<!doctype html><title>Trader Terminal</title>"
+            "<h1>NO LIVE — RESEARCH ONLY</h1>"
+            f"<p>terminal unavailable: {str(exc)[:200]}</p>"
+        )
