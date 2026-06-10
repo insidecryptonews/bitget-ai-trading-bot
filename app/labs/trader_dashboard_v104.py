@@ -49,15 +49,10 @@ READONLY_API_ENDPOINTS = [
     "/api/researchops/v104/dashboard-state",
 ]
 
-# Heavy read-only endpoints the terminal warms on a SLOW schedule so the
-# fast 7s polling endpoint can stay cache-peek only (server never computes
-# heavy work inside the polling path).
-WARM_ENDPOINTS = [
-    "/api/researchops/v104/data-readiness",
-    "/api/researchops/v104/candidates",
-    "/api/researchops/v104/net-edge",
-]
-WARM_INTERVAL_SECONDS = 300
+HEAVY_PANEL_NOTE = (
+    "Heavy research panels use cached/read-only snapshots; "
+    "run CLI reports for refresh."
+)
 
 
 def _safe(d: dict | None, key: str, default: Any) -> Any:
@@ -153,8 +148,9 @@ def dashboard_contract() -> dict[str, Any]:
         "poll_method": "GET",
         "poll_endpoint": POLL_ENDPOINT,
         "default_refresh_seconds": DEFAULT_REFRESH_SECONDS,
-        "warm_endpoints": list(WARM_ENDPOINTS),
-        "warm_interval_seconds": WARM_INTERVAL_SECONDS,
+        "automatic_endpoints": [POLL_ENDPOINT],
+        "heavy_panels_mode": "CACHE_PEEK_ONLY",
+        "heavy_refresh_mode": "CLI_ONLY",
         "polling_never_computes_heavy_work": True,
         "unknown_endpoint_behavior": "HTTP 404 + sanitized payload",
         "errors_sanitized": True,
@@ -181,8 +177,6 @@ RING_CIRC = 2 * math.pi * RING_RADIUS
 
 def render_dashboard_html(vm: dict[str, Any], refresh_seconds: int = DEFAULT_REFRESH_SECONDS) -> str:
     refresh = max(3, min(60, int(refresh_seconds or DEFAULT_REFRESH_SECONDS)))
-    warm_urls_json = json.dumps(list(WARM_ENDPOINTS))
-    warm_interval = max(60, int(WARM_INTERVAL_SECONDS))
     initial_state = json.dumps(vm, ensure_ascii=True, default=str)
     # </script> breaking out of the JSON block would be an injection vector.
     initial_state = initial_state.replace("</", "<\\/")
@@ -260,6 +254,7 @@ background:#0c121a;border:1px solid var(--line);border-radius:8px;padding:8px}}
   <span>refresh: every {refresh}s (read-only GET polling)</span>
   <span id="stale-note" class="warn" style="display:none">data may be outdated</span>
 </div>
+<div class="note">{_esc(HEAVY_PANEL_NOTE)}</div>
 <div class="violation" id="violation">&#9888; SAFETY REVIEW REQUIRED — a safety flag is not in its safe position</div>
 
 <div class="grid">
@@ -362,15 +357,10 @@ no real orders · no mutable controls · polling GET {_esc(POLL_ENDPOINT)} every
 <script id="initial-state" type="application/json">{initial_state}</script>
 <script>
 "use strict";
-// READ-ONLY terminal. The ONLY network call below is getJSON(), a GET fetch
-// restricted to /api/researchops/v104/* read-only endpoints. There are no
-// mutable endpoints and no handlers on the locked buttons.
-// Fast loop: poll dashboard-state (cache-peek only on the server).
-// Slow loop: warm the heavy read-only caches so polling stays cheap.
+// READ-ONLY terminal. The only automatic request is the ultra-light
+// dashboard-state GET. Heavy reports are refreshed through CLI/runbooks.
 var REFRESH_MS = {refresh} * 1000;
 var POLL_URL = "{POLL_ENDPOINT}";
-var WARM_URLS = {warm_urls_json};
-var WARM_MS = {warm_interval} * 1000;
 var token = new URLSearchParams(window.location.search).get("token");
 var lastOkAt = 0;
 
@@ -464,9 +454,9 @@ function applyState(s) {{
   document.getElementById("dr-blockers").innerHTML = blockers || "<li>none</li>";
 
   txt("cd-status", cd.status || cd.overall_status || cd.data_status || "NOT_COMPUTED_YET");
-  txt("cd-text", (cd.text || "").slice(0, 2200) || "no candidate-ranking output yet (cache warming)");
+  txt("cd-text", (cd.text || "").slice(0, 2200) || "no cached candidate-ranking output; run the CLI report");
   txt("ne-status", ne.status || ne.overall_status || ne.data_status || "NOT_COMPUTED_YET");
-  txt("ne-text", (ne.text || "").slice(0, 2200) || "no net-edge output yet (cache warming)");
+  txt("ne-text", (ne.text || "").slice(0, 2200) || "no cached net-edge output; run the CLI report");
 
   var opens = pm.open_positions_detail || [];
   txt("pm-open", opens.length);
@@ -507,16 +497,6 @@ function poll() {{
     }});
 }}
 
-function warm() {{
-  // Slow loop: warm the HEAVY read-only caches (sequentially, GET only) so
-  // the fast polling never makes the server compute heavy work.
-  var chain = Promise.resolve();
-  WARM_URLS.forEach(function (u) {{
-    chain = chain.then(function () {{ return getJSON(u).catch(function () {{}}); }});
-  }});
-  chain.then(function () {{ poll(); }});
-}}
-
 try {{
   var seed = JSON.parse(document.getElementById("initial-state").textContent);
   applyState(seed);
@@ -525,7 +505,5 @@ try {{
 setConn("loading", "LOADING");
 poll();
 setInterval(poll, REFRESH_MS);
-warm();
-setInterval(warm, WARM_MS);
 </script>
 </body></html>"""

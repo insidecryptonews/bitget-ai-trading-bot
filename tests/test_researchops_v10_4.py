@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import threading
 import time
 import urllib.request
 
@@ -433,12 +434,17 @@ def test_dashboard_html_no_forms_no_mutable_methods():
 def test_dashboard_html_fetch_only_readonly_get_endpoints():
     html = _html()
     targets = re.findall(r'"(/api/[^"]+)"', html)
-    assert targets, "polling/warm endpoints must be defined"
+    assert targets, "polling endpoint must be defined"
     assert all(t.startswith("/api/researchops/v104/") for t in targets)
-    # a single fetch call lives inside the getJSON helper, which hard-rejects
-    # any path outside the read-only v104 namespace
+    poll_targets = re.findall(r'POLL_URL\s*=\s*"([^"]+)"', html)
+    assert poll_targets == ["/api/researchops/v104/dashboard-state"]
     assert html.count("fetch(") == 1
     assert "blocked: non-readonly endpoint" in html
+    assert "function warm" not in html
+    assert "WARM_URLS" not in html
+    assert "setInterval(warm" not in html
+    for heavy in ("data-readiness", "candidates", "net-edge"):
+        assert f"/api/researchops/v104/{heavy}" not in html
 
 
 def test_dashboard_contract_declares_all_ten_endpoints():
@@ -449,7 +455,9 @@ def test_dashboard_contract_declares_all_ten_endpoints():
         "signal-monitor", "dashboard-state")}
     assert expected == set(c["readonly_api_endpoints"])
     assert c["polling_never_computes_heavy_work"] is True
-    assert all(w.startswith("/api/researchops/v104/") for w in c["warm_endpoints"])
+    assert c["automatic_endpoints"] == ["/api/researchops/v104/dashboard-state"]
+    assert c["heavy_panels_mode"] == "CACHE_PEEK_ONLY"
+    assert c["heavy_refresh_mode"] == "CLI_ONLY"
 
 
 def test_dashboard_html_has_update_timestamp_and_connection_states():
@@ -561,6 +569,26 @@ def test_server_v104_endpoints_all_respond_no_live(v104_server):
         assert "NO LIVE" in text or payload.get("final_recommendation") == "NO LIVE", ep
 
 
+def test_server_heavy_endpoints_are_cache_peek_only(v104_server):
+    import app.health_server as hs
+
+    for key, endpoint in (
+        ("data_readiness", "data-readiness"),
+        ("candidates", "candidates"),
+        ("net_edge", "net-edge"),
+    ):
+        hs._V104_CACHE.pop(key, None)
+        status, body = _get(v104_server, f"/api/researchops/v104/{endpoint}")
+        assert status == 200
+        payload = json.loads(body)
+        assert payload["data_status"] == "STALE_OR_PENDING"
+        assert payload["needs_manual_refresh"] is True
+        assert payload["refresh_mode"] == "CLI_ONLY"
+        assert payload["http_computation_disabled"] is True
+        assert payload["recommended_cli"].startswith("python -m app.research_lab ")
+        assert payload["final_recommendation"] == "NO LIVE"
+
+
 def test_server_unknown_v104_endpoint_returns_404(v104_server):
     """V10.4.1 (Codex P2): unknown v104 endpoints are 404, payload sanitized."""
     try:
@@ -573,22 +601,51 @@ def test_server_unknown_v104_endpoint_returns_404(v104_server):
         assert payload["final_recommendation"] == "NO LIVE"
 
 
-def test_server_errors_are_sanitized_no_internal_paths(v104_server):
-    """V10.4.1 (Codex P2): public error payloads never leak paths/details.
-    With db=None the candidates lab fails internally; the public payload must
-    be generic."""
-    status, body = _get(v104_server, "/api/researchops/v104/candidates")
+def test_server_errors_and_logs_are_sanitized(
+    v104_server, monkeypatch, caplog,
+):
+    """Public responses and internal logs must never echo exception text."""
+    import app.health_server as hs
+
+    secret_error = (
+        r"C:\secret\repo\.env /home/ubuntu/bitget-ai-trading-bot/.env "
+        "API_KEY=SUPERSECRET SECRET=abc TOKEN=xyz PASSPHRASE=123"
+    )
+
+    def explode():
+        raise RuntimeError(secret_error)
+
+    monkeypatch.setattr(hs, "_v104_provider_readiness", explode)
+    caplog.set_level(logging.WARNING, logger="app.health_server.v104")
+    status, body = _get(v104_server, "/api/researchops/v104/provider-readiness")
     assert status == 200
     payload = json.loads(body)
-    text = json.dumps(payload)
-    for leak in ("C:\\\\", "/home/", "Traceback", ".env", "site-packages",
-                 "bitget-ai-trading-bot"):
-        assert leak not in text, leak
-    if payload.get("error"):
-        assert payload["error"] in ("component_unavailable",
-                                    "data_temporarily_unavailable",
-                                    "research_endpoint_error")
-    assert payload["final_recommendation"] == "NO LIVE"
+    assert payload == {
+        "error": "research_endpoint_error",
+        "final_recommendation": "NO LIVE",
+    }
+    combined = body + "\n" + caplog.text
+    for leak in (
+        r"C:\secret\repo\.env",
+        "/home/ubuntu/bitget-ai-trading-bot/.env",
+        "SUPERSECRET",
+        "SECRET=abc",
+        "TOKEN=xyz",
+        "PASSPHRASE=123",
+    ):
+        assert leak not in combined
+    assert "research_endpoint_error" in caplog.text
+    assert "exception_type=RuntimeError" in caplog.text
+
+    sanitized = hs._v104_sanitize(
+        {"error": secret_error, "details": secret_error},
+        "synthetic-payload",
+    )
+    assert sanitized == {
+        "error": "component_unavailable",
+        "final_recommendation": "NO LIVE",
+    }
+    assert "SUPERSECRET" not in caplog.text
 
 
 def test_server_dashboard_state_polling_never_computes_heavy(v104_server):
@@ -608,6 +665,47 @@ def test_server_dashboard_state_polling_never_computes_heavy(v104_server):
     assert payload["net_edge"].get("data_status") == "STALE_OR_PENDING"
     assert payload["data_readiness"].get("data_status") == "STALE_OR_PENDING"
     assert elapsed < 5.0  # light compose, no heavy lab work
+
+
+def test_heavy_http_request_cannot_block_health(
+    v104_server, monkeypatch,
+):
+    """Regression: old candidate endpoint ran _lab_payload and blocked health."""
+    import app.health_server as hs
+
+    builder_called = threading.Event()
+
+    def forbidden_slow_builder(*args, **kwargs):
+        builder_called.set()
+        time.sleep(2.5)
+        return {"final_recommendation": "NO LIVE"}
+
+    monkeypatch.setattr(hs, "_lab_payload", forbidden_slow_builder)
+    hs._V104_CACHE.pop("candidates", None)
+    candidate_result = {}
+
+    def fetch_candidate():
+        started = time.perf_counter()
+        candidate_result["status"], candidate_result["body"] = _get(
+            v104_server, "/api/researchops/v104/candidates",
+        )
+        candidate_result["elapsed"] = time.perf_counter() - started
+
+    request_thread = threading.Thread(target=fetch_candidate)
+    request_thread.start()
+    health_started = time.perf_counter()
+    status, _body = _get(v104_server, "/health")
+    health_elapsed = time.perf_counter() - health_started
+    request_thread.join(3)
+
+    assert status == 200
+    assert health_elapsed < 1.0
+    assert candidate_result["status"] == 200
+    assert candidate_result["elapsed"] < 1.0
+    assert builder_called.is_set() is False
+    payload = json.loads(candidate_result["body"])
+    assert payload["data_status"] == "STALE_OR_PENDING"
+    assert payload["needs_manual_refresh"] is True
 
 
 def test_server_health_stays_fast_alongside_v104(v104_server):
@@ -637,6 +735,18 @@ def test_health_server_source_has_no_mutable_v104_routes():
     assert "do_POST" not in src
     assert "do_PUT" not in src
     assert "do_DELETE" not in src
+
+
+def test_v104_source_never_logs_raw_exception_messages():
+    import pathlib
+
+    src = pathlib.Path("app/health_server.py").read_text(encoding="utf-8")
+    v104 = src.split("# ResearchOps V10.4", 1)[1]
+    assert "repr(exc)" not in v104
+    assert "str(exc)" not in v104
+    assert "%r" not in v104
+    assert "logger.exception" not in v104
+    assert "_v104_sanitize_error_for_log(exc)" in v104
 
 
 # ---------------------------------------------------------------------------

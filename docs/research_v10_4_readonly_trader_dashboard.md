@@ -18,11 +18,11 @@ existing dashboard.
 |---|---|
 | `/api/researchops/v104/overview` | banner, mode, security, data classification |
 | `/api/researchops/v104/safety` | flags derived from real config (never invented) |
-| `/api/researchops/v104/data-readiness` | V10.3 data source audit (clean days, OI policy) — TTL cache 120s |
+| `/api/researchops/v104/data-readiness` | cached data-readiness snapshot only; never computes in HTTP |
 | `/api/researchops/v104/provider-readiness` | provider registry snapshot — TTL 600s |
 | `/api/researchops/v104/provider-verification` | V10.4 manual verification report — TTL 600s |
-| `/api/researchops/v104/candidates` | candidate-ranking lab payload — TTL 600s |
-| `/api/researchops/v104/net-edge` | net-edge lab payload — TTL 600s |
+| `/api/researchops/v104/candidates` | cached candidate-ranking snapshot only; never computes in HTTP |
+| `/api/researchops/v104/net-edge` | cached net-edge snapshot only; never computes in HTTP |
 | `/api/researchops/v104/paper-monitor` | open paper positions, paper PnL (labelled NOT real) |
 | `/api/researchops/v104/signal-monitor` | top signals + top EdgeGuard blocks from the training pulse |
 | `/api/researchops/v104/dashboard-state` | aggregate of all of the above (the polling target) |
@@ -38,14 +38,17 @@ never break `/health` or the existing dashboard.
 - **Errors are sanitized**: public payloads only ever say
   `component_unavailable` / `data_temporarily_unavailable` /
   `research_endpoint_error` — no paths, no stack traces, no exception text.
-  The real error goes to the internal logger (`app.health_server.v104`).
+  Internal logs contain only the component, generic error code, and exception
+  class. Exception messages, paths, `.env` names, and credential-like values
+  are never logged.
 - **The 7s polling endpoint never computes heavy work** (single-threaded
   `HTTPServer` protection): `dashboard-state` composes from existing caches
   only. Cold/expired heavy sections answer `data_status: STALE_OR_PENDING`
   or `STALE` instead of computing.
-- Heavy builders (`data-readiness` TTL 300s; `candidates`/`net-edge` TTL
-  600s) run at most once concurrently (non-blocking lock): a second request
-  during a build gets the stale copy or a pending placeholder.
+- Heavy HTTP endpoints are **cache-peek only**. They return cached data when
+  available, otherwise `STALE_OR_PENDING`, `needs_manual_refresh=true`, and
+  the recommended CLI command. They never run disk scans, candidate ranking,
+  net-edge, `_lab_payload`, or bulk data reads inside `HTTPServer`.
 - Light builders (`safety`, `overview`, `paper-monitor`, `signal-monitor`,
   `provider-readiness`, `provider-verification` — pure/in-memory) stay
   synchronous and cheap; `/health` stays fast.
@@ -55,12 +58,12 @@ never break `/health` or the existing dashboard.
 - The page polls `GET /api/researchops/v104/dashboard-state` every **7s**
   (server-configurable via `dashboard_refresh_seconds`, clamped 3–60s) —
   ultra-light cache-peek on the server.
-- A slow warm loop calls the heavy read-only endpoints (`data-readiness`,
-  `candidates`, `net-edge`) on load and every **300s** so caches stay warm
-  without making the fast polling expensive.
-- ALL JavaScript network traffic goes through one `getJSON()` helper that
-  hard-rejects any path outside `/api/researchops/v104/` and only issues GET.
-  No WebSocket, no POST.
+- There is **no browser warm loop**. The only automatic request is the light
+  `dashboard-state` polling GET.
+- Heavy reports must be refreshed through their CLI/runbook commands, outside
+  the HTTP request path. The UI states this explicitly.
+- JavaScript uses one `getJSON()` helper restricted to
+  `/api/researchops/v104/` and issues GET only. No WebSocket, no POST.
 - Connection badge states: `LOADING` → `LIVE-POLL` → `STALE` (a poll failed
   but the last success is recent) → `ERROR` (no success for >3 intervals),
   plus a visible "data may be outdated" warning.

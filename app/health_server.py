@@ -3450,12 +3450,13 @@ def _public_value(value: Any) -> Any:
 # a labs failure can never break /health or the existing dashboard. There are
 # NO mutable routes: nothing here writes to the DB, config, .env or files.
 #
-# V10.4.1 (Codex P2 hardening):
+# V10.4.2 (Codex P1 hardening):
 # - public error payloads are sanitized (no paths, no stack traces, no
-#   exception text); real errors go to the internal logger only;
-# - heavy builders (data-readiness, candidates, net-edge) run at most once
-#   concurrently (non-blocking lock) and are TTL-cached; while a build is in
-#   progress other requests get the stale copy or a STALE_OR_PENDING payload;
+#   exception text); internal logs contain only the generic error code and
+#   exception class, never the exception message;
+# - heavy HTTP endpoints (data-readiness, candidates, net-edge) are cache-peek
+#   only. They never execute labs, disk scans, or bulk reads in the HTTP
+#   request. Heavy reports are refreshed from the CLI/runbook;
 # - the 7s polling endpoint (dashboard-state) NEVER computes heavy work: it
 #   composes from existing caches only, so /health stays responsive on the
 #   single-threaded HTTPServer.
@@ -3465,7 +3466,6 @@ import logging as _logging
 
 _V104_LOG = _logging.getLogger("app.health_server.v104")
 _V104_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
-_V104_BUILD_LOCKS: dict[str, threading.Lock] = {}
 _V104_ERROR_UNAVAILABLE = "component_unavailable"
 _V104_ERROR_DATA = "data_temporarily_unavailable"
 _V104_ERROR_ENDPOINT = "research_endpoint_error"
@@ -3477,24 +3477,51 @@ _V104_TTL_PROVIDERS = 600.0
 _V104_TTL_LABS = 600.0
 
 
+def _v104_sanitize_error_for_public(public_message: str) -> str:
+    """Return one of the fixed public error codes; never echo caller input."""
+    allowed = {
+        _V104_ERROR_UNAVAILABLE,
+        _V104_ERROR_DATA,
+        _V104_ERROR_ENDPOINT,
+    }
+    return public_message if public_message in allowed else _V104_ERROR_ENDPOINT
+
+
+def _v104_sanitize_error_for_log(exc: Exception | None) -> str:
+    """Return safe metadata without reading the exception message."""
+    if exc is None:
+        return "exception_type=unknown detail=redacted"
+    error_type = re.sub(r"[^A-Za-z0-9_.-]", "", type(exc).__name__)[:80]
+    return f"exception_type={error_type or 'Exception'} detail=redacted"
+
+
 def _v104_safe_error(public_message: str, exc: Exception | None = None,
                      component: str = "") -> dict[str, Any]:
-    """Sanitized public error payload. Internal detail goes to the log only."""
+    """Return and log a sanitized error without exposing exception text."""
+    safe_message = _v104_sanitize_error_for_public(public_message)
     if exc is not None:
-        _V104_LOG.warning("v104 %s failed: %r", component or public_message, exc)
-    return {"error": public_message, "final_recommendation": "NO LIVE"}
+        _V104_LOG.warning(
+            "v104 component=%s error=%s %s",
+            component or "unknown",
+            safe_message,
+            _v104_sanitize_error_for_log(exc),
+        )
+    return {"error": safe_message, "final_recommendation": "NO LIVE"}
 
 
 def _v104_sanitize(payload: dict[str, Any], component: str = "") -> dict[str, Any]:
     """Replace any raw error text coming from shared helpers with a generic
     message so internal paths/details never reach the client."""
     if isinstance(payload, dict) and payload.get("error"):
-        _V104_LOG.warning("v104 %s error sanitized: %s", component,
-                          str(payload.get("error"))[:300])
-        clean = {k: v for k, v in payload.items() if k != "error"}
-        clean["error"] = _V104_ERROR_UNAVAILABLE
-        clean["final_recommendation"] = "NO LIVE"
-        return clean
+        _V104_LOG.warning(
+            "v104 component=%s error=%s source_error=redacted",
+            component or "unknown",
+            _V104_ERROR_UNAVAILABLE,
+        )
+        return {
+            "error": _V104_ERROR_UNAVAILABLE,
+            "final_recommendation": "NO LIVE",
+        }
     return payload
 
 
@@ -3513,33 +3540,6 @@ def _v104_cached(key: str, ttl_seconds: float, builder,
     return value
 
 
-def _v104_cached_heavy(key: str, ttl_seconds: float, builder,
-                       error_message: str = _V104_ERROR_DATA) -> dict[str, Any]:
-    """TTL cache for HEAVY builders. At most one build runs at a time per key;
-    concurrent requests get the stale copy (marked) or STALE_OR_PENDING
-    instead of piling up on the single-threaded server."""
-    now = time.time()
-    hit = _V104_CACHE.get(key)
-    if hit is not None and (now - hit[0]) < ttl_seconds:
-        return hit[1]
-    lock = _V104_BUILD_LOCKS.setdefault(key, threading.Lock())
-    if not lock.acquire(blocking=False):
-        if hit is not None:
-            stale = dict(hit[1])
-            stale["data_status"] = "STALE"
-            return stale
-        return {"data_status": _V104_PENDING, "final_recommendation": "NO LIVE"}
-    try:
-        try:
-            value = _v104_sanitize(builder(), key)
-        except Exception as exc:
-            value = _v104_safe_error(error_message, exc, key)
-        _V104_CACHE[key] = (time.time(), value)
-        return value
-    finally:
-        lock.release()
-
-
 def _v104_cache_peek(key: str) -> dict[str, Any]:
     """Read-only cache peek for the polling endpoint: NEVER computes. Returns
     the cached payload (marked STALE when expired) or a pending placeholder."""
@@ -3554,6 +3554,18 @@ def _v104_cache_peek(key: str) -> dict[str, Any]:
            "net_edge": _V104_TTL_LABS}.get(key, _V104_TTL_LABS)
     if (time.time() - hit[0]) >= ttl:
         payload["data_status"] = "STALE"
+    return payload
+
+
+def _v104_heavy_snapshot(key: str, recommended_cli: str) -> dict[str, Any]:
+    """Return cached heavy research without computing inside HTTP."""
+    payload = _v104_cache_peek(key)
+    status = str(payload.get("data_status") or "").upper()
+    payload["needs_manual_refresh"] = status in {"", "STALE", _V104_PENDING}
+    payload["refresh_mode"] = "CLI_ONLY"
+    payload["recommended_cli"] = recommended_cli
+    payload["http_computation_disabled"] = True
+    payload["final_recommendation"] = "NO LIVE"
     return payload
 
 
@@ -3593,20 +3605,11 @@ def _v104_safety(config: Any | None, db: Any | None, state: Any | None) -> dict[
 
 
 def _v104_data_readiness() -> dict[str, Any]:
-    """HEAVY (disk IO + audit): on-demand endpoint only, never via polling."""
-    def build() -> dict[str, Any]:
-        from .labs.external_data_provider_registry_v10_3 import run_data_source_audit
-        from .labs.external_edge_ingest_v10_1 import ingest_rows, read_input_dir
-
-        rows, _used = read_input_dir("external_data/raw/perp_market_state")
-        if not rows:
-            rows, _used = read_input_dir("external_data/clean/perp_market_state")
-        _report, clean = ingest_rows(rows, "perp_market_state")
-        raw_rows, _u = read_input_dir("external_data/raw/perp_market_state")
-        audit = run_data_source_audit(clean, raw_rows, hours=8760)
-        return _v104_as_dict(audit)
-
-    return _v104_cached_heavy("data_readiness", _V104_TTL_DATA_READINESS, build)
+    """Cache-peek only. Heavy data audits are refreshed through the CLI."""
+    return _v104_heavy_snapshot(
+        "data_readiness",
+        "python -m app.research_lab external-data-source-audit-v103 --hours 8760",
+    )
 
 
 def _v104_provider_readiness() -> dict[str, Any]:
@@ -3630,20 +3633,18 @@ def _v104_provider_verification() -> dict[str, Any]:
 
 
 def _v104_candidates(config: Any | None, db: Any | None) -> dict[str, Any]:
-    """HEAVY (lab over DB): on-demand endpoint only, never via polling."""
-    return _v104_cached_heavy(
-        "candidates", _V104_TTL_LABS,
-        lambda: _lab_payload(config, db, {}, _V104_ERROR_UNAVAILABLE,
-                             ".candidate_ranking", "CandidateRanking"),
+    """Cache-peek only. Candidate ranking is refreshed through the CLI."""
+    return _v104_heavy_snapshot(
+        "candidates",
+        "python -m app.research_lab candidate-ranking --hours 24",
     )
 
 
 def _v104_net_edge(config: Any | None, db: Any | None) -> dict[str, Any]:
-    """HEAVY (lab over DB): on-demand endpoint only, never via polling."""
-    return _v104_cached_heavy(
-        "net_edge", _V104_TTL_LABS,
-        lambda: _lab_payload(config, db, {}, _V104_ERROR_UNAVAILABLE,
-                             ".net_edge_lab", "NetEdgeLab"),
+    """Cache-peek only. Net-edge research is refreshed through the CLI."""
+    return _v104_heavy_snapshot(
+        "net_edge",
+        "python -m app.research_lab net-edge-lab --hours 24",
     )
 
 
@@ -3699,9 +3700,7 @@ def _v104_overview(config: Any | None, db: Any | None, state: Any | None,
 
 def _v104_dashboard_state(config: Any | None, db: Any | None, state: Any | None,
                           training_pulse: Any | None) -> dict[str, Any]:
-    """ULTRA-LIGHT polling payload (Codex P2). Heavy sections come from cache
-    peeks only — this function NEVER triggers labs/disk audits. The terminal
-    JS warms the heavy caches via the dedicated on-demand endpoints."""
+    """Ultra-light polling payload. Heavy sections are cache-peek only."""
     return {
         "banner": "NO LIVE — RESEARCH ONLY",
         "read_only": True,
@@ -3771,8 +3770,12 @@ def _v104_terminal_html(config: Any | None, db: Any | None, state: Any | None,
         return render_dashboard_html(vm, refresh_seconds=refresh)
     except Exception as exc:
         # Even the failure page is read-only, sanitized and explicit: no
-        # internal paths or exception details reach the client (Codex P2).
-        _V104_LOG.warning("v104 terminal render failed: %r", exc)
+        # internal paths or exception details reach the client or logs.
+        _V104_LOG.warning(
+            "v104 component=terminal error=%s %s",
+            _V104_ERROR_UNAVAILABLE,
+            _v104_sanitize_error_for_log(exc),
+        )
         return (
             "<!doctype html><title>Trader Terminal</title>"
             "<h1>NO LIVE — RESEARCH ONLY</h1>"
