@@ -30,10 +30,14 @@ LOCK_TOOLTIP = "Locked: requires explicit human approval + audit + gates"
 POLL_ENDPOINT = "/api/researchops/v104/dashboard-state"
 DEFAULT_REFRESH_SECONDS = 7
 
-# Future-action buttons — ALL disabled, no backend, no-op.
+# Future-action buttons — ALL disabled, no backend, no-op. The last three are
+# deliberately-locked "anti-features": they exist only to make explicit that
+# copy trading, leverage controls and casino mechanics will NEVER be enabled
+# from this dashboard.
 DISABLED_CONTROLS = [
     "Enable Live", "Enable Paper Filter", "Run Paid Download", "Promote Candidate",
     "Start Backtester Operational", "Re-ingest Data", "Replace Raw Data",
+    "Copy Trading", "Leverage Control", "777 Spin / Casino Mode",
 ]
 
 READONLY_API_ENDPOINTS = [
@@ -177,9 +181,11 @@ def dashboard_contract() -> dict[str, Any]:
         "name": "ResearchOps Trader Terminal V1",
         "read_only": True,
         "route": "/trader-terminal",
-        "panels": ["mission_control", "safety", "data_readiness", "provider_readiness",
+        "panels": ["mission_bar", "pipeline", "mission_control", "safety",
+                   "data_readiness", "provider_readiness", "why_no_edge",
                    "candidate_edge", "net_edge_lab", "paper_monitor", "signal_monitor",
-                   "strategy_research", "disabled_controls"],
+                   "strategy_research", "strategy_research_lab", "ssh_tunnel_help",
+                   "disabled_controls"],
         "readonly_api_endpoints": list(READONLY_API_ENDPOINTS),
         "mutable_endpoints": [],
         "post_forms": 0,
@@ -283,10 +289,52 @@ ul{{margin:6px 0;padding-left:18px}}li{{margin:2px 0;color:var(--muted)}}
 pre.mini{{white-space:pre-wrap;color:var(--muted);font-size:11px;max-height:180px;overflow:auto;
 background:#0c121a;border:1px solid var(--line);border-radius:8px;padding:8px}}
 .footer{{margin-top:18px;text-align:center;color:var(--muted);font-size:11px}}
+/* V10.5 Research Command Center */
+.mission-bar{{display:flex;flex-wrap:wrap;gap:10px;margin-top:12px}}
+.chip{{flex:1 1 110px;min-width:110px;background:linear-gradient(180deg,#101822,#0d141d);
+border:1px solid var(--line);border-radius:12px;padding:10px 12px;text-align:center;
+box-shadow:0 0 14px rgba(90,169,255,.06)}}
+.chip .k{{font-size:9px;letter-spacing:1.5px;color:var(--muted);text-transform:uppercase}}
+.chip .v{{font-size:15px;font-weight:700;margin-top:4px;color:#e9f1f7;text-shadow:0 0 12px rgba(54,226,180,.25)}}
+.chip.ok .v{{color:var(--accent)}}.chip.block .v{{color:var(--bad)}}.chip.warn .v{{color:var(--warn)}}
+.pipeline{{display:flex;flex-wrap:wrap;gap:6px;align-items:stretch;margin-top:12px}}
+.pl-step{{flex:1 1 140px;min-width:140px;background:#0e1620;border:1px solid var(--line);
+border-radius:10px;padding:8px 10px;position:relative}}
+.pl-step .name{{font-size:10px;letter-spacing:1.2px;color:var(--accent2);text-transform:uppercase}}
+.pl-step .st{{font-size:13px;font-weight:700;margin-top:3px}}
+.pl-step .why{{font-size:10px;color:var(--muted);margin-top:2px}}
+.pl-step.pass{{border-color:var(--accent)}}.pl-step.pass .st{{color:var(--accent)}}
+.pl-step.block{{border-color:var(--bad)}}.pl-step.block .st{{color:var(--bad)}}
+.pl-step.stale{{border-color:var(--warn)}}.pl-step.stale .st{{color:var(--warn)}}
+.pl-step.needs{{border-color:var(--accent2)}}.pl-step.needs .st{{color:var(--accent2)}}
+code.ssh{{display:block;background:#0c121a;border:1px solid var(--line);border-radius:8px;
+padding:8px;color:var(--accent);font-size:11px;margin:6px 0;word-break:break-all}}
 </style></head>
 <body><div class="wrap">
-<div class="banner"><h1>&#9673; RESEARCHOPS TERMINAL</h1>
+<div class="banner"><h1>&#9673; RESEARCH COMMAND CENTER</h1>
 <div class="ro">NO LIVE — RESEARCH ONLY</div></div>
+
+<!-- V10.5 TOP MISSION BAR -->
+<div class="mission-bar" id="mission-bar">
+  <div class="chip ok"><div class="k">Mode</div><div class="v" id="mb-mode">PAPER</div></div>
+  <div class="chip block"><div class="k">Live</div><div class="v" id="mb-live">BLOCKED</div></div>
+  <div class="chip ok"><div class="k">Paper Filter</div><div class="v" id="mb-filter">OFF</div></div>
+  <div class="chip"><div class="k">Open Positions</div><div class="v" id="mb-pos">0</div></div>
+  <div class="chip ok"><div class="k">Worker</div><div class="v" id="mb-worker">—</div></div>
+  <div class="chip warn"><div class="k">Edge</div><div class="v" id="mb-edge">NOT DEMONSTRATED</div></div>
+  <div class="chip warn"><div class="k">Data</div><div class="v" id="mb-data">NEEDS 180/365D</div></div>
+  <div class="chip block"><div class="k">Final</div><div class="v" id="mb-final">NO LIVE</div></div>
+</div>
+
+<!-- V10.5 PIPELINE -->
+<div class="pipeline" id="pipeline">
+  <div class="pl-step" id="pl-scan"><div class="name">Scan</div><div class="st">—</div><div class="why">—</div></div>
+  <div class="pl-step" id="pl-signal"><div class="name">Signal</div><div class="st">—</div><div class="why">—</div></div>
+  <div class="pl-step" id="pl-guard"><div class="name">Edge Guard</div><div class="st">—</div><div class="why">—</div></div>
+  <div class="pl-step" id="pl-netev"><div class="name">Net EV</div><div class="st">—</div><div class="why">—</div></div>
+  <div class="pl-step" id="pl-policy"><div class="name">Policy</div><div class="st">—</div><div class="why">—</div></div>
+  <div class="pl-step" id="pl-shadow"><div class="name">Shadow / Paper</div><div class="st">—</div><div class="why">—</div></div>
+</div>
 <div class="statusbar">
   <span class="conn loading" id="conn"><span class="dot"></span><span id="conn-text">LOADING</span></span>
   <span>last update: <span id="last-update">never</span></span>
@@ -341,7 +389,11 @@ background:#0c121a;border:1px solid var(--line);border-radius:8px;padding:8px}}
     <div class="note" id="pr-next">recommended next: — · verify pricing/limits before any paid download</div>
   </div>
 
-  <div class="card col-4"><h2>Data Blockers</h2><ul id="dr-blockers"><li>loading…</li></ul></div>
+  <div class="card col-4"><h2>Why No Trade / Why No Edge</h2>
+    <ul id="wn-list"><li>loading…</li></ul>
+    <div class="kv"><span>data blockers</span><span class="v" id="wn-count">—</span></div>
+    <ul id="dr-blockers"><li>loading…</li></ul>
+  </div>
 
   <div class="card col-8"><h2>Candidate / Edge Funnel</h2>
     <div class="funnel">
@@ -370,6 +422,15 @@ background:#0c121a;border:1px solid var(--line);border-radius:8px;padding:8px}}
     <pre class="mini" id="ne-text">loading…</pre>
   </div>
 
+  <div class="card col-6"><h2>Learning Status</h2>
+    <div class="kv"><span>observations</span><span class="v" id="ln-obs">—</span></div>
+    <div class="kv"><span>labels</span><span class="v" id="ln-labels">—</span></div>
+    <div class="kv"><span>path metrics (MFE/MAE)</span><span class="v" id="ln-path">—</span></div>
+    <div class="kv"><span>virtual research trades</span><span class="v" id="ln-virtual">—</span></div>
+    <div class="kv"><span>learning_status</span><span class="v" id="ln-status">—</span></div>
+    <div class="kv"><span>edge_status</span><span class="v bad" id="ln-edge">NO_EDGE_DEMONSTRATED</span></div>
+  </div>
+
   <div class="card col-6"><h2>Signal Monitor</h2>
     <div class="kv"><span>recent signals</span><span class="v" id="sg-count">0</span></div>
     <ul id="sg-signals"><li>none</li></ul>
@@ -386,9 +447,26 @@ background:#0c121a;border:1px solid var(--line);border-radius:8px;padding:8px}}
     <div class="kv"><span>research note</span><span class="v muted">no edge candidate is actionable until data + gates pass — the system reports this honestly</span></div>
   </div>
 
+  <div class="card col-8"><h2>Strategy Research Lab</h2>
+    <div class="kv"><span>research backlog</span><span class="v">external ideas enter via intake (ceiling: SHADOW_ELIGIBLE; unknown risk parks in NEEDS_RISK_REVIEW)</span></div>
+    <div class="kv"><span>active hypothesis</span><span class="v warn" id="lab-hypothesis">TIME-death dominates exits; net EV negative after costs on every bucket</span></div>
+    <div class="kv"><span>required tests</span><span class="v">180/365d replay &#8250; cost x1/x2/x3 &#8250; walk-forward monthly+rolling &#8250; OOS &#8250; stability matrix</span></div>
+    <div class="kv"><span>anti-overfit status</span><span class="v" id="lab-overfit">gates armed: min 150 samples · net PF&#8805;1.30 · no same-window tuning</span></div>
+    <div class="kv"><span>promotion blocked reason</span><span class="v bad" id="lab-blocked">net_EV&#8804;0 + history&lt;180d + OI blocked</span></div>
+    <div class="note">Research only: this lab never generates executable runtime code and never activates bots.</div>
+  </div>
+
+  <div class="card col-4"><h2>SSH Tunnel Help</h2>
+    <div class="kv"><span>access</span><span class="v warn">dashboard only via SSH tunnel</span></div>
+    <code class="ssh">ssh -L 18080:127.0.0.1:8080 ubuntu@YOUR_VPS_IP</code>
+    <code class="ssh">http://127.0.0.1:18080/trader-terminal?token=&lt;your_token&gt;</code>
+    <div class="note">Never expose port 8080 publicly. Never share or print the token.</div>
+  </div>
+
   <div class="card col-12"><h2>Disabled Controls — Future Actions (locked)</h2>
     <div>{btns}</div>
-    <div class="note">All actions disabled. {_esc(vm.get("lock_tooltip"))}. No backend, no-op, read-only.</div>
+    <div class="note">All actions disabled. {_esc(vm.get("lock_tooltip"))}. No backend, no-op, read-only.
+    Copy trading, leverage controls and casino mechanics are permanently locked anti-features.</div>
   </div>
 </div>
 
@@ -500,6 +578,52 @@ function applyState(s) {{
   txt("sr-blocking", (ef.what_is_blocking_edge || []).join(" · ") || "—");
   txt("sr-next", ef.next_best_research_action || "—");
 
+  // V10.5 — mission bar (top KPI chips).
+  txt("mb-mode", sf.mode || "PAPER");
+  txt("mb-live", s.live_allowed ? "DANGER" : "BLOCKED");
+  txt("mb-filter", sf.paper_filter_enabled ? "ON (REVIEW!)" : "OFF");
+  txt("mb-pos", sf.open_positions || 0);
+  txt("mb-worker", String(sf.worker_lock || "unknown").toUpperCase());
+  var cdStatus = String(cd.status || cd.data_status || "");
+  txt("mb-edge", cdStatus === "OK" ? "CANDIDATE PENDING" : "NOT DEMONSTRATED");
+  var drStatus = String(dr.backtester_readiness || dr.data_status || "");
+  txt("mb-data", drStatus === "READY" ? "READY" : "NEEDS 180/365D");
+  txt("mb-final", s.final_recommendation || "NO LIVE");
+
+  // V10.5 — pipeline stages (derived from light payload only).
+  function stage(id, st, why) {{
+    var el = document.getElementById(id); if (!el) return;
+    var cls = {{PASS: "pass", BLOCKED: "block", STALE: "stale", NEEDS_DATA: "needs"}}[st] || "stale";
+    el.className = "pl-step " + cls;
+    el.children[1].textContent = st;
+    el.children[2].textContent = why;
+  }}
+  var sigs2 = (sg.top_signals || []).length;
+  var blocks2 = (sg.top_blocks || []).length;
+  stage("pl-scan", sf.uptime ? "PASS" : "STALE",
+        sf.uptime ? ("worker up " + sf.uptime) : "no runtime payload");
+  stage("pl-signal", sigs2 > 0 ? "PASS" : "STALE",
+        sigs2 > 0 ? (sigs2 + " signals in window") : "no recent signal snapshot");
+  stage("pl-guard", blocks2 > 0 ? "BLOCKED" : "PASS",
+        blocks2 > 0 ? "low RR / quality gates blocking" : "no blocks in window");
+  var pending = cdStatus === "STALE_OR_PENDING" || cdStatus === "STALE" || cdStatus === "";
+  stage("pl-netev", pending ? "NEEDS_DATA" : "BLOCKED",
+        pending ? "no cached snapshot; run CLI" : "net_EV <= 0 after costs");
+  stage("pl-policy", pending ? "NEEDS_DATA" : "BLOCKED",
+        pending ? "awaiting candidate snapshot" : "no valid candidates");
+  stage("pl-shadow", "BLOCKED", "paper filter disabled by design");
+
+  // V10.5 — why no trade / why no edge.
+  var why = [];
+  (ef.what_is_blocking_edge || []).forEach(function (b) {{ why.push(b); }});
+  if (blocks2 > 0) why.push("EdgeGuard: low RR blocks in window");
+  why.push("sample_too_small / high TIME-death on observed buckets");
+  var whyHtml = "";
+  why.slice(0, 8).forEach(function (w) {{ whyHtml += "<li>" + esc(w) + "</li>"; }});
+  var wnEl = document.getElementById("wn-list");
+  if (wnEl) wnEl.innerHTML = whyHtml || "<li>none</li>";
+  txt("wn-count", (dr.data_blockers || []).length);
+
   txt("cd-status", cd.status || cd.overall_status || cd.data_status || "NOT_COMPUTED_YET");
   txt("cd-text", (cd.text || "").slice(0, 2200) || "no cached candidate-ranking output; run the CLI report");
   txt("ne-status", ne.status || ne.overall_status || ne.data_status || "NOT_COMPUTED_YET");
@@ -515,6 +639,14 @@ function applyState(s) {{
     pos += "<li>" + esc(p.symbol) + " " + esc(p.side) + " @" + esc(p.entry_price) + "</li>";
   }});
   document.getElementById("pm-positions").innerHTML = pos || "<li>none</li>";
+
+  var ln = s.learning || {{}};
+  txt("ln-obs", ln.observations === undefined ? "—" : ln.observations);
+  txt("ln-labels", ln.labels === undefined ? "—" : ln.labels);
+  txt("ln-path", ln.path_metrics === undefined ? "—" : ln.path_metrics);
+  txt("ln-virtual", ln.virtual_research_trades === undefined ? "—" : ln.virtual_research_trades);
+  txt("ln-status", ln.learning_status || "—");
+  txt("ln-edge", ln.edge_status || "NO_EDGE_DEMONSTRATED");
 
   var sigs = sg.top_signals || [];
   var blocks = sg.top_blocks || [];

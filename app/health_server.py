@@ -3707,6 +3707,30 @@ def _v104_overview(config: Any | None, db: Any | None, state: Any | None,
     }
 
 
+def _v105_learning_status(db: Any | None) -> dict[str, Any]:
+    """V10.5 — LIGHT learning panel: whitelisted COUNT(*) reads, TTL-cached
+    so the 7s polling never hits the DB more than once per 5 minutes."""
+    def build() -> dict[str, Any]:
+        from .labs.runtime_audit_v10_4_3 import count_db_tables
+
+        counts = count_db_tables(db)
+        obs = counts.get("signal_observations")
+        path = counts.get("signal_path_metrics")
+        active = isinstance(obs, int) and obs > 0 and isinstance(path, int) and path > 0
+        return {
+            "observations": counts.get("signal_observations", "unknown"),
+            "labels": counts.get("signal_labels", "unknown"),
+            "path_metrics": counts.get("signal_path_metrics", "unknown"),
+            "virtual_research_trades": counts.get("virtual_research_trades", "unknown"),
+            "learning_status": ("LEARNING_INFRA_ACTIVE" if active
+                                else "LEARNING_DATA_NOT_VISIBLE"),
+            "edge_status": "NO_EDGE_DEMONSTRATED",
+            "final_recommendation": "NO LIVE",
+        }
+
+    return _v104_cached("learning_counts", 300.0, build)
+
+
 def _v104_edge_focus(candidates_peek: dict[str, Any],
                      data_peek: dict[str, Any]) -> dict[str, Any]:
     """V10.4.3 — LIGHT 'what is blocking edge / next best action' summary,
@@ -3749,6 +3773,7 @@ def _v104_dashboard_state(config: Any | None, db: Any | None, state: Any | None,
         "paper_monitor": _v104_paper_monitor(config, db, state),
         "signal_monitor": _v104_signal_monitor(config, db, training_pulse),
         "edge_focus": _v104_edge_focus(candidates_peek, data_peek),
+        "learning": _v105_learning_status(db),
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "final_recommendation": "NO LIVE",
     }

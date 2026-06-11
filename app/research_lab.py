@@ -4376,6 +4376,148 @@ class ResearchLab:
         lines.append("RUNTIME EFFICIENCY DIAGNOSTIC V10.4.3 END")
         return "\n".join(lines)
 
+    # ---------------------------------------------------------------
+    # V10.5 — provider verification scorecards, data readiness and
+    # command-center dashboard contract (all read-only, no network).
+    # ---------------------------------------------------------------
+    def provider_verification_v105_cli(self) -> str:
+        from .labs.provider_verification_v10_5 import (
+            COMMERCIAL_CHECKS,
+            QUALITY_CHECKS,
+            REQUIRED_DATA_TYPES,
+            REQUIRED_HISTORY,
+            REQUIRED_SYMBOLS,
+            REQUIRED_TIMEFRAMES,
+            run_provider_verification_v105,
+        )
+        rep = run_provider_verification_v105()
+        lines = ["PROVIDER VERIFICATION V10.5 START"]
+        lines.append(f"primary: {rep.primary}")
+        lines.append(f"fallback: {rep.fallback}")
+        lines.append(f"cross_check: {rep.cross_check}")
+        lines.append(f"proxy_only: {rep.proxy_only}")
+        lines.append("symbols_required: " + ",".join(REQUIRED_SYMBOLS))
+        lines.append(f"required_history_days: min={REQUIRED_HISTORY['minimum_days']} preferred={REQUIRED_HISTORY['preferred_days']}")
+        lines.append("required_data_types: " + ",".join(REQUIRED_DATA_TYPES))
+        lines.append("required_timeframes: " + ",".join(REQUIRED_TIMEFRAMES))
+        lines.append("quality_checks: " + ",".join(QUALITY_CHECKS))
+        lines.append("commercial_checks: " + ",".join(COMMERCIAL_CHECKS))
+        for p in rep.providers:
+            lines.append(
+                f"provider {p['provider_name']}: role={p['role']} status={p['status']} "
+                f"bitget_perp={p['bitget_perp_supported']} "
+                f"history_confirmed={p['history_confirmed']} "
+                f"sample_received={str(p['sample_received']).lower()} "
+                f"sample_validated={str(p['sample_validated']).lower()} "
+                f"paid_download_authorized={str(p['paid_download_authorized']).lower()}"
+            )
+            lines.append(f"  notes: {p['notes']}")
+        lines.append("sample_rule: must obtain and schema-validate BTCUSDT+ETHUSDT 7-30d sample before any purchase")
+        lines.append(f"any_provider_ready_for_authorization: {str(rep.any_provider_ready_for_authorization).lower()}")
+        lines.append(f"any_paid_download_authorized: {str(rep.any_paid_download_authorized).lower()}")
+        lines.append(f"no_external_calls_made: {str(rep.no_external_calls_made).lower()}")
+        lines.append(f"paper_ready: {str(rep.paper_ready).lower()}")
+        lines.append(f"live_ready: {str(rep.live_ready).lower()}")
+        lines.extend(self._v82_safety_footer())
+        lines.append("PROVIDER VERIFICATION V10.5 END")
+        return "\n".join(lines)
+
+    def data_readiness_v105_cli(self) -> str:
+        from .labs.data_foundation_v10_5 import build_data_readiness_v105
+        from .labs.provider_verification_v10_5 import run_provider_verification_v105
+        try:
+            from .labs.external_data_provider_registry_v10_3 import run_data_source_audit
+            from .labs.external_edge_ingest_v10_1 import read_input_dir
+            market_clean, _m = self._v101_load_clean("perp_market_state")
+            raw_rows, _u = read_input_dir(f"{self._V101_RAW}/perp_market_state")
+            audit = run_data_source_audit(market_clean, raw_rows, hours=8760)
+            snapshot = audit.as_dict() if hasattr(audit, "as_dict") else None
+        except Exception:
+            snapshot = None
+        report = build_data_readiness_v105(
+            data_readiness_snapshot=snapshot,
+            provider_report=run_provider_verification_v105().as_dict(),
+        )
+        lines = ["DATA READINESS V10.5 START"]
+        lines.append(f"status: {report.status}")
+        lines.append(f"clean_days: {report.clean_days}")
+        lines.append(f"history_status: {report.history_status}")
+        lines.append(f"oi_status: {report.oi_status}")
+        lines.append(f"oi_bucket_policy: {report.oi_bucket_policy}")
+        lines.append(f"funding_status: {report.funding_status}")
+        lines.append(f"liquidations_status: {report.liquidations_status}")
+        lines.append(f"backtester_readiness: {report.backtester_readiness}")
+        lines.append(f"provider_readiness: {report.provider_readiness}")
+        lines.append("top_blockers:")
+        lines.extend(f"- {b}" for b in report.top_blockers)
+        lines.append(f"next_required_human_action: {report.next_required_human_action}")
+        lines.append(f"paper_ready: {str(report.paper_ready).lower()}")
+        lines.append(f"live_ready: {str(report.live_ready).lower()}")
+        lines.extend(self._v82_safety_footer())
+        lines.append("DATA READINESS V10.5 END")
+        return "\n".join(lines)
+
+    def trader_dashboard_contract_v105_cli(self) -> str:
+        from .labs.trader_dashboard_v104 import (
+            DISABLED_CONTROLS,
+            LOCK_TOOLTIP,
+            build_dashboard_view_model,
+            dashboard_contract,
+            render_dashboard_html,
+        )
+        contract = dashboard_contract()
+        vm = build_dashboard_view_model()
+        html = render_dashboard_html(vm)
+        lower = html.lower()
+        import re as _re
+        fetch_targets = _re.findall(r'"(/api/[^"]+)"', html)
+        fetch_readonly_only = all(
+            t.startswith("/api/researchops/v104/") for t in fetch_targets
+        ) and bool(fetch_targets)
+        sections = {
+            "mission_bar": "MISSION BAR" in html or "mission-bar" in html,
+            "pipeline": "PIPELINE" in html,
+            "why_no_edge": "WHY NO TRADE" in html.upper() or "WHY NO EDGE" in html.upper(),
+            "provider_panel": "Provider Readiness" in html or "PROVIDER READINESS" in html.upper(),
+            "learning_panel": "LEARNING" in html.upper(),
+            "strategy_lab": "STRATEGY RESEARCH LAB" in html.upper(),
+            "ssh_tunnel_help": "SSH TUNNEL" in html.upper(),
+        }
+        locked_extras = {
+            "copy_trading": "Copy Trading" in html,
+            "leverage_control": "Leverage Control" in html,
+            "casino_mode": "777" in html,
+        }
+        lines = ["TRADER DASHBOARD CONTRACT V10.5 START"]
+        lines.append(f"route: {contract['route']}")
+        lines.append(f"read_only: {str(contract['read_only']).lower()}")
+        lines.append("methods: GET_only")
+        lines.append(f"mutable_endpoints: {','.join(contract['mutable_endpoints']) or 'NONE'}")
+        lines.append(f"post_forms: {contract['post_forms']}")
+        lines.append(f"heavy_panels_mode: {contract.get('heavy_panels_mode', 'CACHE_PEEK_ONLY')}")
+        lines.append(f"heavy_refresh_mode: {contract.get('heavy_refresh_mode', 'CLI_ONLY')}")
+        for name, present in sections.items():
+            lines.append(f"section {name}: {str(present).lower()}")
+        lines.append("disabled_controls: " + ",".join(DISABLED_CONTROLS))
+        for name, present in locked_extras.items():
+            lines.append(f"locked_control {name}: {str(present).lower()}")
+        lines.append(f"lock_tooltip: {LOCK_TOOLTIP}")
+        lines.append(f"html_has_no_live: {str('NO LIVE' in html).lower()}")
+        lines.append(f"html_has_research_only: {str('RESEARCH ONLY' in html).lower()}")
+        lines.append(f"html_has_post_form: {str('<form' in lower).lower()}")
+        lines.append(f"html_fetch_targets_readonly_only: {str(fetch_readonly_only).lower()}")
+        lines.append(f"html_exposes_token_value: false")
+        lines.append("live_toggle_functional: false")
+        lines.append("paper_filter_toggle_functional: false")
+        lines.append("leverage_controls_functional: false")
+        lines.append("copy_trading_functional: false")
+        lines.append("casino_spin_functional: false")
+        lines.append("paper_ready: false")
+        lines.append("live_ready: false")
+        lines.extend(self._v82_safety_footer())
+        lines.append("TRADER DASHBOARD CONTRACT V10.5 END")
+        return "\n".join(lines)
+
     def rebound_sign_integrity_v8293_cli(
         self, hours: int = 168, limit: int = 50000,
     ) -> str:
@@ -5406,6 +5548,9 @@ def build_argument_parser() -> argparse.ArgumentParser:
             "runtime-health-audit-v104",
             "learning-edge-diagnostic-v104",
             "runtime-efficiency-diagnostic-v104",
+            "provider-verification-v105",
+            "data-readiness-v105",
+            "trader-dashboard-contract-v105",
             "ohlcv-replay-loader-smoke-test",
             "ohlcv-replay-loader-audit",
             "duplicate-module-audit-smoke-test",
@@ -6296,6 +6441,12 @@ def main() -> None:
         print(lab.learning_edge_diagnostic_v104_cli(hours=args.hours))
     elif args.command == "runtime-efficiency-diagnostic-v104":
         print(lab.runtime_efficiency_diagnostic_v104_cli())
+    elif args.command == "provider-verification-v105":
+        print(lab.provider_verification_v105_cli())
+    elif args.command == "data-readiness-v105":
+        print(lab.data_readiness_v105_cli())
+    elif args.command == "trader-dashboard-contract-v105":
+        print(lab.trader_dashboard_contract_v105_cli())
     elif args.command == "ohlcv-replay-loader-smoke-test":
         print(lab.ohlcv_replay_loader_smoke_test())
     elif args.command == "ohlcv-replay-loader-audit":
