@@ -1386,3 +1386,94 @@ def test_lock_disabled_but_required_by_config_is_flagged():
     assert "single_worker_lock_disabled_but_required" in report["attention"]
     # Deliberately disabled lock must NOT claim a duplicate worker.
     assert "duplicate_worker_detected" not in report["attention"]
+
+
+# ---------------------------------------------------------------------------
+# K. V10.4.3.3 (Codex hotfix) — total metric parser + alias conflicts
+# ---------------------------------------------------------------------------
+
+class _EvilRuntime:
+    def __float__(self):
+        raise RuntimeError("boom")
+
+
+class _EvilOverflow:
+    def __float__(self):
+        raise OverflowError("boom")
+
+
+class _NoConversion:
+    pass
+
+
+def test_to_finite_float_is_total_never_raises():
+    """Codex P1: huge ints (OverflowError) and hostile __float__ objects must
+    return None instead of raising."""
+    assert _to_finite_float(10 ** 10000) is None
+    assert _to_finite_float(_EvilRuntime()) is None
+    assert _to_finite_float(_EvilOverflow()) is None
+    assert _to_finite_float(_NoConversion()) is None
+    assert _to_finite_float([1]) is None
+    assert _to_finite_float({"a": 1}) is None
+    assert _to_finite_float({1, 2}) is None
+    assert _to_finite_float(True) is None
+    assert _to_finite_float(False) is None
+    # Valid values still parse exactly.
+    assert _to_finite_float(1) == 1.0
+    assert _to_finite_float(1.5) == 1.5
+    assert _to_finite_float("1.5") == 1.5
+    assert _to_finite_float(" 1.5 ") == 1.5
+
+
+def test_revalidation_survives_hostile_objects():
+    """Codex P1: hostile metric values can never validate nor crash."""
+    for field, value in (("net_EV", 10 ** 10000),
+                         ("net_EV", _EvilRuntime()),
+                         ("samples", _EvilOverflow())):
+        row = _top_row(**{field: value})
+        validated, failures = revalidate_top_candidates([row])
+        assert validated == []
+        assert f"invalid_metric:{field}" in failures[0]
+        report = _diag_with_top([row])
+        assert report["edge_status"] == "NO_EDGE_DEMONSTRATED"
+        assert report["validated_top_candidates_count"] == 0
+
+
+def test_alias_invalid_cannot_hide_behind_valid_alias():
+    """Codex alias rule: any present-but-invalid alias fails the metric."""
+    validated, failures = revalidate_top_candidates(
+        [_top_row(net_EV=None, net_ev=0.05)])
+    assert validated == []
+    assert "invalid_metric:net_EV" in failures[0]
+
+    validated, failures = revalidate_top_candidates(
+        [_top_row(samples=None, sample_count=300)])
+    assert validated == []
+    assert "invalid_metric:samples" in failures[0]
+
+    validated, failures = revalidate_top_candidates(
+        [_top_row(time_ratio=_NAN, time_pct=0.4)])
+    assert validated == []
+    assert "invalid_metric:TIME" in failures[0]
+
+
+def test_alias_disagreement_fails_as_conflict():
+    validated, failures = revalidate_top_candidates(
+        [_top_row(net_EV=0.05, net_ev=0.20)])
+    assert validated == []
+    assert "conflicting_alias:net_EV" in failures[0]
+
+
+def test_alias_equal_values_are_not_a_conflict():
+    validated, failures = revalidate_top_candidates(
+        [_top_row(net_ev="0.05")])  # base row already has net_EV=0.05
+    assert len(validated) == 1
+    assert failures == []
+
+
+def test_v10433_healthy_candidate_still_pending_only():
+    report = _diag_with_top([_top_row()])
+    assert report["edge_status"] == "EDGE_CANDIDATE_PRESENT_PENDING_VALIDATION"
+    assert report["paper_ready"] is False
+    assert report["live_ready"] is False
+    assert report["final_recommendation"] == "NO LIVE"

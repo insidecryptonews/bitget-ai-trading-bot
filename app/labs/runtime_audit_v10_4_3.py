@@ -211,31 +211,61 @@ def build_runtime_health_audit(
 # ---------------------------------------------------------------------------
 
 def _to_finite_float(value: Any) -> float | None:
-    """V10.4.3.2 (Codex P1-1) — strict numeric parsing for safety gates.
+    """V10.4.3.3 (Codex P1) — TOTAL numeric parsing for safety gates.
 
     Returns a finite float, or None for ANYTHING else: None, NaN, +/-inf,
-    booleans, empty/non-numeric strings, exotic objects. Never raises.
+    booleans, empty/non-numeric strings, huge ints that overflow float,
+    containers, and hostile objects whose __float__ raises. Catches
+    ``Exception`` (never ``BaseException``) so it truly never raises.
     """
     if value is None or isinstance(value, bool):
         return None
+    if isinstance(value, str) and not value.strip():
+        return None
     try:
         f = float(value)
-    except (TypeError, ValueError):
+    except Exception:  # OverflowError, hostile __float__, TypeError, ValueError…
         return None
-    if not math.isfinite(f):
+    try:
+        if not math.isfinite(f):
+            return None
+    except Exception:  # hostile __float__ returning a non-float exotic
         return None
     return f
 
 
-def _metric(row: dict[str, Any], *names: str) -> float | None:
-    """First alias present AND finite; None when every alias is missing or
-    invalid (missing and invalid are equally disqualifying for validation)."""
-    for n in names:
-        if n in row:
-            f = _to_finite_float(row.get(n))
-            if f is not None:
-                return f
-    return None
+# Alias resolution outcomes for _metric_strict.
+_METRIC_OK = ""
+_METRIC_MISSING = "missing"
+_METRIC_INVALID = "invalid"
+_METRIC_CONFLICT = "conflict"
+_ALIAS_TOLERANCE = 1e-12
+
+
+def _metric_strict(row: dict[str, Any], *names: str) -> tuple[float | None, str]:
+    """V10.4.3.3 — conservative alias resolution. Returns (value, status):
+
+    - no alias present                      -> (None, "missing")
+    - ANY present alias invalid/non-finite  -> (None, "invalid")
+    - valid aliases that disagree (>1e-12)  -> (None, "conflict")
+    - all present aliases valid and equal   -> (value, "")
+
+    An invalid alias can never hide behind a valid one (corrupt-schema guard).
+    """
+    present = [(n, row.get(n)) for n in names if n in row]
+    if not present:
+        return None, _METRIC_MISSING
+    values: list[float] = []
+    for _name, raw in present:
+        f = _to_finite_float(raw)
+        if f is None:
+            return None, _METRIC_INVALID
+        values.append(f)
+    first = values[0]
+    for v in values[1:]:
+        if abs(v - first) > _ALIAS_TOLERANCE:
+            return None, _METRIC_CONFLICT
+    return first, _METRIC_OK
 
 
 def _num(row: dict[str, Any], *names: str) -> float:
@@ -293,6 +323,10 @@ def revalidate_top_candidates(
     net_PF >= 1.0, samples >= 150 (compared as finite float, so 149.9 is
     insufficient), TIME-death < 0.80 (missing or invalid TIME data fails),
     decision != REJECT and no disqualifying reason. Never raises.
+
+    V10.4.3.3 alias rule: if ANY alias of a metric is present but invalid the
+    whole metric fails (invalid_metric:X) even when another alias is valid;
+    valid aliases that disagree beyond 1e-12 fail as conflicting_alias:X.
     """
     validated: list[dict[str, Any]] = []
     failures: list[str] = []
@@ -300,29 +334,36 @@ def revalidate_top_candidates(
         rid = str(row.get("group_value") or row.get("policy_id") or "?")
         fails: list[str] = []
 
-        net_ev = _metric(row, "net_EV", "net_ev")
-        if net_ev is None:
+        net_ev, ev_status = _metric_strict(row, "net_EV", "net_ev")
+        if ev_status == _METRIC_CONFLICT:
+            fails.append("conflicting_alias:net_EV")
+        elif ev_status != _METRIC_OK:
             fails.append("invalid_metric:net_EV")
         elif net_ev <= 0:
             fails.append("negative_net_ev")
 
-        net_pf = _metric(row, "net_PF", "net_pf")
-        if net_pf is None:
+        net_pf, pf_status = _metric_strict(row, "net_PF", "net_pf")
+        if pf_status == _METRIC_CONFLICT:
+            fails.append("conflicting_alias:net_PF")
+        elif pf_status != _METRIC_OK:
             fails.append("invalid_metric:net_PF")
         elif net_pf < MIN_NET_PF_CANDIDATE:
             fails.append("low_net_pf")
 
-        samples = _metric(row, "samples", "sample_count")
-        if samples is None:
+        samples, sm_status = _metric_strict(row, "samples", "sample_count")
+        if sm_status == _METRIC_CONFLICT:
+            fails.append("conflicting_alias:samples")
+        elif sm_status != _METRIC_OK:
             fails.append("invalid_metric:samples")
         elif samples < MIN_SAMPLES:
             fails.append("insufficient_samples")
 
-        has_time_key = any(k in row for k in ("time_ratio", "TIME", "time_pct"))
-        time_ratio = _metric(row, "time_ratio", "TIME", "time_pct")
-        if not has_time_key:
+        time_ratio, tm_status = _metric_strict(row, "time_ratio", "TIME", "time_pct")
+        if tm_status == _METRIC_MISSING:
             fails.append("needs_time_death_review")
-        elif time_ratio is None:
+        elif tm_status == _METRIC_CONFLICT:
+            fails.append("conflicting_alias:TIME")
+        elif tm_status != _METRIC_OK:
             fails.append("invalid_metric:TIME")
             fails.append("needs_time_death_review")
         elif time_ratio >= EXTREME_TIME_DEATH_CANDIDATE:
