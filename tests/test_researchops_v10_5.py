@@ -170,14 +170,17 @@ def test_manifest_v105_series_completeness_gates():
     ev = evaluate_manifest_v105(_manifest_v105(missing_funding_ratio=0.5))
     assert ev.status == ST_SERIES_INCOMPLETE
     assert "missing_funding_ratio_invalid_or_too_high" in ev.blockers
+    # V10.5.1: None/invalid values now fail SEMANTIC validation (stricter).
     ev2 = evaluate_manifest_v105(_manifest_v105(missing_liquidations_ratio=None))
-    assert ev2.status == ST_SERIES_INCOMPLETE
+    assert ev2.promote_allowed is False
+    assert "invalid_field:missing_liquidations_ratio" in ev2.blockers
     ev3 = evaluate_manifest_v105(_manifest_v105(timezone="Europe/Madrid"))
-    assert "timezone_must_be_utc" in ev3.blockers
+    assert ev3.promote_allowed is False
+    assert "invalid_field:timezone_must_be_utc" in ev3.blockers
     ev4 = evaluate_manifest_v105(_manifest_v105(timestamp_unit="iso8601"))
-    assert "timestamp_unit_must_be_unix_ms_or_unix_s" in ev4.blockers
+    assert "invalid_field:timestamp_unit" in ev4.blockers
     ev5 = evaluate_manifest_v105(_manifest_v105(schema_version="v10.4"))
-    assert "schema_version_mismatch" in ev5.blockers
+    assert "invalid_field:schema_version" in ev5.blockers
 
 
 def test_manifest_v105_full_pass_is_research_only():
@@ -320,3 +323,318 @@ def test_v105_reports_never_paper_or_live_ready():
     r = build_data_readiness_v105(data_readiness_snapshot=None, provider_report=None)
     assert r.as_dict()["paper_ready"] is False
     assert r.as_dict()["live_ready"] is False
+
+
+# ===========================================================================
+# V10.5.1 (Codex hotfix) — fail-closed manifest + non-blocking dashboard
+# ===========================================================================
+
+import json  # noqa: E402
+import logging  # noqa: E402
+import threading  # noqa: E402
+import time  # noqa: E402
+import urllib.request  # noqa: E402
+
+import pytest  # noqa: E402
+
+from app.labs.data_foundation_v10_5 import (  # noqa: E402
+    READY_NEED_SERIES,
+    READY_OI_BLOCKED,
+    ST_SEMANTIC_FAIL,
+    _to_finite_float,
+    _to_non_negative_int,
+    _valid_ratio,
+    _valid_sha256,
+)
+from app.labs.trader_dashboard_v104 import derive_pipeline_stages  # noqa: E402
+
+_NAN = float("nan")
+_INF = float("inf")
+
+
+class _EvilFloat:
+    def __float__(self):
+        raise RuntimeError("boom")
+
+
+# --- P1-2: fail-closed manifest -------------------------------------------
+
+def test_v1051_defensive_parsers_are_total():
+    for bad in (None, _NAN, _INF, -_INF, True, False, "", "  ", "abc",
+                [1], {"a": 1}, {1, 2}, 10 ** 10000, _EvilFloat()):
+        assert _to_finite_float(bad) is None, repr(bad)
+    assert _to_non_negative_int(-1) is None
+    assert _to_non_negative_int(3.7) is None
+    assert _to_non_negative_int(5.0) == 5
+    assert _valid_ratio(1.5) is None
+    assert _valid_ratio(-0.1) is None
+    assert _valid_ratio(0.8) == 0.8
+    assert _valid_sha256("a" * 64) is True
+    assert _valid_sha256("xyz") is False
+    assert _valid_sha256("a" * 63) is False
+
+
+@pytest.mark.parametrize("field,value", [
+    ("coverage_ratio", _NAN), ("coverage_ratio", _INF), ("coverage_ratio", "abc"),
+    ("missing_oi_ratio", _NAN), ("missing_funding_ratio", _NAN),
+    ("missing_liquidations_ratio", _NAN), ("missing_funding_ratio", -_INF),
+    ("clean_days", _EvilFloat()), ("clean_days", 10 ** 10000),
+    ("gap_count", -1), ("duplicate_count", _NAN),
+], ids=["cov-nan", "cov-inf", "cov-str", "oi-nan", "fund-nan", "liq-nan",
+        "fund-neginf", "clean-evil", "clean-hugeint", "gap-neg", "dup-nan"])
+def test_v1051_hostile_numeric_fields_block_never_raise(field, value):
+    ev = evaluate_manifest_v105(_manifest_v105(**{field: value}))
+    assert ev.promote_allowed is False
+    assert ev.status == ST_SEMANTIC_FAIL
+    assert any("invalid_field:" in b for b in ev.blockers)
+
+
+def test_v1051_structural_fields_block():
+    assert evaluate_manifest_v105(_manifest_v105(symbols=[])).promote_allowed is False
+    assert evaluate_manifest_v105(_manifest_v105(timeframes=[])).promote_allowed is False
+    assert evaluate_manifest_v105(_manifest_v105(data_types=[])).promote_allowed is False
+    assert evaluate_manifest_v105(_manifest_v105(rows_by_type={})).promote_allowed is False
+    assert evaluate_manifest_v105(_manifest_v105(rows_by_type={"x": -5})).promote_allowed is False
+    assert evaluate_manifest_v105(_manifest_v105(checksums_sha256={"f": "bad"})).promote_allowed is False
+    assert evaluate_manifest_v105(_manifest_v105(generated_at="")).promote_allowed is False
+    assert evaluate_manifest_v105(_manifest_v105(import_status="HACKED")).promote_allowed is False
+    assert evaluate_manifest_v105(_manifest_v105(missing_oi_status="JUNK")).promote_allowed is False
+
+
+def test_v1051_coverage_and_quality_thresholds_block():
+    assert evaluate_manifest_v105(_manifest_v105(coverage_ratio=0.79)).promote_allowed is False
+    # gap ratio 0.06 over 8760 rows -> 526 gaps; dup ratio 0.03 -> 263 dups
+    assert evaluate_manifest_v105(_manifest_v105(gap_count=526)).promote_allowed is False
+    assert evaluate_manifest_v105(_manifest_v105(duplicate_count=263)).promote_allowed is False
+
+
+def test_v1051_promote_allowed_input_is_ignored():
+    """A malicious manifest carrying promote_allowed=True cannot steer the
+    evaluator: the result is recalculated from gates."""
+    ev = evaluate_manifest_v105(_manifest_v105(promote_allowed=True, coverage_ratio=0.5))
+    assert ev.promote_allowed is False
+    ev2 = evaluate_manifest_v105({"promote_allowed": True})
+    assert ev2.promote_allowed is False
+
+
+def test_v1051_valid_manifest_promotes_research_only():
+    ev = evaluate_manifest_v105(_manifest_v105())
+    assert ev.status == ST_PROMOTE_ALLOWED
+    assert ev.promote_allowed is True
+    assert ev.paper_ready is False
+    assert ev.live_ready is False
+    assert ev.final_recommendation == "NO LIVE"
+
+
+# --- P2-1: readiness never optimistic with blocked/unknown series ----------
+
+_SNAP_180 = {"current_clean_days": 200.0,
+             "current_history_status": "OK",
+             "missing_oi_status": "DATA_OK",
+             "oi_bucket_policy": "ALLOW_OI_BUCKETS_WITH_CARE",
+             "backtester_readiness": "READY"}
+_PROV_READY = {"any_provider_ready_for_authorization": True}
+
+
+def test_v1051_readiness_oi_blocked_never_initial_ready():
+    snap = dict(_SNAP_180, oi_bucket_policy="BLOCK_OI_BUCKETS",
+                missing_oi_status="MISSING_OI_CLUSTERED")
+    r = build_data_readiness_v105(
+        data_readiness_snapshot=snap, provider_report=_PROV_READY,
+        funding_verified=True, liquidations_verified=True)
+    assert r.status == READY_OI_BLOCKED
+    assert r.status != "INITIAL_VALIDATION_READY"
+
+
+def test_v1051_readiness_funding_unknown_never_initial_ready():
+    r = build_data_readiness_v105(
+        data_readiness_snapshot=dict(_SNAP_180), provider_report=_PROV_READY,
+        funding_verified=False, liquidations_verified=True)
+    assert r.status == READY_NEED_SERIES
+
+
+def test_v1051_readiness_liquidations_unknown_never_initial_ready():
+    r = build_data_readiness_v105(
+        data_readiness_snapshot=dict(_SNAP_180), provider_report=_PROV_READY,
+        funding_verified=True, liquidations_verified=False)
+    assert r.status == READY_NEED_SERIES
+
+
+def test_v1051_readiness_all_series_green_is_initial_ready_research_only():
+    r = build_data_readiness_v105(
+        data_readiness_snapshot=dict(_SNAP_180), provider_report=_PROV_READY,
+        funding_verified=True, liquidations_verified=True)
+    assert r.status == "INITIAL_VALIDATION_READY"
+    assert r.paper_ready is False
+    assert r.live_ready is False
+    assert r.final_recommendation == "NO LIVE"
+
+
+# --- P2-2: pipeline never says PASS without explicit fresh evidence --------
+
+_SAFE = {"uptime": "100s"}
+
+
+def test_v1051_pipeline_stale_data_guard_not_pass():
+    stages = derive_pipeline_stages(
+        safety=_SAFE, candidates={"data_status": "STALE_OR_PENDING"},
+        net_edge={}, signal_monitor={"top_signals": ["s"], "top_blocks": []})
+    guard = next(s for s in stages if s["name"] == "EDGE GUARD")
+    assert guard["state"] != "PASS"
+    netev = next(s for s in stages if s["name"] == "NET EV")
+    assert netev["state"] == "NEEDS_DATA"
+
+
+def test_v1051_pipeline_no_valid_candidates_guard_blocked():
+    stages = derive_pipeline_stages(
+        safety=_SAFE, candidates={"status": "NO_VALID_CANDIDATES"},
+        net_edge={}, signal_monitor={"top_signals": ["s"], "top_blocks": []})
+    guard = next(s for s in stages if s["name"] == "EDGE GUARD")
+    assert guard["state"] == "BLOCKED"
+    netev = next(s for s in stages if s["name"] == "NET EV")
+    assert netev["state"] == "BLOCKED"
+
+
+def test_v1051_pipeline_no_signals_guard_not_pass():
+    stages = derive_pipeline_stages(
+        safety=_SAFE, candidates={"status": "OK"},
+        net_edge={"status": "OK"}, signal_monitor={"top_signals": [], "top_blocks": []})
+    guard = next(s for s in stages if s["name"] == "EDGE GUARD")
+    assert guard["state"] != "PASS"
+
+
+def test_v1051_pipeline_pass_only_with_explicit_fresh_evidence():
+    stages = derive_pipeline_stages(
+        safety=_SAFE, candidates={"status": "OK"},
+        net_edge={"status": "OK"},
+        signal_monitor={"top_signals": ["s"], "top_blocks": []})
+    guard = next(s for s in stages if s["name"] == "EDGE GUARD")
+    assert guard["state"] == "PASS"
+    shadow = next(s for s in stages if s["name"] == "SHADOW / PAPER")
+    assert shadow["state"] == "BLOCKED"  # always, by design
+
+
+# --- P1-1: dashboard-state never touches the DB ----------------------------
+
+class _V1051Config:
+    enable_training_dashboard = True
+    dashboard_auth_token = ""
+    dashboard_refresh_seconds = 7
+    live_trading = False
+    dry_run = True
+    paper_trading = True
+    enable_paper_policy_filter = False
+    require_single_worker_lock = True
+    training_runtime_profile = "railway_lightweight"
+
+
+class _SlowDb:
+    def _connect(self):
+        time.sleep(5)
+        raise RuntimeError("slow db")
+
+
+@pytest.fixture()
+def v1051_server(monkeypatch):
+    import app.health_server as hs
+    import app.labs.runtime_audit_v10_4_3 as ra
+
+    def _poisoned(db):
+        raise AssertionError("count_db_tables called from polling path")
+
+    monkeypatch.setattr(ra, "count_db_tables", _poisoned)
+    hs._V104_CACHE.clear()
+    state = hs.HealthState(mode="paper")
+    thread = hs.start_health_server(
+        state, 0, logging.getLogger("test-v1051"),
+        config=_V1051Config(), db=_SlowDb(), training_pulse=None,
+        telegram_notifier=None,
+    )
+    assert thread.server_ready.wait(5)
+    server = thread.server_box.get("server")
+    assert server is not None
+    yield f"http://127.0.0.1:{server.server_address[1]}", hs
+    server.shutdown()
+    server.server_close()
+
+
+def _get_json(base, path, timeout=10):
+    started = time.perf_counter()
+    with urllib.request.urlopen(base + path, timeout=timeout) as resp:
+        return json.loads(resp.read().decode("utf-8")), time.perf_counter() - started
+
+
+def test_v1051_dashboard_state_cold_cache_no_db(v1051_server):
+    """Poisoned DB counters + slow DB: dashboard-state must answer fast with
+    STALE_OR_PENDING and never call the count function."""
+    base, hs = v1051_server
+    payload, elapsed = _get_json(base, "/api/researchops/v104/dashboard-state")
+    assert payload["learning"]["data_status"] == "STALE_OR_PENDING"
+    assert elapsed < 1.0
+
+
+def test_v1051_health_fast_while_polling(v1051_server):
+    base, hs = v1051_server
+    times = []
+
+    def poll():
+        for _ in range(4):
+            _get_json(base, "/api/researchops/v104/dashboard-state")
+
+    worker = threading.Thread(target=poll)
+    worker.start()
+    for _ in range(4):
+        _payload, elapsed = _get_json(base, "/health")
+        times.append(elapsed)
+    worker.join()
+    assert max(times) < 1.0
+
+
+def test_v1051_learning_snapshot_served_from_cache(v1051_server):
+    base, hs = v1051_server
+    hs._V104_CACHE["learning_counts"] = (time.time(), {
+        "observations": 148546, "labels": 0, "path_metrics": 675,
+        "virtual_research_trades": 0,
+        "learning_status": "LEARNING_INFRA_ACTIVE",
+        "edge_status": "NO_EDGE_DEMONSTRATED",
+        "final_recommendation": "NO LIVE"})
+    payload, _ = _get_json(base, "/api/researchops/v104/dashboard-state")
+    assert payload["learning"]["observations"] == 148546
+    assert payload["learning"]["learning_status"] == "LEARNING_INFRA_ACTIVE"
+
+
+def test_v1051_learning_cached_error_is_sanitized_stale(v1051_server):
+    base, hs = v1051_server
+    hs._V104_CACHE["learning_counts"] = (time.time(), {
+        "error": "RuntimeError at C:\\secret\\repo\\.env",
+        "final_recommendation": "NO LIVE"})
+    payload, _ = _get_json(base, "/api/researchops/v104/dashboard-state")
+    assert payload["learning"]["data_status"] == "ERROR_STALE"
+    text = json.dumps(payload)
+    assert "secret" not in text and ".env" not in text
+
+
+def test_v1051_polling_path_source_is_db_free():
+    """Contractual: the polling code path contains no DB primitives."""
+    import inspect
+
+    import app.health_server as hs
+
+    src = (inspect.getsource(hs._v104_dashboard_state)
+           + inspect.getsource(hs._v105_learning_status_cache_peek)
+           + inspect.getsource(hs._v104_cache_peek))
+    assert "_connect" not in src
+    assert "count_db_tables" not in src
+    assert "COUNT(" not in src
+
+
+def test_v1051_provider_panel_distinguishes_v105_from_legacy():
+    """P2-3: the dashboard shows real V10.5 verification, legacy registry is
+    labelled as legacy."""
+    html = _html()
+    assert "V10.5 Provider Verification" in html
+    assert "Legacy local registry (V10.3)" in html
+    assert "NOT a completed verification" in html
+    rep = run_provider_verification_v105()
+    assert all(p["status"] != ST_READY_FOR_HUMAN_AUTH for p in rep.providers)
+    assert rep.any_paid_download_authorized is False

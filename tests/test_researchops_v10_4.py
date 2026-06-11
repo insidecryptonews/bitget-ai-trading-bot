@@ -447,12 +447,12 @@ def test_dashboard_html_fetch_only_readonly_get_endpoints():
         assert f"/api/researchops/v104/{heavy}" not in html
 
 
-def test_dashboard_contract_declares_all_ten_endpoints():
+def test_dashboard_contract_declares_all_endpoints():
     c = dashboard_contract()
     expected = {f"/api/researchops/v104/{e}" for e in (
         "overview", "safety", "data-readiness", "provider-readiness",
         "provider-verification", "candidates", "net-edge", "paper-monitor",
-        "signal-monitor", "dashboard-state")}
+        "signal-monitor", "learning", "dashboard-state")}
     assert expected == set(c["readonly_api_endpoints"])
     assert c["polling_never_computes_heavy_work"] is True
     assert c["automatic_endpoints"] == ["/api/researchops/v104/dashboard-state"]

@@ -3550,6 +3550,7 @@ def _v104_cache_peek(key: str) -> dict[str, Any]:
     ttl = {"data_readiness": _V104_TTL_DATA_READINESS,
            "provider_readiness": _V104_TTL_PROVIDERS,
            "provider_verification": _V104_TTL_PROVIDERS,
+           "learning_counts": _V104_TTL_DATA_READINESS,
            "candidates": _V104_TTL_LABS,
            "net_edge": _V104_TTL_LABS}.get(key, _V104_TTL_LABS)
     if (time.time() - hit[0]) >= ttl:
@@ -3707,9 +3708,10 @@ def _v104_overview(config: Any | None, db: Any | None, state: Any | None,
     }
 
 
-def _v105_learning_status(db: Any | None) -> dict[str, Any]:
-    """V10.5 — LIGHT learning panel: whitelisted COUNT(*) reads, TTL-cached
-    so the 7s polling never hits the DB more than once per 5 minutes."""
+def _v105_learning_heavy(db: Any | None) -> dict[str, Any]:
+    """V10.5.1 (Codex P1-1) — HEAVY: whitelisted COUNT(*) reads. ONLY served
+    by the on-demand /learning endpoint (single concurrent build, TTL 300s).
+    NEVER called from the dashboard-state polling path."""
     def build() -> dict[str, Any]:
         from .labs.runtime_audit_v10_4_3 import count_db_tables
 
@@ -3728,7 +3730,18 @@ def _v105_learning_status(db: Any | None) -> dict[str, Any]:
             "final_recommendation": "NO LIVE",
         }
 
-    return _v104_cached("learning_counts", 300.0, build)
+    return _v104_cached_heavy("learning_counts", _V104_TTL_DATA_READINESS, build)
+
+
+def _v105_learning_status_cache_peek() -> dict[str, Any]:
+    """V10.5.1 (Codex P1-1) — PURE cache peek for the polling path. Zero
+    database access of any kind: cold cache answers STALE_OR_PENDING; a
+    cached error answers ERROR_STALE (sanitized)."""
+    payload = _v104_cache_peek("learning_counts")
+    if payload.get("error"):
+        return {"data_status": "ERROR_STALE", "error": _V104_ERROR_UNAVAILABLE,
+                "final_recommendation": "NO LIVE"}
+    return payload
 
 
 def _v104_edge_focus(candidates_peek: dict[str, Any],
@@ -3758,25 +3771,64 @@ def _v104_edge_focus(candidates_peek: dict[str, Any],
 
 def _v104_dashboard_state(config: Any | None, db: Any | None, state: Any | None,
                           training_pulse: Any | None) -> dict[str, Any]:
-    """Ultra-light polling payload. Heavy sections are cache-peek only."""
+    """Ultra-light polling payload. Heavy sections are cache-peek only.
+    V10.5.1 (Codex P1-1): NO synchronous DB reads anywhere in this path —
+    learning is a pure cache peek; counts are computed only by the on-demand
+    /learning endpoint or the CLIs."""
     candidates_peek = _v104_cache_peek("candidates")
     data_peek = _v104_cache_peek("data_readiness")
+    net_edge_peek = _v104_cache_peek("net_edge")
+    safety = _v104_safety(config, db, state)
+    signal_monitor = _v104_signal_monitor(config, db, training_pulse)
+    try:
+        from .labs.trader_dashboard_v104 import derive_pipeline_stages
+
+        pipeline = derive_pipeline_stages(
+            safety=safety, candidates=candidates_peek,
+            net_edge=net_edge_peek, signal_monitor=signal_monitor)
+    except Exception as exc:
+        _V104_LOG.warning("v105 pipeline derivation failed: %s", type(exc).__name__)
+        pipeline = []
     return {
         "banner": "NO LIVE — RESEARCH ONLY",
         "read_only": True,
         "live_allowed": False,
-        "safety": _v104_safety(config, db, state),
+        "safety": safety,
         "data_readiness": data_peek,
         "provider_readiness": _v104_provider_readiness(),  # light, pure
+        "provider_verification_v105": _v105_provider_verification_light(),
         "candidates": candidates_peek,
-        "net_edge": _v104_cache_peek("net_edge"),
+        "net_edge": net_edge_peek,
         "paper_monitor": _v104_paper_monitor(config, db, state),
-        "signal_monitor": _v104_signal_monitor(config, db, training_pulse),
+        "signal_monitor": signal_monitor,
         "edge_focus": _v104_edge_focus(candidates_peek, data_peek),
-        "learning": _v105_learning_status(db),
+        "learning": _v105_learning_status_cache_peek(),
+        "pipeline": pipeline,
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "final_recommendation": "NO LIVE",
     }
+
+
+def _v105_provider_verification_light() -> dict[str, Any]:
+    """V10.5.1 (Codex P2-3) — LIGHT pure in-memory V10.5 scorecards summary
+    (clearly distinct from the legacy V10.3 registry)."""
+    def build() -> dict[str, Any]:
+        from .labs.provider_verification_v10_5 import run_provider_verification_v105
+
+        rep = run_provider_verification_v105()
+        return {
+            "title": "V10.5 Provider Verification",
+            "providers": [
+                {"name": p["provider_name"], "role": p["role"],
+                 "status": p["status"],
+                 "paid_download_authorized": p["paid_download_authorized"]}
+                for p in rep.providers
+            ],
+            "any_paid_download_authorized": rep.any_paid_download_authorized,
+            "final_recommendation": "NO LIVE",
+        }
+
+    return _v104_cached("provider_verification_v105", _V104_TTL_PROVIDERS, build)
 
 
 def _v104_api(path: str, config: Any | None, db: Any | None, state: Any | None,
@@ -3802,6 +3854,8 @@ def _v104_api(path: str, config: Any | None, db: Any | None, state: Any | None,
             return _v104_paper_monitor(config, db, state), 200
         if kind == "signal-monitor":
             return _v104_signal_monitor(config, db, training_pulse), 200
+        if kind == "learning":
+            return _v105_learning_heavy(db), 200  # on-demand only, never polling
         if kind == "dashboard-state":
             return _v104_dashboard_state(config, db, state, training_pulse), 200
     except Exception as exc:

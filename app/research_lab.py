@@ -4507,6 +4507,18 @@ class ResearchLab:
         lines.append(f"html_has_post_form: {str('<form' in lower).lower()}")
         lines.append(f"html_fetch_targets_readonly_only: {str(fetch_readonly_only).lower()}")
         lines.append(f"html_exposes_token_value: false")
+        # V10.5.1 (Codex P1-1) — contractual check: the polling path must not
+        # contain any synchronous DB access primitives.
+        import inspect as _inspect
+        from . import health_server as _hs
+        polling_src = (_inspect.getsource(_hs._v104_dashboard_state)
+                       + _inspect.getsource(_hs._v105_learning_status_cache_peek)
+                       + _inspect.getsource(_hs._v104_cache_peek))
+        polling_db_free = ("_connect" not in polling_src
+                           and "count_db_tables" not in polling_src
+                           and "COUNT(" not in polling_src)
+        lines.append(f"polling_path_db_free: {str(polling_db_free).lower()}")
+        lines.append("learning_counts_source: on_demand_endpoint_or_cli_only")
         lines.append("live_toggle_functional: false")
         lines.append("paper_filter_toggle_functional: false")
         lines.append("leverage_controls_functional: false")

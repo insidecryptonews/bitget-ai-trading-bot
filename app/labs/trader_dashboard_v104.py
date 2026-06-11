@@ -50,6 +50,7 @@ READONLY_API_ENDPOINTS = [
     "/api/researchops/v104/net-edge",
     "/api/researchops/v104/paper-monitor",
     "/api/researchops/v104/signal-monitor",
+    "/api/researchops/v104/learning",
     "/api/researchops/v104/dashboard-state",
 ]
 
@@ -94,6 +95,59 @@ def derive_worker_lock_view(raw_lock: Any) -> dict[str, Any]:
                 "duplicate_worker": "NO"}
     return {"worker_lock": "unknown", "worker_acquired": "unknown",
             "duplicate_worker": "UNKNOWN"}
+
+
+def derive_pipeline_stages(
+    *,
+    safety: dict[str, Any] | None,
+    candidates: dict[str, Any] | None,
+    net_edge: dict[str, Any] | None,
+    signal_monitor: dict[str, Any] | None,
+) -> list[dict[str, str]]:
+    """V10.5.1 (Codex P2-2) — pure pipeline derivation. PASS requires explicit
+    positive evidence in a fresh snapshot; stale/unknown/no-candidate states
+    can NEVER render PASS. Conservative by default."""
+    sf = dict(safety or {})
+    cd = dict(candidates or {})
+    sg = dict(signal_monitor or {})
+    ne = dict(net_edge or {})
+
+    cand_status = str(cd.get("status") or cd.get("data_status") or "")
+    cand_fresh = cand_status not in ("", "STALE", "STALE_OR_PENDING", "ERROR_STALE")
+    signals = len(sg.get("top_signals") or [])
+    blocks = len(sg.get("top_blocks") or [])
+
+    def stage(name: str, state: str, why: str) -> dict[str, str]:
+        return {"name": name, "state": state, "why": why}
+
+    scan = (stage("SCAN", "PASS", f"worker up {sf.get('uptime')}")
+            if sf.get("uptime") else stage("SCAN", "STALE", "no runtime payload"))
+    signal = (stage("SIGNAL", "PASS", f"{signals} signals in window")
+              if signals > 0 else stage("SIGNAL", "STALE", "no recent signal snapshot"))
+
+    if blocks > 0:
+        guard = stage("EDGE GUARD", "BLOCKED", "low RR / quality gates blocking")
+    elif cand_status == "NO_VALID_CANDIDATES":
+        guard = stage("EDGE GUARD", "BLOCKED", "no valid candidates")
+    elif not cand_fresh or signals == 0:
+        guard = stage("EDGE GUARD", "STALE", "no fresh evidence; run CLI report")
+    elif cand_status == "OK":
+        guard = stage("EDGE GUARD", "PASS", "explicit gate evidence in fresh snapshot")
+    else:
+        guard = stage("EDGE GUARD", "STALE", "evidence inconclusive")
+
+    if not cand_fresh:
+        netev = stage("NET EV", "NEEDS_DATA", "no cached snapshot; run CLI")
+        policy = stage("POLICY", "NEEDS_DATA", "awaiting candidate snapshot")
+    elif cand_status == "OK" and str(ne.get("status") or "") == "OK":
+        netev = stage("NET EV", "PASS", "net EV positive in fresh snapshot")
+        policy = stage("POLICY", "BLOCKED", "human gates pending")
+    else:
+        netev = stage("NET EV", "BLOCKED", "net_EV <= 0 after costs")
+        policy = stage("POLICY", "BLOCKED", "no valid candidates")
+
+    shadow = stage("SHADOW / PAPER", "BLOCKED", "paper filter disabled by design")
+    return [scan, signal, guard, netev, policy, shadow]
 
 
 def derive_safety_view(safety: dict[str, Any] | None) -> dict[str, Any]:
@@ -383,7 +437,12 @@ padding:8px;color:var(--accent);font-size:11px;margin:6px 0;word-break:break-all
     <div class="bar"><span id="dr-bar" style="width:0%"></span></div>
   </div>
 
-  <div class="card col-8"><h2>Provider Readiness</h2>
+  <div class="card col-8"><h2>V10.5 Provider Verification</h2>
+    <table><thead><tr><th>provider</th><th>role</th><th>status</th><th>paid authorized</th></tr></thead>
+    <tbody id="pv105-rows"><tr><td colspan="4" class="muted">loading…</td></tr></tbody></table>
+    <div class="note">Real verification status (V10.5 scorecards): nothing is verified or
+    paid-authorized until a human validates a sample offline.</div>
+    <div class="kv" style="margin-top:8px"><span class="muted">Legacy local registry (V10.3) — current ingest source, NOT a completed verification</span><span class="v muted">Provider Readiness (legacy)</span></div>
     <table><thead><tr><th>provider</th><th>status</th><th>bitget</th><th>180d</th><th>365d</th><th>paid</th></tr></thead>
     <tbody id="pr-rows"><tr><td colspan="6" class="muted">loading…</td></tr></tbody></table>
     <div class="note" id="pr-next">recommended next: — · verify pricing/limits before any paid download</div>
@@ -558,6 +617,17 @@ function applyState(s) {{
   txt("dr-oi-policy", dr.oi_bucket_policy || "—");
   var bar = document.getElementById("dr-bar"); if (bar) bar.style.width = pct.toFixed(0) + "%";
 
+  // V10.5 verification scorecards (the real status — distinct from legacy).
+  var pv = s.provider_verification_v105 || {{}};
+  var pvRows = "";
+  (pv.providers || []).forEach(function (p) {{
+    pvRows += "<tr><td>" + esc(p.name) + "</td><td>" + esc(p.role) +
+      "</td><td><span class='tag'>" + esc(p.status) + "</span></td><td>" +
+      esc(String(!!p.paid_download_authorized)) + "</td></tr>";
+  }});
+  var pvEl = document.getElementById("pv105-rows");
+  if (pvEl) pvEl.innerHTML = pvRows || "<tr><td colspan='4' class='muted'>no scorecards</td></tr>";
+
   var rows = "";
   (pr.providers || []).forEach(function (p) {{
     rows += "<tr><td>" + esc(p.name || p.provider_id) + "</td><td><span class='tag'>" +
@@ -590,28 +660,22 @@ function applyState(s) {{
   txt("mb-data", drStatus === "READY" ? "READY" : "NEEDS 180/365D");
   txt("mb-final", s.final_recommendation || "NO LIVE");
 
-  // V10.5 — pipeline stages (derived from light payload only).
+  // V10.5.1 — pipeline stages come from the SERVER (conservative derivation;
+  // PASS only with explicit fresh evidence). The client just paints them.
   function stage(id, st, why) {{
     var el = document.getElementById(id); if (!el) return;
     var cls = {{PASS: "pass", BLOCKED: "block", STALE: "stale", NEEDS_DATA: "needs"}}[st] || "stale";
     el.className = "pl-step " + cls;
-    el.children[1].textContent = st;
-    el.children[2].textContent = why;
+    el.children[1].textContent = st || "STALE";
+    el.children[2].textContent = why || "no evidence";
   }}
-  var sigs2 = (sg.top_signals || []).length;
+  var plIds = ["pl-scan", "pl-signal", "pl-guard", "pl-netev", "pl-policy", "pl-shadow"];
+  var pl = s.pipeline || [];
+  for (var i = 0; i < plIds.length; i++) {{
+    var st = pl[i] || {{}};
+    stage(plIds[i], st.state || "STALE", st.why || "no server snapshot");
+  }}
   var blocks2 = (sg.top_blocks || []).length;
-  stage("pl-scan", sf.uptime ? "PASS" : "STALE",
-        sf.uptime ? ("worker up " + sf.uptime) : "no runtime payload");
-  stage("pl-signal", sigs2 > 0 ? "PASS" : "STALE",
-        sigs2 > 0 ? (sigs2 + " signals in window") : "no recent signal snapshot");
-  stage("pl-guard", blocks2 > 0 ? "BLOCKED" : "PASS",
-        blocks2 > 0 ? "low RR / quality gates blocking" : "no blocks in window");
-  var pending = cdStatus === "STALE_OR_PENDING" || cdStatus === "STALE" || cdStatus === "";
-  stage("pl-netev", pending ? "NEEDS_DATA" : "BLOCKED",
-        pending ? "no cached snapshot; run CLI" : "net_EV <= 0 after costs");
-  stage("pl-policy", pending ? "NEEDS_DATA" : "BLOCKED",
-        pending ? "awaiting candidate snapshot" : "no valid candidates");
-  stage("pl-shadow", "BLOCKED", "paper filter disabled by design");
 
   // V10.5 — why no trade / why no edge.
   var why = [];

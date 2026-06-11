@@ -12,6 +12,8 @@ false by default and can only flip true through the full gate chain.
 
 from __future__ import annotations
 
+import math
+import re as _re
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
@@ -42,12 +44,107 @@ MAX_MISSING_FUNDING_RATIO = 0.10
 MAX_MISSING_LIQUIDATIONS_RATIO = 0.10
 
 ST_INVALID_V105 = "INVALID_MANIFEST_V105"
+ST_SEMANTIC_FAIL = "SEMANTIC_VALIDATION_FAIL"
 ST_SERIES_INCOMPLETE = "SERIES_COMPLETENESS_FAIL"
+
+# Whitelists (fail-closed: anything outside them is invalid).
+ALLOWED_TIMESTAMP_UNITS = frozenset({"unix_ms", "unix_s"})
+ALLOWED_IMPORT_STATUSES = frozenset({"BLOCKED", "STAGED", "VALIDATING",
+                                     "STAGED_READY_FOR_PROMOTE"})
+ALLOWED_OI_STATUSES = frozenset({
+    "DATA_OK", "MISSING_OI_LOW", "MISSING_OI_MODERATE", "MISSING_OI_HIGH",
+    "MISSING_OI_CLUSTERED", "NEED_DATA", "NEED_MORE_DATA", "UNKNOWN",
+    "NO_AUDIT", "NO_RAW_OI", "NOT_AVAILABLE",
+})
 
 # Data-readiness statuses.
 READY_NEED_VERIFIED_PROVIDER = "NEED_VERIFIED_PROVIDER"
 READY_NEED_LONG_HISTORY = "NEED_LONG_HISTORY"
+READY_OI_BLOCKED = "OI_BLOCKED"
+READY_NEED_SERIES = "NEED_SERIES_COMPLETENESS"
 READY_INITIAL_OK = "INITIAL_VALIDATION_READY"
+
+_SHA256_RE = _re.compile(r"^[0-9a-fA-F]{64}$")
+_DATE_RE = _re.compile(r"^\d{4}-\d{2}-\d{2}")
+
+
+# ---------------------------------------------------------------------------
+# V10.5.1 (Codex P1-2) — TOTAL defensive parsers. Never raise; reject
+# anything hostile, malformed or ambiguous. If in doubt: invalid.
+# ---------------------------------------------------------------------------
+
+def _to_finite_float(value: Any) -> float | None:
+    """Finite float or None. Rejects None/bool/NaN/inf/blank/garbage strings,
+    containers, huge ints (OverflowError) and hostile __float__ objects.
+    Catches Exception (never BaseException). Never raises."""
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, str) and not value.strip():
+        return None
+    try:
+        f = float(value)
+    except Exception:
+        return None
+    try:
+        if not math.isfinite(f):
+            return None
+    except Exception:
+        return None
+    return f
+
+
+def _to_non_negative_int(value: Any) -> int | None:
+    """Non-negative integer (int or integral float) or None. Never raises."""
+    f = _to_finite_float(value)
+    if f is None or f < 0:
+        return None
+    try:
+        i = int(f)
+    except Exception:
+        return None
+    if float(i) != f:  # 3.7 is not a count
+        return None
+    return i
+
+
+def _valid_ratio(value: Any) -> float | None:
+    """Finite ratio inside [0, 1] or None. Never raises."""
+    f = _to_finite_float(value)
+    if f is None or f < 0.0 or f > 1.0:
+        return None
+    return f
+
+
+def _valid_non_empty_str(value: Any) -> bool:
+    try:
+        return isinstance(value, str) and bool(value.strip())
+    except Exception:
+        return False
+
+
+def _valid_non_empty_list(value: Any) -> bool:
+    try:
+        return isinstance(value, (list, tuple)) and len(value) > 0
+    except Exception:
+        return False
+
+
+def _valid_sha256(value: Any) -> bool:
+    try:
+        return isinstance(value, str) and bool(_SHA256_RE.match(value))
+    except Exception:
+        return False
+
+
+def _valid_date_or_ts(value: Any) -> bool:
+    """ISO-like date string (YYYY-MM-DD...) or a positive finite unix ts."""
+    try:
+        if isinstance(value, str):
+            return bool(_DATE_RE.match(value.strip()))
+        f = _to_finite_float(value)
+        return f is not None and f > 0
+    except Exception:
+        return False
 
 
 @dataclass
@@ -75,79 +172,152 @@ class ManifestV105Evaluation:
         return asdict(self)
 
 
-def _finite_ratio(value: Any) -> float | None:
-    try:
-        f = float(value)
-    except (TypeError, ValueError):
-        return None
-    if f != f or f in (float("inf"), float("-inf")) or f < 0:
-        return None
-    return f
+def _semantic_blockers(m: dict[str, Any]) -> list[str]:
+    """V10.5.1 (Codex P1-2) — full semantic validation BEFORE any other gate.
+    Every field is parsed defensively; any invalid value blocks. Never raises."""
+    bad: list[str] = []
+
+    for name in ("source_provider", "license_terms",
+                 "requested_range", "actual_covered_range"):
+        if not _valid_non_empty_str(m.get(name)):
+            bad.append(f"invalid_field:{name}")
+    # Authorization fields: ABSENT/None/empty is handled by the V10.4 gate
+    # (AUTHORIZATION_REQUIRED — more actionable); a present-but-garbage TYPE
+    # (string "yes", number, list…) is a semantic failure here.
+    for name in ("explicit_human_authorization", "paid_download_authorized",
+                 "license_terms_confirmed"):
+        value = m.get(name)
+        if value is not None and not isinstance(value, bool):
+            bad.append(f"invalid_field:{name}")
+    ref = m.get("authorization_reference")
+    if ref is not None and not isinstance(ref, str):
+        bad.append("invalid_field:authorization_reference")
+
+    clean_days = _to_finite_float(m.get("clean_days"))
+    if clean_days is None or clean_days < 0:
+        bad.append("invalid_field:clean_days")
+
+    for name in ("symbols", "timeframes", "data_types"):
+        if not _valid_non_empty_list(m.get(name)):
+            bad.append(f"invalid_field:{name}")
+
+    rows = m.get("rows_by_type")
+    if not isinstance(rows, dict) or not rows:
+        bad.append("invalid_field:rows_by_type")
+    else:
+        for key, val in rows.items():
+            if _to_non_negative_int(val) is None:
+                bad.append(f"invalid_field:rows_by_type.{key}")
+                break
+
+    for name in ("coverage_ratio", "missing_oi_ratio",
+                 "missing_funding_ratio", "missing_liquidations_ratio"):
+        if _valid_ratio(m.get(name)) is None:
+            bad.append(f"invalid_field:{name}")
+    for name in ("gap_count", "duplicate_count"):
+        if _to_non_negative_int(m.get(name)) is None:
+            bad.append(f"invalid_field:{name}")
+
+    oi_status = m.get("missing_oi_status")
+    if not (_valid_non_empty_str(oi_status)
+            and str(oi_status).upper() in ALLOWED_OI_STATUSES):
+        bad.append("invalid_field:missing_oi_status")
+
+    if not (_valid_non_empty_str(m.get("timezone"))
+            and str(m.get("timezone")).strip().upper() == "UTC"):
+        bad.append("invalid_field:timezone_must_be_utc")
+    if str(m.get("timestamp_unit") or "") not in ALLOWED_TIMESTAMP_UNITS:
+        bad.append("invalid_field:timestamp_unit")
+    if str(m.get("schema_version") or "") != SCHEMA_VERSION:
+        bad.append("invalid_field:schema_version")
+    if str(m.get("import_status") or "") not in ALLOWED_IMPORT_STATUSES:
+        bad.append("invalid_field:import_status")
+    if not _valid_date_or_ts(m.get("generated_at")):
+        bad.append("invalid_field:generated_at")
+
+    checksums = m.get("checksums_sha256")
+    if not isinstance(checksums, dict) or not checksums:
+        bad.append("invalid_field:checksums_sha256")
+    else:
+        for fname, digest in checksums.items():
+            if not _valid_non_empty_str(fname) or not _valid_sha256(digest):
+                bad.append("invalid_field:checksums_sha256_not_sha256_hex")
+                break
+    return bad
+
+
+def _fail_closed(ev: ManifestV105Evaluation, status: str,
+                 blockers: list[str]) -> ManifestV105Evaluation:
+    ev.status = status
+    ev.blockers = blockers
+    ev.promote_allowed = False
+    ev.do_not_replace_raw = True
+    ev.import_status = "BLOCKED"
+    return ev
 
 
 def evaluate_manifest_v105(manifest: dict[str, Any] | None) -> ManifestV105Evaluation:
-    """Full V10.5 gate chain: V10.5 schema fields -> V10.4 gates (validity,
-    coverage, history, quality, explicit human authorization) -> V10.5
-    series-completeness gates. Never promotes by default."""
+    """Full FAIL-CLOSED V10.5 gate chain (Codex P1-2):
+
+    1. schema completeness, 2. TOTAL semantic validation of every field
+    (hostile/NaN/inf/garbage values block, never raise), 3. all V10.4 gates
+    (coverage, history, quality, explicit human authorization), 4. V10.5
+    series-completeness. ``promote_allowed`` is RECALCULATED from gates —
+    any ``promote_allowed`` value inside the manifest input is ignored.
+    Never raises; any internal error returns a blocked evaluation.
+    """
     ev = ManifestV105Evaluation()
-    m = dict(manifest or {})
+    try:
+        if not isinstance(manifest, dict) or not manifest:
+            return _fail_closed(ev, ST_INVALID_V105,
+                                ["invalid_or_missing_manifest_v105_fields"])
+        m = dict(manifest)
+        m.pop("promote_allowed", None)  # input can never steer the result
 
-    missing = [f for f in MANIFEST_V105_REQUIRED_FIELDS if f not in m]
-    ev.missing_fields = missing
-    ev.valid_manifest_v105 = not missing
-    if missing:
-        ev.status = ST_INVALID_V105
-        ev.blockers = ["invalid_or_missing_manifest_v105_fields"]
-        ev.promote_allowed = False
-        ev.do_not_replace_raw = True
-        ev.import_status = "BLOCKED"
+        missing = [f for f in MANIFEST_V105_REQUIRED_FIELDS if f not in m]
+        ev.missing_fields = missing
+        if missing:
+            return _fail_closed(ev, ST_INVALID_V105,
+                                ["invalid_or_missing_manifest_v105_fields"])
+        ev.valid_manifest_v105 = True
+
+        # 2) Semantic validation BEFORE any downstream gate (fail-closed).
+        semantic = _semantic_blockers(m)
+        if semantic:
+            return _fail_closed(ev, ST_SEMANTIC_FAIL, semantic)
+
+        # 3) Every V10.4 gate (incl. explicit human authorization).
+        base = evaluate_acquisition_manifest(m)
+        ev.base_status = base.status
+        ev.base_blockers = list(base.blockers)
+        if base.status != ST_PROMOTE_ALLOWED:
+            return _fail_closed(ev, base.status, list(base.blockers))
+
+        # 4) V10.5 series-completeness (ratios already validated finite/[0,1]).
+        blockers: list[str] = []
+        funding = _valid_ratio(m.get("missing_funding_ratio"))
+        liq = _valid_ratio(m.get("missing_liquidations_ratio"))
+        ev.missing_funding_ratio = funding if funding is not None else "UNKNOWN"
+        ev.missing_liquidations_ratio = liq if liq is not None else "UNKNOWN"
+        if funding is None or funding > MAX_MISSING_FUNDING_RATIO:
+            blockers.append("missing_funding_ratio_invalid_or_too_high")
+        if liq is None or liq > MAX_MISSING_LIQUIDATIONS_RATIO:
+            blockers.append("missing_liquidations_ratio_invalid_or_too_high")
+        ev.timezone_ok = True
+        ev.timestamp_unit_ok = True
+        if blockers:
+            return _fail_closed(ev, ST_SERIES_INCOMPLETE, blockers)
+
+        ev.status = ST_PROMOTE_ALLOWED
+        ev.blockers = []
+        ev.promote_allowed = True
+        ev.do_not_replace_raw = False
+        ev.import_status = "STAGED_READY_FOR_PROMOTE"
         return ev
-
-    # Delegate every V10.4 gate (incl. explicit human authorization).
-    base = evaluate_acquisition_manifest(m)
-    ev.base_status = base.status
-    ev.base_blockers = list(base.blockers)
-    if base.status != ST_PROMOTE_ALLOWED:
-        ev.status = base.status
-        ev.blockers = list(base.blockers)
-        ev.promote_allowed = False
-        ev.do_not_replace_raw = True
-        ev.import_status = "BLOCKED"
-        return ev
-
-    # V10.5 series-completeness + metadata gates.
-    blockers: list[str] = []
-    funding = _finite_ratio(m.get("missing_funding_ratio"))
-    liq = _finite_ratio(m.get("missing_liquidations_ratio"))
-    ev.missing_funding_ratio = funding if funding is not None else "UNKNOWN"
-    ev.missing_liquidations_ratio = liq if liq is not None else "UNKNOWN"
-    if funding is None or funding > MAX_MISSING_FUNDING_RATIO:
-        blockers.append("missing_funding_ratio_invalid_or_too_high")
-    if liq is None or liq > MAX_MISSING_LIQUIDATIONS_RATIO:
-        blockers.append("missing_liquidations_ratio_invalid_or_too_high")
-    ev.timezone_ok = str(m.get("timezone") or "").upper() == "UTC"
-    if not ev.timezone_ok:
-        blockers.append("timezone_must_be_utc")
-    ev.timestamp_unit_ok = str(m.get("timestamp_unit") or "") in ("unix_ms", "unix_s")
-    if not ev.timestamp_unit_ok:
-        blockers.append("timestamp_unit_must_be_unix_ms_or_unix_s")
-    if str(m.get("schema_version") or "") != SCHEMA_VERSION:
-        blockers.append("schema_version_mismatch")
-
-    if blockers:
-        ev.status = ST_SERIES_INCOMPLETE
-        ev.blockers = blockers
-        ev.promote_allowed = False
-        ev.do_not_replace_raw = True
-        ev.import_status = "BLOCKED"
-        return ev
-
-    ev.status = ST_PROMOTE_ALLOWED
-    ev.blockers = []
-    ev.promote_allowed = True
-    ev.do_not_replace_raw = False
-    ev.import_status = "STAGED_READY_FOR_PROMOTE"
-    return ev
+    except Exception:
+        # Absolute fail-closed backstop: any unexpected error blocks.
+        return _fail_closed(ManifestV105Evaluation(), ST_SEMANTIC_FAIL,
+                            ["manifest_validation_error"])
 
 
 @dataclass
@@ -176,9 +346,16 @@ def build_data_readiness_v105(
     *,
     data_readiness_snapshot: dict[str, Any] | None,
     provider_report: dict[str, Any] | None,
+    funding_verified: bool = False,
+    liquidations_verified: bool = False,
 ) -> DataReadinessV105:
     """Summarise the data foundation honestly. Without a verified provider or
-    sufficient history the answer is NEED_VERIFIED_PROVIDER — never invented."""
+    sufficient history the answer is NEED_VERIFIED_PROVIDER — never invented.
+
+    V10.5.1 (Codex P2-1): INITIAL_VALIDATION_READY requires ALL of: provider
+    ready for authorization, clean_days>=180, OI NOT blocked, funding verified
+    AND liquidations verified. Any unknown/blocked mandatory series keeps the
+    status conservative (OI_BLOCKED / NEED_SERIES_COMPLETENESS / ...)."""
     r = DataReadinessV105()
     snap = dict(data_readiness_snapshot or {})
     prov = dict(provider_report or {})
@@ -190,6 +367,10 @@ def build_data_readiness_v105(
         r.oi_bucket_policy = snap.get("oi_bucket_policy", "BLOCK_OI_BUCKETS")
         r.backtester_readiness = snap.get("backtester_readiness", "NEED_LONG_HISTORY")
 
+    r.funding_status = "VERIFIED" if funding_verified else "UNKNOWN_NO_VERIFIED_SOURCE"
+    r.liquidations_status = ("VERIFIED" if liquidations_verified
+                             else "UNKNOWN_NO_VERIFIED_SOURCE")
+
     any_ready = bool(prov.get("any_provider_ready_for_authorization"))
     r.provider_readiness = ("READY_FOR_HUMAN_AUTHORIZATION" if any_ready
                             else "NO_PROVIDER_VERIFIED")
@@ -197,6 +378,7 @@ def build_data_readiness_v105(
     blockers: list[str] = []
     clean = r.clean_days
     has_180d = isinstance(clean, (int, float)) and clean >= 180
+    oi_blocked = str(r.oi_bucket_policy) == "BLOCK_OI_BUCKETS"
     if not any_ready:
         blockers.append("no provider verified (Tardis.dev sample + manual checks pending)")
     if isinstance(clean, (int, float)):
@@ -204,13 +386,23 @@ def build_data_readiness_v105(
             blockers.append(f"clean_days={clean} < 180 minimum")
     else:
         blockers.append("history_depth_unknown (no data snapshot)")
-    if str(r.oi_bucket_policy) == "BLOCK_OI_BUCKETS":
+    if oi_blocked:
         blockers.append(f"OI buckets blocked (status={r.oi_status})")
-    blockers.append("funding/liquidations history: no verified external source yet")
+    if not funding_verified:
+        blockers.append("funding history not verified")
+    if not liquidations_verified:
+        blockers.append("liquidations history not verified")
     r.top_blockers = blockers
 
-    if not any_ready or not has_180d:
-        r.status = READY_NEED_VERIFIED_PROVIDER if not any_ready else READY_NEED_LONG_HISTORY
+    # Conservative status ladder — every mandatory series must be green.
+    if not any_ready:
+        r.status = READY_NEED_VERIFIED_PROVIDER
+    elif not has_180d:
+        r.status = READY_NEED_LONG_HISTORY
+    elif oi_blocked:
+        r.status = READY_OI_BLOCKED
+    elif not (funding_verified and liquidations_verified):
+        r.status = READY_NEED_SERIES
     else:
         r.status = READY_INITIAL_OK  # still research-only; never paper/live
 
