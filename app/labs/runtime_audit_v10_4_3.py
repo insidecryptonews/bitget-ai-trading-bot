@@ -13,6 +13,7 @@ nothing here can ever output live/paper readiness.
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
 from . import FINAL_RECOMMENDATION_NO_LIVE
@@ -113,18 +114,31 @@ def build_runtime_health_audit(
 
     if health_source != "ok":
         warnings.append(f"health_endpoint_{health_source}")
-    # V10.4.3.1 (Codex P1-2) — a worker lock that is enabled but not acquired,
-    # duplicated, or unknown can NEVER end in OK_RESEARCH_RUNTIME.
+    # V10.4.3.2 (Codex P1-2) — strict worker-lock rule: unless the lock is
+    # EXPLICITLY disabled (enabled is False), ``acquired`` must be EXPLICITLY
+    # True for OK_RESEARCH_RUNTIME. ``lock_status=heartbeat`` alone proves
+    # nothing — a missing/None/false ``acquired`` blocks the clean verdict.
     if isinstance(lock, dict) and lock:
         status = str(lock.get("lock_status") or "unknown")
         acquired = lock.get("acquired")
+        enabled = lock.get("enabled")
         if status == "blocked_duplicate" or lock.get("warning_if_duplicate_worker"):
             attention.append("duplicate_worker_detected")
             attention.append("worker_lock_blocked_duplicate")
-        if lock.get("enabled") is True and acquired is not True:
+        if enabled is False:
+            # Deliberately disabled lock: no duplicate claim, but never a
+            # silent OK when the config requires single-worker locking.
+            if _flag(config, "require_single_worker_lock", False):
+                attention.append("single_worker_lock_disabled_but_required")
+            else:
+                warnings.append("worker_lock_disabled")
+        elif acquired is True:
+            pass  # healthy: explicitly acquired
+        elif acquired is False:
             attention.append("worker_lock_not_acquired")
-        elif acquired is not True and status not in ("heartbeat", "acquired"):
-            warnings.append("worker_lock_unknown")
+        else:  # acquired missing/None/garbage — unknown is not healthy
+            attention.append("worker_lock_acquired_missing")
+            attention.append("worker_lock_not_acquired")
     elif health_source == "ok":
         warnings.append("worker_lock_unknown")
         warnings.append("worker_lock_not_in_health_payload")
@@ -196,14 +210,41 @@ def build_runtime_health_audit(
 # Learning / Edge diagnostic
 # ---------------------------------------------------------------------------
 
-def _num(row: dict[str, Any], *names: str) -> float:
+def _to_finite_float(value: Any) -> float | None:
+    """V10.4.3.2 (Codex P1-1) — strict numeric parsing for safety gates.
+
+    Returns a finite float, or None for ANYTHING else: None, NaN, +/-inf,
+    booleans, empty/non-numeric strings, exotic objects. Never raises.
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(f):
+        return None
+    return f
+
+
+def _metric(row: dict[str, Any], *names: str) -> float | None:
+    """First alias present AND finite; None when every alias is missing or
+    invalid (missing and invalid are equally disqualifying for validation)."""
     for n in names:
-        v = row.get(n)
-        try:
-            if v is not None:
-                return float(v)
-        except (TypeError, ValueError):
-            continue
+        if n in row:
+            f = _to_finite_float(row.get(n))
+            if f is not None:
+                return f
+    return None
+
+
+def _num(row: dict[str, Any], *names: str) -> float:
+    """Lenient variant for warning generation only (never for validation):
+    skips non-finite values instead of letting NaN poison comparisons."""
+    for n in names:
+        f = _to_finite_float(row.get(n))
+        if f is not None:
+            return f
     return 0.0
 
 
@@ -247,31 +288,52 @@ def revalidate_top_candidates(
     """V10.4.3.1 (Codex P1-3) — never trust a 'top candidate' row as edge
     without conservative revalidation. Returns (validated, failure_warnings).
 
-    A row only survives when ALL of these hold: net_EV > 0, net_PF >= 1.0,
-    samples >= 150, TIME-death < 0.80 (missing TIME data => fails as
-    needs_time_death_review), decision != REJECT and no disqualifying reason.
+    A row only survives when EVERY metric exists, is finite (no None/NaN/inf/
+    non-numeric — V10.4.3.2 Codex P1-1) and passes: net_EV > 0,
+    net_PF >= 1.0, samples >= 150 (compared as finite float, so 149.9 is
+    insufficient), TIME-death < 0.80 (missing or invalid TIME data fails),
+    decision != REJECT and no disqualifying reason. Never raises.
     """
     validated: list[dict[str, Any]] = []
     failures: list[str] = []
     for row in top or []:
         rid = str(row.get("group_value") or row.get("policy_id") or "?")
         fails: list[str] = []
-        if _num(row, "net_EV", "net_ev") <= 0:
+
+        net_ev = _metric(row, "net_EV", "net_ev")
+        if net_ev is None:
+            fails.append("invalid_metric:net_EV")
+        elif net_ev <= 0:
             fails.append("negative_net_ev")
-        if _num(row, "net_PF", "net_pf") < MIN_NET_PF_CANDIDATE:
+
+        net_pf = _metric(row, "net_PF", "net_pf")
+        if net_pf is None:
+            fails.append("invalid_metric:net_PF")
+        elif net_pf < MIN_NET_PF_CANDIDATE:
             fails.append("low_net_pf")
-        if int(_num(row, "samples")) < MIN_SAMPLES:
+
+        samples = _metric(row, "samples", "sample_count")
+        if samples is None:
+            fails.append("invalid_metric:samples")
+        elif samples < MIN_SAMPLES:
             fails.append("insufficient_samples")
-        has_time = any(k in row for k in ("time_ratio", "TIME", "time_pct"))
-        if not has_time:
+
+        has_time_key = any(k in row for k in ("time_ratio", "TIME", "time_pct"))
+        time_ratio = _metric(row, "time_ratio", "TIME", "time_pct")
+        if not has_time_key:
             fails.append("needs_time_death_review")
-        elif _num(row, "time_ratio", "TIME", "time_pct") >= EXTREME_TIME_DEATH_CANDIDATE:
+        elif time_ratio is None:
+            fails.append("invalid_metric:TIME")
+            fails.append("needs_time_death_review")
+        elif time_ratio >= EXTREME_TIME_DEATH_CANDIDATE:
             fails.append("high_time_death")
+
         if str(row.get("decision") or "").upper() == "REJECT":
             fails.append("rejected_decision")
         reason = str(row.get("reason") or "").lower()
         if any(bad in reason for bad in DISQUALIFYING_REASONS):
             fails.append(f"reject_reason:{reason}")
+
         if fails:
             failures.append(
                 f"top_candidate_failed_revalidation: {rid} ({','.join(fails)})")

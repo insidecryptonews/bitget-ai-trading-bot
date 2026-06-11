@@ -1150,14 +1150,15 @@ def test_runtime_audit_blocked_duplicate_minimum_needs_attention():
 
 
 def test_runtime_audit_unknown_lock_blocks_ok():
-    """Codex P1-2: unknown/missing acquired state can never be OK."""
+    """Codex P1-2 (tightened in V10.4.3.2): unknown/missing acquired state
+    escalates to NEEDS_ATTENTION — heartbeat/status strings prove nothing."""
     health = dict(_HEALTHY_HEALTH)
     health["worker_lock"] = {"lock_status": "unknown"}
     report = build_runtime_health_audit(
         config=_SafePaperConfig(), db_counts={"trades": 1},
         health=health, health_source="ok", log_audit="0_errors")
     assert report["verdict"] != VERDICT_OK
-    assert "worker_lock_unknown" in report["warnings"]
+    assert "worker_lock_acquired_missing" in report["attention"]
 
 
 def _top_row(**over):
@@ -1260,3 +1261,128 @@ def test_http_fixture_uses_ephemeral_port_and_closes(v104_server):
     assert port not in (18977, 18978)  # no fixed test ports anymore
     status, _ = _get(v104_server, "/health")
     assert status == 200
+
+
+# ---------------------------------------------------------------------------
+# J. V10.4.3.2 (Codex hotfix) — invalid metrics + worker lock strictness
+# ---------------------------------------------------------------------------
+
+from app.labs.runtime_audit_v10_4_3 import (  # noqa: E402
+    _to_finite_float,
+    revalidate_top_candidates,
+)
+
+_NAN = float("nan")
+_INF = float("inf")
+
+
+def test_to_finite_float_rejects_garbage_never_raises():
+    for bad in (None, _NAN, _INF, -_INF, "", "abc", "nan", "inf", True, False,
+                [], {}, object()):
+        assert _to_finite_float(bad) is None, repr(bad)
+    assert _to_finite_float(1) == 1.0
+    assert _to_finite_float(-0.5) == -0.5
+    assert _to_finite_float("150") == 150.0
+    assert _to_finite_float("  0.05 ") == 0.05
+
+
+@pytest.mark.parametrize("field,value,expected_reason", [
+    ("net_EV", None, "invalid_metric:net_EV"),
+    ("net_EV", _NAN, "invalid_metric:net_EV"),
+    ("net_EV", _INF, "invalid_metric:net_EV"),
+    ("net_EV", "garbage", "invalid_metric:net_EV"),
+    ("net_PF", None, "invalid_metric:net_PF"),
+    ("net_PF", _NAN, "invalid_metric:net_PF"),
+    ("net_PF", _INF, "invalid_metric:net_PF"),
+    ("samples", None, "invalid_metric:samples"),
+    ("samples", _NAN, "invalid_metric:samples"),
+    ("samples", _INF, "invalid_metric:samples"),
+    ("samples", "abc", "invalid_metric:samples"),
+    ("time_ratio", None, "needs_time_death_review"),
+    ("time_ratio", _NAN, "invalid_metric:TIME"),
+    ("time_ratio", _INF, "invalid_metric:TIME"),
+])
+def test_invalid_metric_never_validates_candidate(field, value, expected_reason):
+    """Codex P1-1: missing/NaN/inf/non-numeric metrics fail revalidation
+    and never raise (the samples=NaN case used to raise ValueError)."""
+    row = _top_row(**{field: value})
+    validated, failures = revalidate_top_candidates([row])
+    assert validated == []
+    assert failures, "a failure warning must be emitted"
+    assert "top_candidate_failed_revalidation" in failures[0]
+    assert expected_reason in failures[0]
+    report = _diag_with_top([row])
+    assert report["edge_status"] == "NO_EDGE_DEMONSTRATED"
+    assert report["validated_top_candidates_count"] == 0
+
+
+def test_samples_149_9_is_insufficient():
+    """Documented rule: samples must be >=150 as a finite float."""
+    validated, failures = revalidate_top_candidates([_top_row(samples=149.9)])
+    assert validated == []
+    assert "insufficient_samples" in failures[0]
+
+
+def test_fully_valid_candidate_is_pending_only_never_ready():
+    validated, failures = revalidate_top_candidates([_top_row()])
+    assert len(validated) == 1 and not failures
+    report = _diag_with_top([_top_row()])
+    assert report["edge_status"] == "EDGE_CANDIDATE_PRESENT_PENDING_VALIDATION"
+    assert report["paper_ready"] is False
+    assert report["live_ready"] is False
+    assert report["final_recommendation"] == "NO LIVE"
+
+
+def _lock_audit(lock, config=None):
+    health = {"mode": "paper", "last_scan": "x", "circuit_breaker": False}
+    if lock is not None:
+        health["worker_lock"] = lock
+    return build_runtime_health_audit(
+        config=config or _SafePaperConfig(), db_counts={"trades": 1},
+        health=health, health_source="ok", log_audit="0_errors")
+
+
+def test_lock_heartbeat_without_acquired_is_not_ok():
+    """Codex P1-2: lock_status=heartbeat alone proves nothing."""
+    report = _lock_audit({"lock_status": "heartbeat"})
+    assert report["verdict"] != VERDICT_OK
+    assert report["verdict"] == VERDICT_ATTENTION
+    assert "worker_lock_acquired_missing" in report["attention"]
+    assert "worker_lock_not_acquired" in report["attention"]
+
+
+def test_lock_enabled_heartbeat_without_acquired_is_not_ok():
+    report = _lock_audit({"enabled": True, "lock_status": "heartbeat"})
+    assert report["verdict"] != VERDICT_OK
+    assert "worker_lock_acquired_missing" in report["attention"]
+
+
+def test_lock_empty_dict_is_not_ok():
+    report = _lock_audit({})
+    assert report["verdict"] != VERDICT_OK
+    assert "worker_lock_unknown" in report["warnings"]
+
+
+def test_lock_absent_from_payload_is_not_ok():
+    report = _lock_audit(None)
+    assert report["verdict"] != VERDICT_OK
+    assert "worker_lock_unknown" in report["warnings"]
+
+
+def test_lock_fully_healthy_allows_ok():
+    report = _lock_audit({"enabled": True, "acquired": True,
+                          "lock_status": "heartbeat",
+                          "warning_if_duplicate_worker": ""})
+    assert report["verdict"] == VERDICT_OK
+
+
+def test_lock_disabled_but_required_by_config_is_flagged():
+    class RequireLockConfig(_SafePaperConfig):
+        require_single_worker_lock = True
+
+    report = _lock_audit({"enabled": False, "lock_status": "disabled"},
+                         config=RequireLockConfig())
+    assert report["verdict"] != VERDICT_OK
+    assert "single_worker_lock_disabled_but_required" in report["attention"]
+    # Deliberately disabled lock must NOT claim a duplicate worker.
+    assert "duplicate_worker_detected" not in report["attention"]
