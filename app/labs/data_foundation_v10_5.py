@@ -319,6 +319,22 @@ def _semantic_blockers(m: dict[str, Any]) -> list[str]:
             if not _valid_non_empty_str(fname) or not _valid_sha256(digest):
                 bad.append("invalid_field:checksums_sha256_not_sha256_hex")
                 break
+
+    # V10.5.2 self-audit — CROSS-FIELD consistency (contradictory manifests
+    # are hostile manifests). Only checked when the individual fields parsed.
+    clean = _to_finite_float(m.get("clean_days"))
+    covered = m.get("actual_covered_range")
+    if clean is not None and isinstance(covered, dict):
+        start = _parse_datetime(covered.get("start"))
+        end = _parse_datetime(covered.get("end"))
+        if start is not None and end is not None and end > start:
+            span_days = (end - start).total_seconds() / 86400.0
+            if clean > span_days + 1.0:  # physically impossible claim
+                bad.append("inconsistent_field:clean_days_exceeds_covered_range")
+    oi_ratio = _valid_ratio(m.get("missing_oi_ratio"))
+    oi_status = str(m.get("missing_oi_status") or "").upper()
+    if oi_ratio is not None and oi_status == "DATA_OK" and oi_ratio > 0.10:
+        bad.append("inconsistent_field:oi_status_data_ok_with_high_missing_ratio")
     return bad
 
 

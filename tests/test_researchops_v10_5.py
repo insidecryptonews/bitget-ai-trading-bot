@@ -748,6 +748,29 @@ def test_v1052_checksums_empty_blocks():
     assert "invalid_field:checksums_sha256" in ev.blockers
 
 
+def test_v1052_cross_field_clean_days_exceeding_covered_range_blocks():
+    """Self-audit family: a physically impossible clean_days claim (larger
+    than the covered range span) is a hostile/contradictory manifest."""
+    one_month = {"start": "2026-05-11T00:00:00Z", "end": "2026-06-11T00:00:00Z"}
+    ev = evaluate_manifest_v105(_manifest_v105(
+        actual_covered_range=one_month, clean_days=365.0))
+    assert ev.promote_allowed is False
+    assert "inconsistent_field:clean_days_exceeds_covered_range" in ev.blockers
+    # Coherent claim still passes (clean_days fits inside the range).
+    ev2 = evaluate_manifest_v105(_manifest_v105(
+        actual_covered_range=one_month, clean_days=30.0, coverage_ratio=0.97))
+    assert "inconsistent_field:clean_days_exceeds_covered_range" not in ev2.blockers
+
+
+def test_v1052_cross_field_oi_status_contradicting_ratio_blocks():
+    """missing_oi_status=DATA_OK with missing_oi_ratio>0.10 is contradictory."""
+    ev = evaluate_manifest_v105(_manifest_v105(
+        missing_oi_status="DATA_OK", missing_oi_ratio=0.25))
+    assert ev.promote_allowed is False
+    assert ("inconsistent_field:oi_status_data_ok_with_high_missing_ratio"
+            in ev.blockers)
+
+
 def test_v1052_valid_manifest_still_research_only():
     ev = evaluate_manifest_v105(_manifest_v105())
     assert ev.status == ST_PROMOTE_ALLOWED
