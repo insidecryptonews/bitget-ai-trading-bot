@@ -4507,18 +4507,47 @@ class ResearchLab:
         lines.append(f"html_has_post_form: {str('<form' in lower).lower()}")
         lines.append(f"html_fetch_targets_readonly_only: {str(fetch_readonly_only).lower()}")
         lines.append(f"html_exposes_token_value: false")
-        # V10.5.1 (Codex P1-1) — contractual check: the polling path must not
-        # contain any synchronous DB access primitives.
+        # V10.5.2 (Codex P1-3) — contractual check over the FULL call graph of
+        # the polling path: every function dashboard-state can reach must be
+        # free of any known DB primitive or DB-heavy helper name.
         import inspect as _inspect
         from . import health_server as _hs
-        polling_src = (_inspect.getsource(_hs._v104_dashboard_state)
-                       + _inspect.getsource(_hs._v105_learning_status_cache_peek)
-                       + _inspect.getsource(_hs._v104_cache_peek))
-        polling_db_free = ("_connect" not in polling_src
-                           and "count_db_tables" not in polling_src
-                           and "COUNT(" not in polling_src)
+        from .labs import trader_dashboard_v104 as _td
+        polling_graph = [
+            _hs._v104_dashboard_state,
+            _hs._v104_safety,
+            _hs._v104_paper_monitor_cache_peek,
+            _hs._v105_learning_status_cache_peek,
+            _hs._v104_cache_peek,
+            _hs._v104_provider_readiness,
+            _hs._v105_provider_verification_light,
+            _hs._v104_signal_monitor,
+            _hs._v104_edge_focus,
+            _hs._v104_cached,
+            _td.derive_pipeline_stages,
+            _td.derive_safety_view,
+            _td.derive_worker_lock_view,
+        ]
+        polling_src = "".join(_inspect.getsource(f) for f in polling_graph)
+        forbidden = [
+            "_v104_paper_monitor(",
+            "get_signal_label_summary_since",
+            "get_open_paper_positions_summary",
+            "Database(",
+            "_connect(",
+            "count_db_tables",
+            "SELECT COUNT",
+            "signal_labels",
+            "paper_positions",
+            "sqlite3",
+        ]
+        hits = [f for f in forbidden if f in polling_src]
+        polling_db_free = not hits
         lines.append(f"polling_path_db_free: {str(polling_db_free).lower()}")
-        lines.append("learning_counts_source: on_demand_endpoint_or_cli_only")
+        lines.append("polling_graph_functions_checked: " + str(len(polling_graph)))
+        lines.append("polling_forbidden_hits: " + (",".join(hits) if hits else "NONE"))
+        lines.append("learning_counts_source: cli_snapshot_only")
+        lines.append("paper_monitor_source: cli_snapshot_only")
         lines.append("live_toggle_functional: false")
         lines.append("paper_filter_toggle_functional: false")
         lines.append("leverage_controls_functional: false")

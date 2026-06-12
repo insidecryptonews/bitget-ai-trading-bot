@@ -120,6 +120,45 @@ def derive_pipeline_stages(
     def stage(name: str, state: str, why: str) -> dict[str, str]:
         return {"name": name, "state": state, "why": why}
 
+    def _count(d: dict[str, Any], *names: str) -> int:
+        """Defensive non-negative count: missing/garbage => 0."""
+        for n in names:
+            value = d.get(n)
+            if isinstance(value, bool):
+                continue
+            if isinstance(value, (list, tuple)):
+                return len(value)
+            try:
+                f = float(value)
+            except (TypeError, ValueError):
+                continue
+            if f == f and f not in (float("inf"), float("-inf")) and f >= 0:
+                return int(f)
+        return 0
+
+    # V10.5.2 (Codex P2-2) — explicit positive evidence, not generic "OK":
+    # a fresh snapshot AND a real validated-candidate count above zero.
+    cand_count = _count(cd, "validated_top_candidates_count", "candidate_count",
+                        "top_candidates", "top_candidates_count")
+    ne_status = str(ne.get("status") or ne.get("data_status") or "")
+    ne_fresh = ne_status not in ("", "STALE", "STALE_OR_PENDING", "ERROR_STALE")
+    ne_top = list(ne.get("top_candidates") or [])
+
+    def _net_edge_positive() -> bool:
+        """True only if a fresh top row shows net_EV > 0 and net_PF >= 1.0."""
+        for row in ne_top:
+            if not isinstance(row, dict):
+                continue
+            try:
+                net_ev = float(row.get("net_EV", row.get("net_ev")))
+                net_pf = float(row.get("net_PF", row.get("net_pf")))
+            except (TypeError, ValueError):
+                continue
+            if (net_ev == net_ev and net_pf == net_pf
+                    and net_ev > 0 and net_pf >= 1.0):
+                return True
+        return False
+
     scan = (stage("SCAN", "PASS", f"worker up {sf.get('uptime')}")
             if sf.get("uptime") else stage("SCAN", "STALE", "no runtime payload"))
     signal = (stage("SIGNAL", "PASS", f"{signals} signals in window")
@@ -131,19 +170,26 @@ def derive_pipeline_stages(
         guard = stage("EDGE GUARD", "BLOCKED", "no valid candidates")
     elif not cand_fresh or signals == 0:
         guard = stage("EDGE GUARD", "STALE", "no fresh evidence; run CLI report")
+    elif cand_status == "OK" and cand_count > 0:
+        guard = stage("EDGE GUARD", "PASS",
+                      f"{cand_count} validated candidate(s) in fresh snapshot")
     elif cand_status == "OK":
-        guard = stage("EDGE GUARD", "PASS", "explicit gate evidence in fresh snapshot")
+        guard = stage("EDGE GUARD", "STALE",
+                      "status OK but zero validated candidates — not evidence")
     else:
         guard = stage("EDGE GUARD", "STALE", "evidence inconclusive")
 
     if not cand_fresh:
         netev = stage("NET EV", "NEEDS_DATA", "no cached snapshot; run CLI")
         policy = stage("POLICY", "NEEDS_DATA", "awaiting candidate snapshot")
-    elif cand_status == "OK" and str(ne.get("status") or "") == "OK":
-        netev = stage("NET EV", "PASS", "net EV positive in fresh snapshot")
+    elif (guard["state"] == "PASS" and ne_fresh and ne_status == "OK"
+          and len(ne_top) > 0 and _net_edge_positive()):
+        netev = stage("NET EV", "PASS",
+                      "net_EV > 0 and net_PF >= 1.0 in fresh top candidate")
         policy = stage("POLICY", "BLOCKED", "human gates pending")
     else:
-        netev = stage("NET EV", "BLOCKED", "net_EV <= 0 after costs")
+        netev = stage("NET EV", "BLOCKED",
+                      "net_EV <= 0 after costs or no fresh net-edge evidence")
         policy = stage("POLICY", "BLOCKED", "no valid candidates")
 
     shadow = stage("SHADOW / PAPER", "BLOCKED", "paper filter disabled by design")
@@ -655,7 +701,11 @@ function applyState(s) {{
   txt("mb-pos", sf.open_positions || 0);
   txt("mb-worker", String(sf.worker_lock || "unknown").toUpperCase());
   var cdStatus = String(cd.status || cd.data_status || "");
-  txt("mb-edge", cdStatus === "OK" ? "CANDIDATE PENDING" : "NOT DEMONSTRATED");
+  // V10.5.2 — CANDIDATE PENDING only when the SERVER pipeline reports an
+  // EDGE GUARD PASS backed by real validated candidates (never generic OK).
+  var plStages = s.pipeline || [];
+  var guardStage = plStages[2] || {{}};
+  txt("mb-edge", guardStage.state === "PASS" ? "CANDIDATE PENDING" : "NOT DEMONSTRATED");
   var drStatus = String(dr.backtester_readiness || dr.data_status || "");
   txt("mb-data", drStatus === "READY" ? "READY" : "NEEDS 180/365D");
   txt("mb-final", s.final_recommendation || "NO LIVE");
@@ -693,16 +743,21 @@ function applyState(s) {{
   txt("ne-status", ne.status || ne.overall_status || ne.data_status || "NOT_COMPUTED_YET");
   txt("ne-text", (ne.text || "").slice(0, 2200) || "no cached net-edge output; run the CLI report");
 
+  // V10.5.2 — paper monitor is snapshot-only in polling; fresh values are
+  // limited to the in-memory runtime PnL counter.
+  var pmPending = pm.data_status === "STALE_OR_PENDING" || pm.data_status === "ERROR_STALE";
   var opens = pm.open_positions_detail || [];
-  txt("pm-open", opens.length);
-  txt("pm-pnl", Number(pm.paper_pnl || 0).toFixed(4));
-  txt("pm-pf", Number(pm.profit_factor || 0).toFixed(2));
-  txt("pm-labels", pm.total_labels || 0);
+  txt("pm-open", pmPending ? "STALE_OR_PENDING" : opens.length);
+  var pmPnl = (pm.paper_pnl_runtime !== undefined ? pm.paper_pnl_runtime : pm.paper_pnl);
+  txt("pm-pnl", Number(pmPnl || 0).toFixed(4));
+  txt("pm-pf", pmPending ? "—" : Number(pm.profit_factor || 0).toFixed(2));
+  txt("pm-labels", pmPending ? "—" : (pm.total_labels || 0));
   var pos = "";
   opens.forEach(function (p) {{
     pos += "<li>" + esc(p.symbol) + " " + esc(p.side) + " @" + esc(p.entry_price) + "</li>";
   }});
-  document.getElementById("pm-positions").innerHTML = pos || "<li>none</li>";
+  document.getElementById("pm-positions").innerHTML =
+    pos || (pmPending ? "<li>no snapshot; run CLI report</li>" : "<li>none</li>");
 
   var ln = s.learning || {{}};
   txt("ln-obs", ln.observations === undefined ? "—" : ln.observations);

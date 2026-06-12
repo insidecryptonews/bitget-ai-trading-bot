@@ -15,6 +15,7 @@ from __future__ import annotations
 import math
 import re as _re
 from dataclasses import asdict, dataclass, field
+from datetime import datetime, timezone
 from typing import Any
 
 from . import FINAL_RECOMMENDATION_NO_LIVE
@@ -57,11 +58,22 @@ ALLOWED_OI_STATUSES = frozenset({
     "NO_AUDIT", "NO_RAW_OI", "NOT_AVAILABLE",
 })
 
+# V10.5.2 (Codex P1-4) — semantic whitelists. Anything outside blocks.
+ALLOWED_TIMEFRAMES = frozenset({"1m", "5m", "15m", "30m", "1h", "4h", "1d"})
+ALLOWED_DATA_TYPES = frozenset({
+    "ohlcv", "open_interest", "funding", "liquidations",
+    "mark_price", "index_price", "trades", "orderbook",
+})
+REQUIRED_DATA_TYPES_MIN = frozenset({"ohlcv", "open_interest", "funding",
+                                     "liquidations"})
+_SYMBOL_RE = _re.compile(r"^[A-Z0-9]{2,15}USDT$")
+
 # Data-readiness statuses.
 READY_NEED_VERIFIED_PROVIDER = "NEED_VERIFIED_PROVIDER"
 READY_NEED_LONG_HISTORY = "NEED_LONG_HISTORY"
 READY_OI_BLOCKED = "OI_BLOCKED"
 READY_NEED_SERIES = "NEED_SERIES_COMPLETENESS"
+READY_NEED_VALID_MANIFEST = "NEED_VALID_MANIFEST"
 READY_INITIAL_OK = "INITIAL_VALIDATION_READY"
 
 _SHA256_RE = _re.compile(r"^[0-9a-fA-F]{64}$")
@@ -136,13 +148,42 @@ def _valid_sha256(value: Any) -> bool:
         return False
 
 
-def _valid_date_or_ts(value: Any) -> bool:
-    """ISO-like date string (YYYY-MM-DD...) or a positive finite unix ts."""
+def _parse_datetime(value: Any) -> datetime | None:
+    """V10.5.2 (Codex P1-4) — REAL date parsing, never a regex shortcut.
+    Accepts true ISO-8601 strings (Z suffix ok) or positive finite unix
+    timestamps (seconds or milliseconds). Returns None for anything else:
+    '2026-99-99garbage', '', 'x', impossible dates… Never raises."""
     try:
         if isinstance(value, str):
-            return bool(_DATE_RE.match(value.strip()))
+            text = value.strip()
+            if not text:
+                return None
+            if text.endswith(("Z", "z")):
+                text = text[:-1] + "+00:00"
+            return datetime.fromisoformat(text)
         f = _to_finite_float(value)
-        return f is not None and f > 0
+        if f is None or f <= 0:
+            return None
+        if f > 1e12:  # unix milliseconds
+            f = f / 1000.0
+        return datetime.fromtimestamp(f, tz=timezone.utc)
+    except Exception:
+        return None
+
+
+def _valid_date_or_ts(value: Any) -> bool:
+    return _parse_datetime(value) is not None
+
+
+def _valid_range(value: Any) -> bool:
+    """A range must be a dict with parseable start/end and start < end.
+    Free-form strings like 'x' or '365d' are NOT acceptable ranges."""
+    try:
+        if not isinstance(value, dict):
+            return False
+        start = _parse_datetime(value.get("start"))
+        end = _parse_datetime(value.get("end"))
+        return start is not None and end is not None and start < end
     except Exception:
         return False
 
@@ -177,9 +218,13 @@ def _semantic_blockers(m: dict[str, Any]) -> list[str]:
     Every field is parsed defensively; any invalid value blocks. Never raises."""
     bad: list[str] = []
 
-    for name in ("source_provider", "license_terms",
-                 "requested_range", "actual_covered_range"):
+    for name in ("source_provider", "license_terms"):
         if not _valid_non_empty_str(m.get(name)):
+            bad.append(f"invalid_field:{name}")
+    # V10.5.2 — ranges are structured dicts with parseable start < end; a
+    # free-form string ('x', '365d') is not a range.
+    for name in ("requested_range", "actual_covered_range"):
+        if not _valid_range(m.get(name)):
             bad.append(f"invalid_field:{name}")
     # Authorization fields: ABSENT/None/empty is handled by the V10.4 gate
     # (AUTHORIZATION_REQUIRED — more actionable); a present-but-garbage TYPE
@@ -197,18 +242,49 @@ def _semantic_blockers(m: dict[str, Any]) -> list[str]:
     if clean_days is None or clean_days < 0:
         bad.append("invalid_field:clean_days")
 
-    for name in ("symbols", "timeframes", "data_types"):
-        if not _valid_non_empty_list(m.get(name)):
-            bad.append(f"invalid_field:{name}")
+    # V10.5.2 — list CONTENT is validated, not just non-emptiness.
+    symbols = m.get("symbols")
+    if not _valid_non_empty_list(symbols):
+        bad.append("invalid_field:symbols")
+    elif not all(isinstance(s, str) and _SYMBOL_RE.match(s) for s in symbols):
+        bad.append("invalid_field:symbols_pattern")
 
+    timeframes = m.get("timeframes")
+    if not _valid_non_empty_list(timeframes):
+        bad.append("invalid_field:timeframes")
+    elif not all(isinstance(t, str) and t in ALLOWED_TIMEFRAMES for t in timeframes):
+        bad.append("invalid_field:timeframes_not_allowed")
+
+    data_types = m.get("data_types")
+    if not _valid_non_empty_list(data_types):
+        bad.append("invalid_field:data_types")
+    else:
+        if not all(isinstance(d, str) and d in ALLOWED_DATA_TYPES for d in data_types):
+            bad.append("invalid_field:data_types_not_allowed")
+        missing_required = REQUIRED_DATA_TYPES_MIN - set(
+            d for d in data_types if isinstance(d, str))
+        if missing_required:
+            bad.append("invalid_field:data_types_missing_required:"
+                       + ",".join(sorted(missing_required)))
+
+    # V10.5.2 — rows_by_type must be semantically meaningful: known keys,
+    # non-negative ints, and >0 rows for every mandatory data type.
     rows = m.get("rows_by_type")
     if not isinstance(rows, dict) or not rows:
         bad.append("invalid_field:rows_by_type")
     else:
         for key, val in rows.items():
+            if not isinstance(key, str) or key not in ALLOWED_DATA_TYPES:
+                bad.append(f"invalid_field:rows_by_type_unknown_key:{key}")
+                break
             if _to_non_negative_int(val) is None:
                 bad.append(f"invalid_field:rows_by_type.{key}")
                 break
+        else:
+            for required in sorted(REQUIRED_DATA_TYPES_MIN):
+                count = _to_non_negative_int(rows.get(required))
+                if count is None or count <= 0:
+                    bad.append(f"invalid_field:rows_by_type_required_zero:{required}")
 
     for name in ("coverage_ratio", "missing_oi_ratio",
                  "missing_funding_ratio", "missing_liquidations_ratio"):
@@ -348,6 +424,7 @@ def build_data_readiness_v105(
     provider_report: dict[str, Any] | None,
     funding_verified: bool = False,
     liquidations_verified: bool = False,
+    manifest_evaluation: dict[str, Any] | None = None,
 ) -> DataReadinessV105:
     """Summarise the data foundation honestly. Without a verified provider or
     sufficient history the answer is NEED_VERIFIED_PROVIDER — never invented.
@@ -355,7 +432,11 @@ def build_data_readiness_v105(
     V10.5.1 (Codex P2-1): INITIAL_VALIDATION_READY requires ALL of: provider
     ready for authorization, clean_days>=180, OI NOT blocked, funding verified
     AND liquidations verified. Any unknown/blocked mandatory series keeps the
-    status conservative (OI_BLOCKED / NEED_SERIES_COMPLETENESS / ...)."""
+    status conservative (OI_BLOCKED / NEED_SERIES_COMPLETENESS / ...).
+
+    V10.5.2 (Codex P2-1): additionally requires a VALID manifest evaluation
+    (full gate chain passed). Without one => NEED_VALID_MANIFEST with blocker
+    valid_manifest_required — INITIAL_VALIDATION_READY is unreachable."""
     r = DataReadinessV105()
     snap = dict(data_readiness_snapshot or {})
     prov = dict(provider_report or {})
@@ -392,9 +473,15 @@ def build_data_readiness_v105(
         blockers.append("funding history not verified")
     if not liquidations_verified:
         blockers.append("liquidations history not verified")
+    manifest_eval = dict(manifest_evaluation or {})
+    manifest_ok = (bool(manifest_eval)
+                   and manifest_eval.get("valid_manifest_v105") is True
+                   and manifest_eval.get("promote_allowed") is True)
+    if not manifest_ok:
+        blockers.append("valid_manifest_required")
     r.top_blockers = blockers
 
-    # Conservative status ladder — every mandatory series must be green.
+    # Conservative status ladder — every mandatory gate must be green.
     if not any_ready:
         r.status = READY_NEED_VERIFIED_PROVIDER
     elif not has_180d:
@@ -403,6 +490,8 @@ def build_data_readiness_v105(
         r.status = READY_OI_BLOCKED
     elif not (funding_verified and liquidations_verified):
         r.status = READY_NEED_SERIES
+    elif not manifest_ok:
+        r.status = READY_NEED_VALID_MANIFEST
     else:
         r.status = READY_INITIAL_OK  # still research-only; never paper/live
 

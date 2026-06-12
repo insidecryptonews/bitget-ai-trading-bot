@@ -3551,6 +3551,7 @@ def _v104_cache_peek(key: str) -> dict[str, Any]:
            "provider_readiness": _V104_TTL_PROVIDERS,
            "provider_verification": _V104_TTL_PROVIDERS,
            "learning_counts": _V104_TTL_DATA_READINESS,
+           "paper_monitor": _V104_TTL_DATA_READINESS,
            "candidates": _V104_TTL_LABS,
            "net_edge": _V104_TTL_LABS}.get(key, _V104_TTL_LABS)
     if (time.time() - hit[0]) >= ttl:
@@ -3658,17 +3659,24 @@ def _v104_net_edge(config: Any | None, db: Any | None) -> dict[str, Any]:
     )
 
 
-def _v104_paper_monitor(config: Any | None, db: Any | None, state: Any | None) -> dict[str, Any]:
-    edge = _edge_summary(config, db)
-    return {
-        "open_positions_detail": _open_paper_positions_detail(db),
-        "paper_pnl": float(getattr(state, "daily_pnl", 0.0) or 0.0),
-        "paper_pnl_is_real_money": False,
-        "profit_factor": float(edge.get("profit_factor") or 0.0),
-        "total_labels": int(edge.get("total_labels") or 0),
-        "note": "paper/shadow only — NOT real money",
-        "final_recommendation": "NO LIVE",
-    }
+def _v104_paper_monitor_cache_peek(state: Any | None) -> dict[str, Any]:
+    """V10.5.2 (Codex P1-1) — PURE cache peek for the polling path. Zero
+    database access: the only fresh values come from the in-memory
+    HealthState (paper PnL counter). Cold cache => STALE_OR_PENDING."""
+    payload = _v104_cache_peek("paper_monitor")
+    if payload.get("error"):
+        payload = {"data_status": "ERROR_STALE", "error": _V104_ERROR_UNAVAILABLE}
+    payload["paper_pnl_runtime"] = float(getattr(state, "daily_pnl", 0.0) or 0.0)
+    payload["paper_pnl_is_real_money"] = False
+    payload["note"] = "paper/shadow only — NOT real money"
+    payload["final_recommendation"] = "NO LIVE"
+    return payload
+
+
+# V10.5.2 (Codex P1-1): the old _v104_paper_monitor() helper performed
+# synchronous DB reads (get_signal_label_summary_since /
+# get_open_paper_positions_summary) and was removed from the v104 HTTP
+# surface entirely. Paper-monitor data now flows snapshot-only.
 
 
 def _v104_signal_monitor(config: Any | None, db: Any | None, training_pulse: Any | None) -> dict[str, Any]:
@@ -3708,29 +3716,15 @@ def _v104_overview(config: Any | None, db: Any | None, state: Any | None,
     }
 
 
-def _v105_learning_heavy(db: Any | None) -> dict[str, Any]:
-    """V10.5.1 (Codex P1-1) — HEAVY: whitelisted COUNT(*) reads. ONLY served
-    by the on-demand /learning endpoint (single concurrent build, TTL 300s).
-    NEVER called from the dashboard-state polling path."""
-    def build() -> dict[str, Any]:
-        from .labs.runtime_audit_v10_4_3 import count_db_tables
-
-        counts = count_db_tables(db)
-        obs = counts.get("signal_observations")
-        path = counts.get("signal_path_metrics")
-        active = isinstance(obs, int) and obs > 0 and isinstance(path, int) and path > 0
-        return {
-            "observations": counts.get("signal_observations", "unknown"),
-            "labels": counts.get("signal_labels", "unknown"),
-            "path_metrics": counts.get("signal_path_metrics", "unknown"),
-            "virtual_research_trades": counts.get("virtual_research_trades", "unknown"),
-            "learning_status": ("LEARNING_INFRA_ACTIVE" if active
-                                else "LEARNING_DATA_NOT_VISIBLE"),
-            "edge_status": "NO_EDGE_DEMONSTRATED",
-            "final_recommendation": "NO LIVE",
-        }
-
-    return _v104_cached_heavy("learning_counts", _V104_TTL_DATA_READINESS, build)
+def _v105_learning_snapshot() -> dict[str, Any]:
+    """V10.5.2 (Codex P1-2) — snapshot-only /learning endpoint, consistent
+    with the V10.4.2 design: NO computation inside HTTP, no database access.
+    Learning counts are produced by the CLI; this endpoint only serves the
+    cached snapshot or an honest STALE_OR_PENDING with the recommended CLI."""
+    return _v104_heavy_snapshot(
+        "learning_counts",
+        "python -m app.research_lab learning-edge-diagnostic-v104",
+    )
 
 
 def _v105_learning_status_cache_peek() -> dict[str, Any]:
@@ -3799,7 +3793,7 @@ def _v104_dashboard_state(config: Any | None, db: Any | None, state: Any | None,
         "provider_verification_v105": _v105_provider_verification_light(),
         "candidates": candidates_peek,
         "net_edge": net_edge_peek,
-        "paper_monitor": _v104_paper_monitor(config, db, state),
+        "paper_monitor": _v104_paper_monitor_cache_peek(state),
         "signal_monitor": signal_monitor,
         "edge_focus": _v104_edge_focus(candidates_peek, data_peek),
         "learning": _v105_learning_status_cache_peek(),
@@ -3851,11 +3845,17 @@ def _v104_api(path: str, config: Any | None, db: Any | None, state: Any | None,
         if kind == "net-edge":
             return _v104_net_edge(config, db), 200
         if kind == "paper-monitor":
-            return _v104_paper_monitor(config, db, state), 200
+            # V10.5.2 — snapshot-only: no DB reads inside HTTP, ever.
+            payload = _v104_heavy_snapshot(
+                "paper_monitor", "python -m app.research_lab daily-summary")
+            payload["paper_pnl_runtime"] = float(getattr(state, "daily_pnl", 0.0) or 0.0)
+            payload["paper_pnl_is_real_money"] = False
+            return payload, 200
         if kind == "signal-monitor":
             return _v104_signal_monitor(config, db, training_pulse), 200
         if kind == "learning":
-            return _v105_learning_heavy(db), 200  # on-demand only, never polling
+            # V10.5.2 — snapshot-only; never computed in HTTP, never polled.
+            return _v105_learning_snapshot(), 200
         if kind == "dashboard-state":
             return _v104_dashboard_state(config, db, state, training_pulse), 200
     except Exception as exc:
