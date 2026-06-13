@@ -136,10 +136,29 @@ def derive_pipeline_stages(
                 return int(f)
         return 0
 
-    # V10.5.2 (Codex P2-2) — explicit positive evidence, not generic "OK":
-    # a fresh snapshot AND a real validated-candidate count above zero.
-    cand_count = _count(cd, "validated_top_candidates_count", "candidate_count",
-                        "top_candidates", "top_candidates_count")
+    # V10.5.3 (Codex) — explicit positive evidence means a VALIDATED
+    # candidate: either a validated count (already revalidated upstream) or
+    # at least one top_candidates row that survives the conservative
+    # revalidation gates (no REJECT, net_EV>0, net_PF>=1.0, samples>=150,
+    # TIME<80%, no disqualifying reason). A generic candidate_count or a
+    # row list with rejected/negative candidates is NOT evidence.
+    cand_count = _count(cd, "validated_top_candidates_count",
+                        "valid_candidates_count")
+    if cand_count <= 0:
+        top_rows = [r for r in (cd.get("top_candidates") or [])
+                    if isinstance(r, dict)]
+        if top_rows:
+            try:
+                from .runtime_audit_v10_4_3 import revalidate_top_candidates
+
+                validated_rows, _failures = revalidate_top_candidates(top_rows)
+                cand_count = len(validated_rows)
+            except Exception:
+                cand_count = 0  # fail-closed: cannot revalidate => no evidence
+    has_unvalidated_claim = (cand_count <= 0
+                             and _count(cd, "candidate_count",
+                                        "top_candidates_count",
+                                        "top_candidates") > 0)
     ne_status = str(ne.get("status") or ne.get("data_status") or "")
     ne_fresh = ne_status not in ("", "STALE", "STALE_OR_PENDING", "ERROR_STALE")
     ne_top = list(ne.get("top_candidates") or [])
@@ -173,6 +192,9 @@ def derive_pipeline_stages(
     elif cand_status == "OK" and cand_count > 0:
         guard = stage("EDGE GUARD", "PASS",
                       f"{cand_count} validated candidate(s) in fresh snapshot")
+    elif cand_status == "OK" and has_unvalidated_claim:
+        guard = stage("EDGE GUARD", "BLOCKED",
+                      "candidates present but none survives revalidation")
     elif cand_status == "OK":
         guard = stage("EDGE GUARD", "STALE",
                       "status OK but zero validated candidates — not evidence")
@@ -701,11 +723,19 @@ function applyState(s) {{
   txt("mb-pos", sf.open_positions || 0);
   txt("mb-worker", String(sf.worker_lock || "unknown").toUpperCase());
   var cdStatus = String(cd.status || cd.data_status || "");
-  // V10.5.2 — CANDIDATE PENDING only when the SERVER pipeline reports an
-  // EDGE GUARD PASS backed by real validated candidates (never generic OK).
+  // V10.5.3 — CANDIDATE PENDING requires BOTH server stages to PASS:
+  // EDGE GUARD (validated candidate) AND NET EV (positive net edge).
+  // Guard PASS alone shows EDGE REVIEW, never a pending candidate.
   var plStages = s.pipeline || [];
   var guardStage = plStages[2] || {{}};
-  txt("mb-edge", guardStage.state === "PASS" ? "CANDIDATE PENDING" : "NOT DEMONSTRATED");
+  var netevStage = plStages[3] || {{}};
+  var edgeChip = "NOT DEMONSTRATED";
+  if (guardStage.state === "PASS" && netevStage.state === "PASS") {{
+    edgeChip = "CANDIDATE PENDING";
+  }} else if (guardStage.state === "PASS") {{
+    edgeChip = "EDGE REVIEW";
+  }}
+  txt("mb-edge", edgeChip);
   var drStatus = String(dr.backtester_readiness || dr.data_status || "");
   txt("mb-data", drStatus === "READY" ? "READY" : "NEEDS 180/365D");
   txt("mb-final", s.final_recommendation || "NO LIVE");

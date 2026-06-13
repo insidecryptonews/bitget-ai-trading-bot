@@ -68,6 +68,47 @@ REQUIRED_DATA_TYPES_MIN = frozenset({"ohlcv", "open_interest", "funding",
                                      "liquidations"})
 _SYMBOL_RE = _re.compile(r"^[A-Z0-9]{2,15}USDT$")
 
+# V10.5.3 (Codex) — provider/manifest vocabulary normalization. A vocabulary
+# mismatch must never let incomplete data through: known aliases normalize to
+# the canonical name, unknown names block.
+DATA_TYPE_ALIASES = {
+    "ohlcv": "ohlcv", "ohlcv_candles": "ohlcv", "candles": "ohlcv",
+    "open_interest": "open_interest", "oi": "open_interest",
+    "funding": "funding", "funding_rates": "funding",
+    "liquidations": "liquidations",
+    "mark_price": "mark_price", "index_price": "index_price",
+    "trades": "trades", "orderbook": "orderbook",
+}
+
+# V10.5.3 — only ONE import status may promote; everything else blocks.
+IMPORT_STATUS_READY = "STAGED_READY_FOR_PROMOTE"
+
+# V10.5.3 — OI statuses compatible with a promotable dataset. Clustered/high/
+# unknown-family statuses block promote (OI buckets were already blocked, but
+# a dataset that DECLARES open_interest as a data type cannot promote with a
+# broken/unaudited OI series).
+PROMOTABLE_OI_STATUSES = frozenset({"DATA_OK", "MISSING_OI_LOW",
+                                    "MISSING_OI_MODERATE"})
+
+# V10.5.3 — checksum filenames must be tied to the required data types.
+# Each required type needs at least one checksum whose filename mentions it.
+CHECKSUM_KEYWORDS = {
+    "ohlcv": ("ohlcv", "candles", "market_state"),
+    "open_interest": ("open_interest", "oi", "market_state"),
+    "funding": ("funding", "market_state"),
+    "liquidations": ("liquidation",),
+}
+
+
+def normalize_data_type(name: Any) -> str | None:
+    """Canonical data-type name, or None for unknown/garbage. Never raises."""
+    try:
+        if not isinstance(name, str):
+            return None
+        return DATA_TYPE_ALIASES.get(name.strip().lower())
+    except Exception:
+        return None
+
 # Data-readiness statuses.
 READY_NEED_VERIFIED_PROVIDER = "NEED_VERIFIED_PROVIDER"
 READY_NEED_LONG_HISTORY = "NEED_LONG_HISTORY"
@@ -255,35 +296,45 @@ def _semantic_blockers(m: dict[str, Any]) -> list[str]:
     elif not all(isinstance(t, str) and t in ALLOWED_TIMEFRAMES for t in timeframes):
         bad.append("invalid_field:timeframes_not_allowed")
 
+    # V10.5.3 — data types are NORMALIZED through the alias map before any
+    # validation; unknown vocabulary blocks instead of slipping through.
     data_types = m.get("data_types")
+    normalized_types: set[str] = set()
     if not _valid_non_empty_list(data_types):
         bad.append("invalid_field:data_types")
     else:
-        if not all(isinstance(d, str) and d in ALLOWED_DATA_TYPES for d in data_types):
-            bad.append("invalid_field:data_types_not_allowed")
-        missing_required = REQUIRED_DATA_TYPES_MIN - set(
-            d for d in data_types if isinstance(d, str))
-        if missing_required:
-            bad.append("invalid_field:data_types_missing_required:"
-                       + ",".join(sorted(missing_required)))
+        for d in data_types:
+            canonical = normalize_data_type(d)
+            if canonical is None:
+                bad.append("invalid_field:data_types_not_allowed")
+                break
+            normalized_types.add(canonical)
+        else:
+            missing_required = REQUIRED_DATA_TYPES_MIN - normalized_types
+            if missing_required:
+                bad.append("invalid_field:data_types_missing_required:"
+                           + ",".join(sorted(missing_required)))
 
-    # V10.5.2 — rows_by_type must be semantically meaningful: known keys,
-    # non-negative ints, and >0 rows for every mandatory data type.
+    # V10.5.2 — rows_by_type must be semantically meaningful: known keys
+    # (aliases normalized), non-negative ints, >0 for every mandatory type.
     rows = m.get("rows_by_type")
     if not isinstance(rows, dict) or not rows:
         bad.append("invalid_field:rows_by_type")
     else:
+        normalized_rows: dict[str, int] = {}
         for key, val in rows.items():
-            if not isinstance(key, str) or key not in ALLOWED_DATA_TYPES:
+            canonical = normalize_data_type(key)
+            if canonical is None:
                 bad.append(f"invalid_field:rows_by_type_unknown_key:{key}")
                 break
-            if _to_non_negative_int(val) is None:
+            count = _to_non_negative_int(val)
+            if count is None:
                 bad.append(f"invalid_field:rows_by_type.{key}")
                 break
+            normalized_rows[canonical] = normalized_rows.get(canonical, 0) + count
         else:
             for required in sorted(REQUIRED_DATA_TYPES_MIN):
-                count = _to_non_negative_int(rows.get(required))
-                if count is None or count <= 0:
+                if normalized_rows.get(required, 0) <= 0:
                     bad.append(f"invalid_field:rows_by_type_required_zero:{required}")
 
     for name in ("coverage_ratio", "missing_oi_ratio",
@@ -295,9 +346,14 @@ def _semantic_blockers(m: dict[str, Any]) -> list[str]:
             bad.append(f"invalid_field:{name}")
 
     oi_status = m.get("missing_oi_status")
-    if not (_valid_non_empty_str(oi_status)
-            and str(oi_status).upper() in ALLOWED_OI_STATUSES):
+    oi_status_up = str(oi_status).upper() if _valid_non_empty_str(oi_status) else ""
+    if oi_status_up not in ALLOWED_OI_STATUSES:
         bad.append("invalid_field:missing_oi_status")
+    # V10.5.3 — a dataset that declares open_interest cannot promote with a
+    # clustered/high/unaudited OI series: only explicitly audited low/moderate
+    # statuses are promotable.
+    elif oi_status_up not in PROMOTABLE_OI_STATUSES:
+        bad.append(f"oi_status_not_promotable:{oi_status_up}")
 
     if not (_valid_non_empty_str(m.get("timezone"))
             and str(m.get("timezone")).strip().upper() == "UTC"):
@@ -306,34 +362,65 @@ def _semantic_blockers(m: dict[str, Any]) -> list[str]:
         bad.append("invalid_field:timestamp_unit")
     if str(m.get("schema_version") or "") != SCHEMA_VERSION:
         bad.append("invalid_field:schema_version")
-    if str(m.get("import_status") or "") not in ALLOWED_IMPORT_STATUSES:
+    import_status = str(m.get("import_status") or "")
+    if import_status not in ALLOWED_IMPORT_STATUSES:
         bad.append("invalid_field:import_status")
+    # V10.5.3 (Codex B4) — only the explicit ready state may promote;
+    # BLOCKED/STAGED/VALIDATING/anything else blocks.
+    elif import_status != IMPORT_STATUS_READY:
+        bad.append("import_status_not_ready")
     if not _valid_date_or_ts(m.get("generated_at")):
         bad.append("invalid_field:generated_at")
 
+    # V10.5.3 (Codex B5) — checksums must be tied to the required data types:
+    # every mandatory type needs at least one valid SHA-256 whose filename
+    # mentions it. An unrelated.txt checksum can never satisfy the inventory.
     checksums = m.get("checksums_sha256")
     if not isinstance(checksums, dict) or not checksums:
         bad.append("invalid_field:checksums_sha256")
     else:
+        valid_names: list[str] = []
         for fname, digest in checksums.items():
             if not _valid_non_empty_str(fname) or not _valid_sha256(digest):
                 bad.append("invalid_field:checksums_sha256_not_sha256_hex")
                 break
+            valid_names.append(fname.lower())
+        else:
+            for required, keywords in CHECKSUM_KEYWORDS.items():
+                if not any(any(k in name for k in keywords) for name in valid_names):
+                    bad.append(f"checksum_missing_for_required_type:{required}")
 
     # V10.5.2 self-audit — CROSS-FIELD consistency (contradictory manifests
     # are hostile manifests). Only checked when the individual fields parsed.
     clean = _to_finite_float(m.get("clean_days"))
     covered = m.get("actual_covered_range")
-    if clean is not None and isinstance(covered, dict):
+    actual_span_days: float | None = None
+    if isinstance(covered, dict):
         start = _parse_datetime(covered.get("start"))
         end = _parse_datetime(covered.get("end"))
         if start is not None and end is not None and end > start:
-            span_days = (end - start).total_seconds() / 86400.0
-            if clean > span_days + 1.0:  # physically impossible claim
-                bad.append("inconsistent_field:clean_days_exceeds_covered_range")
+            actual_span_days = (end - start).total_seconds() / 86400.0
+    if clean is not None and actual_span_days is not None:
+        if clean > actual_span_days + 1.0:  # physically impossible claim
+            bad.append("inconsistent_field:clean_days_exceeds_covered_range")
+
+    # V10.5.3 (Codex B2) — the ACTUAL covered window must cover the REQUESTED
+    # window (±1 day tolerance). A high coverage_ratio over 10 real days can
+    # never satisfy a 365-day request.
+    requested = m.get("requested_range")
+    requested_span_days: float | None = None
+    if isinstance(requested, dict):
+        r_start = _parse_datetime(requested.get("start"))
+        r_end = _parse_datetime(requested.get("end"))
+        if r_start is not None and r_end is not None and r_end > r_start:
+            requested_span_days = (r_end - r_start).total_seconds() / 86400.0
+    if requested_span_days is not None and actual_span_days is not None:
+        if actual_span_days < requested_span_days - 1.0:
+            bad.append("inconsistent_field:actual_range_shorter_than_requested")
+
     oi_ratio = _valid_ratio(m.get("missing_oi_ratio"))
-    oi_status = str(m.get("missing_oi_status") or "").upper()
-    if oi_ratio is not None and oi_status == "DATA_OK" and oi_ratio > 0.10:
+    oi_status_cf = str(m.get("missing_oi_status") or "").upper()
+    if oi_ratio is not None and oi_status_cf == "DATA_OK" and oi_ratio > 0.10:
         bad.append("inconsistent_field:oi_status_data_ok_with_high_missing_ratio")
     return bad
 
@@ -371,7 +458,8 @@ def evaluate_manifest_v105(manifest: dict[str, Any] | None) -> ManifestV105Evalu
         if missing:
             return _fail_closed(ev, ST_INVALID_V105,
                                 ["invalid_or_missing_manifest_v105_fields"])
-        ev.valid_manifest_v105 = True
+        # V10.5.3 (Codex B6) — valid_manifest_v105 stays False until EVERY
+        # gate (semantic, V10.4 chain and series completeness) has passed.
 
         # 2) Semantic validation BEFORE any downstream gate (fail-closed).
         semantic = _semantic_blockers(m)
@@ -402,9 +490,10 @@ def evaluate_manifest_v105(manifest: dict[str, Any] | None) -> ManifestV105Evalu
 
         ev.status = ST_PROMOTE_ALLOWED
         ev.blockers = []
+        ev.valid_manifest_v105 = True  # only here: every gate passed
         ev.promote_allowed = True
         ev.do_not_replace_raw = False
-        ev.import_status = "STAGED_READY_FOR_PROMOTE"
+        ev.import_status = IMPORT_STATUS_READY
         return ev
     except Exception:
         # Absolute fail-closed backstop: any unexpected error blocks.

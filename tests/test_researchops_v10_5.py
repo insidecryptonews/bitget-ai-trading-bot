@@ -107,7 +107,13 @@ def _manifest_v105(**over):
         "missing_oi_ratio": 0.02, "missing_oi_status": "DATA_OK",
         "gap_count": 0, "duplicate_count": 0,
         "coverage_ratio": 0.97, "clean_days": 365.0,
-        "checksums_sha256": {"perp_market_state.csv": "ab" * 32},
+        # V10.5.3 — checksums must cover every required data type.
+        "checksums_sha256": {
+            "BTCUSDT_1h_ohlcv.csv": "ab" * 32,
+            "BTCUSDT_open_interest.csv": "cd" * 32,
+            "BTCUSDT_funding.csv": "ef" * 32,
+            "BTCUSDT_liquidations.csv": "12" * 32,
+        },
         "explicit_human_authorization": True,
         "paid_download_authorized": True,
         "license_terms_confirmed": True,
@@ -116,7 +122,9 @@ def _manifest_v105(**over):
         "missing_liquidations_ratio": 0.02,
         "timezone": "UTC", "timestamp_unit": "unix_ms",
         "generated_at": "2026-06-11T00:00:00Z",
-        "schema_version": SCHEMA_VERSION, "import_status": "STAGED",
+        "schema_version": SCHEMA_VERSION,
+        # V10.5.3 — only the explicit ready state may promote.
+        "import_status": "STAGED_READY_FOR_PROMOTE",
     })
     man.update(over)
     return man
@@ -965,6 +973,258 @@ def test_v1052_learning_endpoint_no_nameerror(v1052_server):
 def test_v1052_learning_not_called_by_automatic_js():
     html = _html()
     assert "/api/researchops/v104/learning" not in html  # not in any JS loop
+
+
+# ===========================================================================
+# V10.5.3 (Codex hotfix) — data semantics closure + truthful edge pipeline
+# ===========================================================================
+
+from app.labs.data_foundation_v10_5 import (  # noqa: E402
+    IMPORT_STATUS_READY,
+    normalize_data_type,
+)
+
+_TEN_DAYS = {"start": "2026-06-01T00:00:00Z", "end": "2026-06-11T00:00:00Z"}
+_ONE_MONTH = {"start": "2026-05-11T00:00:00Z", "end": "2026-06-11T00:00:00Z"}
+
+
+# --- TAREA 2: requested vs actual range coherence ---------------------------
+
+def test_v1053_requested_365_actual_10_days_blocks():
+    ev = evaluate_manifest_v105(_manifest_v105(
+        actual_covered_range=dict(_TEN_DAYS), clean_days=10.0))
+    assert ev.promote_allowed is False
+    assert "inconsistent_field:actual_range_shorter_than_requested" in ev.blockers
+
+
+def test_v1053_requested_180_actual_179_blocks():
+    ev = evaluate_manifest_v105(_manifest_v105(
+        requested_range={"start": "2025-12-13T00:00:00Z", "end": "2026-06-11T00:00:00Z"},
+        actual_covered_range={"start": "2025-12-15T00:00:00Z", "end": "2026-06-11T00:00:00Z"},
+        clean_days=178.0))
+    assert ev.promote_allowed is False
+    assert "inconsistent_field:actual_range_shorter_than_requested" in ev.blockers
+
+
+def test_v1053_full_coverage_ratio_cannot_mask_short_range():
+    ev = evaluate_manifest_v105(_manifest_v105(
+        actual_covered_range=dict(_TEN_DAYS), clean_days=10.0, coverage_ratio=1.0))
+    assert ev.promote_allowed is False
+
+
+def test_v1053_matching_ranges_with_coherent_clean_days_pass():
+    ev = evaluate_manifest_v105(_manifest_v105())  # 365d requested == actual
+    assert ev.status == ST_PROMOTE_ALLOWED
+    assert ev.promote_allowed is True
+
+
+def test_v1053_clean_days_inflated_vs_range_blocks():
+    ev = evaluate_manifest_v105(_manifest_v105(
+        requested_range=dict(_ONE_MONTH), actual_covered_range=dict(_ONE_MONTH),
+        clean_days=365.0))
+    assert ev.promote_allowed is False
+    assert "inconsistent_field:clean_days_exceeds_covered_range" in ev.blockers
+
+
+# --- TAREA 3: OI status / ratio coherence ------------------------------------
+
+def test_v1053_oi_data_ok_with_high_ratio_blocks():
+    ev = evaluate_manifest_v105(_manifest_v105(missing_oi_ratio=0.25))
+    assert ev.promote_allowed is False
+
+
+def test_v1053_oi_data_ok_with_nan_ratio_blocks():
+    ev = evaluate_manifest_v105(_manifest_v105(missing_oi_ratio=float("nan")))
+    assert ev.promote_allowed is False
+
+
+def test_v1053_oi_data_ok_with_low_ratio_passes():
+    for ratio in (0.0, 0.01):
+        ev = evaluate_manifest_v105(_manifest_v105(missing_oi_ratio=ratio))
+        assert ev.promote_allowed is True, ratio
+
+
+def test_v1053_oi_clustered_blocks_even_with_low_ratio():
+    ev = evaluate_manifest_v105(_manifest_v105(
+        missing_oi_status="MISSING_OI_CLUSTERED", missing_oi_ratio=0.01))
+    assert ev.promote_allowed is False
+    assert any("oi_status_not_promotable" in b for b in ev.blockers)
+
+
+def test_v1053_oi_unknown_family_statuses_block():
+    for status in ("NEED_MORE_DATA", "UNKNOWN", "NO_AUDIT", "MISSING_OI_HIGH"):
+        ev = evaluate_manifest_v105(_manifest_v105(missing_oi_status=status))
+        assert ev.promote_allowed is False, status
+
+
+# --- TAREA 4: import_status ready-only ---------------------------------------
+
+def test_v1053_import_status_only_ready_state_promotes():
+    for blocked in ("BLOCKED", "STAGED", "VALIDATING"):
+        ev = evaluate_manifest_v105(_manifest_v105(import_status=blocked))
+        assert ev.promote_allowed is False, blocked
+        assert "import_status_not_ready" in ev.blockers, blocked
+    ev_unknown = evaluate_manifest_v105(_manifest_v105(import_status="WHATEVER"))
+    assert ev_unknown.promote_allowed is False
+    assert "invalid_field:import_status" in ev_unknown.blockers
+    ev_ok = evaluate_manifest_v105(_manifest_v105(import_status=IMPORT_STATUS_READY))
+    assert ev_ok.promote_allowed is True
+
+
+# --- TAREA 5: checksums tied to required data types ---------------------------
+
+def test_v1053_unrelated_checksum_alone_blocks():
+    ev = evaluate_manifest_v105(_manifest_v105(
+        checksums_sha256={"unrelated.txt": "ab" * 32}))
+    assert ev.promote_allowed is False
+    assert any("checksum_missing_for_required_type" in b for b in ev.blockers)
+
+
+def test_v1053_each_required_type_needs_a_checksum():
+    base = {
+        "BTCUSDT_1h_ohlcv.csv": "ab" * 32,
+        "BTCUSDT_open_interest.csv": "cd" * 32,
+        "BTCUSDT_funding.csv": "ef" * 32,
+        "BTCUSDT_liquidations.csv": "12" * 32,
+    }
+    removable = {
+        "ohlcv": "BTCUSDT_1h_ohlcv.csv",
+        "open_interest": "BTCUSDT_open_interest.csv",
+        "funding": "BTCUSDT_funding.csv",
+        "liquidations": "BTCUSDT_liquidations.csv",
+    }
+    for dtype, fname in removable.items():
+        partial = {k: v for k, v in base.items() if k != fname}
+        ev = evaluate_manifest_v105(_manifest_v105(checksums_sha256=partial))
+        assert ev.promote_allowed is False, dtype
+        assert any(f"checksum_missing_for_required_type:{dtype}" in b
+                   for b in ev.blockers), dtype
+    ev_ok = evaluate_manifest_v105(_manifest_v105(checksums_sha256=dict(base)))
+    assert ev_ok.promote_allowed is True
+
+
+# --- TAREA 6: valid_manifest_v105 only at the end -----------------------------
+
+def test_v1053_valid_flag_never_true_with_any_blocker():
+    bad_cases = [
+        _manifest_v105(import_status="BLOCKED"),
+        _manifest_v105(checksums_sha256={"unrelated.txt": "ab" * 32}),
+        _manifest_v105(missing_oi_status="MISSING_OI_CLUSTERED"),
+        _manifest_v105(actual_covered_range=dict(_TEN_DAYS), clean_days=10.0),
+        _manifest_v105(coverage_ratio=0.5),
+        _manifest_v105(explicit_human_authorization=None),
+        _manifest_v105(generated_at="2026-99-99garbage"),
+        {},
+    ]
+    for case in bad_cases:
+        ev = evaluate_manifest_v105(case)
+        assert ev.promote_allowed is False
+        assert ev.valid_manifest_v105 is False, ev.blockers
+    ev_ok = evaluate_manifest_v105(_manifest_v105())
+    assert ev_ok.valid_manifest_v105 is True
+
+
+# --- TAREA 7: vocabulary normalization ----------------------------------------
+
+def test_v1053_provider_aliases_normalize():
+    assert normalize_data_type("ohlcv_candles") == "ohlcv"
+    assert normalize_data_type("funding_rates") == "funding"
+    assert normalize_data_type("OHLCV") == "ohlcv"
+    assert normalize_data_type("banana") is None
+    assert normalize_data_type(None) is None
+
+
+def test_v1053_alias_manifest_promotes_with_canonical_semantics():
+    ev = evaluate_manifest_v105(_manifest_v105(
+        data_types=["ohlcv_candles", "open_interest", "funding_rates", "liquidations"],
+        rows_by_type={"ohlcv_candles": 8760, "open_interest": 8760,
+                      "funding_rates": 1095, "liquidations": 5000}))
+    assert ev.promote_allowed is True
+
+
+def test_v1053_unknown_vocabulary_blocks():
+    ev = evaluate_manifest_v105(_manifest_v105(
+        data_types=["ohlcv", "open_interest", "funding", "liquidations", "banana_feed"]))
+    assert ev.promote_allowed is False
+
+
+# --- TAREA 8: EdgeGuard PASS only with a truly validated candidate ------------
+
+_REJECTED_ROW = {"group_value": "X", "samples": 72, "net_EV": -0.16,
+                 "net_PF": 0.0, "time_ratio": 0.99, "decision": "REJECT",
+                 "reason": "sample_too_small"}
+_VALID_ROW = {"group_value": "Y", "samples": 300, "net_EV": 0.05,
+              "net_PF": 1.4, "time_ratio": 0.4,
+              "decision": "PAPER_CANDIDATE", "reason": "ok"}
+
+
+def _guard_for(rows=None, **cd_extra):
+    cd = {"status": "OK"}
+    if rows is not None:
+        cd["top_candidates"] = rows
+    cd.update(cd_extra)
+    stages = derive_pipeline_stages(
+        safety=_SAFE, candidates=cd, net_edge={"status": "OK"},
+        signal_monitor={"top_signals": ["s"], "top_blocks": []})
+    return next(s for s in stages if s["name"] == "EDGE GUARD")
+
+
+def test_v1053_guard_rejected_candidate_not_pass():
+    guard = _guard_for(rows=[_REJECTED_ROW], candidate_count=1)
+    assert guard["state"] == "BLOCKED"
+
+
+def test_v1053_guard_negative_ev_candidate_not_pass():
+    guard = _guard_for(rows=[dict(_VALID_ROW, net_EV=-0.1)], candidate_count=1)
+    assert guard["state"] != "PASS"
+
+
+def test_v1053_guard_low_pf_candidate_not_pass():
+    guard = _guard_for(rows=[dict(_VALID_ROW, net_PF=0.8)], candidate_count=1)
+    assert guard["state"] != "PASS"
+
+
+def test_v1053_guard_small_sample_candidate_not_pass():
+    guard = _guard_for(rows=[dict(_VALID_ROW, samples=40)], candidate_count=1)
+    assert guard["state"] != "PASS"
+
+
+def test_v1053_guard_high_time_death_candidate_not_pass():
+    guard = _guard_for(rows=[dict(_VALID_ROW, time_ratio=0.85)], candidate_count=1)
+    assert guard["state"] != "PASS"
+
+
+def test_v1053_guard_generic_count_without_rows_not_pass():
+    guard = _guard_for(rows=None, candidate_count=3)
+    assert guard["state"] != "PASS"
+
+
+def test_v1053_guard_validated_row_passes():
+    guard = _guard_for(rows=[_VALID_ROW])
+    assert guard["state"] == "PASS"
+
+
+# --- TAREA 9: CANDIDATE PENDING requires guard AND net-ev PASS -----------------
+
+def test_v1053_candidate_pending_requires_both_passes_in_js():
+    html = _html()
+    assert 'guardStage.state === "PASS" && netevStage.state === "PASS"' in html
+    assert "EDGE REVIEW" in html
+    # The old single-condition logic is gone.
+    assert 'guardStage.state === "PASS" ? "CANDIDATE PENDING"' not in html
+
+
+def test_v1053_guard_pass_netev_blocked_is_not_pending_serverside():
+    """Server stages for the chip: guard PASS + netev BLOCKED scenario."""
+    stages = derive_pipeline_stages(
+        safety=_SAFE,
+        candidates={"status": "OK", "top_candidates": [_VALID_ROW]},
+        net_edge={"status": "OK", "top_candidates": []},  # no positive net edge
+        signal_monitor={"top_signals": ["s"], "top_blocks": []})
+    guard = next(s for s in stages if s["name"] == "EDGE GUARD")
+    netev = next(s for s in stages if s["name"] == "NET EV")
+    assert guard["state"] == "PASS"
+    assert netev["state"] == "BLOCKED"  # JS therefore shows EDGE REVIEW
 
 
 def test_v1052_contract_call_graph_check_catches_db_reintroduction():
