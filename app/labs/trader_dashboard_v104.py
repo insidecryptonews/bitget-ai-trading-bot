@@ -97,6 +97,77 @@ def derive_worker_lock_view(raw_lock: Any) -> dict[str, Any]:
             "duplicate_worker": "UNKNOWN"}
 
 
+_MARKET_PROBE_FIELDS = ("source", "origin", "signal_type")
+_MIN_CANDIDATE_SAMPLES = 150
+_MIN_CANDIDATE_NET_PF = 1.0
+_MAX_CANDIDATE_TIME = 0.80
+
+
+def _pipeline_finite(value: Any) -> float | None:
+    """Finite float or None. Never raises (pure, defensive)."""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        return None
+    if f != f or f in (float("inf"), float("-inf")):
+        return None
+    return f
+
+
+def _is_market_probe(row: dict[str, Any]) -> bool:
+    for field_name in _MARKET_PROBE_FIELDS:
+        if str(row.get(field_name) or "").strip().lower() == "market_probe":
+            return True
+    return False
+
+
+def _alias_pair_ok(row: dict[str, Any], a: str, b: str) -> bool:
+    """If both aliases are present they must agree (finite, equal ±1e-12)."""
+    if a in row and b in row:
+        fa, fb = _pipeline_finite(row.get(a)), _pipeline_finite(row.get(b))
+        if fa is None or fb is None or abs(fa - fb) > 1e-12:
+            return False
+    return True
+
+
+def strict_validated_candidate(row: Any) -> dict[str, Any] | None:
+    """V10.5.4 (Codex A4/A5/A6) — return the row ONLY if it is a real,
+    fully-evidenced candidate; otherwise None. Never trusts declarative
+    counts. Pure, never raises."""
+    if not isinstance(row, dict):
+        return None
+    cid = str(row.get("candidate_id") or row.get("policy_id")
+              or row.get("group_value") or "").strip()
+    if not cid:
+        return None
+    if _is_market_probe(row):
+        return None
+    decision = str(row.get("decision") or "").upper()
+    if decision in ("REJECT", "BLOCK", "NO_VALID_CANDIDATE"):
+        return None
+    if not (_alias_pair_ok(row, "net_EV", "net_ev")
+            and _alias_pair_ok(row, "net_PF", "net_pf")):
+        return None
+    net_ev = _pipeline_finite(row.get("net_EV", row.get("net_ev")))
+    net_pf = _pipeline_finite(row.get("net_PF", row.get("net_pf")))
+    samples = _pipeline_finite(row.get("samples", row.get("sample_count")))
+    has_time = any(k in row for k in ("time_ratio", "TIME", "time_pct"))
+    time_ratio = _pipeline_finite(row.get("time_ratio",
+                                          row.get("TIME", row.get("time_pct"))))
+    if net_ev is None or net_ev <= 0:
+        return None
+    if net_pf is None or net_pf < _MIN_CANDIDATE_NET_PF:
+        return None
+    if samples is None or samples < _MIN_CANDIDATE_SAMPLES:
+        return None
+    if not has_time or time_ratio is None or time_ratio >= _MAX_CANDIDATE_TIME:
+        return None
+    return {"candidate_id": cid, "net_EV": net_ev, "net_PF": net_pf,
+            "samples": samples, "time_ratio": time_ratio}
+
+
 def derive_pipeline_stages(
     *,
     safety: dict[str, Any] | None,
@@ -104,9 +175,12 @@ def derive_pipeline_stages(
     net_edge: dict[str, Any] | None,
     signal_monitor: dict[str, Any] | None,
 ) -> list[dict[str, str]]:
-    """V10.5.1 (Codex P2-2) — pure pipeline derivation. PASS requires explicit
-    positive evidence in a fresh snapshot; stale/unknown/no-candidate states
-    can NEVER render PASS. Conservative by default."""
+    """V10.5.4 (Codex A4–A7) — pure pipeline derivation with NO declarative
+    promotion. Counts (candidate_count / validated_top_candidates_count /
+    status=OK) are metadata only and never produce PASS. EDGE GUARD PASS
+    requires a real top_candidates row that survives strict revalidation;
+    NET EV PASS requires a fresh net_edge row for the SAME candidate_id with
+    finite net_EV>0 and net_PF>=1.0. market_probe never qualifies."""
     sf = dict(safety or {})
     cd = dict(candidates or {})
     sg = dict(signal_monitor or {})
@@ -120,61 +194,35 @@ def derive_pipeline_stages(
     def stage(name: str, state: str, why: str) -> dict[str, str]:
         return {"name": name, "state": state, "why": why}
 
-    def _count(d: dict[str, Any], *names: str) -> int:
-        """Defensive non-negative count: missing/garbage => 0."""
-        for n in names:
-            value = d.get(n)
-            if isinstance(value, bool):
-                continue
-            if isinstance(value, (list, tuple)):
-                return len(value)
+    # Real validated candidate from a row (never from a count).
+    validated = None
+    raw_claim = False
+    for row in (cd.get("top_candidates") or []):
+        if isinstance(row, dict):
+            raw_claim = True
+            v = strict_validated_candidate(row)
+            if v is not None:
+                validated = v
+                break
+    # A declarative count with no revalidable row is an unvalidated claim.
+    if not raw_claim:
+        for key in ("candidate_count", "validated_top_candidates_count",
+                    "valid_candidates_count", "top_candidates_count"):
             try:
-                f = float(value)
+                if float(cd.get(key)) > 0:
+                    raw_claim = True
+                    break
             except (TypeError, ValueError):
                 continue
-            if f == f and f not in (float("inf"), float("-inf")) and f >= 0:
-                return int(f)
-        return 0
 
-    # V10.5.3 (Codex) — explicit positive evidence means a VALIDATED
-    # candidate: either a validated count (already revalidated upstream) or
-    # at least one top_candidates row that survives the conservative
-    # revalidation gates (no REJECT, net_EV>0, net_PF>=1.0, samples>=150,
-    # TIME<80%, no disqualifying reason). A generic candidate_count or a
-    # row list with rejected/negative candidates is NOT evidence.
-    cand_count = _count(cd, "validated_top_candidates_count",
-                        "valid_candidates_count")
-    if cand_count <= 0:
-        top_rows = [r for r in (cd.get("top_candidates") or [])
-                    if isinstance(r, dict)]
-        if top_rows:
-            try:
-                from .runtime_audit_v10_4_3 import revalidate_top_candidates
-
-                validated_rows, _failures = revalidate_top_candidates(top_rows)
-                cand_count = len(validated_rows)
-            except Exception:
-                cand_count = 0  # fail-closed: cannot revalidate => no evidence
-    has_unvalidated_claim = (cand_count <= 0
-                             and _count(cd, "candidate_count",
-                                        "top_candidates_count",
-                                        "top_candidates") > 0)
     ne_status = str(ne.get("status") or ne.get("data_status") or "")
     ne_fresh = ne_status not in ("", "STALE", "STALE_OR_PENDING", "ERROR_STALE")
-    ne_top = list(ne.get("top_candidates") or [])
 
-    def _net_edge_positive() -> bool:
-        """True only if a fresh top row shows net_EV > 0 and net_PF >= 1.0."""
-        for row in ne_top:
-            if not isinstance(row, dict):
-                continue
-            try:
-                net_ev = float(row.get("net_EV", row.get("net_ev")))
-                net_pf = float(row.get("net_PF", row.get("net_pf")))
-            except (TypeError, ValueError):
-                continue
-            if (net_ev == net_ev and net_pf == net_pf
-                    and net_ev > 0 and net_pf >= 1.0):
+    def _net_edge_pass_for(cid: str) -> bool:
+        """A fresh net_edge row for the SAME candidate_id, fully evidenced."""
+        for row in (ne.get("top_candidates") or []):
+            v = strict_validated_candidate(row)
+            if v is not None and v["candidate_id"] == cid:
                 return True
         return False
 
@@ -189,29 +237,30 @@ def derive_pipeline_stages(
         guard = stage("EDGE GUARD", "BLOCKED", "no valid candidates")
     elif not cand_fresh or signals == 0:
         guard = stage("EDGE GUARD", "STALE", "no fresh evidence; run CLI report")
-    elif cand_status == "OK" and cand_count > 0:
+    elif validated is not None:
         guard = stage("EDGE GUARD", "PASS",
-                      f"{cand_count} validated candidate(s) in fresh snapshot")
-    elif cand_status == "OK" and has_unvalidated_claim:
+                      f"validated candidate {validated['candidate_id']} in fresh snapshot")
+    elif raw_claim:
         guard = stage("EDGE GUARD", "BLOCKED",
-                      "candidates present but none survives revalidation")
-    elif cand_status == "OK":
+                      "candidate claim present but none survives revalidation")
+    else:
         guard = stage("EDGE GUARD", "STALE",
                       "status OK but zero validated candidates — not evidence")
-    else:
-        guard = stage("EDGE GUARD", "STALE", "evidence inconclusive")
 
+    edge_status = str(ne.get("edge_status") or "")
     if not cand_fresh:
         netev = stage("NET EV", "NEEDS_DATA", "no cached snapshot; run CLI")
         policy = stage("POLICY", "NEEDS_DATA", "awaiting candidate snapshot")
-    elif (guard["state"] == "PASS" and ne_fresh and ne_status == "OK"
-          and len(ne_top) > 0 and _net_edge_positive()):
+    elif (validated is not None and guard["state"] == "PASS"
+          and ne_fresh and ne_status == "OK"
+          and edge_status != "NO_EDGE_DEMONSTRATED"
+          and _net_edge_pass_for(validated["candidate_id"])):
         netev = stage("NET EV", "PASS",
-                      "net_EV > 0 and net_PF >= 1.0 in fresh top candidate")
+                      f"net_EV>0 & net_PF>=1.0 for candidate {validated['candidate_id']}")
         policy = stage("POLICY", "BLOCKED", "human gates pending")
     else:
         netev = stage("NET EV", "BLOCKED",
-                      "net_EV <= 0 after costs or no fresh net-edge evidence")
+                      "no fresh net-edge evidence for a validated candidate")
         policy = stage("POLICY", "BLOCKED", "no valid candidates")
 
     shadow = stage("SHADOW / PAPER", "BLOCKED", "paper filter disabled by design")

@@ -36,6 +36,8 @@ MANIFEST_V105_EXTRA_FIELDS = [
     "generated_at",
     "schema_version",
     "import_status",
+    # V10.5.4 (Codex A2) — structured file inventory is now mandatory.
+    "files",
 ]
 
 MANIFEST_V105_REQUIRED_FIELDS = list(MANIFEST_REQUIRED_FIELDS) + MANIFEST_V105_EXTRA_FIELDS
@@ -47,6 +49,7 @@ MAX_MISSING_LIQUIDATIONS_RATIO = 0.10
 ST_INVALID_V105 = "INVALID_MANIFEST_V105"
 ST_SEMANTIC_FAIL = "SEMANTIC_VALIDATION_FAIL"
 ST_SERIES_INCOMPLETE = "SERIES_COMPLETENESS_FAIL"
+ST_NEED_STRUCTURED_INVENTORY = "NEED_STRUCTURED_FILE_INVENTORY"
 
 # Whitelists (fail-closed: anything outside them is invalid).
 ALLOWED_TIMESTAMP_UNITS = frozenset({"unix_ms", "unix_s"})
@@ -83,21 +86,19 @@ DATA_TYPE_ALIASES = {
 # V10.5.3 — only ONE import status may promote; everything else blocks.
 IMPORT_STATUS_READY = "STAGED_READY_FOR_PROMOTE"
 
-# V10.5.3 — OI statuses compatible with a promotable dataset. Clustered/high/
-# unknown-family statuses block promote (OI buckets were already blocked, but
-# a dataset that DECLARES open_interest as a data type cannot promote with a
-# broken/unaudited OI series).
-PROMOTABLE_OI_STATUSES = frozenset({"DATA_OK", "MISSING_OI_LOW",
-                                    "MISSING_OI_MODERATE"})
+# V10.5.4 (Codex A3) — strict OI status/ratio MATRIX. Only DATA_OK with a low
+# finite ratio may promote. Any other status blocks, and any status/ratio
+# contradiction blocks — LOW/MODERATE/HIGH/CLUSTERED can never promote, not
+# even with a low ratio, and DATA_OK can never promote with a high ratio.
+PROMOTABLE_OI_STATUSES = frozenset({"DATA_OK"})
+MAX_OI_RATIO_FOR_DATA_OK = 0.02
 
-# V10.5.3 — checksum filenames must be tied to the required data types.
-# Each required type needs at least one checksum whose filename mentions it.
-CHECKSUM_KEYWORDS = {
-    "ohlcv": ("ohlcv", "candles", "market_state"),
-    "open_interest": ("open_interest", "oi", "market_state"),
-    "funding": ("funding", "market_state"),
-    "liquidations": ("liquidation",),
-}
+# V10.5.4 (Codex A2) — checksums are no longer matched by filename keyword.
+# Promotion requires a STRUCTURED file inventory (manifest["files"]); the
+# legacy checksums_sha256 dict is kept only as informative compatibility and
+# can never satisfy the inventory by itself.
+REQUIRED_INVENTORY_TYPES = frozenset({"ohlcv", "open_interest", "funding",
+                                      "liquidations"})
 
 
 def normalize_data_type(name: Any) -> str | None:
@@ -345,15 +346,22 @@ def _semantic_blockers(m: dict[str, Any]) -> list[str]:
         if _to_non_negative_int(m.get(name)) is None:
             bad.append(f"invalid_field:{name}")
 
+    # V10.5.4 (Codex A3) — strict OI status/ratio MATRIX. Only DATA_OK with a
+    # low finite ratio promotes; any other status blocks, and DATA_OK with a
+    # ratio above the ceiling is a contradiction that blocks.
     oi_status = m.get("missing_oi_status")
     oi_status_up = str(oi_status).upper() if _valid_non_empty_str(oi_status) else ""
+    oi_ratio_val = _valid_ratio(m.get("missing_oi_ratio"))
     if oi_status_up not in ALLOWED_OI_STATUSES:
         bad.append("invalid_field:missing_oi_status")
-    # V10.5.3 — a dataset that declares open_interest cannot promote with a
-    # clustered/high/unaudited OI series: only explicitly audited low/moderate
-    # statuses are promotable.
     elif oi_status_up not in PROMOTABLE_OI_STATUSES:
+        # LOW/MODERATE/HIGH/CLUSTERED/unknown-family: never promotable.
         bad.append(f"oi_status_not_promotable:{oi_status_up}")
+    elif oi_ratio_val is None:
+        bad.append("invalid_field:missing_oi_ratio")
+    elif oi_ratio_val > MAX_OI_RATIO_FOR_DATA_OK:
+        # DATA_OK contradicted by a high ratio.
+        bad.append("oi_status_ratio_conflict")
 
     if not (_valid_non_empty_str(m.get("timezone"))
             and str(m.get("timezone")).strip().upper() == "UTC"):
@@ -372,56 +380,92 @@ def _semantic_blockers(m: dict[str, Any]) -> list[str]:
     if not _valid_date_or_ts(m.get("generated_at")):
         bad.append("invalid_field:generated_at")
 
-    # V10.5.3 (Codex B5) — checksums must be tied to the required data types:
-    # every mandatory type needs at least one valid SHA-256 whose filename
-    # mentions it. An unrelated.txt checksum can never satisfy the inventory.
+    # V10.5.3 — the legacy checksums_sha256 dict must still be a dict of valid
+    # SHA-256 hex (informative compatibility), but it can NO LONGER satisfy
+    # promotion by itself (Codex A2).
     checksums = m.get("checksums_sha256")
     if not isinstance(checksums, dict) or not checksums:
         bad.append("invalid_field:checksums_sha256")
     else:
-        valid_names: list[str] = []
         for fname, digest in checksums.items():
             if not _valid_non_empty_str(fname) or not _valid_sha256(digest):
                 bad.append("invalid_field:checksums_sha256_not_sha256_hex")
                 break
-            valid_names.append(fname.lower())
-        else:
-            for required, keywords in CHECKSUM_KEYWORDS.items():
-                if not any(any(k in name for k in keywords) for name in valid_names):
-                    bad.append(f"checksum_missing_for_required_type:{required}")
 
-    # V10.5.2 self-audit — CROSS-FIELD consistency (contradictory manifests
-    # are hostile manifests). Only checked when the individual fields parsed.
+    # V10.5.4 (Codex A2) — STRUCTURED file inventory is mandatory. Each entry
+    # is {path, data_type, sha256, rows}; a file maps to exactly one canonical
+    # data type; every required type needs its OWN file with rows>0 and a
+    # valid SHA-256. One file can never cover multiple required types.
+    files = m.get("files")
+    if not _valid_non_empty_list(files):
+        bad.append("invalid_field:files_inventory_required")
+    else:
+        inventory_types: set[str] = set()
+        inventory_ok = True
+        for entry in files:
+            if not isinstance(entry, dict):
+                bad.append("invalid_field:files_entry_not_object")
+                inventory_ok = False
+                break
+            if not _valid_non_empty_str(entry.get("path")):
+                bad.append("invalid_field:files_entry_path")
+                inventory_ok = False
+                break
+            canonical = normalize_data_type(entry.get("data_type"))
+            if canonical is None:
+                bad.append("invalid_field:files_entry_data_type")
+                inventory_ok = False
+                break
+            if not _valid_sha256(entry.get("sha256")):
+                bad.append("invalid_field:files_entry_sha256")
+                inventory_ok = False
+                break
+            rows_entry = _to_non_negative_int(entry.get("rows"))
+            if rows_entry is None or rows_entry <= 0:
+                bad.append("invalid_field:files_entry_rows")
+                inventory_ok = False
+                break
+            inventory_types.add(canonical)
+        if inventory_ok:
+            for required in sorted(REQUIRED_INVENTORY_TYPES):
+                if required not in inventory_types:
+                    bad.append(f"inventory_missing_file_for_required_type:{required}")
+
+    # V10.5.4 (Codex A1) — range CONTAINMENT, not duration. The actual covered
+    # window must truly contain the requested window: actual.start <=
+    # requested.start AND actual.end >= requested.end. A separated range with
+    # the same duration, a 179/180 shortfall, or a high coverage_ratio over a
+    # short/separated range all block. No tolerance.
     clean = _to_finite_float(m.get("clean_days"))
     covered = m.get("actual_covered_range")
+    a_start = a_end = None
     actual_span_days: float | None = None
     if isinstance(covered, dict):
-        start = _parse_datetime(covered.get("start"))
-        end = _parse_datetime(covered.get("end"))
-        if start is not None and end is not None and end > start:
-            actual_span_days = (end - start).total_seconds() / 86400.0
-    if clean is not None and actual_span_days is not None:
-        if clean > actual_span_days + 1.0:  # physically impossible claim
-            bad.append("inconsistent_field:clean_days_exceeds_covered_range")
+        a_start = _parse_datetime(covered.get("start"))
+        a_end = _parse_datetime(covered.get("end"))
+        if a_start is not None and a_end is not None and a_end > a_start:
+            actual_span_days = (a_end - a_start).total_seconds() / 86400.0
 
-    # V10.5.3 (Codex B2) — the ACTUAL covered window must cover the REQUESTED
-    # window (±1 day tolerance). A high coverage_ratio over 10 real days can
-    # never satisfy a 365-day request.
     requested = m.get("requested_range")
-    requested_span_days: float | None = None
+    r_start = r_end = None
     if isinstance(requested, dict):
         r_start = _parse_datetime(requested.get("start"))
         r_end = _parse_datetime(requested.get("end"))
-        if r_start is not None and r_end is not None and r_end > r_start:
-            requested_span_days = (r_end - r_start).total_seconds() / 86400.0
-    if requested_span_days is not None and actual_span_days is not None:
-        if actual_span_days < requested_span_days - 1.0:
+
+    if None not in (a_start, a_end, r_start, r_end) and actual_span_days is not None:
+        # Containment: actual must start no later and end no earlier than
+        # requested (exact coverage of the requested window).
+        if a_start > r_start or a_end < r_end:
+            bad.append("inconsistent_field:actual_range_does_not_cover_requested")
+        requested_span_days = (r_end - r_start).total_seconds() / 86400.0
+        if actual_span_days < requested_span_days:  # no tolerance (179<180 blocks)
             bad.append("inconsistent_field:actual_range_shorter_than_requested")
 
-    oi_ratio = _valid_ratio(m.get("missing_oi_ratio"))
-    oi_status_cf = str(m.get("missing_oi_status") or "").upper()
-    if oi_ratio is not None and oi_status_cf == "DATA_OK" and oi_ratio > 0.10:
-        bad.append("inconsistent_field:oi_status_data_ok_with_high_missing_ratio")
+    # clean_days can never exceed the real covered span (physically impossible).
+    if clean is not None and actual_span_days is not None:
+        if clean > actual_span_days + 1.0:
+            bad.append("inconsistent_field:clean_days_exceeds_covered_range")
+
     return bad
 
 

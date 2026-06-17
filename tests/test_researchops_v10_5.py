@@ -125,6 +125,17 @@ def _manifest_v105(**over):
         "schema_version": SCHEMA_VERSION,
         # V10.5.3 — only the explicit ready state may promote.
         "import_status": "STAGED_READY_FOR_PROMOTE",
+        # V10.5.4 — structured file inventory (one file per required type).
+        "files": [
+            {"path": "BTCUSDT_1h_ohlcv.parquet", "data_type": "ohlcv",
+             "sha256": "ab" * 32, "rows": 8760},
+            {"path": "BTCUSDT_open_interest.parquet", "data_type": "open_interest",
+             "sha256": "cd" * 32, "rows": 8760},
+            {"path": "BTCUSDT_funding.parquet", "data_type": "funding",
+             "sha256": "ef" * 32, "rows": 1095},
+            {"path": "BTCUSDT_liquidations.parquet", "data_type": "liquidations",
+             "sha256": "12" * 32, "rows": 5000},
+        ],
     })
     man.update(over)
     return man
@@ -519,13 +530,14 @@ def test_v1051_pipeline_no_signals_guard_not_pass():
 
 
 def test_v1051_pipeline_pass_only_with_explicit_fresh_evidence():
-    """V10.5.2 tightened: PASS needs validated count > 0 AND a positive fresh
-    net-edge row — a generic status=OK is no longer evidence."""
+    """V10.5.4 tightened: PASS needs a REAL revalidated row in BOTH candidates
+    and net_edge sharing the same candidate_id — a count is never evidence."""
+    row = {"candidate_id": "c1", "net_EV": 0.05, "net_PF": 1.4,
+           "samples": 300, "time_ratio": 0.4, "decision": "PAPER_CANDIDATE"}
     stages = derive_pipeline_stages(
         safety=_SAFE,
-        candidates={"status": "OK", "validated_top_candidates_count": 1},
-        net_edge={"status": "OK",
-                  "top_candidates": [{"net_EV": 0.05, "net_PF": 1.4}]},
+        candidates={"status": "OK", "top_candidates": [row]},
+        net_edge={"status": "OK", "top_candidates": [row]},
         signal_monitor={"top_signals": ["s"], "top_blocks": []})
     guard = next(s for s in stages if s["name"] == "EDGE GUARD")
     assert guard["state"] == "PASS"
@@ -771,12 +783,11 @@ def test_v1052_cross_field_clean_days_exceeding_covered_range_blocks():
 
 
 def test_v1052_cross_field_oi_status_contradicting_ratio_blocks():
-    """missing_oi_status=DATA_OK with missing_oi_ratio>0.10 is contradictory."""
+    """V10.5.4: DATA_OK with a ratio above the ceiling is a contradiction."""
     ev = evaluate_manifest_v105(_manifest_v105(
         missing_oi_status="DATA_OK", missing_oi_ratio=0.25))
     assert ev.promote_allowed is False
-    assert ("inconsistent_field:oi_status_data_ok_with_high_missing_ratio"
-            in ev.blockers)
+    assert "oi_status_ratio_conflict" in ev.blockers
 
 
 def test_v1052_valid_manifest_still_research_only():
@@ -1074,32 +1085,30 @@ def test_v1053_import_status_only_ready_state_promotes():
 # --- TAREA 5: checksums tied to required data types ---------------------------
 
 def test_v1053_unrelated_checksum_alone_blocks():
+    """V10.5.4: a structured inventory of unrelated files cannot promote."""
     ev = evaluate_manifest_v105(_manifest_v105(
-        checksums_sha256={"unrelated.txt": "ab" * 32}))
+        files=[{"path": "unrelated.txt", "data_type": "trades",
+                "sha256": "ab" * 32, "rows": 9}]))
     assert ev.promote_allowed is False
-    assert any("checksum_missing_for_required_type" in b for b in ev.blockers)
+    assert any("inventory_missing_file_for_required_type" in b
+               for b in ev.blockers)
 
 
-def test_v1053_each_required_type_needs_a_checksum():
-    base = {
-        "BTCUSDT_1h_ohlcv.csv": "ab" * 32,
-        "BTCUSDT_open_interest.csv": "cd" * 32,
-        "BTCUSDT_funding.csv": "ef" * 32,
-        "BTCUSDT_liquidations.csv": "12" * 32,
-    }
-    removable = {
-        "ohlcv": "BTCUSDT_1h_ohlcv.csv",
-        "open_interest": "BTCUSDT_open_interest.csv",
-        "funding": "BTCUSDT_funding.csv",
-        "liquidations": "BTCUSDT_liquidations.csv",
-    }
-    for dtype, fname in removable.items():
-        partial = {k: v for k, v in base.items() if k != fname}
-        ev = evaluate_manifest_v105(_manifest_v105(checksums_sha256=partial))
+def test_v1053_each_required_type_needs_a_file():
+    """V10.5.4: dropping any required-type file blocks promotion."""
+    base = [
+        {"path": "ohlcv.parquet", "data_type": "ohlcv", "sha256": "ab" * 32, "rows": 8760},
+        {"path": "oi.parquet", "data_type": "open_interest", "sha256": "cd" * 32, "rows": 8760},
+        {"path": "funding.parquet", "data_type": "funding", "sha256": "ef" * 32, "rows": 1095},
+        {"path": "liq.parquet", "data_type": "liquidations", "sha256": "12" * 32, "rows": 5000},
+    ]
+    for dtype in ("ohlcv", "open_interest", "funding", "liquidations"):
+        partial = [f for f in base if f["data_type"] != dtype]
+        ev = evaluate_manifest_v105(_manifest_v105(files=partial))
         assert ev.promote_allowed is False, dtype
-        assert any(f"checksum_missing_for_required_type:{dtype}" in b
+        assert any(f"inventory_missing_file_for_required_type:{dtype}" in b
                    for b in ev.blockers), dtype
-    ev_ok = evaluate_manifest_v105(_manifest_v105(checksums_sha256=dict(base)))
+    ev_ok = evaluate_manifest_v105(_manifest_v105(files=[dict(f) for f in base]))
     assert ev_ok.promote_allowed is True
 
 
@@ -1108,7 +1117,7 @@ def test_v1053_each_required_type_needs_a_checksum():
 def test_v1053_valid_flag_never_true_with_any_blocker():
     bad_cases = [
         _manifest_v105(import_status="BLOCKED"),
-        _manifest_v105(checksums_sha256={"unrelated.txt": "ab" * 32}),
+        _manifest_v105(files=[]),
         _manifest_v105(missing_oi_status="MISSING_OI_CLUSTERED"),
         _manifest_v105(actual_covered_range=dict(_TEN_DAYS), clean_days=10.0),
         _manifest_v105(coverage_ratio=0.5),
@@ -1249,3 +1258,299 @@ def test_v1052_contract_call_graph_check_catches_db_reintroduction():
                  "paper_positions", "sqlite3"]
     hits = [f for f in forbidden if f in src]
     assert hits == [], f"DB primitives leaked into polling path: {hits}"
+
+
+# ===========================================================================
+# V10.5.4 (Codex hotfix) — strict evidence gates, no declarative promotion
+# ===========================================================================
+
+from app.labs.data_foundation_v10_5 import (  # noqa: E402
+    ST_PROMOTE_ALLOWED as _ST_PROMOTE_V1054,
+)
+from app.labs.trader_dashboard_v104 import (  # noqa: E402
+    strict_validated_candidate,
+)
+
+_RANGE_180_REQ = {"start": "2025-12-13T00:00:00Z", "end": "2026-06-11T00:00:00Z"}
+_RANGE_180_OK = {"start": "2025-12-13T00:00:00Z", "end": "2026-06-11T00:00:00Z"}
+_RANGE_179 = {"start": "2025-12-14T00:00:00Z", "end": "2026-06-11T00:00:00Z"}
+_SEP_REQ = {"start": "2025-01-01T00:00:00Z", "end": "2025-07-01T00:00:00Z"}
+_SEP_ACTUAL = {"start": "2025-07-02T00:00:00Z", "end": "2025-12-30T00:00:00Z"}
+
+
+# --- A1: range containment, not duration ------------------------------------
+
+def test_v1054_separated_equal_duration_range_blocks():
+    ev = evaluate_manifest_v105(_manifest_v105(
+        requested_range=dict(_SEP_REQ), actual_covered_range=dict(_SEP_ACTUAL),
+        clean_days=181.0))
+    assert ev.promote_allowed is False
+    assert "inconsistent_field:actual_range_does_not_cover_requested" in ev.blockers
+
+
+def test_v1054_range_179_of_180_blocks_no_tolerance():
+    ev = evaluate_manifest_v105(_manifest_v105(
+        requested_range=dict(_RANGE_180_REQ), actual_covered_range=dict(_RANGE_179),
+        clean_days=178.0))
+    assert ev.promote_allowed is False
+    assert "inconsistent_field:actual_range_shorter_than_requested" in ev.blockers
+
+
+def test_v1054_range_exact_180_passes():
+    ev = evaluate_manifest_v105(_manifest_v105(
+        requested_range=dict(_RANGE_180_REQ), actual_covered_range=dict(_RANGE_180_OK),
+        clean_days=180.0))
+    assert ev.promote_allowed is True
+
+
+def test_v1054_requested_365_actual_10_blocks():
+    ten = {"start": "2026-06-01T00:00:00Z", "end": "2026-06-11T00:00:00Z"}
+    ev = evaluate_manifest_v105(_manifest_v105(
+        actual_covered_range=ten, clean_days=10.0))
+    assert ev.promote_allowed is False
+
+
+def test_v1054_coverage_ratio_cannot_mask_separated_range():
+    ev = evaluate_manifest_v105(_manifest_v105(
+        requested_range=dict(_SEP_REQ), actual_covered_range=dict(_SEP_ACTUAL),
+        clean_days=181.0, coverage_ratio=1.0))
+    assert ev.promote_allowed is False
+
+
+def test_v1054_clean_days_365_actual_30_blocks():
+    month = {"start": "2026-05-12T00:00:00Z", "end": "2026-06-11T00:00:00Z"}
+    ev = evaluate_manifest_v105(_manifest_v105(
+        requested_range=dict(month), actual_covered_range=dict(month),
+        clean_days=365.0))
+    assert ev.promote_allowed is False
+    assert "inconsistent_field:clean_days_exceeds_covered_range" in ev.blockers
+
+
+# --- A2: structured file inventory ------------------------------------------
+
+def _files_ok():
+    return [
+        {"path": "ohlcv.parquet", "data_type": "ohlcv", "sha256": "ab" * 32, "rows": 8760},
+        {"path": "oi.parquet", "data_type": "open_interest", "sha256": "cd" * 32, "rows": 8760},
+        {"path": "funding.parquet", "data_type": "funding", "sha256": "ef" * 32, "rows": 1095},
+        {"path": "liq.parquet", "data_type": "liquidations", "sha256": "12" * 32, "rows": 5000},
+    ]
+
+
+def test_v1054_legacy_checksum_combo_file_cannot_promote():
+    ev = evaluate_manifest_v105(_manifest_v105(
+        files=[{"path": "ohlcv_oi_funding_liquidations.txt",
+                "data_type": "everything", "sha256": "ab" * 32, "rows": 9}]))
+    assert ev.promote_allowed is False
+
+
+def test_v1054_files_missing_blocks():
+    man = _manifest_v105()
+    man.pop("files", None)
+    ev = evaluate_manifest_v105(man)
+    assert ev.promote_allowed is False
+
+
+def test_v1054_files_empty_blocks():
+    assert evaluate_manifest_v105(_manifest_v105(files=[])).promote_allowed is False
+
+
+def test_v1054_file_unknown_data_type_blocks():
+    bad = _files_ok()
+    bad[0]["data_type"] = "banana"
+    ev = evaluate_manifest_v105(_manifest_v105(files=bad))
+    assert ev.promote_allowed is False
+    assert "invalid_field:files_entry_data_type" in ev.blockers
+
+
+def test_v1054_file_rows_zero_blocks():
+    bad = _files_ok()
+    bad[0]["rows"] = 0
+    ev = evaluate_manifest_v105(_manifest_v105(files=bad))
+    assert ev.promote_allowed is False
+    assert "invalid_field:files_entry_rows" in ev.blockers
+
+
+def test_v1054_file_bad_sha_blocks():
+    bad = _files_ok()
+    bad[0]["sha256"] = "xyz"
+    ev = evaluate_manifest_v105(_manifest_v105(files=bad))
+    assert ev.promote_allowed is False
+    assert "invalid_field:files_entry_sha256" in ev.blockers
+
+
+def test_v1054_file_empty_path_blocks():
+    bad = _files_ok()
+    bad[0]["path"] = ""
+    ev = evaluate_manifest_v105(_manifest_v105(files=bad))
+    assert ev.promote_allowed is False
+    assert "invalid_field:files_entry_path" in ev.blockers
+
+
+def test_v1054_structured_inventory_alias_normalizes():
+    aliased = [
+        {"path": "c.parquet", "data_type": "ohlcv_candles", "sha256": "ab" * 32, "rows": 8760},
+        {"path": "oi.parquet", "data_type": "oi", "sha256": "cd" * 32, "rows": 8760},
+        {"path": "f.parquet", "data_type": "funding_rates", "sha256": "ef" * 32, "rows": 1095},
+        {"path": "l.parquet", "data_type": "liquidations", "sha256": "12" * 32, "rows": 5000},
+    ]
+    assert evaluate_manifest_v105(_manifest_v105(files=aliased)).promote_allowed is True
+
+
+def test_v1054_valid_inventory_promotes_research_only():
+    ev = evaluate_manifest_v105(_manifest_v105(files=_files_ok()))
+    assert ev.status == _ST_PROMOTE_V1054
+    assert ev.paper_ready is False
+    assert ev.live_ready is False
+    assert ev.final_recommendation == "NO LIVE"
+
+
+# --- A3: OI status/ratio matrix ---------------------------------------------
+
+def test_v1054_oi_low_or_moderate_high_ratio_blocks():
+    for status in ("MISSING_OI_LOW", "MISSING_OI_MODERATE"):
+        ev = evaluate_manifest_v105(_manifest_v105(
+            missing_oi_status=status, missing_oi_ratio=0.99))
+        assert ev.promote_allowed is False, status
+        assert any("oi_status_not_promotable" in b for b in ev.blockers), status
+
+
+def test_v1054_oi_data_ok_high_ratio_blocks():
+    assert evaluate_manifest_v105(
+        _manifest_v105(missing_oi_ratio=0.25)).promote_allowed is False
+
+
+def test_v1054_oi_data_ok_nan_inf_blocks():
+    assert evaluate_manifest_v105(
+        _manifest_v105(missing_oi_ratio=float("nan"))).promote_allowed is False
+    assert evaluate_manifest_v105(
+        _manifest_v105(missing_oi_ratio=float("inf"))).promote_allowed is False
+
+
+def test_v1054_oi_clustered_low_ratio_blocks():
+    ev = evaluate_manifest_v105(_manifest_v105(
+        missing_oi_status="MISSING_OI_CLUSTERED", missing_oi_ratio=0.01))
+    assert ev.promote_allowed is False
+
+
+def test_v1054_oi_unknown_family_blocks():
+    for status in ("UNKNOWN", "NEED_MORE_DATA", "NO_AUDIT"):
+        assert evaluate_manifest_v105(
+            _manifest_v105(missing_oi_status=status)).promote_allowed is False, status
+
+
+def test_v1054_oi_data_ok_low_ratio_passes():
+    for ratio in (0.0, 0.01):
+        assert evaluate_manifest_v105(
+            _manifest_v105(missing_oi_ratio=ratio)).promote_allowed is True, ratio
+
+
+# --- A4: EdgeGuard ignores declarative counts -------------------------------
+
+_VALID_CAND = {"candidate_id": "c1", "net_EV": 0.05, "net_PF": 1.4,
+               "samples": 300, "time_ratio": 0.4, "decision": "PAPER_CANDIDATE"}
+
+
+def _pl(cd, ne=None):
+    return {s["name"]: s for s in derive_pipeline_stages(
+        safety={"uptime": "1s"}, candidates=cd,
+        net_edge=ne or {"status": "OK"},
+        signal_monitor={"top_signals": ["s"], "top_blocks": []})}
+
+
+def test_v1054_count_without_rows_not_pass():
+    assert _pl({"status": "OK", "validated_top_candidates_count": 1})["EDGE GUARD"]["state"] != "PASS"
+
+
+def test_v1054_count_with_reject_row_not_pass():
+    cd = {"status": "OK", "validated_top_candidates_count": 1,
+          "top_candidates": [dict(_VALID_CAND, decision="REJECT")]}
+    assert _pl(cd)["EDGE GUARD"]["state"] != "PASS"
+
+
+def test_v1054_negative_ev_row_not_pass():
+    cd = {"status": "OK", "top_candidates": [dict(_VALID_CAND, net_EV=-0.1)]}
+    assert _pl(cd)["EDGE GUARD"]["state"] != "PASS"
+
+
+def test_v1054_low_sample_row_not_pass():
+    cd = {"status": "OK", "candidate_count": 1,
+          "top_candidates": [dict(_VALID_CAND, samples=5)]}
+    assert _pl(cd)["EDGE GUARD"]["state"] != "PASS"
+
+
+def test_v1054_high_time_row_not_pass():
+    cd = {"status": "OK", "candidate_count": 1,
+          "top_candidates": [dict(_VALID_CAND, time_ratio=0.99)]}
+    assert _pl(cd)["EDGE GUARD"]["state"] != "PASS"
+
+
+def test_v1054_status_ok_no_row_not_pass():
+    assert _pl({"status": "OK"})["EDGE GUARD"]["state"] != "PASS"
+
+
+def test_v1054_valid_row_guard_passes():
+    assert _pl({"status": "OK", "top_candidates": [_VALID_CAND]})["EDGE GUARD"]["state"] == "PASS"
+
+
+# --- A5: NET EV revalidates row + finite metrics + candidate_id -------------
+
+def test_v1054_netev_inf_metric_blocked():
+    ne = {"status": "OK", "top_candidates": [dict(_VALID_CAND, net_EV=float("inf"))]}
+    assert _pl({"status": "OK", "top_candidates": [_VALID_CAND]}, ne)["NET EV"]["state"] == "BLOCKED"
+
+
+def test_v1054_netev_alias_conflict_blocked():
+    ne = {"status": "OK", "top_candidates": [dict(_VALID_CAND, net_EV=0.1, net_ev=-5)]}
+    assert _pl({"status": "OK", "top_candidates": [_VALID_CAND]}, ne)["NET EV"]["state"] == "BLOCKED"
+
+
+def test_v1054_netev_reject_decision_blocked():
+    ne = {"status": "OK", "top_candidates": [dict(_VALID_CAND, decision="REJECT")]}
+    assert _pl({"status": "OK", "top_candidates": [_VALID_CAND]}, ne)["NET EV"]["state"] == "BLOCKED"
+
+
+def test_v1054_netev_edge_status_no_edge_blocked():
+    ne = {"status": "OK", "edge_status": "NO_EDGE_DEMONSTRATED",
+          "top_candidates": [_VALID_CAND]}
+    assert _pl({"status": "OK", "top_candidates": [_VALID_CAND]}, ne)["NET EV"]["state"] == "BLOCKED"
+
+
+def test_v1054_netev_candidate_id_mismatch_blocked():
+    ne = {"status": "OK", "top_candidates": [dict(_VALID_CAND, candidate_id="cZ")]}
+    assert _pl({"status": "OK", "top_candidates": [_VALID_CAND]}, ne)["NET EV"]["state"] == "BLOCKED"
+
+
+def test_v1054_netev_same_id_passes():
+    ne = {"status": "OK", "top_candidates": [_VALID_CAND]}
+    r = _pl({"status": "OK", "top_candidates": [_VALID_CAND]}, ne)
+    assert r["EDGE GUARD"]["state"] == "PASS"
+    assert r["NET EV"]["state"] == "PASS"
+
+
+# --- A6: market_probe never actionable --------------------------------------
+
+def test_v1054_market_probe_blocks_guard_and_netev():
+    for field_name in ("source", "origin", "signal_type"):
+        probe = dict(_VALID_CAND, net_EV=5, net_PF=9, samples=900, time_ratio=0.1)
+        probe[field_name] = "market_probe"
+        cd = {"status": "OK", "top_candidates": [probe]}
+        r = _pl(cd, {"status": "OK", "top_candidates": [probe]})
+        assert r["EDGE GUARD"]["state"] != "PASS", field_name
+        assert r["NET EV"]["state"] == "BLOCKED", field_name
+
+
+def test_v1054_strict_validator_rejects_probe_and_garbage():
+    assert strict_validated_candidate({}) is None
+    assert strict_validated_candidate({"net_EV": 1}) is None  # no id
+    assert strict_validated_candidate(dict(_VALID_CAND, source="market_probe")) is None
+    assert strict_validated_candidate(dict(_VALID_CAND, net_EV=float("inf"))) is None
+    assert strict_validated_candidate(_VALID_CAND) is not None
+
+
+# --- A7: candidate pending requires both real stages -------------------------
+
+def test_v1054_candidate_pending_dual_stage_in_js():
+    html = _html()
+    assert 'guardStage.state === "PASS" && netevStage.state === "PASS"' in html
+    assert "EDGE REVIEW" in html
