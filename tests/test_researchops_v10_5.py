@@ -338,7 +338,10 @@ def test_v105_modules_no_keys_no_env_no_db_writes():
         assert "API_KEY" not in src and "SECRET" not in src, name
         assert "INSERT INTO" not in src and "UPDATE " not in src, name
         assert "DELETE FROM" not in src and "DROP TABLE" not in src, name
-        assert "import requests" not in src and "urllib" not in src, name
+        # urllib.parse.unquote is allowed (pure path decoding, V10.5.6);
+        # network clients are not.
+        assert "import requests" not in src and "urllib.request" not in src, name
+        assert "httpx" not in src and "socket" not in src, name
 
 
 def test_v105_reports_never_paper_or_live_ready():
@@ -1578,8 +1581,9 @@ _GOOD_PATHS = ["datasets/BTCUSDT_1h_ohlcv.parquet",
 
 def _files(paths):
     types = ["ohlcv", "open_interest", "funding", "liquidations"]
-    return [{"path": p, "data_type": t, "sha256": "ab" * 32, "rows": 1000}
-            for p, t in zip(paths, types)]
+    shas = ["ab" * 32, "cd" * 32, "ef" * 32, "12" * 32]  # distinct per file
+    return [{"path": p, "data_type": t, "sha256": s, "rows": 1000}
+            for p, t, s in zip(paths, types, shas)]
 
 
 # --- B1: unique path per data file ------------------------------------------
@@ -1799,3 +1803,113 @@ def test_v1055_full_valid_candidate_both_stages_pass():
     assert r["EDGE GUARD"] == "PASS"
     assert r["NET EV"] == "PASS"
     assert r["SHADOW / PAPER"] == "BLOCKED"  # research-only, always
+
+
+# ===========================================================================
+# V10.5.6 (Codex hotfix) — percent-decoded path safety + unique sha per file
+# ===========================================================================
+
+_ENCODED_MUST_BLOCK = [
+    "datasets/%2e%2e/ohlcv.parquet",
+    "datasets/%2E%2E/ohlcv.parquet",
+    "%2Ftmp%2Fohlcv.parquet",
+    "%5Ctmp%5Cohlcv.parquet",
+    "%2eenv.parquet",
+    "datasets/%2Eenv.local",
+    "datasets/%70rivate/ohlcv.parquet",
+    "datasets/api%5Fkey.parquet",
+    "datasets/secret%73/ohlcv.parquet",
+    "datasets/pass%77ord/ohlcv.parquet",
+    "datasets/to%6Ben/ohlcv.parquet",
+    "datasets/%252e%252e/ohlcv.parquet",
+    "%252Ftmp%252Fohlcv.parquet",
+    "datasets/%2e%2e%2fohlcv.parquet",
+    "datasets/%2e%2e%5cohlcv.parquet",
+    "datasets/data%2Esqlite",
+    "datasets/data%2Ezip",
+]
+
+
+def test_v1056_classify_blocks_all_encoded_paths():
+    for p in _ENCODED_MUST_BLOCK:
+        reason = classify_file_path(p)
+        assert reason is not None, p
+        assert reason.startswith("invalid_file_path:"), (p, reason)
+
+
+def test_v1056_clean_paths_still_pass():
+    assert classify_file_path("datasets/BTCUSDT_1h_ohlcv.parquet") is None
+    assert classify_file_path("external_data/bitget/BTCUSDT/1h/ohlcv.parquet") is None
+
+
+def test_v1056_bare_percent_is_fail_closed():
+    # Even an otherwise-innocuous %-encoding is blocked for research datasets.
+    reason = classify_file_path("datasets/oh%6Ccv.parquet")
+    assert reason is not None
+    assert reason.startswith("invalid_file_path:")
+
+
+def test_v1056_encoded_path_blocks_promotion_in_manifest():
+    files = _files(["datasets/%2e%2e/ohlcv.parquet",
+                    "datasets/i.parquet", "datasets/f.parquet",
+                    "datasets/l.parquet"])
+    ev = evaluate_manifest_v105(_manifest_v105(files=files))
+    assert ev.promote_allowed is False
+    assert any(b.startswith("invalid_file_path:") for b in ev.blockers)
+
+
+def test_v1056_duplicate_sha_across_files_blocks():
+    same = "ab" * 32
+    files = [
+        {"path": "datasets/o.parquet", "data_type": "ohlcv", "sha256": same, "rows": 8760},
+        {"path": "datasets/i.parquet", "data_type": "open_interest", "sha256": same, "rows": 8760},
+        {"path": "datasets/f.parquet", "data_type": "funding", "sha256": same, "rows": 1095},
+        {"path": "datasets/l.parquet", "data_type": "liquidations", "sha256": same, "rows": 5000},
+    ]
+    ev = evaluate_manifest_v105(_manifest_v105(files=files))
+    assert ev.promote_allowed is False
+    assert "duplicate_file_sha256_across_data_types" in ev.blockers
+
+
+def test_v1056_distinct_sha_distinct_path_passes():
+    ev = evaluate_manifest_v105(_manifest_v105(files=_files(_GOOD_PATHS)))
+    assert ev.promote_allowed is True
+
+
+# --- Regression: V10.5.5 / V10.5.4 gates remain closed ----------------------
+
+def test_v1056_regression_prior_gates_still_block():
+    # same path reused
+    assert evaluate_manifest_v105(_manifest_v105(files=_files(["s.parquet"] * 4))).promote_allowed is False
+    # literal .env / traversal / absolute / .db / .zip
+    for bad in (".env", "../o.parquet", "/tmp/o.parquet", "data.sqlite", "dataset.zip"):
+        files = _files([bad, "datasets/i.parquet", "datasets/f.parquet", "datasets/l.parquet"])
+        assert evaluate_manifest_v105(_manifest_v105(files=files)).promote_allowed is False, bad
+    # requested 365 / clean_days 180
+    assert evaluate_manifest_v105(_manifest_v105(clean_days=180.0)).promote_allowed is False
+    # OI clustered
+    assert evaluate_manifest_v105(_manifest_v105(missing_oi_status="MISSING_OI_CLUSTERED")).promote_allowed is False
+
+
+def test_v1056_regression_pipeline_gates_still_block():
+    base = {"candidate_id": "c1", "net_EV": 5, "net_PF": 9, "samples": 900,
+            "time_ratio": 0.1, "decision": "VALIDATED"}
+
+    def guard(cd, ne=None):
+        return {s["name"]: s["state"] for s in derive_pipeline_stages(
+            safety={"uptime": "1s"}, candidates=cd, net_edge=ne or {"status": "OK"},
+            signal_monitor={"top_signals": ["s"], "top_blocks": []})}["EDGE GUARD"]
+
+    assert guard({"status": "OK", "top_candidates": [dict(base, source="market_probe:BTCUSDT")]}) != "PASS"
+    assert guard({"status": "OK", "top_candidates": [dict(base, decision="WATCH_ONLY")]}) != "PASS"
+    assert guard({"status": "OK", "top_candidates": [dict(base, reason="sample_too_small")]}) != "PASS"
+    no_id = dict(base, group_value="RANGE")
+    no_id.pop("candidate_id")
+    assert guard({"status": "OK", "top_candidates": [no_id]}) != "PASS"
+    # valid strong-id candidate still passes both stages
+    full = {s["name"]: s["state"] for s in derive_pipeline_stages(
+        safety={"uptime": "1s"},
+        candidates={"status": "OK", "top_candidates": [base]},
+        net_edge={"status": "OK", "top_candidates": [base]},
+        signal_monitor={"top_signals": ["s"], "top_blocks": []})}
+    assert full["EDGE GUARD"] == "PASS" and full["NET EV"] == "PASS"

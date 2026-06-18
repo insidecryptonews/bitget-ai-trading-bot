@@ -17,6 +17,7 @@ import re as _re
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from typing import Any
+from urllib.parse import unquote as _unquote
 
 from . import FINAL_RECOMMENDATION_NO_LIVE
 from .external_data_acquisition_plan_v10_4 import (
@@ -113,38 +114,68 @@ _PATH_UNSAFE_EXTENSIONS = (
 _ALLOWED_DATA_EXTENSIONS = (".parquet", ".csv", ".ndjson", ".json", ".feather")
 
 
+def _classify_literal_path(path: str, *, decoded: bool = False) -> str | None:
+    """Classify a concrete (already-decoded if needed) path literal. Returns a
+    blocker reason or None. ``decoded`` tags the reason for percent-decoded
+    forms so the blocker is descriptive."""
+    suffix = "decoded_" if decoded else ""
+    if any(ord(ch) < 32 for ch in path):
+        return f"invalid_file_path:{suffix}control_chars"
+    lower = path.lower()
+    norm = lower.replace("\\", "/")
+    if norm.startswith("/") or norm.startswith("~") or norm.startswith("//"):
+        return f"invalid_file_path:{suffix}absolute"
+    if _re.match(r"^[a-z]:", norm):
+        return f"invalid_file_path:{suffix}absolute"
+    for seg in [s for s in norm.split("/") if s != ""]:
+        if seg == ".." or seg.startswith(".."):
+            return f"invalid_file_path:{suffix}traversal"
+        if seg.startswith("."):  # hidden file/dir incl. .env
+            return f"invalid_file_path:{suffix}hidden"
+    if any(kw in norm for kw in _PATH_SENSITIVE_KEYWORDS):
+        return f"invalid_file_path:{suffix}sensitive"
+    if any(norm.endswith(ext) for ext in _PATH_UNSAFE_EXTENSIONS):
+        return f"invalid_file_path:{suffix}unsafe_extension"
+    if not any(norm.endswith(ext) for ext in _ALLOWED_DATA_EXTENSIONS):
+        return f"invalid_file_path:{suffix}unrecognized_extension"
+    return None
+
+
 def classify_file_path(raw: Any) -> str | None:
-    """V10.5.5 — return a blocker reason if the path is unsafe, else None.
+    """V10.5.5/6 — return a blocker reason if the path is unsafe, else None.
     Pure, never raises. Blocks empty/control, hidden (dot) segments, traversal,
-    absolute (unix/windows), '~', sensitive keywords and unsafe extensions."""
+    absolute (unix/windows), '~', sensitive keywords and unsafe extensions —
+    AND (V10.5.6) any percent-encoding: a path with '%' is fail-closed. Before
+    blocking, the path is recursively percent-decoded (max 3 rounds) so the
+    decoded danger (traversal/.env/absolute/sensitive) is reported precisely;
+    a bare '%' with no decoded danger still blocks as percent_encoded."""
     try:
         if not isinstance(raw, str):
             return "invalid_file_path:empty"
         path = raw.strip()
         if not path:
             return "invalid_file_path:empty"
-        if any(ord(ch) < 32 for ch in path):
-            return "invalid_file_path:control_chars"
-        lower = path.lower()
-        norm = lower.replace("\\", "/")
-        # Absolute paths (unix, windows drive, UNC) and home expansion.
-        if norm.startswith("/") or norm.startswith("~") or norm.startswith("//"):
-            return "invalid_file_path:absolute"
-        if _re.match(r"^[a-z]:", norm):
-            return "invalid_file_path:absolute"
-        segments = [s for s in norm.split("/") if s != ""]
-        for seg in segments:
-            if seg == ".." or seg.startswith(".."):
-                return "invalid_file_path:traversal"
-            if seg.startswith("."):  # hidden file/dir incl. .env
-                return "invalid_file_path:hidden"
-        if any(kw in norm for kw in _PATH_SENSITIVE_KEYWORDS):
-            return "invalid_file_path:sensitive"
-        if any(norm.endswith(ext) for ext in _PATH_UNSAFE_EXTENSIONS):
-            return "invalid_file_path:unsafe_extension"
-        if not any(norm.endswith(ext) for ext in _ALLOWED_DATA_EXTENSIONS):
-            return "invalid_file_path:unrecognized_extension"
-        return None
+        # 1) Validate the original literal first.
+        literal = _classify_literal_path(path)
+        if literal is not None:
+            return literal
+        # 2) V10.5.6 — percent-encoding is fail-closed for research datasets.
+        if "%" not in path:
+            return None
+        current = path
+        for _ in range(3):  # bounded recursive decode
+            try:
+                decoded = _unquote(current)
+            except Exception:
+                return "invalid_file_path:percent_encoded"
+            if decoded == current:
+                break
+            current = decoded
+            reason = _classify_literal_path(current, decoded=True)
+            if reason is not None:
+                return reason
+        # No specific decoded danger surfaced, but '%' is still disallowed.
+        return "invalid_file_path:percent_encoded"
     except Exception:
         return "invalid_file_path:error"
 
@@ -454,6 +485,7 @@ def _semantic_blockers(m: dict[str, Any]) -> list[str]:
     else:
         inventory_types: set[str] = set()
         seen_paths: set[str] = set()
+        seen_shas: set[str] = set()
         inventory_ok = True
         for entry in files:
             if not isinstance(entry, dict):
@@ -488,6 +520,14 @@ def _semantic_blockers(m: dict[str, Any]) -> list[str]:
                 bad.append("invalid_field:files_entry_sha256")
                 inventory_ok = False
                 break
+            # V10.5.6 (Codex task 4) — the same checksum reused across files
+            # means identical content masquerading as distinct data types.
+            sha_norm = str(entry.get("sha256")).lower()
+            if sha_norm in seen_shas:
+                bad.append("duplicate_file_sha256_across_data_types")
+                inventory_ok = False
+                break
+            seen_shas.add(sha_norm)
             rows_entry = _to_non_negative_int(entry.get("rows"))
             if rows_entry is None or rows_entry <= 0:
                 bad.append("invalid_field:files_entry_rows")
