@@ -1085,9 +1085,10 @@ def test_v1053_import_status_only_ready_state_promotes():
 # --- TAREA 5: checksums tied to required data types ---------------------------
 
 def test_v1053_unrelated_checksum_alone_blocks():
-    """V10.5.4: a structured inventory of unrelated files cannot promote."""
+    """V10.5.4/5: an inventory of only an unrelated (non-required) type cannot
+    promote — the four required types are missing."""
     ev = evaluate_manifest_v105(_manifest_v105(
-        files=[{"path": "unrelated.txt", "data_type": "trades",
+        files=[{"path": "datasets/unrelated.parquet", "data_type": "trades",
                 "sha256": "ab" * 32, "rows": 9}]))
     assert ev.promote_allowed is False
     assert any("inventory_missing_file_for_required_type" in b
@@ -1159,10 +1160,11 @@ def test_v1053_unknown_vocabulary_blocks():
 
 # --- TAREA 8: EdgeGuard PASS only with a truly validated candidate ------------
 
-_REJECTED_ROW = {"group_value": "X", "samples": 72, "net_EV": -0.16,
+_REJECTED_ROW = {"candidate_id": "X", "samples": 72, "net_EV": -0.16,
                  "net_PF": 0.0, "time_ratio": 0.99, "decision": "REJECT",
                  "reason": "sample_too_small"}
-_VALID_ROW = {"group_value": "Y", "samples": 300, "net_EV": 0.05,
+# V10.5.5 — a valid row needs a STRONG identity and a PROMOTABLE decision.
+_VALID_ROW = {"candidate_id": "Y", "samples": 300, "net_EV": 0.05,
               "net_PF": 1.4, "time_ratio": 0.4,
               "decision": "PAPER_CANDIDATE", "reason": "ok"}
 
@@ -1554,3 +1556,246 @@ def test_v1054_candidate_pending_dual_stage_in_js():
     html = _html()
     assert 'guardStage.state === "PASS" && netevStage.state === "PASS"' in html
     assert "EDGE REVIEW" in html
+
+
+# ===========================================================================
+# V10.5.5 (Codex hotfix) — path / identity / non-actionable candidate gates
+# ===========================================================================
+
+from app.labs.data_foundation_v10_5 import classify_file_path  # noqa: E402
+from app.labs.trader_dashboard_v104 import (  # noqa: E402
+    _is_market_probe,
+    _has_critical_reason,
+    _decision_is_promotable,
+    _strong_identity,
+)
+
+_GOOD_PATHS = ["datasets/BTCUSDT_1h_ohlcv.parquet",
+               "datasets/BTCUSDT_open_interest.parquet",
+               "datasets/BTCUSDT_funding.parquet",
+               "datasets/BTCUSDT_liquidations.parquet"]
+
+
+def _files(paths):
+    types = ["ohlcv", "open_interest", "funding", "liquidations"]
+    return [{"path": p, "data_type": t, "sha256": "ab" * 32, "rows": 1000}
+            for p, t in zip(paths, types)]
+
+
+# --- B1: unique path per data file ------------------------------------------
+
+def test_v1055_same_path_for_four_types_blocks():
+    ev = evaluate_manifest_v105(_manifest_v105(files=_files(["s.parquet"] * 4)))
+    assert ev.promote_allowed is False
+    assert "duplicate_file_path_in_inventory" in ev.blockers
+
+
+def test_v1055_same_path_for_two_types_blocks():
+    files = _files(_GOOD_PATHS)
+    files[1]["path"] = files[0]["path"]
+    ev = evaluate_manifest_v105(_manifest_v105(files=files))
+    assert ev.promote_allowed is False
+    assert "duplicate_file_path_in_inventory" in ev.blockers
+
+
+def test_v1055_unique_paths_pass():
+    assert evaluate_manifest_v105(_manifest_v105(files=_files(_GOOD_PATHS))).promote_allowed is True
+
+
+# --- B2: sensitive / traversal / absolute / artifact paths blocked ----------
+
+def test_v1055_classify_file_path_direct():
+    assert classify_file_path(".env") is not None
+    assert classify_file_path(".env.local") is not None
+    assert classify_file_path("../ohlcv.parquet") is not None
+    assert classify_file_path("/tmp/ohlcv.parquet") is not None
+    assert classify_file_path("C:/Users/Adrian/.env") is not None
+    assert classify_file_path("C:\\Users\\Adrian\\data.parquet") is not None
+    assert classify_file_path("~/ohlcv.parquet") is not None
+    assert classify_file_path("secrets/ohlcv.parquet") is not None
+    assert classify_file_path("backup/ohlcv.parquet") is not None
+    assert classify_file_path("data.sqlite") is not None
+    assert classify_file_path("dataset.zip") is not None
+    assert classify_file_path("vault/x.parquet") is not None
+    assert classify_file_path("") is not None
+    assert classify_file_path("   ") is not None
+    assert classify_file_path("private/x.parquet") is not None
+    # Clean relative dataset paths are allowed.
+    assert classify_file_path("datasets/BTCUSDT_1h_ohlcv.parquet") is None
+    assert classify_file_path("external_data/bitget/BTCUSDT/1h/ohlcv.parquet") is None
+
+
+def test_v1055_sensitive_path_in_inventory_blocks():
+    for bad in (".env", ".env.local", "../o.parquet", "/tmp/o.parquet",
+                "C:/Users/Adrian/.env", "secrets/o.parquet", "backup/o.parquet",
+                "data.sqlite", "dataset.zip"):
+        files = _files([bad] + _GOOD_PATHS[1:])
+        ev = evaluate_manifest_v105(_manifest_v105(files=files))
+        assert ev.promote_allowed is False, bad
+        assert any(b.startswith("invalid_file_path") for b in ev.blockers), bad
+
+
+# --- B3: clean_days must cover requested window -----------------------------
+
+def test_v1055_requested_365_clean_180_blocks():
+    ev = evaluate_manifest_v105(_manifest_v105(clean_days=180.0))
+    assert ev.promote_allowed is False
+    assert "inconsistent_field:clean_days_below_requested_range" in ev.blockers
+
+
+def test_v1055_requested_180_clean_179_blocks():
+    r180 = {"start": "2025-12-13T00:00:00Z", "end": "2026-06-11T00:00:00Z"}
+    ev = evaluate_manifest_v105(_manifest_v105(
+        requested_range=dict(r180), actual_covered_range=dict(r180),
+        clean_days=179.0))
+    assert ev.promote_allowed is False
+
+
+def test_v1055_requested_180_clean_180_passes():
+    r180 = {"start": "2025-12-13T00:00:00Z", "end": "2026-06-11T00:00:00Z"}
+    ev = evaluate_manifest_v105(_manifest_v105(
+        requested_range=dict(r180), actual_covered_range=dict(r180),
+        clean_days=180.0))
+    assert ev.promote_allowed is True
+
+
+def test_v1055_coverage_ratio_cannot_mask_short_clean_days():
+    ev = evaluate_manifest_v105(_manifest_v105(clean_days=180.0, coverage_ratio=1.0))
+    assert ev.promote_allowed is False
+
+
+# --- B4: robust market_probe -------------------------------------------------
+
+def test_v1055_market_probe_variants_detected():
+    for v in ("market_probe", "market_probe:BTCUSDT", "MARKET_PROBE",
+              "market-probe", "market probe", "MarketProbe", "marketProbe",
+              "probe_market", "probe-only", "watch_probe"):
+        assert _is_market_probe({"source": v}) is True, v
+    assert _is_market_probe({"origin": "market-probe"}) is True
+    assert _is_market_probe({"signal_type": "market probe"}) is True
+    assert _is_market_probe({"reason": "from market_probe pipeline"}) is True
+    assert _is_market_probe({"source": "trend_following"}) is False
+
+
+_PROBE_BASE = {"candidate_id": "c1", "net_EV": 5, "net_PF": 9,
+               "samples": 900, "time_ratio": 0.1, "decision": "VALIDATED"}
+
+
+def test_v1055_market_probe_prefix_blocks_pipeline():
+    cd = {"status": "OK", "top_candidates": [dict(_PROBE_BASE, source="market_probe:BTCUSDT")]}
+    r = {s["name"]: s["state"] for s in derive_pipeline_stages(
+        safety={"uptime": "1s"}, candidates=cd,
+        net_edge={"status": "OK", "top_candidates": [dict(_PROBE_BASE, source="market_probe:BTCUSDT")]},
+        signal_monitor={"top_signals": ["s"], "top_blocks": []})}
+    assert r["EDGE GUARD"] != "PASS"
+    assert r["NET EV"] == "BLOCKED"
+
+
+# --- B5: decision allowlist --------------------------------------------------
+
+def test_v1055_decision_allowlist():
+    assert _decision_is_promotable({"decision": "VALIDATED"}) is True
+    assert _decision_is_promotable({"decision": "PAPER_CANDIDATE"}) is True
+    for blocked in ("WATCH_ONLY", "RESEARCH_ONLY", "NEED_MORE_DATA",
+                    "NO_VALID_CANDIDATES", "NO_TRADE", "BLOCK", "REJECT",
+                    "EDGE_REVIEW", "SHADOW_ONLY", "MONITOR_ONLY", "UNKNOWN"):
+        assert _decision_is_promotable({"decision": blocked}) is False, blocked
+    # no decision field at all => not promotable
+    assert _decision_is_promotable({}) is False
+    # status=OK alone is a freshness flag, not a promotable decision
+    assert _decision_is_promotable({"status": "OK"}) is False
+    # a blocking secondary field vetoes an allowlisted primary
+    assert _decision_is_promotable({"decision": "VALIDATED", "verdict": "REJECT"}) is False
+
+
+def test_v1055_non_actionable_decisions_block_pipeline():
+    for d in ("WATCH_ONLY", "RESEARCH_ONLY", "NEED_MORE_DATA",
+              "NO_VALID_CANDIDATES", "NO_TRADE"):
+        cd = {"status": "OK", "top_candidates": [dict(_PROBE_BASE, decision=d)]}
+        r = {s["name"]: s["state"] for s in derive_pipeline_stages(
+            safety={"uptime": "1s"}, candidates=cd, net_edge={"status": "OK"},
+            signal_monitor={"top_signals": ["s"], "top_blocks": []})}
+        assert r["EDGE GUARD"] != "PASS", d
+
+
+# --- B6: critical rejection reasons -----------------------------------------
+
+def test_v1055_critical_reason_detection():
+    assert _has_critical_reason({"reason": "sample_too_small"}) is True
+    assert _has_critical_reason({"reasons": ["negative_net_ev"]}) is True
+    assert _has_critical_reason({"blockers": ["high_time_death"]}) is True
+    assert _has_critical_reason({"warnings": ["gross_green_net_negative"]}) is True
+    assert _has_critical_reason({"diagnostics": {"x": "anti_overfit_failed"}}) is True
+    assert _has_critical_reason({"reason": "clean_and_actionable"}) is False
+
+
+def test_v1055_critical_reason_blocks_despite_good_metrics():
+    for field, val in (("reason", "sample_too_small"),
+                       ("reasons", ["negative_net_ev"]),
+                       ("blockers", ["high_time_death"]),
+                       ("warnings", ["gross_green_net_negative"])):
+        cd = {"status": "OK", "top_candidates": [dict(_PROBE_BASE, **{field: val})]}
+        r = {s["name"]: s["state"] for s in derive_pipeline_stages(
+            safety={"uptime": "1s"}, candidates=cd, net_edge={"status": "OK"},
+            signal_monitor={"top_signals": ["s"], "top_blocks": []})}
+        assert r["EDGE GUARD"] != "PASS", field
+
+
+# --- B7: strong identity required -------------------------------------------
+
+def test_v1055_strong_identity_only():
+    assert _strong_identity({"candidate_id": "c1"}) == "c1"
+    assert _strong_identity({"policy_id": "p1"}) == "p1"
+    assert _strong_identity({"strategy_policy_id": "s1"}) == "s1"
+    assert _strong_identity({"group_value": "RANGE"}) is None
+    assert _strong_identity({"symbol": "BTCUSDT", "regime": "RANGE"}) is None
+    assert _strong_identity({"candidate_id": "A", "policy_id": "B"}) is None  # contradictory
+
+
+def test_v1055_group_value_only_blocks_pipeline():
+    cd = {"status": "OK", "top_candidates": [dict(_PROBE_BASE, candidate_id=None,
+                                                  group_value="RANGE")]}
+    cd["top_candidates"][0].pop("candidate_id")
+    r = {s["name"]: s["state"] for s in derive_pipeline_stages(
+        safety={"uptime": "1s"}, candidates=cd, net_edge={"status": "OK"},
+        signal_monitor={"top_signals": ["s"], "top_blocks": []})}
+    assert r["EDGE GUARD"] != "PASS"
+
+
+def test_v1055_policy_id_identity_passes():
+    row = {"policy_id": "p1", "net_EV": 0.05, "net_PF": 1.4, "samples": 300,
+           "time_ratio": 0.4, "decision": "VALIDATED"}
+    r = {s["name"]: s["state"] for s in derive_pipeline_stages(
+        safety={"uptime": "1s"},
+        candidates={"status": "OK", "top_candidates": [row]},
+        net_edge={"status": "OK", "top_candidates": [row]},
+        signal_monitor={"top_signals": ["s"], "top_blocks": []})}
+    assert r["EDGE GUARD"] == "PASS"
+    assert r["NET EV"] == "PASS"
+
+
+def test_v1055_strong_id_mismatch_blocks_netev():
+    a = {"candidate_id": "A", "net_EV": 0.05, "net_PF": 1.4, "samples": 300,
+         "time_ratio": 0.4, "decision": "VALIDATED"}
+    b = dict(a, candidate_id="B")
+    r = {s["name"]: s["state"] for s in derive_pipeline_stages(
+        safety={"uptime": "1s"},
+        candidates={"status": "OK", "top_candidates": [a]},
+        net_edge={"status": "OK", "top_candidates": [b]},
+        signal_monitor={"top_signals": ["s"], "top_blocks": []})}
+    assert r["NET EV"] == "BLOCKED"
+
+
+# --- B8: candidate pending requires the full chain --------------------------
+
+def test_v1055_full_valid_candidate_both_stages_pass():
+    row = {"candidate_id": "c1", "net_EV": 0.05, "net_PF": 1.4, "samples": 300,
+           "time_ratio": 0.4, "decision": "VALIDATED", "reason": "clean"}
+    r = {s["name"]: s["state"] for s in derive_pipeline_stages(
+        safety={"uptime": "1s"},
+        candidates={"status": "OK", "top_candidates": [row]},
+        net_edge={"status": "OK", "top_candidates": [row]},
+        signal_monitor={"top_signals": ["s"], "top_blocks": []})}
+    assert r["EDGE GUARD"] == "PASS"
+    assert r["NET EV"] == "PASS"
+    assert r["SHADOW / PAPER"] == "BLOCKED"  # research-only, always

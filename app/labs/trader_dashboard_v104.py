@@ -23,6 +23,10 @@ from __future__ import annotations
 import html
 import json
 import math
+import re as _re
+
+# camelCase splitter for robust token normalization (Codex B4).
+_CAMEL_RE = _re.compile(r"([a-z0-9])([A-Z])")
 from typing import Any
 
 FINAL_RECOMMENDATION_NO_LIVE = "NO LIVE"
@@ -97,10 +101,44 @@ def derive_worker_lock_view(raw_lock: Any) -> dict[str, Any]:
             "duplicate_worker": "UNKNOWN"}
 
 
-_MARKET_PROBE_FIELDS = ("source", "origin", "signal_type")
 _MIN_CANDIDATE_SAMPLES = 150
 _MIN_CANDIDATE_NET_PF = 1.0
 _MAX_CANDIDATE_TIME = 0.80
+
+# V10.5.5 (Codex B7) — only STRONG, stable identities qualify. Generic
+# groupers (group_value/symbol/regime/side/...) are NOT identities.
+_STRONG_ID_FIELDS = ("candidate_id", "policy_id", "strategy_policy_id")
+
+# V10.5.5 (Codex B5) — allowlist of promotable decisions. Anything not on the
+# list (incl. WATCH_ONLY/RESEARCH_ONLY/NEED_MORE_DATA/EDGE_REVIEW/empty) blocks.
+_PROMOTABLE_DECISIONS = frozenset({
+    "VALIDATED", "EDGE_VALIDATED", "APPROVED_RESEARCH_CANDIDATE",
+    "ACTIONABLE_RESEARCH", "PAPER_CANDIDATE",
+})
+_DECISION_FIELDS = ("decision", "status", "recommendation", "action",
+                    "verdict", "candidate_status")
+
+# V10.5.5 (Codex B4) — robust market/probe detection. Any of these tokens or
+# substrings (after normalization) in identity/diagnostic fields disqualifies.
+_PROBE_FIELDS = ("source", "origin", "signal_type", "candidate_type", "tag",
+                 "kind", "reason", "reasons", "warnings", "diagnostics")
+_PROBE_MARKERS = ("market_probe", "market probe", "marketprobe", "probe_market",
+                  "probe_only", "watch_probe", "probe")
+
+# V10.5.5 (Codex B6) — critical rejection reasons block even with good metrics.
+_REASON_FIELDS = ("reason", "reasons", "rejection_reason", "rejection_reasons",
+                  "blocker", "blockers", "warning", "warnings", "diagnostic",
+                  "diagnostics")
+_CRITICAL_REASONS = (
+    "sample_too_small", "insufficient_sample", "not_enough_samples",
+    "market_probe", "negative_net_ev", "net_ev_negative",
+    "gross_green_net_negative", "high_time_death", "time_death_high",
+    "time_exit_dominant", "pf_below_threshold", "low_pf", "slippage_too_high",
+    "spread_too_high", "funding_unfavorable", "missing_oi", "oi_unavailable",
+    "stale_data", "need_more_data", "no_edge_demonstrated", "overfit",
+    "anti_overfit_failed", "walk_forward_failed", "oos_failed",
+    "data_quality_bad", "duplicate_rate_high",
+)
 
 
 def _pipeline_finite(value: Any) -> float | None:
@@ -116,11 +154,81 @@ def _pipeline_finite(value: Any) -> float | None:
     return f
 
 
+def _normalize_token_text(value: Any) -> str:
+    """Lower-case, split camelCase, unify separators to spaces. Never raises."""
+    try:
+        if isinstance(value, (list, tuple, set)):
+            return " ".join(_normalize_token_text(v) for v in value)
+        if isinstance(value, dict):
+            return " ".join(_normalize_token_text(v) for v in value.values())
+        text = str(value or "")
+        text = _CAMEL_RE.sub(r"\1 \2", text)
+        for sep in ("-", ":", "/", ".", "|", ",", ";", "\\"):
+            text = text.replace(sep, " ")
+        return " ".join(text.lower().split())
+    except Exception:
+        return ""
+
+
 def _is_market_probe(row: dict[str, Any]) -> bool:
-    for field_name in _MARKET_PROBE_FIELDS:
-        if str(row.get(field_name) or "").strip().lower() == "market_probe":
-            return True
+    """V10.5.5 (Codex B4) — robust probe detection across many fields and
+    spellings/prefixes (market_probe:BTCUSDT, MARKET_PROBE, market-probe…)."""
+    for field_name in _PROBE_FIELDS:
+        if field_name not in row:
+            continue
+        norm = _normalize_token_text(row.get(field_name))
+        collapsed = norm.replace(" ", "_")
+        for marker in _PROBE_MARKERS:
+            m = marker.replace(" ", "_")
+            if m in collapsed:
+                return True
     return False
+
+
+def _has_critical_reason(row: dict[str, Any]) -> bool:
+    """V10.5.5 (Codex B6) — a critical rejection reason blocks regardless of
+    how good the numeric metrics look."""
+    for field_name in _REASON_FIELDS:
+        if field_name not in row:
+            continue
+        collapsed = _normalize_token_text(row.get(field_name)).replace(" ", "_")
+        for reason in _CRITICAL_REASONS:
+            if reason in collapsed:
+                return True
+    return False
+
+
+def _decision_is_promotable(row: dict[str, Any]) -> bool:
+    """V10.5.5 (Codex B5) — at least one decision/status field must be in the
+    promotable allowlist, and NONE present may be blocking/non-allowlisted."""
+    present = [(f, str(row.get(f) or "").strip().upper())
+               for f in _DECISION_FIELDS if f in row and str(row.get(f) or "").strip()]
+    if not present:
+        return False  # no explicit promotable decision => block
+    has_allowlisted = any(val in _PROMOTABLE_DECISIONS for _f, val in present)
+    if not has_allowlisted:
+        return False
+    # status=OK is a freshness flag, not a promotable decision; ignore it, but
+    # any OTHER non-allowlisted decision field blocks (conservative).
+    for field_name, val in present:
+        if field_name == "status" and val == "OK":
+            continue
+        if val not in _PROMOTABLE_DECISIONS:
+            return False
+    return True
+
+
+def _strong_identity(row: dict[str, Any]) -> str | None:
+    """V10.5.5 (Codex B7) — strong, stable id only; generic groupers don't
+    count. Contradictory strong ids block."""
+    ids = {f: str(row.get(f) or "").strip() for f in _STRONG_ID_FIELDS
+           if str(row.get(f) or "").strip()}
+    if not ids:
+        return None
+    values = set(ids.values())
+    if len(values) > 1:
+        return None  # contradictory candidate_id/policy_id => block
+    return next(iter(values))
 
 
 def _alias_pair_ok(row: dict[str, Any], a: str, b: str) -> bool:
@@ -133,19 +241,25 @@ def _alias_pair_ok(row: dict[str, Any], a: str, b: str) -> bool:
 
 
 def strict_validated_candidate(row: Any) -> dict[str, Any] | None:
-    """V10.5.4 (Codex A4/A5/A6) — return the row ONLY if it is a real,
-    fully-evidenced candidate; otherwise None. Never trusts declarative
-    counts. Pure, never raises."""
+    """V10.5.5 (Codex B4–B7) — return the row ONLY if it is a real,
+    fully-evidenced, actionable candidate; otherwise None. Never trusts
+    declarative counts or generic identity. Pure, never raises.
+
+    Gates: strong identity (candidate_id/policy_id/strategy_policy_id, not
+    group_value); not a market_probe (robust); no critical rejection reason;
+    a promotable decision (allowlist); finite net_EV>0, net_PF>=1.0,
+    samples>=150, TIME<80%; no contradictory metric aliases.
+    """
     if not isinstance(row, dict):
         return None
-    cid = str(row.get("candidate_id") or row.get("policy_id")
-              or row.get("group_value") or "").strip()
+    cid = _strong_identity(row)
     if not cid:
         return None
     if _is_market_probe(row):
         return None
-    decision = str(row.get("decision") or "").upper()
-    if decision in ("REJECT", "BLOCK", "NO_VALID_CANDIDATE"):
+    if _has_critical_reason(row):
+        return None
+    if not _decision_is_promotable(row):
         return None
     if not (_alias_pair_ok(row, "net_EV", "net_ev")
             and _alias_pair_ok(row, "net_PF", "net_pf")):

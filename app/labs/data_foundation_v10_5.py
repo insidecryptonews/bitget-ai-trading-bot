@@ -100,6 +100,58 @@ MAX_OI_RATIO_FOR_DATA_OK = 0.02
 REQUIRED_INVENTORY_TYPES = frozenset({"ohlcv", "open_interest", "funding",
                                       "liquidations"})
 
+# V10.5.5 (Codex B2) — file path safety. Sensitive/hidden/traversal/absolute
+# paths and dangerous artifacts can never be declared as dataset evidence.
+_PATH_SENSITIVE_KEYWORDS = (
+    "secret", "secrets", "api_key", "apikey", "token", "passphrase",
+    "password", "private", "vault", "backup", "backups", "credential",
+)
+_PATH_UNSAFE_EXTENSIONS = (
+    ".db", ".sqlite", ".sqlite3", ".zip", ".tar", ".gz", ".tgz",
+    ".pem", ".key", ".env",
+)
+_ALLOWED_DATA_EXTENSIONS = (".parquet", ".csv", ".ndjson", ".json", ".feather")
+
+
+def classify_file_path(raw: Any) -> str | None:
+    """V10.5.5 — return a blocker reason if the path is unsafe, else None.
+    Pure, never raises. Blocks empty/control, hidden (dot) segments, traversal,
+    absolute (unix/windows), '~', sensitive keywords and unsafe extensions."""
+    try:
+        if not isinstance(raw, str):
+            return "invalid_file_path:empty"
+        path = raw.strip()
+        if not path:
+            return "invalid_file_path:empty"
+        if any(ord(ch) < 32 for ch in path):
+            return "invalid_file_path:control_chars"
+        lower = path.lower()
+        norm = lower.replace("\\", "/")
+        # Absolute paths (unix, windows drive, UNC) and home expansion.
+        if norm.startswith("/") or norm.startswith("~") or norm.startswith("//"):
+            return "invalid_file_path:absolute"
+        if _re.match(r"^[a-z]:", norm):
+            return "invalid_file_path:absolute"
+        segments = [s for s in norm.split("/") if s != ""]
+        for seg in segments:
+            if seg == ".." or seg.startswith(".."):
+                return "invalid_file_path:traversal"
+            if seg.startswith("."):  # hidden file/dir incl. .env
+                return "invalid_file_path:hidden"
+        if any(kw in norm for kw in _PATH_SENSITIVE_KEYWORDS):
+            return "invalid_file_path:sensitive"
+        if any(norm.endswith(ext) for ext in _PATH_UNSAFE_EXTENSIONS):
+            return "invalid_file_path:unsafe_extension"
+        if not any(norm.endswith(ext) for ext in _ALLOWED_DATA_EXTENSIONS):
+            return "invalid_file_path:unrecognized_extension"
+        return None
+    except Exception:
+        return "invalid_file_path:error"
+
+
+def _normalize_path_for_dedup(raw: str) -> str:
+    return raw.strip().lower().replace("\\", "/")
+
 
 def normalize_data_type(name: Any) -> str | None:
     """Canonical data-type name, or None for unknown/garbage. Never raises."""
@@ -401,6 +453,7 @@ def _semantic_blockers(m: dict[str, Any]) -> list[str]:
         bad.append("invalid_field:files_inventory_required")
     else:
         inventory_types: set[str] = set()
+        seen_paths: set[str] = set()
         inventory_ok = True
         for entry in files:
             if not isinstance(entry, dict):
@@ -411,6 +464,21 @@ def _semantic_blockers(m: dict[str, Any]) -> list[str]:
                 bad.append("invalid_field:files_entry_path")
                 inventory_ok = False
                 break
+            # V10.5.5 (Codex B2) — path safety: sensitive/hidden/traversal/
+            # absolute/unsafe-extension paths can never be dataset evidence.
+            path_block = classify_file_path(entry.get("path"))
+            if path_block is not None:
+                bad.append(path_block)
+                inventory_ok = False
+                break
+            # V10.5.5 (Codex B1) — each path must be unique in the inventory;
+            # a reused path (any data_type) blocks.
+            norm_path = _normalize_path_for_dedup(str(entry.get("path")))
+            if norm_path in seen_paths:
+                bad.append("duplicate_file_path_in_inventory")
+                inventory_ok = False
+                break
+            seen_paths.add(norm_path)
             canonical = normalize_data_type(entry.get("data_type"))
             if canonical is None:
                 bad.append("invalid_field:files_entry_data_type")
@@ -452,6 +520,7 @@ def _semantic_blockers(m: dict[str, Any]) -> list[str]:
         r_start = _parse_datetime(requested.get("start"))
         r_end = _parse_datetime(requested.get("end"))
 
+    requested_span_days: float | None = None
     if None not in (a_start, a_end, r_start, r_end) and actual_span_days is not None:
         # Containment: actual must start no later and end no earlier than
         # requested (exact coverage of the requested window).
@@ -465,6 +534,13 @@ def _semantic_blockers(m: dict[str, Any]) -> list[str]:
     if clean is not None and actual_span_days is not None:
         if clean > actual_span_days + 1.0:
             bad.append("inconsistent_field:clean_days_exceeds_covered_range")
+
+    # V10.5.5 (Codex B3) — clean_days must COVER the requested window. A full
+    # 365d range with only 180 clean days cannot promote a 365d request; no
+    # tolerance (179<180 blocks). coverage_ratio cannot compensate.
+    if clean is not None and requested_span_days is not None:
+        if clean < requested_span_days:
+            bad.append("inconsistent_field:clean_days_below_requested_range")
 
     return bad
 
