@@ -4457,6 +4457,187 @@ class ResearchLab:
         lines.append("DATA READINESS V10.5 END")
         return "\n".join(lines)
 
+    # ------------------------------------------------------------------
+    # ResearchOps V10.6 — local-first live-readiness foundation CLIs.
+    # All research-only, offline, fail-closed. None can flip paper/live.
+    # ------------------------------------------------------------------
+    def _v106_gate_block(self, title: str, rep: dict, key_fields: list) -> str:
+        lines = [f"{title} START"]
+        lines.append(f"status: {rep.get('status')}")
+        for k in key_fields:
+            if k in rep:
+                v = rep[k]
+                lines.append(f"{k}: {str(v).lower() if isinstance(v, bool) else v}")
+        if "blockers" in rep:
+            lines.append("blockers:")
+            lines.extend(f"- {b}" for b in (rep.get("blockers") or ["NONE"]))
+        lines.append(f"paper_ready: {str(rep.get('paper_ready', False)).lower()}")
+        lines.append(f"live_ready: {str(rep.get('live_ready', False)).lower()}")
+        lines.extend(self._v82_safety_footer())
+        lines.append(f"{title} END")
+        return "\n".join(lines)
+
+    def provider_matrix_v106_cli(self) -> str:
+        from .labs.provider_registry_v10_6 import run_provider_matrix_v106
+        rep = run_provider_matrix_v106().as_dict()
+        lines = ["PROVIDER MATRIX V10.6 START"]
+        lines.append(f"preferred_sample_candidate: {rep['preferred_sample_candidate'] or 'NONE'}")
+        lines.append(f"fallback: {rep['fallback'] or 'NONE'}")
+        lines.append(f"cross_check: {rep['cross_check'] or 'NONE'}")
+        lines.append(f"any_verified: {str(rep['any_verified']).lower()}")
+        lines.append(f"any_paid_download_authorized: {str(rep['any_paid_download_authorized']).lower()}")
+        lines.append(f"no_network_calls: {str(rep['no_network_calls']).lower()}")
+        lines.append("providers:")
+        for p in rep["providers"]:
+            lines.append(f"- {p['provider_id']}: status={p['integration_status']} rec={p['recommendation']}")
+        lines.extend(self._v82_safety_footer())
+        lines.append("PROVIDER MATRIX V10.6 END")
+        return "\n".join(lines)
+
+    def provider_sample_validate_v106_cli(self, *, sample_dir: str,
+                                          expected_days: int = 180,
+                                          provider_id: str = "") -> str:
+        from .labs.provider_sample_validator_v10_6 import validate_sample_dir
+        rep = validate_sample_dir(sample_dir, expected_days=expected_days,
+                                  provider_id=provider_id)
+        cov = rep.get("coverage", {})
+        q = rep.get("quality", {})
+        lines = ["PROVIDER SAMPLE VALIDATE V10.6 START"]
+        lines.append(f"provider_id: {rep['provider_id'] or 'NONE'}")
+        lines.append(f"sample_dir: {rep['sample_dir']}")
+        lines.append(f"dataset_hash: {rep['dataset_hash'] or 'NONE'}")
+        lines.append(f"files: {len(rep['files'])}")
+        lines.append(f"rows_total: {rep['rows_total']}")
+        lines.append(f"actual_days_covered: {cov.get('actual_days_covered', 0)}")
+        lines.append(f"coverage_ratio_by_days: {cov.get('coverage_ratio_by_days', 0)}")
+        lines.append(f"data_classification: {rep['data_classification']}")
+        lines.append(f"sample_ready: {str(rep['sample_ready']).lower()}")
+        lines.append(f"required_types_missing: {','.join(q.get('required_types_missing', [])) or 'NONE'}")
+        lines.append("blockers:")
+        lines.extend(f"- {b}" for b in (rep["blockers"][:30] or ["NONE"]))
+        lines.append(f"paper_ready: {str(rep['paper_ready']).lower()}")
+        lines.append(f"live_ready: {str(rep['live_ready']).lower()}")
+        lines.extend(self._v82_safety_footer())
+        lines.append("PROVIDER SAMPLE VALIDATE V10.6 END")
+        return "\n".join(lines)
+
+    def provider_sample_manifest_v106_cli(self, *, sample_dir: str,
+                                          expected_days: int = 180,
+                                          provider_id: str = "",
+                                          write: bool = False) -> str:
+        from .labs.provider_sample_validator_v10_6 import build_sample_manifest
+        man = build_sample_manifest(sample_dir, expected_days=expected_days,
+                                    provider_id=provider_id, write=write)
+        lines = ["PROVIDER SAMPLE MANIFEST V10.6 START"]
+        lines.append(f"provider_id: {man['provider_id'] or 'NONE'}")
+        lines.append(f"dataset_hash: {man['dataset_hash'] or 'NONE'}")
+        lines.append(f"schema_version: {man['schema_version']}")
+        lines.append(f"clean_days: {man['clean_days']}")
+        lines.append(f"data_types: {','.join(man['data_types']) or 'NONE'}")
+        lines.append(f"missing_oi_status: {man['missing_oi_status']}")
+        lines.append(f"import_status: {man['import_status']}")
+        lines.append(f"explicit_human_authorization: {str(man['explicit_human_authorization']).lower()}")
+        lines.append(f"gate_status: {man['gate_status']}")
+        lines.append(f"gate_promote_allowed: {str(man['gate_promote_allowed']).lower()}")
+        lines.append("gate_blockers:")
+        lines.extend(f"- {b}" for b in (man["gate_blockers"][:30] or ["NONE"]))
+        lines.append(f"data_classification: {man['data_classification']}")
+        lines.append(f"written_path: {man['written_path'] or 'NONE'}")
+        lines.append(f"paper_ready: {str(man['paper_ready']).lower()}")
+        lines.append(f"live_ready: {str(man['live_ready']).lower()}")
+        lines.extend(self._v82_safety_footer())
+        lines.append("PROVIDER SAMPLE MANIFEST V10.6 END")
+        return "\n".join(lines)
+
+    def backtester_readiness_v106_cli(self, *, manifest_path: str = "") -> str:
+        import json as _json
+        import os as _os
+        from .labs.real_replay_backtester_v10_6 import evaluate_backtester_readiness
+        manifest_eval = None
+        load_error = ""
+        if manifest_path:
+            try:
+                if _os.path.isfile(manifest_path):
+                    with open(manifest_path, "r", encoding="utf-8") as fh:
+                        manifest_eval = _json.load(fh)
+                    if not isinstance(manifest_eval, dict):
+                        manifest_eval, load_error = None, "manifest_not_object"
+                else:
+                    load_error = "manifest_file_not_found"
+            except Exception:
+                load_error = "manifest_unreadable"
+        rep = evaluate_backtester_readiness(manifest_eval).as_dict()
+        lines = ["BACKTESTER READINESS V10.6 START"]
+        lines.append(f"manifest_path: {manifest_path or 'NONE'}")
+        if load_error:
+            lines.append(f"manifest_load_error: {load_error}")
+        lines.append(f"status: {rep['status']}")
+        lines.append(f"clean_days: {rep['clean_days']}")
+        lines.append(f"required_min_days: {rep['required_min_days']}")
+        lines.append(f"strong_days: {rep['strong_days']}")
+        lines.append(f"manifest_promotable: {str(rep['manifest_promotable']).lower()}")
+        lines.append(f"oi_ok: {str(rep['oi_ok']).lower()}")
+        lines.append("blockers:")
+        lines.extend(f"- {b}" for b in (rep["blockers"][:30] or ["NONE"]))
+        lines.append(f"paper_ready: {str(rep['paper_ready']).lower()}")
+        lines.append(f"live_ready: {str(rep['live_ready']).lower()}")
+        lines.extend(self._v82_safety_footer())
+        lines.append("BACKTESTER READINESS V10.6 END")
+        return "\n".join(lines)
+
+    def replay_backtester_contract_v106_cli(self) -> str:
+        from .labs.real_replay_backtester_v10_6 import (
+            replay_backtester_contract,
+            run_replay_research,
+        )
+        contract = replay_backtester_contract()
+        demo = run_replay_research(bars_by_symbol=None, signals=None)
+        lines = ["REPLAY BACKTESTER CONTRACT V10.6 START"]
+        lines.append(f"engine: {contract['engine']}")
+        lines.append("no_lookahead_rules:")
+        lines.extend(f"- {r}" for r in contract["no_lookahead_rules"])
+        lines.append(f"cost_model: {','.join(contract['cost_model'])}")
+        lines.append(f"exit_reasons: {','.join(contract['exit_reasons'])}")
+        lines.append(f"metrics: {','.join(contract['metrics'])}")
+        lines.append(f"never: {','.join(contract['never'])}")
+        lines.append(f"live_run_status: {demo['status']}")
+        lines.append(f"paper_ready: {str(contract['paper_ready']).lower()}")
+        lines.append(f"live_ready: {str(contract['live_ready']).lower()}")
+        lines.extend(self._v82_safety_footer())
+        lines.append("REPLAY BACKTESTER CONTRACT V10.6 END")
+        return "\n".join(lines)
+
+    def edge_hunter_readiness_v106_cli(self) -> str:
+        from .labs.readiness_gates_v10_6 import edge_hunter_readiness
+        return self._v106_gate_block(
+            "EDGE HUNTER READINESS V10.6", edge_hunter_readiness(), [])
+
+    def walk_forward_readiness_v106_cli(self) -> str:
+        from .labs.readiness_gates_v10_6 import walk_forward_readiness
+        return self._v106_gate_block(
+            "WALK FORWARD READINESS V10.6", walk_forward_readiness(), [])
+
+    def meta_model_readiness_v106_cli(self) -> str:
+        from .labs.readiness_gates_v10_6 import meta_model_readiness
+        return self._v106_gate_block(
+            "META MODEL READINESS V10.6", meta_model_readiness(), [])
+
+    def forecast_lab_readiness_v106_cli(self) -> str:
+        from .labs.readiness_gates_v10_6 import forecast_lab_readiness
+        return self._v106_gate_block(
+            "FORECAST LAB READINESS V10.6", forecast_lab_readiness(), ["implemented"])
+
+    def paper_readiness_v106_cli(self) -> str:
+        from .labs.readiness_gates_v10_6 import paper_readiness
+        return self._v106_gate_block(
+            "PAPER READINESS V10.6", paper_readiness(), ["recommendation"])
+
+    def live_readiness_v106_cli(self) -> str:
+        from .labs.readiness_gates_v10_6 import live_readiness
+        return self._v106_gate_block(
+            "LIVE READINESS V10.6", live_readiness(),
+            ["live_audit_ready", "can_send_real_orders"])
+
     def trader_dashboard_contract_v105_cli(self) -> str:
         from .labs.trader_dashboard_v104 import (
             DISABLED_CONTROLS,
@@ -5592,6 +5773,17 @@ def build_argument_parser() -> argparse.ArgumentParser:
             "provider-verification-v105",
             "data-readiness-v105",
             "trader-dashboard-contract-v105",
+            "provider-matrix-v106",
+            "provider-sample-validate-v106",
+            "provider-sample-manifest-v106",
+            "backtester-readiness-v106",
+            "replay-backtester-contract-v106",
+            "edge-hunter-readiness-v106",
+            "walk-forward-readiness-v106",
+            "meta-model-readiness-v106",
+            "forecast-lab-readiness-v106",
+            "paper-readiness-v106",
+            "live-readiness-v106",
             "ohlcv-replay-loader-smoke-test",
             "ohlcv-replay-loader-audit",
             "duplicate-module-audit-smoke-test",
@@ -5715,6 +5907,10 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--input", default="", help="V10.1 single local input file (CSV/JSON/NDJSON) for external-edge-ingest-v101.")
     parser.add_argument("--input-dir", default="", help="V10.1 input directory of local files for external-edge-ingest-v101.")
     parser.add_argument("--module", default="funding_oi_liq", help="V10.1 event-study module: funding_oi_liq|unlocks|listings.")
+    parser.add_argument("--sample-dir", default="", help="V10.6 local sample directory (read-only) for provider-sample-validate/manifest. No network, no ingest.")
+    parser.add_argument("--expected-days", type=int, default=180, help="V10.6 expected history span in days for the sample validator (default 180).")
+    parser.add_argument("--provider", default="", help="V10.6 provider id label for sample validation/manifest (e.g. tardis_dev). Informational only.")
+    parser.add_argument("--manifest", default="", help="V10.6 path to a research-only manifest JSON for backtester-readiness-v106.")
     return parser
 
 
@@ -6488,6 +6684,32 @@ def main() -> None:
         print(lab.data_readiness_v105_cli())
     elif args.command == "trader-dashboard-contract-v105":
         print(lab.trader_dashboard_contract_v105_cli())
+    elif args.command == "provider-matrix-v106":
+        print(lab.provider_matrix_v106_cli())
+    elif args.command == "provider-sample-validate-v106":
+        print(lab.provider_sample_validate_v106_cli(
+            sample_dir=args.sample_dir, expected_days=args.expected_days,
+            provider_id=args.provider))
+    elif args.command == "provider-sample-manifest-v106":
+        print(lab.provider_sample_manifest_v106_cli(
+            sample_dir=args.sample_dir, expected_days=args.expected_days,
+            provider_id=args.provider, write=args.apply))
+    elif args.command == "backtester-readiness-v106":
+        print(lab.backtester_readiness_v106_cli(manifest_path=args.manifest))
+    elif args.command == "replay-backtester-contract-v106":
+        print(lab.replay_backtester_contract_v106_cli())
+    elif args.command == "edge-hunter-readiness-v106":
+        print(lab.edge_hunter_readiness_v106_cli())
+    elif args.command == "walk-forward-readiness-v106":
+        print(lab.walk_forward_readiness_v106_cli())
+    elif args.command == "meta-model-readiness-v106":
+        print(lab.meta_model_readiness_v106_cli())
+    elif args.command == "forecast-lab-readiness-v106":
+        print(lab.forecast_lab_readiness_v106_cli())
+    elif args.command == "paper-readiness-v106":
+        print(lab.paper_readiness_v106_cli())
+    elif args.command == "live-readiness-v106":
+        print(lab.live_readiness_v106_cli())
     elif args.command == "ohlcv-replay-loader-smoke-test":
         print(lab.ohlcv_replay_loader_smoke_test())
     elif args.command == "ohlcv-replay-loader-audit":
