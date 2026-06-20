@@ -4638,6 +4638,80 @@ class ResearchLab:
             "LIVE READINESS V10.6", live_readiness(),
             ["live_audit_ready", "can_send_real_orders"])
 
+    # ------------------------------------------------------------------
+    # ResearchOps V10.7 — Bitget PUBLIC free data collector CLIs.
+    # GET-only public market data; dry-run by default; staging-only writes.
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _v107_emit(title: str, report: dict, key_fields: list) -> str:
+        import json as _json
+        lines = [f"{title} START"]
+        for k in key_fields:
+            if k in report:
+                v = report[k]
+                if isinstance(v, bool):
+                    v = str(v).lower()
+                elif isinstance(v, (list, dict)):
+                    v = _json.dumps(v, default=str)
+                lines.append(f"{k}: {v}")
+        lines.append("report_json: " + _json.dumps(report, default=str))
+        lines.append(f"research_only: true")
+        lines.append(f"paper_filter_enabled: false")
+        lines.append(f"can_send_real_orders: false")
+        lines.append(f"final_recommendation: {report.get('final_recommendation', 'NO LIVE')}")
+        lines.append(f"{title} END")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _v107_csv_arg(value: str) -> list:
+        return [tok.strip() for tok in str(value or "").split(",") if tok.strip()]
+
+    def bitget_public_plan_v107_cli(self) -> str:
+        from .labs.bitget_public_data_v10_7 import build_plan_v107
+        return self._v107_emit("BITGET PUBLIC PLAN V10.7", build_plan_v107(),
+                               ["data_source", "free", "api_key_required",
+                                "provider_verified", "recommended_start_free",
+                                "limitations", "paper_ready", "live_ready"])
+
+    def bitget_public_fetch_v107_cli(self, *, symbols: str, timeframes: str,
+                                     days: int, data_types: str,
+                                     apply: bool = False) -> str:
+        from .labs.bitget_public_data_v10_7 import run_fetch_v107
+        report = run_fetch_v107(
+            symbols=self._v107_csv_arg(symbols),
+            timeframes=self._v107_csv_arg(timeframes), days=int(days),
+            data_types=self._v107_csv_arg(data_types), apply=bool(apply))
+        return self._v107_emit("BITGET PUBLIC FETCH V10.7", report,
+                               ["run_id", "dry_run", "symbols", "timeframes",
+                                "requested_days", "data_types", "endpoints_called",
+                                "rows_written", "errors", "warnings",
+                                "staging_dir", "paper_ready", "live_ready"])
+
+    def bitget_public_staging_audit_v107_cli(self, *, staging_dir: str) -> str:
+        from .labs.bitget_public_data_v10_7 import audit_staging_v107
+        report = audit_staging_v107(staging_dir)
+        return self._v107_emit("BITGET PUBLIC STAGING AUDIT V10.7", report,
+                               ["staging_dir", "audit_status", "rows_total",
+                                "coverage", "blockers", "warnings",
+                                "suggested_next", "paper_ready", "live_ready"])
+
+    def bitget_public_to_sample_v107_cli(self, *, staging_dir: str) -> str:
+        from .labs.bitget_public_data_v10_7 import staging_to_sample_v107
+        report = staging_to_sample_v107(staging_dir)
+        return self._v107_emit("BITGET PUBLIC TO SAMPLE V10.7", report,
+                               ["staging_dir", "sample_dir", "written", "skipped",
+                                "errors", "note", "paper_ready", "live_ready"])
+
+    def bitget_public_collector_status_v107_cli(self) -> str:
+        from .labs.bitget_public_data_v10_7 import collector_status_v107
+        return self._v107_emit("BITGET PUBLIC COLLECTOR STATUS V10.7",
+                               collector_status_v107(),
+                               ["data_source", "implemented_endpoints",
+                                "planned_endpoints", "free_data_available",
+                                "still_missing", "latest_staging_dir",
+                                "no_private_auth", "no_env", "paper_ready",
+                                "live_ready"])
+
     def trader_dashboard_contract_v105_cli(self) -> str:
         from .labs.trader_dashboard_v104 import (
             DISABLED_CONTROLS,
@@ -5784,6 +5858,11 @@ def build_argument_parser() -> argparse.ArgumentParser:
             "forecast-lab-readiness-v106",
             "paper-readiness-v106",
             "live-readiness-v106",
+            "bitget-public-plan-v107",
+            "bitget-public-fetch-v107",
+            "bitget-public-staging-audit-v107",
+            "bitget-public-to-sample-v107",
+            "bitget-public-collector-status-v107",
             "ohlcv-replay-loader-smoke-test",
             "ohlcv-replay-loader-audit",
             "duplicate-module-audit-smoke-test",
@@ -5911,6 +5990,9 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--expected-days", type=int, default=180, help="V10.6 expected history span in days for the sample validator (default 180).")
     parser.add_argument("--provider", default="", help="V10.6 provider id label for sample validation/manifest (e.g. tardis_dev). Informational only.")
     parser.add_argument("--manifest", default="", help="V10.6 path to a research-only manifest JSON for backtester-readiness-v106.")
+    parser.add_argument("--days", type=int, default=30, help="V10.7 lookback span in days for bitget-public-fetch-v107 (default 30).")
+    parser.add_argument("--data-types", default="candles,funding,oi_snapshot", help="V10.7 comma-separated data types: candles,funding,oi_snapshot.")
+    parser.add_argument("--staging-dir", default="", help="V10.7 local staging directory (read-only audit / sample conversion). No network, no raw, no DB.")
     return parser
 
 
@@ -6710,6 +6792,19 @@ def main() -> None:
         print(lab.paper_readiness_v106_cli())
     elif args.command == "live-readiness-v106":
         print(lab.live_readiness_v106_cli())
+    elif args.command == "bitget-public-plan-v107":
+        print(lab.bitget_public_plan_v107_cli())
+    elif args.command == "bitget-public-fetch-v107":
+        print(lab.bitget_public_fetch_v107_cli(
+            symbols=args.symbols, timeframes=args.timeframes, days=args.days,
+            data_types=args.data_types,
+            apply=bool(args.apply) and not bool(args.dry_run)))
+    elif args.command == "bitget-public-staging-audit-v107":
+        print(lab.bitget_public_staging_audit_v107_cli(staging_dir=args.staging_dir))
+    elif args.command == "bitget-public-to-sample-v107":
+        print(lab.bitget_public_to_sample_v107_cli(staging_dir=args.staging_dir))
+    elif args.command == "bitget-public-collector-status-v107":
+        print(lab.bitget_public_collector_status_v107_cli())
     elif args.command == "ohlcv-replay-loader-smoke-test":
         print(lab.ohlcv_replay_loader_smoke_test())
     elif args.command == "ohlcv-replay-loader-audit":
