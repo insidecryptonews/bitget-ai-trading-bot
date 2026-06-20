@@ -131,6 +131,86 @@ def _norm_tf(token: Any) -> str | None:
 
 
 # --------------------------------------------------------------------------
+# V10.7.1 (Codex fix) — single staging-path-safety gate. EVERY local write in
+# this module (run_fetch staging_root, to-sample output, any sample conversion)
+# must be under the bitget public staging marker. Fail-closed.
+# --------------------------------------------------------------------------
+
+# The marker that a path must contain (as consecutive segments) to be a legal
+# write target. Tying allowance to this marker — not to an absolute repo root —
+# lets temp-rooted runs work while still rejecting raw/outside/db/etc.
+_STAGING_MARKER = ("external_data", "staging", "bitget_public_v10_7")
+# Exact path segments that are never allowed anywhere in the path.
+_FORBIDDEN_SEGMENTS = frozenset({
+    "raw", "backup", "backups", "vault", "vaults", "training_exports",
+    "secret", "secrets", "credential", "credentials",
+    "codex_result.md", "code_result.md",
+})
+# Dangerous suffixes / substrings on any segment.
+_FORBIDDEN_SUFFIXES = (".env", ".db", ".sqlite", ".sqlite3", ".zip", ".tar",
+                       ".gz", ".tgz", ".pem", ".key")
+
+
+def _contains_subsequence(seq: list[str], sub: list[str]) -> bool:
+    if not sub or len(sub) > len(seq):
+        return False
+    return any(seq[i:i + len(sub)] == sub for i in range(len(seq) - len(sub) + 1))
+
+
+def _forbidden_segment(segs: list[str]) -> str | None:
+    for s in segs:
+        if s in _FORBIDDEN_SEGMENTS:
+            return "refuses_raw_directory" if s == "raw" else "unsafe_staging_dir"
+        if ".env" in s or s.endswith(_FORBIDDEN_SUFFIXES):
+            return "unsafe_staging_dir"
+    return None
+
+
+def validate_bitget_public_staging_dir_v107(staging_dir: Any, *,
+                                            for_write: bool) -> str | None:
+    """Return a blocker code if ``staging_dir`` is not a safe V10.7 staging
+    path, else None. Pure, never raises.
+
+    for_write=True  -> must be the bitget public staging marker dir or below it
+                       (writes are staging-ONLY; raw/outside is fail-closed).
+    for_write=False -> read-only audit: still blocks raw/db/.env/zip/backup/
+                       vault/traversal/percent/symlink-escape, but does not
+                       require the marker (so any otherwise-safe dir can be
+                       inspected).
+    Codes: staging_dir_outside_allowed_root / refuses_raw_directory /
+    unsafe_staging_dir / percent_encoded_path_blocked /
+    staging_symlink_escape_blocked.
+    """
+    if not isinstance(staging_dir, str) or not staging_dir.strip():
+        return "unsafe_staging_dir"
+    raw = staging_dir.strip()
+    if "%" in raw:
+        return "percent_encoded_path_blocked"
+    if ".." in raw.replace("\\", "/").split("/"):
+        return "unsafe_staging_dir"  # lexical traversal
+    try:
+        lexical = os.path.normpath(os.path.abspath(raw)).replace("\\", "/")
+        real = os.path.realpath(raw).replace("\\", "/")
+    except Exception:
+        return "unsafe_staging_dir"
+    lex_segs = [s.lower() for s in lexical.split("/") if s]
+    real_segs = [s.lower() for s in real.split("/") if s]
+    for segs in (lex_segs, real_segs):
+        bad = _forbidden_segment(segs)
+        if bad is not None:
+            return bad
+    if for_write:
+        marker = [m.lower() for m in _STAGING_MARKER]
+        lex_ok = _contains_subsequence(lex_segs, marker)
+        real_ok = _contains_subsequence(real_segs, marker)
+        if lex_ok and not real_ok:
+            return "staging_symlink_escape_blocked"  # symlink leaves the root
+        if not real_ok:
+            return "staging_dir_outside_allowed_root"
+    return None
+
+
+# --------------------------------------------------------------------------
 # A. Endpoint registry
 # --------------------------------------------------------------------------
 
@@ -515,6 +595,14 @@ def run_fetch_v107(*, symbols: list[str], timeframes: list[str], days: int,
         report["ended_at"] = _now_iso()
         return report
 
+    # V10.7.1 (Codex fix) — staging-ONLY enforcement BEFORE any write/network.
+    staging_block = validate_bitget_public_staging_dir_v107(staging_root, for_write=True)
+    if staging_block is not None:
+        report["errors"].append(f"staging_root_rejected:{staging_block}")
+        report["blocked"] = True
+        report["ended_at"] = _now_iso()
+        return report  # fail-closed: never write outside the staging root
+
     ctx = _RunCtx(transport=transport or default_transport,
                   sleep_fn=sleep_fn or time.sleep, rate_per_s=rate_per_s,
                   timeout=timeout, max_retries=max_retries)
@@ -524,6 +612,7 @@ def run_fetch_v107(*, symbols: list[str], timeframes: list[str], days: int,
 
     def _emit(dtype: str, sub: str, fname: str, rows: list[dict[str, Any]]) -> None:
         if not rows:
+            report["warnings"].append(f"no_rows_written_for_{sub}_{dtype}")
             return
         rel = os.path.join(dtype, sub, fname)
         _write_csv(os.path.join(run_dir, rel), _CSV_HEADERS[dtype], rows)
@@ -546,6 +635,8 @@ def run_fetch_v107(*, symbols: list[str], timeframes: list[str], days: int,
     report["rows_written"] = rows_written
     report["files"] = files
     report["staging_dir"] = run_dir.replace("\\", "/")
+    if not rows_written:
+        report["warnings"].append("no_rows_written")
     report["ended_at"] = _now_iso()
 
     try:
@@ -665,9 +756,11 @@ def audit_staging_v107(staging_dir: str) -> dict[str, Any]:
     if not (isinstance(staging_dir, str) and staging_dir and os.path.isdir(staging_dir)):
         report["blockers"].append("staging_dir_not_found")
         return report
-    norm = staging_dir.replace("\\", "/").lower()
-    if "/raw/" in norm or norm.rstrip("/").endswith("/raw"):
-        report["blockers"].append("refuses_raw_directory")
+    # V10.7.1 — centralised path safety (read-only: blocks raw/db/.env/zip/
+    # backup/vault/traversal/percent/symlink-escape; no marker requirement).
+    path_block = validate_bitget_public_staging_dir_v107(staging_dir, for_write=False)
+    if path_block is not None:
+        report["blockers"].append(path_block)
         return report
 
     file_reports: list[dict[str, Any]] = []
@@ -719,14 +812,26 @@ SAMPLE_SUBDIR = "_sample_v106"
 
 def staging_to_sample_v107(staging_dir: str, *, apply: bool = True) -> dict[str, Any]:
     """Transform staging candles/funding into validator-friendly sample files
-    (``<SYMBOL>_<tf>_ohlcv.csv`` / ``<SYMBOL>_funding.csv``) under a sibling
-    sample dir, so provider-sample-validate-v106 can read it WITHOUT any
-    readiness bypass. OI snapshots are skipped (single-point, not a series)."""
+    (``<SYMBOL>_<tf>_ohlcv.csv`` / ``<SYMBOL>_funding.csv``) under the staging
+    dir's ``_sample_v106`` subdir, so provider-sample-validate-v106 can read it
+    WITHOUT any readiness bypass. OI snapshots are skipped (single-point).
+
+    V10.7.1 (Codex fix) — writes here are staging-ONLY: ``staging_dir`` must be
+    under the bitget public staging marker; raw/outside/traversal/percent/db/
+    env/backup/vault/symlink-escape are fail-closed BEFORE any directory is
+    created or any byte is written."""
     out_dir = os.path.join(staging_dir, SAMPLE_SUBDIR)
     report = {"staging_dir": staging_dir, "sample_dir": out_dir.replace("\\", "/"),
               "written": [], "skipped": [], "errors": [],
               "paper_ready": False, "live_ready": False,
               "final_recommendation": FINAL_RECOMMENDATION_NO_LIVE}
+    # Fail-closed staging-only check BEFORE computing/creating any output path.
+    path_block = validate_bitget_public_staging_dir_v107(staging_dir, for_write=True)
+    if path_block is not None:
+        report["blocked"] = True
+        report["sample_dir"] = ""  # nothing will be written
+        report["errors"].append(f"staging_dir_rejected:{path_block}")
+        return report
     if not os.path.isdir(staging_dir):
         report["errors"].append("staging_dir_not_found")
         return report

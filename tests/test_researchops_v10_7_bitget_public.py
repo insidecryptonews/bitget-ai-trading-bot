@@ -19,6 +19,14 @@ from app.labs.provider_sample_validator_v10_6 import build_sample_manifest, vali
 MODULE_PATH = "app/labs/bitget_public_data_v10_7.py"
 
 
+def _staging_root(tmp_path) -> str:
+    """A temp path that contains the V10.7 staging marker, so staging-only
+    write enforcement accepts it (mirrors external_data/staging/bitget_public_v10_7)."""
+    p = tmp_path / "external_data" / "staging" / "bitget_public_v10_7"
+    p.mkdir(parents=True, exist_ok=True)
+    return str(p)
+
+
 # --------------------------------------------------------------------------
 # helpers
 # --------------------------------------------------------------------------
@@ -205,14 +213,16 @@ def test_dry_run_writes_nothing(tmp_path):
 
 def test_apply_writes_only_under_staging(tmp_path):
     transport, state = _fake_transport_factory()
+    root = _staging_root(tmp_path)
     rep = B.run_fetch_v107(symbols=["BTCUSDT"], timeframes=["1h"], days=2,
                            data_types=["candles", "funding", "oi_snapshot"],
                            apply=True, transport=transport,
-                           staging_root=str(tmp_path), sleep_fn=lambda *_: None)
+                           staging_root=root, sleep_fn=lambda *_: None)
     assert rep["dry_run"] is False
     run_dir = Path(rep["staging_dir"])
-    # everything written lives under tmp_path (staging root) — never raw/db/.env
-    assert str(run_dir).startswith(str(tmp_path))
+    # everything written lives under the staging root — never raw/db/.env
+    assert str(run_dir).startswith(root)
+    assert "bitget_public_v10_7" in str(run_dir)
     assert (run_dir / "run_report.json").is_file()
     assert (run_dir / "candles" / "BTCUSDT" / "1h.csv").is_file()
     assert (run_dir / "funding" / "BTCUSDT" / "funding.csv").is_file()
@@ -228,7 +238,7 @@ def test_apply_with_failing_transport_records_errors_not_crash(tmp_path):
         raise OSError("network down")
     rep = B.run_fetch_v107(symbols=["BTCUSDT"], timeframes=["1h"], days=2,
                            data_types=["candles"], apply=True, transport=boom,
-                           staging_root=str(tmp_path), sleep_fn=lambda *_: None,
+                           staging_root=_staging_root(tmp_path), sleep_fn=lambda *_: None,
                            max_retries=1)
     assert rep["errors"]  # errors captured
     assert rep["final_recommendation"] == "NO LIVE"  # still safe
@@ -308,11 +318,12 @@ def test_to_sample_then_validate_does_not_bypass_readiness(tmp_path):
     transport, _ = _fake_transport_factory()
     rep = B.run_fetch_v107(symbols=["BTCUSDT"], timeframes=["1h"], days=2,
                            data_types=["candles", "funding"], apply=True,
-                           transport=transport, staging_root=str(tmp_path),
+                           transport=transport, staging_root=_staging_root(tmp_path),
                            sleep_fn=lambda *_: None)
     run_dir = rep["staging_dir"]
     conv = B.staging_to_sample_v107(run_dir)
     sample_dir = conv["sample_dir"]
+    assert conv.get("blocked") is not True
     assert any(n.endswith("_ohlcv.csv") for n in conv["written"])
 
     # the real V10.6 validator reads the converted sample (no bypass)
@@ -324,6 +335,126 @@ def test_to_sample_then_validate_does_not_bypass_readiness(tmp_path):
     assert man["gate_promote_allowed"] is False
     assert man["explicit_human_authorization"] is False
     assert man["final_recommendation"] == "NO LIVE"
+
+
+# --------------------------------------------------------------------------
+# V10.7.1 — staging-ONLY write enforcement (Codex hotfix)
+# --------------------------------------------------------------------------
+
+def _make_candle_dir(parent: Path) -> Path:
+    d = parent / "candles" / "BTCUSDT"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "1h.csv").write_text(
+        ",".join(B._CSV_HEADERS["candles"]) + "\n" + _candle_row(1700000000000) + "\n",
+        encoding="utf-8")
+    return parent
+
+
+def test_to_sample_refuses_raw_directory(tmp_path):
+    raw = _make_candle_dir(tmp_path / "external_data" / "raw")
+    conv = B.staging_to_sample_v107(str(raw))
+    assert conv["blocked"] is True
+    assert any("refuses_raw_directory" in e for e in conv["errors"])
+    assert conv["sample_dir"] == ""
+    assert not (raw / B.SAMPLE_SUBDIR).exists()  # NOTHING written into raw
+
+
+def test_to_sample_refuses_outside_staging_root(tmp_path):
+    outside = _make_candle_dir(tmp_path / "outside")
+    conv = B.staging_to_sample_v107(str(outside))
+    assert conv["blocked"] is True
+    assert any("staging_dir_outside_allowed_root" in e for e in conv["errors"])
+    assert not (outside / B.SAMPLE_SUBDIR).exists()
+
+
+def test_to_sample_refuses_percent_encoded_path(tmp_path):
+    conv = B.staging_to_sample_v107(
+        str(tmp_path) + "/external_data/staging/bitget_public_v10_7/run%2e")
+    assert conv["blocked"] is True
+    assert any("percent_encoded_path_blocked" in e for e in conv["errors"])
+
+
+def test_to_sample_refuses_traversal(tmp_path):
+    conv = B.staging_to_sample_v107(
+        str(tmp_path) + "/external_data/staging/bitget_public_v10_7/../raw")
+    assert conv["blocked"] is True
+    assert conv["sample_dir"] == ""
+
+
+@pytest.mark.parametrize("bad", [
+    "external_data/staging/bitget_public_v10_7/secrets",
+    "external_data/staging/bitget_public_v10_7/vault",
+    "external_data/staging/bitget_public_v10_7/backups",
+    "external_data/staging/bitget_public_v10_7/data.zip",
+    "external_data/staging/bitget_public_v10_7/.env",
+    "external_data/staging/bitget_public_v10_7/x.db",
+])
+def test_to_sample_refuses_db_zip_env_backup_vault_paths(tmp_path, bad):
+    target = str(tmp_path / bad)
+    conv = B.staging_to_sample_v107(target)
+    assert conv["blocked"] is True
+    assert conv["sample_dir"] == ""
+
+
+def test_to_sample_accepts_valid_bitget_public_staging_dir(tmp_path):
+    run_dir = Path(_staging_root(tmp_path)) / "20260101T000000Z"
+    _make_candle_dir(run_dir)
+    conv = B.staging_to_sample_v107(str(run_dir))
+    assert conv.get("blocked") is not True
+    assert any(n.endswith("_ohlcv.csv") for n in conv["written"])
+    sample_dir = Path(conv["sample_dir"])
+    assert sample_dir.is_dir()
+    assert "bitget_public_v10_7" in conv["sample_dir"]
+    assert B.SAMPLE_SUBDIR in conv["sample_dir"]
+    # the written sample stays strictly inside the run dir (no escape)
+    assert str(sample_dir).startswith(str(run_dir))
+
+
+def test_run_fetch_refuses_raw_staging_root_programmatic(tmp_path):
+    transport, _ = _fake_transport_factory()
+    raw_root = str(tmp_path / "external_data" / "raw")
+    rep = B.run_fetch_v107(symbols=["BTCUSDT"], timeframes=["1h"], days=2,
+                           data_types=["candles"], apply=True, transport=transport,
+                           staging_root=raw_root, sleep_fn=lambda *_: None)
+    assert rep.get("blocked") is True
+    assert any("staging_root_rejected:refuses_raw_directory" in e for e in rep["errors"])
+    assert rep["rows_written"] == {}
+    assert not os.path.isdir(raw_root)  # never even created
+
+
+def test_run_fetch_refuses_outside_staging_root_programmatic(tmp_path):
+    transport, _ = _fake_transport_factory()
+    rep = B.run_fetch_v107(symbols=["BTCUSDT"], timeframes=["1h"], days=2,
+                           data_types=["candles"], apply=True, transport=transport,
+                           staging_root=str(tmp_path / "nope"), sleep_fn=lambda *_: None)
+    assert rep.get("blocked") is True
+    assert any("staging_root_rejected:staging_dir_outside_allowed_root" in e
+               for e in rep["errors"])
+    assert rep["rows_written"] == {}
+
+
+def test_dry_run_still_does_not_write_even_with_raw_root(tmp_path):
+    # dry-run must never write, regardless of the (here unsafe) root.
+    raw_root = str(tmp_path / "external_data" / "raw")
+    rep = B.run_fetch_v107(symbols=["BTCUSDT"], timeframes=["1h"], days=2,
+                           data_types=["candles"], apply=False,
+                           staging_root=raw_root, sleep_fn=lambda *_: None)
+    assert rep["dry_run"] is True
+    assert rep["staging_dir"] == ""
+    assert not os.path.isdir(raw_root)
+
+
+def test_zero_rows_adds_warning(tmp_path):
+    def empty_transport(path, params, *, timeout=10.0):
+        return {"code": "00000", "data": []}
+    rep = B.run_fetch_v107(symbols=["BTCUSDT"], timeframes=["1h"], days=2,
+                           data_types=["candles", "funding"], apply=True,
+                           transport=empty_transport, staging_root=_staging_root(tmp_path),
+                           sleep_fn=lambda *_: None)
+    assert "no_rows_written" in rep["warnings"]
+    assert any(w.startswith("no_rows_written_for_") for w in rep["warnings"])
+    assert rep["rows_written"] == {}
+    assert rep["final_recommendation"] == "NO LIVE"
 
 
 # --------------------------------------------------------------------------
