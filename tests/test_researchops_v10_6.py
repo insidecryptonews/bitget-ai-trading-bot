@@ -23,9 +23,15 @@ from app.labs.provider_sample_validator_v10_6 import (
     build_sample_manifest,
     validate_sample_dir,
 )
+from app.labs.data_foundation_v10_5 import (
+    MANIFEST_V105_REQUIRED_FIELDS,
+    SCHEMA_VERSION,
+)
 from app.labs.real_replay_backtester_v10_6 import (
+    BR_NEED_CONTENT_VALIDATION,
     BR_NEED_DATA,
     BR_NEED_LONG_HISTORY,
+    BR_NEED_VALID_MANIFEST,
     BR_READY,
     CostModel,
     evaluate_backtester_readiness,
@@ -33,6 +39,55 @@ from app.labs.real_replay_backtester_v10_6 import (
     run_replay_research,
     simulate_position,
 )
+
+# A manifest shape that genuinely PASSES the real V10.5.6 gate (mirrors the
+# fixture used by the V10.5 suite). Backtester readiness must re-derive
+# promotability from this — never from declared fields.
+_VALID_RANGE = {"start": "2025-06-11T00:00:00Z", "end": "2026-06-11T00:00:00Z"}
+
+
+def _valid_manifest_v105(**over):
+    man = {f: 0 for f in MANIFEST_V105_REQUIRED_FIELDS}
+    man.update({
+        "source_provider": "tardis_dev", "license_terms": "research",
+        "requested_range": dict(_VALID_RANGE),
+        "actual_covered_range": dict(_VALID_RANGE),
+        "symbols": ["BTCUSDT"], "timeframes": ["1h"],
+        "data_types": ["ohlcv", "open_interest", "funding", "liquidations"],
+        "rows_by_type": {"ohlcv": 8760, "open_interest": 8760,
+                         "funding": 1095, "liquidations": 5000},
+        "missing_oi_ratio": 0.02, "missing_oi_status": "DATA_OK",
+        "gap_count": 0, "duplicate_count": 0,
+        "coverage_ratio": 0.97, "clean_days": 365.0,
+        "checksums_sha256": {
+            "BTCUSDT_1h_ohlcv.csv": "ab" * 32,
+            "BTCUSDT_open_interest.csv": "cd" * 32,
+            "BTCUSDT_funding.csv": "ef" * 32,
+            "BTCUSDT_liquidations.csv": "12" * 32,
+        },
+        "explicit_human_authorization": True,
+        "paid_download_authorized": True,
+        "license_terms_confirmed": True,
+        "authorization_reference": "HUMAN-V106-TEST-001",
+        "missing_funding_ratio": 0.01,
+        "missing_liquidations_ratio": 0.02,
+        "timezone": "UTC", "timestamp_unit": "unix_ms",
+        "generated_at": "2026-06-11T00:00:00Z",
+        "schema_version": SCHEMA_VERSION,
+        "import_status": "STAGED_READY_FOR_PROMOTE",
+        "files": [
+            {"path": "BTCUSDT_1h_ohlcv.parquet", "data_type": "ohlcv",
+             "sha256": "ab" * 32, "rows": 8760},
+            {"path": "BTCUSDT_open_interest.parquet", "data_type": "open_interest",
+             "sha256": "cd" * 32, "rows": 8760},
+            {"path": "BTCUSDT_funding.parquet", "data_type": "funding",
+             "sha256": "ef" * 32, "rows": 1095},
+            {"path": "BTCUSDT_liquidations.parquet", "data_type": "liquidations",
+             "sha256": "12" * 32, "rows": 5000},
+        ],
+    })
+    man.update(over)
+    return man
 
 DAY = 86_400_000
 T0 = 1_700_000_000_000
@@ -217,36 +272,77 @@ def test_manifest_write_goes_to_reports_dir_not_raw(tmp_path):
 # D. Backtester readiness
 # --------------------------------------------------------------------------
 
+_NOT_READY = {BR_NEED_DATA, BR_NEED_LONG_HISTORY, BR_NEED_CONTENT_VALIDATION,
+              BR_NEED_VALID_MANIFEST}
+
+
 def test_backtester_readiness_no_manifest_needs_data():
     r = evaluate_backtester_readiness(None).as_dict()
     assert r["status"] == BR_NEED_DATA
     assert r["paper_ready"] is False and r["live_ready"] is False
 
 
-def test_backtester_readiness_non_promotable_blocks():
+def test_backtester_readiness_crafted_minimal_manifest_is_not_ready():
+    # The Codex bug: a 3-field self-declared manifest must NOT be READY.
     r = evaluate_backtester_readiness(
         {"clean_days": 200, "missing_oi_status": "DATA_OK",
-         "gate_promote_allowed": False}).as_dict()
+         "promote_allowed": True}).as_dict()
+    assert r["status"] != BR_READY
+    assert r["status"] in (BR_NEED_VALID_MANIFEST, BR_NEED_CONTENT_VALIDATION)
+    assert r["manifest_promotable"] is False
+    assert "manifest_not_promotable" in r["blockers"]
+    assert "declared_readiness_ignored" in r["blockers"]
+    assert r["paper_ready"] is False and r["live_ready"] is False
+
+
+def test_backtester_readiness_declared_valid_flags_without_inventory_blocked():
+    r = evaluate_backtester_readiness(
+        {"valid_manifest_v105": True, "promote_allowed": True,
+         "clean_days": 365, "missing_oi_status": "DATA_OK"}).as_dict()
+    assert r["status"] in _NOT_READY and r["status"] != BR_READY
+    assert r["manifest_promotable"] is False
+    assert "declared_readiness_ignored" in r["blockers"]
+
+
+def test_backtester_readiness_declared_paper_live_ready_is_ignored():
+    r = evaluate_backtester_readiness(
+        {"paper_ready": True, "live_ready": True, "clean_days": 365,
+         "missing_oi_status": "DATA_OK"}).as_dict()
     assert r["status"] != BR_READY
     assert r["manifest_promotable"] is False
-
-
-def test_backtester_readiness_short_history_blocks():
-    r = evaluate_backtester_readiness(
-        {"clean_days": 84, "missing_oi_status": "DATA_OK",
-         "promote_allowed": True}).as_dict()
-    assert r["status"] == BR_NEED_LONG_HISTORY
-
-
-@pytest.mark.parametrize("flag_key", ["promote_allowed", "gate_promote_allowed"])
-def test_backtester_readiness_ready_only_when_fully_gated(flag_key):
-    r = evaluate_backtester_readiness(
-        {"clean_days": 200, "missing_oi_status": "DATA_OK",
-         flag_key: True}).as_dict()
-    assert r["status"] == BR_READY
-    assert r["blockers"] == []
-    # READY is for *research replay* — it still does not authorize live.
     assert r["paper_ready"] is False and r["live_ready"] is False
+    assert "declared_readiness_ignored" in r["blockers"]
+
+
+def test_backtester_readiness_unsafe_path_in_files_blocked_via_gate():
+    bad = _valid_manifest_v105()
+    bad["files"][0]["path"] = "BTCUSDT_1h_ohlcv%2e.parquet"  # percent-encoded
+    r = evaluate_backtester_readiness(bad).as_dict()
+    assert r["status"] != BR_READY
+    assert r["manifest_promotable"] is False
+    assert any("manifest_gate" in b for b in r["blockers"])
+
+
+def test_backtester_readiness_84d_declaring_ready_never_ready():
+    short_range = {"start": "2026-03-19T00:00:00Z", "end": "2026-06-11T00:00:00Z"}
+    m = _valid_manifest_v105(
+        requested_range=dict(short_range), actual_covered_range=dict(short_range),
+        clean_days=84.0, coverage_ratio=0.9, status="READY")
+    r = evaluate_backtester_readiness(m).as_dict()
+    assert r["status"] != BR_READY
+    assert r["status"] in (BR_NEED_LONG_HISTORY, BR_NEED_CONTENT_VALIDATION,
+                           BR_NEED_VALID_MANIFEST)
+    assert "declared_readiness_ignored" in r["blockers"]
+
+
+def test_backtester_readiness_healthy_authorized_manifest_is_ready_but_not_live():
+    r = evaluate_backtester_readiness(_valid_manifest_v105()).as_dict()
+    assert r["status"] == BR_READY
+    assert r["manifest_promotable"] is True
+    assert r["blockers"] == []
+    # READY is for *research replay* — it still does not authorize paper/live.
+    assert r["paper_ready"] is False and r["live_ready"] is False
+    assert r["final_recommendation"] == "NO LIVE"
 
 
 # --------------------------------------------------------------------------

@@ -20,13 +20,30 @@ from dataclasses import asdict, dataclass, field
 from typing import Any
 
 from . import FINAL_RECOMMENDATION_NO_LIVE
+from .data_foundation_v10_5 import (
+    ST_INVALID_V105,
+    ST_NEED_STRUCTURED_INVENTORY,
+    ST_SEMANTIC_FAIL,
+    evaluate_manifest_v105,
+)
 
 # Backtester readiness statuses.
 BR_NEED_DATA = "NEED_DATA"
 BR_NEED_LONG_HISTORY = "NEED_LONG_HISTORY"
 BR_NEED_CONTENT_VALIDATION = "NEED_CONTENT_VALIDATION"
+BR_NEED_VALID_MANIFEST = "NEED_VALID_MANIFEST"
 BR_NEED_COST_MODEL = "NEED_COST_MODEL"
 BR_READY = "READY_FOR_REPLAY_RESEARCH"
+
+# V10.6.1 — self-declared manifest fields that must NEVER be trusted as
+# readiness; the real V10.5.6 gate is the only source of truth.
+_DECLARED_READINESS_FIELDS = (
+    "promote_allowed", "gate_promote_allowed", "valid_manifest_v105",
+    "paper_ready", "live_ready", "ready",
+)
+_DECLARED_READY_STATUSES = {
+    "READY", "READY_FOR_REPLAY_RESEARCH", "STAGED_READY_FOR_PROMOTE",
+}
 
 # Replay run statuses.
 RUN_NEED_VALIDATED_DATA = "NEED_VALIDATED_DATA"
@@ -230,42 +247,68 @@ class BacktesterReadinessV106:
         return asdict(self)
 
 
-def evaluate_backtester_readiness(manifest_eval: dict[str, Any] | None,
+def evaluate_backtester_readiness(manifest: dict[str, Any] | None,
                                   *, cost_model: dict[str, Any] | None = None) -> BacktesterReadinessV106:
-    """Decide whether a (gated) manifest can feed the research replay."""
+    """Decide whether a manifest can feed the research replay.
+
+    V10.6.1 (Codex fix) — the manifest is NEVER trusted on self-declared
+    readiness fields (``promote_allowed`` / ``gate_promote_allowed`` /
+    ``valid_manifest_v105`` / ``paper_ready`` / ``live_ready`` / ``status``).
+    It is ALWAYS re-validated against the real V10.5.6 gate
+    ``evaluate_manifest_v105`` (which itself strips any input ``promote_allowed``
+    and recomputes everything from content + file inventory + path safety +
+    coverage/auth gates). Promotability is derived EXCLUSIVELY from that gate.
+    A crafted/minimal/unauthorized/unsafe-path manifest can never reach READY.
+    Declared readiness is ignored and flagged ``declared_readiness_ignored``.
+    """
     r = BacktesterReadinessV106()
-    m = dict(manifest_eval or {})
+    m = dict(manifest or {})
     blockers: list[str] = []
     if not m:
         r.status = BR_NEED_DATA
-        r.blockers = ["no_manifest_evaluation"]
+        r.blockers = ["no_manifest"]
         return r
-    clean_days = m.get("clean_days")
-    try:
-        clean_days = float(clean_days)
-    except (TypeError, ValueError):
-        clean_days = None
+
+    # Record (never honour) any self-declared readiness so a caller cannot be
+    # misled into thinking it influenced the verdict — it did not.
+    declared = any(m.get(k) for k in _DECLARED_READINESS_FIELDS) or (
+        str(m.get("status") or "").upper() in _DECLARED_READY_STATUSES)
+    if declared:
+        blockers.append("declared_readiness_ignored")
+
+    # Re-run the REAL gate. promotability comes only from here.
+    gate = evaluate_manifest_v105(m)
+    r.manifest_promotable = bool(gate.promote_allowed)
+
+    # clean_days / OI are content fields the gate already validates; read them
+    # only to surface the backtester-specific long-history threshold.
+    clean_days = _f(m.get("clean_days"))
     r.clean_days = clean_days if clean_days is not None else "UNKNOWN"
-    # Accept both the raw gate flag and the manifest-embedded gate flag.
-    r.manifest_promotable = bool(m.get("promote_allowed", m.get("gate_promote_allowed")))
     oi_status = str(m.get("missing_oi_status") or "").upper()
     r.oi_ok = oi_status == "DATA_OK"
-    r.cost_model_present = cost_model is not None or True  # default model exists
+    r.cost_model_present = True  # a conservative default model always exists
 
     if not r.manifest_promotable:
-        blockers.append("manifest_not_promotable (content validation/auth pending)")
-        r.status = BR_NEED_CONTENT_VALIDATION
-    if clean_days is None:
+        # Fail-closed: a manifest the real gate won't promote is never READY.
+        blockers.append("manifest_not_promotable")
+        blockers.extend(f"manifest_gate:{b}"
+                        for b in (list(gate.blockers) or [gate.status])[:8])
+        r.status = (BR_NEED_VALID_MANIFEST
+                    if gate.status in (ST_INVALID_V105, ST_SEMANTIC_FAIL,
+                                       ST_NEED_STRUCTURED_INVENTORY)
+                    else BR_NEED_CONTENT_VALIDATION)
+    elif clean_days is None:
         blockers.append("clean_days_unknown")
         r.status = BR_NEED_DATA
     elif clean_days < MIN_REPLAY_DAYS:
         blockers.append(f"clean_days={clean_days}<{MIN_REPLAY_DAYS}")
         r.status = BR_NEED_LONG_HISTORY
-    if not r.oi_ok:
+    elif not r.oi_ok:
         blockers.append(f"oi_not_audited_ok ({oi_status or 'UNKNOWN'})")
-
-    if not blockers and r.manifest_promotable and clean_days is not None \
-            and clean_days >= MIN_REPLAY_DAYS and r.oi_ok:
+        r.status = BR_NEED_CONTENT_VALIDATION
+    else:
+        # Gate PASSED + >=180 clean days + OI audited OK. Research replay only.
         r.status = BR_READY
+
     r.blockers = blockers
     return r
