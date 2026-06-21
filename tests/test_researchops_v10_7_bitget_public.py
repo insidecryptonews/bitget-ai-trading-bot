@@ -498,3 +498,171 @@ def test_module_does_not_read_env_or_write_raw():
     # the only configured write root is the staging dir (raw-dir refusal and
     # staging-only writes are covered behaviourally by the audit/apply tests).
     assert "external_data/staging/bitget_public_v10_7" in src
+
+
+# --------------------------------------------------------------------------
+# V10.7.2 — candle chunking + detailed HTTP errors + expected-data audit
+# --------------------------------------------------------------------------
+import json as _json  # noqa: E402
+
+_BAR_MS = {"4h": 4 * 3600 * 1000, "6h": 6 * 3600 * 1000, "1h": 3600 * 1000}
+
+
+def _windowed_candle_transport():
+    """Returns full candle windows; ASSERTS every request interval <= 90 days
+    (Bitget's cap) and records the window sizes seen."""
+    seen = {"intervals_days": [], "endpoints": set()}
+
+    def transport(path, params, *, timeout=10.0):
+        seen["endpoints"].add(path)
+        if path == B.EP_CANDLES:
+            st, et = int(params["startTime"]), int(params["endTime"])
+            interval = (et - st) / 86_400_000
+            seen["intervals_days"].append(round(interval, 2))
+            assert interval <= 90.0, f"window {interval}d exceeds Bitget 90d cap"
+            bar = _BAR_MS["4h"]
+            return {"code": "00000", "data": [
+                [t, "100", "110", "90", "105", "12", "1200"]
+                for t in range(st, et, bar)]}
+        if path == B.EP_FUNDING:
+            return {"code": "00000", "data": []}
+        return {"code": "00000", "data": []}
+
+    return transport, seen
+
+
+def test_candles_chunking_splits_long_range(tmp_path):
+    transport, seen = _windowed_candle_transport()
+    rep = B.run_fetch_v107(symbols=["BTCUSDT"], timeframes=["4h"], days=180,
+                           data_types=["candles"], apply=True, transport=transport,
+                           staging_root=_staging_root(tmp_path), sleep_fn=lambda *_: None)
+    # multiple windows, each <= 90 days
+    assert len(seen["intervals_days"]) >= 2
+    assert all(d <= 90.0 for d in seen["intervals_days"])
+    # candle CSV written + rows present
+    assert any(k.endswith("candles/BTCUSDT/4h.csv") for k in rep["rows_written"])
+    assert sum(rep["rows_written"].values()) > 500  # ~1080 bars over 180d 4h
+    assert rep["errors"] == []
+
+    # verify rows are deduped + sorted ascending in the written CSV
+    run_dir = Path(rep["staging_dir"])
+    import csv as _csv
+    with open(run_dir / "candles" / "BTCUSDT" / "4h.csv", encoding="utf-8") as fh:
+        ts = [int(r["timestamp_ms"]) for r in _csv.DictReader(fh)]
+    assert ts == sorted(ts)
+    assert len(ts) == len(set(ts))
+
+
+def test_candles_chunking_no_infinite_loop(tmp_path):
+    # transport returns a full-limit page of IDENTICAL timestamps (no progress).
+    def stuck_transport(path, params, *, timeout=10.0):
+        if path == B.EP_CANDLES:
+            st = int(params["startTime"])
+            return {"code": "00000", "data": [
+                [st, "100", "110", "90", "105", "1", "1"]
+                for _ in range(B.CANDLE_PAGE_LIMIT)]}
+        return {"code": "00000", "data": []}
+    rep = B.run_fetch_v107(symbols=["BTCUSDT"], timeframes=["4h"], days=180,
+                           data_types=["candles"], apply=True, transport=stuck_transport,
+                           staging_root=_staging_root(tmp_path), sleep_fn=lambda *_: None)
+    # terminates and stays within the hard request guard
+    assert rep["requests_made"] <= B.MAX_REQUESTS_PER_RUN
+
+
+def test_candles_http_error_includes_status_and_msg(tmp_path):
+    def err_transport(path, params, *, timeout=10.0):
+        raise B.BitgetApiError(
+            status=400, code="00001",
+            msg="startTime and endTime interval cannot be greater than 90 days")
+    rep = B.run_fetch_v107(symbols=["BTCUSDT"], timeframes=["4h"], days=180,
+                           data_types=["candles"], apply=True, transport=err_transport,
+                           staging_root=_staging_root(tmp_path), sleep_fn=lambda *_: None,
+                           max_retries=0)
+    assert rep["errors"], "an error must be recorded"
+    err = rep["errors"][0]
+    for token in ("/api/v2/mix/market/candles", "BTCUSDT", "4h", "400", "00001",
+                  "90 days"):
+        assert token in err, f"{token!r} missing from {err!r}"
+    assert "no_rows_written_for_BTCUSDT_candles" in rep["warnings"]
+
+
+def _full_staging(tmp_path, *, with_candles=True, errors=None):
+    run_dir = Path(_staging_root(tmp_path)) / "RUN1"
+    sets = [("funding", "funding.csv", "funding",
+             "1700000000000,BTCUSDT,usdt-futures,0.0001,bitget_public,x"),
+            ("oi_snapshot", "oi_snapshot.csv", "oi_snapshot",
+             "1700000000000,BTCUSDT,usdt-futures,123,bitget_public,x")]
+    if with_candles:
+        sets.insert(0, ("candles", "4h.csv", "candles",
+                        "1700000000000,BTCUSDT,usdt-futures,4h,100,110,90,105,12,1200,bitget_public,x"))
+    for dtype, fn, hkey, row in sets:
+        d = run_dir / dtype / "BTCUSDT"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / fn).write_text(",".join(B._CSV_HEADERS[hkey]) + "\n" + row + "\n",
+                            encoding="utf-8")
+    rr = {"data_types": ["candles", "funding", "oi_snapshot"],
+          "symbols": ["BTCUSDT"], "timeframes": ["4h"],
+          "errors": errors or [], "warnings": []}
+    (run_dir / "run_report.json").write_text(_json.dumps(rr), encoding="utf-8")
+    return run_dir
+
+
+def test_audit_blocks_when_requested_candles_missing(tmp_path):
+    run_dir = _full_staging(tmp_path, with_candles=False)
+    rep = B.audit_staging_v107(str(run_dir))
+    assert rep["audit_status"] != "STAGING_OK"
+    assert rep["audit_status"] == "STAGING_BLOCKED"
+    assert "expected_data_type_missing:candles" in rep["blockers"]
+    assert rep["paper_ready"] is False and rep["live_ready"] is False
+
+
+def test_audit_warns_when_run_report_errors_present(tmp_path):
+    run_dir = _full_staging(tmp_path, with_candles=True,
+                            errors=["request_failed:/api/v2/mix/market/candles:X:4h:400:00001:x"])
+    rep = B.audit_staging_v107(str(run_dir))
+    assert rep["audit_status"] != "STAGING_OK"  # never clean with run errors
+    assert "run_report_errors_present" in rep["warnings"]
+
+
+def test_audit_ok_when_expected_data_present(tmp_path):
+    run_dir = _full_staging(tmp_path, with_candles=True, errors=[])
+    rep = B.audit_staging_v107(str(run_dir))
+    assert rep["audit_status"] == "STAGING_OK"
+    assert rep["blockers"] == []
+    assert rep["expected_data"]["run_report_found"] is True
+    assert rep["final_recommendation"] == "NO LIVE"
+
+
+def test_deep_4h_6h_plan_does_not_overpromise(tmp_path):
+    plan = B.build_plan_v107()
+    # the 90-day-per-request limit must be stated honestly
+    assert "per_request_limit_note" in plan
+    assert "90" in plan["per_request_limit_note"]
+    # 6H is not asserted as a ready 180d source without verification
+    note = plan["per_request_limit_note"].lower()
+    assert "verify" in note or "not asserted" in note
+    assert plan["provider_verified"] is False
+    assert plan["final_recommendation"] == "NO LIVE"
+
+
+def test_one_h_four_h_60d_still_works_in_mocks(tmp_path):
+    # regression: the prior happy path (1H/4H, shorter range) still fetches.
+    transport, seen = _windowed_candle_transport()
+    rep = B.run_fetch_v107(symbols=["BTCUSDT"], timeframes=["1h", "4h"], days=60,
+                           data_types=["candles", "funding"], apply=True,
+                           transport=transport, staging_root=_staging_root(tmp_path),
+                           sleep_fn=lambda *_: None)
+    assert rep["errors"] == []
+    assert any("candles/BTCUSDT/4h.csv" in k for k in rep["rows_written"])
+    assert all(d <= 90.0 for d in seen["intervals_days"])
+
+
+def test_sample_validate_surfaces_missing_ohlcv_human_warning(tmp_path):
+    # funding-only sample (no OHLCV) must flag a human warning, stay not-ready.
+    (tmp_path / "BTCUSDT_funding.csv").write_text(
+        "timestamp,funding_rate\n1700000000000,0.0001\n", encoding="utf-8")
+    v = validate_sample_dir(str(tmp_path), expected_days=30, provider_id="bitget_official")
+    assert "ohlcv" in v["quality"]["required_types_missing"]
+    assert any("ohlcv" in w for w in v.get("human_warnings", []))
+    assert v["sample_ready"] is False
+    assert v["paper_ready"] is False and v["live_ready"] is False

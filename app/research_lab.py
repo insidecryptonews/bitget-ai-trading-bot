@@ -4513,6 +4513,8 @@ class ResearchLab:
         lines.append(f"data_classification: {rep['data_classification']}")
         lines.append(f"sample_ready: {str(rep['sample_ready']).lower()}")
         lines.append(f"required_types_missing: {','.join(q.get('required_types_missing', [])) or 'NONE'}")
+        lines.append("human_warnings:")
+        lines.extend(f"- {w}" for w in (rep.get("human_warnings") or ["NONE"]))
         lines.append("blockers:")
         lines.extend(f"- {b}" for b in (rep["blockers"][:30] or ["NONE"]))
         lines.append(f"paper_ready: {str(rep['paper_ready']).lower()}")

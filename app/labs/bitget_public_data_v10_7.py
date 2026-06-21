@@ -29,6 +29,7 @@ import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Callable
+from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urlsplit
 from urllib.request import Request, urlopen
 
@@ -62,6 +63,11 @@ MAX_REQUESTS_PER_RUN = 400
 MAX_ROWS_PER_FILE = 250_000
 CANDLE_PAGE_LIMIT = 1000          # Bitget candles max per call
 FUNDING_PAGE_SIZE = 100           # Bitget history-fund-rate max page size
+# V10.7.2 — Bitget rejects a candles request whose [startTime,endTime] interval
+# exceeds 90 days (code 00001). We chunk into windows safely under that cap.
+MAX_CANDLE_WINDOW_DAYS = 80
+MAX_CANDLE_WINDOW_MS = MAX_CANDLE_WINDOW_DAYS * 86_400_000
+MAX_INNER_PAGES_PER_WINDOW = 50   # bound pages inside one window (no infinite loop)
 
 STAGING_ROOT = "external_data/staging/bitget_public_v10_7"
 
@@ -93,6 +99,27 @@ COVERAGE_NOTES = {
 
 class UnsafeRequestError(Exception):
     """Raised BEFORE any socket is opened when a request violates the allowlist."""
+
+
+class BitgetApiError(Exception):
+    """A Bitget HTTP/logical error carrying a sanitized status/code/msg so the
+    run_report has an actionable reason (no headers, no secrets)."""
+
+    def __init__(self, status: Any = "", code: Any = "", msg: Any = ""):
+        self.status = str(status)
+        self.code = str(code)
+        self.msg = _sanitize_msg(msg)
+        super().__init__(f"{self.status}:{self.code}:{self.msg}")
+
+
+def _sanitize_msg(msg: Any) -> str:
+    """Collapse whitespace, strip delimiters, truncate — public error text only."""
+    try:
+        text = " ".join(str(msg).split())
+    except Exception:
+        return ""
+    text = text.replace(":", ";").replace("|", "/")
+    return text[:120]
 
 
 # --------------------------------------------------------------------------
@@ -296,8 +323,20 @@ def _raw_http_get(url: str, timeout: float) -> dict[str, Any]:
     req = Request(url, method="GET",
                   headers={"User-Agent": "researchops-v10_7-public/1.0",
                            "Accept": "application/json"})
-    with urlopen(req, timeout=timeout) as resp:  # noqa: S310 (https+allowlisted)
-        body = resp.read()
+    try:
+        with urlopen(req, timeout=timeout) as resp:  # noqa: S310 (https+allowlisted)
+            body = resp.read()
+    except HTTPError as exc:  # capture Bitget's status + code/msg, no headers
+        bcode, bmsg = "", ""
+        try:
+            payload = json.loads(exc.read().decode("utf-8"))
+            bcode, bmsg = payload.get("code", ""), payload.get("msg", "")
+        except Exception:
+            bmsg = getattr(exc, "reason", "") or ""
+        raise BitgetApiError(status=exc.code, code=bcode, msg=bmsg) from None
+    except URLError as exc:
+        raise BitgetApiError(status="URLERR", code="",
+                             msg=getattr(exc, "reason", "")) from None
     obj = json.loads(body.decode("utf-8"))
     return obj if isinstance(obj, dict) else {"data": obj}
 
@@ -404,12 +443,19 @@ def build_plan_v107(symbols: list[str] | None = None,
             "symbols": ["BTCUSDT", "ETHUSDT"], "timeframes": ["1h", "4h"],
             "days": 30},
         "recommended_wide_research": {
-            "timeframes": {"1h": "max queryable", "4h": "up to ~180-240d"},
+            "timeframes": {"1h": "max queryable (chunked)",
+                           "4h": "up to ~180d via <=90d chunks (collector chunks automatically)"},
             "funding": "historical (paged)",
             "oi": "snapshots ACCUMULATED from today onward (no long history)"},
+        "per_request_limit_note": (
+            "Bitget /candles rejects any startTime-endTime interval > 90 days "
+            "(code 00001); the collector chunks long ranges into <=80-day "
+            "windows automatically. 6H is queryable but verify per symbol — not "
+            "asserted as 180d-ready without a successful run."),
         "limitations": [
             "no long historical open interest (snapshot only)",
             "no complete public historical liquidations",
+            "single candles request capped at a 90-day interval (auto-chunked)",
             "low timeframes capped ~1 month; not enough for 180/365d intraday",
             "no live readiness"],
         "paper_ready": False,
@@ -435,7 +481,8 @@ class _RunCtx:
     warnings: list[str] = field(default_factory=list)
     _last_t: float = 0.0
 
-    def call(self, path: str, params: dict[str, Any]) -> dict[str, Any] | None:
+    def call(self, path: str, params: dict[str, Any], *,
+             label: str = "") -> dict[str, Any] | None:
         if self.requests_made >= MAX_REQUESTS_PER_RUN:
             self.warnings.append("max_requests_guard_hit")
             return None
@@ -451,49 +498,77 @@ class _RunCtx:
                 payload = self.transport(path, params, timeout=self.timeout)
                 self.endpoints_called.append(path)
                 self._last_t = time.monotonic()
+                # logical Bitget error (HTTP 200 but code != success)
                 if isinstance(payload, dict) and str(payload.get("code", "00000")) not in ("00000", "0", "200"):
-                    self.errors.append(f"api_error:{path}:{payload.get('code')}")
+                    self.errors.append(
+                        f"request_failed:{path}:{label}:200:"
+                        f"{payload.get('code')}:{_sanitize_msg(payload.get('msg'))}")
                     return None
                 return payload if isinstance(payload, dict) else None
             except UnsafeRequestError:
                 raise  # never swallow a safety violation
+            except BitgetApiError as exc:
+                attempt += 1
+                if attempt > self.max_retries:
+                    # actionable detail: endpoint:symbol:tf:status:code:msg
+                    self.errors.append(
+                        f"request_failed:{path}:{label}:{exc.status}:{exc.code}:{exc.msg}")
+                    self._last_t = time.monotonic()
+                    return None
+                self.sleep_fn(DEFAULT_BACKOFF_S * attempt)
             except Exception as exc:
                 attempt += 1
                 if attempt > self.max_retries:
-                    self.errors.append(f"request_failed:{path}:{type(exc).__name__}")
+                    self.errors.append(f"request_failed:{path}:{label}:{type(exc).__name__}")
                     self._last_t = time.monotonic()
                     return None
                 self.sleep_fn(DEFAULT_BACKOFF_S * attempt)
 
 
 def _fetch_candles(ctx: _RunCtx, symbol: str, tf: str, days: int) -> list[dict[str, Any]]:
+    """Fetch candles over a long range by CHUNKING into windows whose
+    [startTime,endTime] interval stays under Bitget's 90-day cap (code 00001),
+    paging forward within each window. Dedups + sorts; never fills gaps."""
     gran = _GRANULARITY[tf]
     end_ms = _now_ms()
     start_ms = end_ms - int(days) * 86_400_000
     bar_ms = _TF_MINUTES[tf] * 60_000
+    # window <= min(90-day cap, one page of `limit` bars)
+    window_ms = max(bar_ms, min(MAX_CANDLE_WINDOW_MS, CANDLE_PAGE_LIMIT * bar_ms))
+    label = f"{symbol}:{tf}"
     by_ts: dict[int, dict[str, Any]] = {}
-    cursor = start_ms
-    guard = 0
-    while cursor < end_ms and guard < MAX_REQUESTS_PER_RUN:
-        guard += 1
-        payload = ctx.call(EP_CANDLES, {
-            "symbol": symbol, "productType": PRODUCT_TYPE, "granularity": gran,
-            "startTime": cursor, "endTime": end_ms, "limit": CANDLE_PAGE_LIMIT})
-        if payload is None:
+    win_start = start_ms
+    while win_start < end_ms:
+        if ctx.requests_made >= MAX_REQUESTS_PER_RUN:
+            ctx.warnings.append(f"max_requests_guard_hit:candles:{label}")
             break
-        page = parse_candles(payload, symbol=symbol, timeframe=tf)
-        if not page:
-            break
-        max_ts = cursor
-        for r in page:
-            by_ts[r["timestamp_ms"]] = r
-            max_ts = max(max_ts, r["timestamp_ms"])
-            if len(by_ts) >= MAX_ROWS_PER_FILE:
-                ctx.warnings.append(f"max_rows_guard_hit:candles:{symbol}:{tf}")
+        win_end = min(win_start + window_ms, end_ms)
+        cursor = win_start
+        inner = 0
+        while cursor < win_end and inner < MAX_INNER_PAGES_PER_WINDOW:
+            inner += 1
+            payload = ctx.call(EP_CANDLES, {
+                "symbol": symbol, "productType": PRODUCT_TYPE, "granularity": gran,
+                "startTime": cursor, "endTime": win_end, "limit": CANDLE_PAGE_LIMIT},
+                label=label)
+            if payload is None:
+                break  # error already recorded; stop this symbol/tf
+            page = parse_candles(payload, symbol=symbol, timeframe=tf)
+            if not page:
                 break
-        if max_ts + bar_ms <= cursor or len(by_ts) >= MAX_ROWS_PER_FILE:
-            break  # no forward progress / row guard
-        cursor = max_ts + bar_ms
+            max_ts = cursor
+            for r in page:
+                by_ts[r["timestamp_ms"]] = r
+                max_ts = max(max_ts, r["timestamp_ms"])
+            if len(by_ts) >= MAX_ROWS_PER_FILE:
+                ctx.warnings.append(f"max_rows_guard_hit:candles:{label}")
+                return [by_ts[k] for k in sorted(by_ts)]
+            if max_ts + bar_ms <= cursor:
+                break  # no forward progress inside the window
+            cursor = max_ts + bar_ms
+            if len(page) < CANDLE_PAGE_LIMIT:
+                break  # window exhausted in one (or few) pages
+        win_start = win_end  # advance to the next <=window_ms chunk
     return [by_ts[k] for k in sorted(by_ts)]
 
 
@@ -504,7 +579,7 @@ def _fetch_funding(ctx: _RunCtx, symbol: str, days: int) -> list[dict[str, Any]]
     while page_no <= MAX_REQUESTS_PER_RUN:
         payload = ctx.call(EP_FUNDING, {
             "symbol": symbol, "productType": PRODUCT_TYPE,
-            "pageSize": FUNDING_PAGE_SIZE, "pageNo": page_no})
+            "pageSize": FUNDING_PAGE_SIZE, "pageNo": page_no}, label=symbol)
         if payload is None:
             break
         rows = parse_funding(payload, symbol=symbol)
@@ -520,7 +595,8 @@ def _fetch_funding(ctx: _RunCtx, symbol: str, days: int) -> list[dict[str, Any]]
 
 
 def _fetch_oi_snapshot(ctx: _RunCtx, symbol: str) -> list[dict[str, Any]]:
-    payload = ctx.call(EP_OI, {"symbol": symbol, "productType": PRODUCT_TYPE})
+    payload = ctx.call(EP_OI, {"symbol": symbol, "productType": PRODUCT_TYPE},
+                       label=symbol)
     return parse_oi_snapshot(payload, symbol=symbol) if payload else []
 
 
@@ -794,6 +870,18 @@ def audit_staging_v107(staging_dir: str) -> dict[str, Any]:
         report["coverage"] = {"start_ts": min(starts), "end_ts": max(ends),
                               "actual_days_covered": days}
 
+    # V10.7.2 — EXPECTED-DATA audit: cross-check what the run_report requested
+    # against what actually landed. A run that asked for candles but produced
+    # none (or had request errors) must NOT read as a clean STAGING_OK.
+    present_types = {fr["data_type"] for fr in file_reports if fr.get("data_type")}
+    present_candle_keys = {
+        (fr["path"].split("/")[1].upper(),
+         os.path.splitext(fr["path"].split("/")[-1])[0].lower())
+        for fr in file_reports
+        if fr.get("data_type") == "candles" and len(fr["path"].split("/")) >= 3}
+    report["expected_data"] = _audit_expected_data(
+        staging_dir, present_types, present_candle_keys, report)
+
     if report["blockers"]:
         report["audit_status"] = "STAGING_BLOCKED"
     elif report["warnings"]:
@@ -801,6 +889,58 @@ def audit_staging_v107(staging_dir: str) -> dict[str, Any]:
     else:
         report["audit_status"] = "STAGING_OK"
     return report
+
+
+def _audit_expected_data(staging_dir: str, present_types: set,
+                         present_candle_keys: set,
+                         report: dict[str, Any]) -> dict[str, Any]:
+    """Read run_report.json (if any) and flag incompleteness vs what was
+    requested. Mutates report[blockers]/[warnings]. Never raises."""
+    summary: dict[str, Any] = {"run_report_found": False}
+    rr_path = os.path.join(staging_dir, "run_report.json")
+    if not os.path.isfile(rr_path):
+        return summary
+    try:
+        with open(rr_path, "r", encoding="utf-8") as fh:
+            rr = json.load(fh)
+        if not isinstance(rr, dict):
+            return summary
+    except Exception:
+        report["warnings"].append("run_report_unreadable")
+        return summary
+
+    summary["run_report_found"] = True
+    requested = [d for d in (rr.get("data_types") or []) if d in DATA_TYPES]
+    req_symbols = [str(s).upper() for s in (rr.get("symbols") or [])]
+    req_tfs = [str(t).lower() for t in (rr.get("timeframes") or [])]
+    summary["requested_data_types"] = requested
+    summary["present_data_types"] = sorted(present_types)
+
+    # 1) a requested data type that produced no file at all.
+    missing_types = [d for d in requested if d not in present_types]
+    for d in missing_types:
+        report["blockers"].append(f"expected_data_type_missing:{d}")
+    summary["missing_data_types"] = missing_types
+
+    # 2) request-level errors recorded during the run.
+    if rr.get("errors"):
+        report["warnings"].append("run_report_errors_present")
+        summary["run_report_error_count"] = len(rr["errors"])
+    # 3) carry forward any no_rows warnings the run already recorded.
+    for w in (rr.get("warnings") or []):
+        if isinstance(w, str) and w.startswith("no_rows_written"):
+            report["warnings"].append(w)
+
+    # 4) per requested symbol/timeframe candle presence (warnings only — partial
+    # coverage is recoverable; only a FULL candle miss is a blocker via (1)).
+    if "candles" in requested and "candles" in present_types:
+        missing_pairs = [f"requested_timeframe_missing:{s}:{tf}"
+                         for s in req_symbols for tf in req_tfs
+                         if (s, tf) not in present_candle_keys]
+        for m in missing_pairs:
+            report["warnings"].append(m)
+        summary["missing_symbol_timeframe_count"] = len(missing_pairs)
+    return summary
 
 
 # --------------------------------------------------------------------------

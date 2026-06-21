@@ -402,6 +402,17 @@ def validate_sample_dir(sample_dir: str, expected_days: int = 180,
     report["sample_ready"] = (not report["blockers"]
                               and report["rows_total"] > 0
                               and not report["quality"]["required_types_missing"])
+    # V10.7.2 — human-readable clarity (additive; does NOT change gates). Make a
+    # missing required type — especially ohlcv — explicit for a human reader so
+    # "blockers: NONE" is never mistaken for "sample is complete".
+    human: list[str] = []
+    for t in report["quality"]["required_types_missing"]:
+        human.append(f"missing_required_type:{t}")
+    if "ohlcv" in report["quality"]["required_types_missing"]:
+        human.append("no_price_ohlcv_present_sample_not_usable_for_price_research")
+    if not report["sample_ready"]:
+        human.append("sample_not_ready (manifest will not be promotable)")
+    report["human_warnings"] = human
     report["paper_ready"] = False
     report["live_ready"] = False
     return report
