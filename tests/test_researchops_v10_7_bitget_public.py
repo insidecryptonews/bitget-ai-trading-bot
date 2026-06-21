@@ -254,14 +254,19 @@ def test_fetch_rejects_empty_request():
 # F. Staging audit
 # --------------------------------------------------------------------------
 
-def test_audit_clean_staging_ok(tmp_path):
+def test_audit_warns_when_run_report_missing(tmp_path):
+    # V10.7.3 — clean CSVs but NO run_report.json: not blocked, but cannot be a
+    # clean STAGING_OK because expected data is unverifiable.
     rows = [_candle_row(1700000000000 + i * 3_600_000) for i in range(10)]
     _write_staging_candles(tmp_path, "BTCUSDT", "1h", rows)
     rep = B.audit_staging_v107(str(tmp_path))
-    assert rep["audit_status"] == "STAGING_OK"
+    assert rep["audit_status"] == "STAGING_HAS_WARNINGS"
+    assert "run_report_missing_expected_data_unverifiable" in rep["warnings"]
+    assert rep["expected_data"]["run_report_found"] is False
     assert rep["rows_total"] == 10
     assert rep["blockers"] == []
     assert rep["paper_ready"] is False and rep["live_ready"] is False
+    assert rep["final_recommendation"] == "NO LIVE"
 
 
 def test_audit_invalid_ohlcv_blocked(tmp_path):

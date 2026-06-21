@@ -899,6 +899,10 @@ def _audit_expected_data(staging_dir: str, present_types: set,
     summary: dict[str, Any] = {"run_report_found": False}
     rr_path = os.path.join(staging_dir, "run_report.json")
     if not os.path.isfile(rr_path):
+        # V10.7.3 — without a run_report we cannot verify the staging contains
+        # everything that was originally requested. Clean CSVs are not blocked,
+        # but the audit must not read as a clean STAGING_OK either.
+        report["warnings"].append("run_report_missing_expected_data_unverifiable")
         return summary
     try:
         with open(rr_path, "r", encoding="utf-8") as fh:
