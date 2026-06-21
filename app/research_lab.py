@@ -4714,6 +4714,141 @@ class ResearchLab:
                                 "no_private_auth", "no_env", "paper_ready",
                                 "live_ready"])
 
+    # ------------------------------------------------------------------
+    # ResearchOps V10.8 — Adaptive Trailing Exit Lab (research-only).
+    # Offline, deterministic, no orders/leverage/DB. NOTHING flips paper/live.
+    # ------------------------------------------------------------------
+    def trailing_exit_plan_v108_cli(self) -> str:
+        import json as _json
+        from .labs.adaptive_trailing_exit_v10_8 import trailing_exit_plan
+        plan = trailing_exit_plan()
+        lines = ["TRAILING EXIT PLAN V10.8 START"]
+        lines.append("objective: " + plan["objective"])
+        lines.append("entry_families: " + ",".join(plan["entry_families"]))
+        lines.append("exit_policies: " + ",".join(plan["exit_policies"]))
+        lines.append("same_bar_policy: " + plan["same_bar_policy"])
+        lines.append("leverage_grid: " + ",".join(map(str, plan["leverage_grid"])))
+        lines.append("leverage_recommendation: " + plan["leverage_recommendation"])
+        lines.append("gates:")
+        lines.extend(f"- {g}" for g in plan["gates"])
+        lines.append("limitations:")
+        lines.extend(f"- {x}" for x in plan["limitations"])
+        lines.append("plan_json: " + _json.dumps(plan, default=str))
+        lines.append("research_only: true")
+        lines.append("paper_filter_enabled: false")
+        lines.append("can_send_real_orders: false")
+        lines.append(f"final_recommendation: {plan['final_recommendation']}")
+        lines.append("TRAILING EXIT PLAN V10.8 END")
+        return "\n".join(lines)
+
+    def trailing_exit_lab_v108_cli(self, *, sample_dir: str, symbols: str,
+                                   timeframes: str, sides: str, entry_family: str,
+                                   exit_policies: str, cost_bps: float = 6.0,
+                                   slippage_bps: float = 4.0,
+                                   funding_mode: bool = True, min_trades: int = 30,
+                                   train_ratio: float = 0.6,
+                                   walk_forward: bool = True,
+                                   max_grid_combos: int = 500, seed: int = 7,
+                                   output_dir: str = "",
+                                   aggressive: bool = True) -> str:
+        from .labs.adaptive_trailing_exit_v10_8 import (
+            CLS_INTERMEDIATE, run_trailing_exit_lab, summarize_run, write_reports)
+        csv_arg = self._v107_csv_arg
+        # derive the real data classification from the V10.6 validator (no bypass)
+        classification = CLS_INTERMEDIATE
+        try:
+            from .labs.provider_sample_validator_v10_6 import validate_sample_dir
+            v = validate_sample_dir(sample_dir, expected_days=180,
+                                    provider_id="bitget_official")
+            classification = v.get("data_classification", CLS_INTERMEDIATE)
+        except Exception:
+            pass
+        report = run_trailing_exit_lab(
+            sample_dir=sample_dir, symbols=csv_arg(symbols),
+            timeframes=csv_arg(timeframes), sides=csv_arg(sides),
+            entry_families=csv_arg(entry_family), exit_policies=csv_arg(exit_policies),
+            cost_bps=cost_bps, slippage_bps=slippage_bps, funding_mode=funding_mode,
+            min_trades=min_trades, train_ratio=train_ratio, walk_forward=walk_forward,
+            max_grid_combos=max_grid_combos, seed=seed,
+            data_classification=classification, aggressive=aggressive)
+        run_dir = ""
+        if not report.get("errors"):
+            run_dir = write_reports(report, output_dir=(output_dir or None))
+        summ = summarize_run(report)
+        lines = ["TRAILING EXIT LAB V10.8 START"]
+        lines.append(f"sample_dir: {sample_dir}")
+        lines.append(f"data_classification: {report.get('data_classification')}")
+        lines.append(f"strategy_ready: {str(report.get('strategy_ready', False)).lower()}")
+        lines.append(f"evaluation_type: {report.get('evaluation_type')}")
+        lines.append(f"errors: {report.get('errors')}")
+        lines.append(f"total_baseline_entries: {report.get('total_baseline_entries')}")
+        lines.append(f"combos_evaluated: {report.get('combos_evaluated')}")
+        lines.append(f"trades_simulated: {report.get('trades_simulated')}")
+        lines.append(f"n_research_candidates: {report.get('n_research_candidates')}")
+        lines.append(f"n_rejected_candidates: {report.get('n_rejected_candidates')}")
+        g = report.get("metrics_by", {}).get("global", {})
+        lines.append(f"global_net_EV: {g.get('net_EV')}")
+        lines.append(f"global_net_PF: {g.get('profit_factor_net')}")
+        lines.append(f"global_win_rate: {g.get('win_rate')}")
+        lines.append("by_exit_policy_net_EV:")
+        for k, v in report.get("metrics_by", {}).get("by_exit_policy", {}).items():
+            lines.append(f"- {k}: net_EV={v.get('net_EV')} net_PF={v.get('profit_factor_net')} trades={v.get('trades')}")
+        lines.append("top_research_candidates:")
+        for c in report.get("research_candidates", [])[:8]:
+            lines.append(f"- {c['timeframe']}/{c['side']}/{c['entry_family']}/{c['exit_policy']} "
+                         f"net_EV={c['net_EV']} net_PF={c['net_PF']} oos_net_EV={c['oos_net_EV']} trades={c['trades']}")
+        lev = report.get("aggressive_opportunity", {})
+        lines.append(f"leverage_recommendation: {lev.get('leverage_recommendation', 'NO_REAL_LEVERAGE')}")
+        lines.append(f"real_leverage_allowed: {str(lev.get('real_leverage_allowed', False)).lower()}")
+        lines.append(f"output_run_dir: {run_dir or 'NONE'}")
+        lines.append("oi_regime_available: false")
+        lines.append("liquidations_available: false")
+        lines.append("strategy_ready: false")
+        lines.append("research_only: true")
+        lines.append("paper_ready: false")
+        lines.append("live_ready: false")
+        lines.append("paper_filter_enabled: false")
+        lines.append("can_send_real_orders: false")
+        lines.append("final_recommendation: NO LIVE")
+        lines.append("TRAILING EXIT LAB V10.8 END")
+        return "\n".join(lines)
+
+    def trailing_exit_report_v108_cli(self, *, output_dir: str = "") -> str:
+        from .labs.adaptive_trailing_exit_v10_8 import (
+            latest_run_summary, summarize_run)
+        summary = latest_run_summary(output_dir or None)
+        lines = ["TRAILING EXIT REPORT V10.8 START"]
+        if summary is None:
+            lines.append("status: NO_RUN_FOUND (run trailing-exit-lab-v108 first)")
+        else:
+            s = summarize_run(summary)
+            lines.append(f"data_classification: {s.get('data_classification')}")
+            lines.append(f"trades_simulated: {s.get('trades_simulated')}")
+            lines.append(f"n_research_candidates: {s.get('n_research_candidates')}")
+            lines.append(f"n_rejected_candidates: {s.get('n_rejected_candidates')}")
+            lines.append("top_research_candidates:")
+            for c in s.get("top_research_candidates", [])[:8]:
+                lines.append(f"- {c.get('timeframe')}/{c.get('side')}/{c.get('entry_family')}/{c.get('exit_policy')} "
+                             f"net_EV={c.get('net_EV')} oos_net_EV={c.get('oos_net_EV')}")
+            lines.append("best_policy_by_side_timeframe:")
+            for k, v in s.get("best_policy_by_side_timeframe", {}).items():
+                lines.append(f"- {k}: {v}")
+            lines.append("worst_fragility:")
+            for w in s.get("worst_fragility", []):
+                lines.append(f"- {w['combo']}: dd={w['max_drawdown']} why={w['why']}")
+            lines.append("approved_for_paper: false")
+            lines.append("approved_for_live: false")
+        lines.append("research_only: true")
+        lines.append("paper_filter_enabled: false")
+        lines.append("can_send_real_orders: false")
+        lines.append("final_recommendation: NO LIVE")
+        lines.append("TRAILING EXIT REPORT V10.8 END")
+        return "\n".join(lines)
+
+    def aggressive_opportunity_lab_v108_cli(self, **kwargs) -> str:
+        # Shares the trailing-exit engine; emphasises the leverage simulation.
+        return self.trailing_exit_lab_v108_cli(aggressive=True, **kwargs)
+
     def trader_dashboard_contract_v105_cli(self) -> str:
         from .labs.trader_dashboard_v104 import (
             DISABLED_CONTROLS,
@@ -5865,6 +6000,10 @@ def build_argument_parser() -> argparse.ArgumentParser:
             "bitget-public-staging-audit-v107",
             "bitget-public-to-sample-v107",
             "bitget-public-collector-status-v107",
+            "trailing-exit-plan-v108",
+            "trailing-exit-lab-v108",
+            "trailing-exit-report-v108",
+            "aggressive-opportunity-lab-v108",
             "ohlcv-replay-loader-smoke-test",
             "ohlcv-replay-loader-audit",
             "duplicate-module-audit-smoke-test",
@@ -5995,6 +6134,17 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--days", type=int, default=30, help="V10.7 lookback span in days for bitget-public-fetch-v107 (default 30).")
     parser.add_argument("--data-types", default="candles,funding,oi_snapshot", help="V10.7 comma-separated data types: candles,funding,oi_snapshot.")
     parser.add_argument("--staging-dir", default="", help="V10.7 local staging directory (read-only audit / sample conversion). No network, no raw, no DB.")
+    parser.add_argument("--sides", default="LONG,SHORT", help="V10.8 sides for trailing-exit-lab (LONG,SHORT).")
+    parser.add_argument("--entry-family", default="breakout_momentum,trend_pullback,volatility_expansion", help="V10.8 comma-separated entry families.")
+    parser.add_argument("--exit-policies", default="fixed_tp_sl_time,break_even_lock,atr_trailing,percent_trailing,structure_trailing,hybrid_trailing,time_death_exit,profit_protection_ladder", help="V10.8 comma-separated exit policies.")
+    parser.add_argument("--cost-bps", type=float, default=6.0, help="V10.8 taker fee bps per side (research cost model).")
+    parser.add_argument("--slippage-bps", type=float, default=4.0, help="V10.8 slippage bps per side (research cost model).")
+    parser.add_argument("--funding-mode", default="true", help="V10.8 apply funding in exit sim (true/false).")
+    parser.add_argument("--train-ratio", type=float, default=0.6, help="V10.8 train fraction for walk-forward OOS split.")
+    parser.add_argument("--walk-forward", default="true", help="V10.8 enable walk-forward OOS gating (true/false).")
+    parser.add_argument("--output-dir", default="", help="V10.8 research report output dir (default reports/research/v10_8). Never raw/DB/.env.")
+    parser.add_argument("--max-grid-combos", type=int, default=500, help="V10.8 cap on evaluated parameter combos.")
+    parser.add_argument("--seed", type=int, default=7, help="V10.8 deterministic seed for grid sampling.")
     return parser
 
 
@@ -6807,6 +6957,21 @@ def main() -> None:
         print(lab.bitget_public_to_sample_v107_cli(staging_dir=args.staging_dir))
     elif args.command == "bitget-public-collector-status-v107":
         print(lab.bitget_public_collector_status_v107_cli())
+    elif args.command == "trailing-exit-plan-v108":
+        print(lab.trailing_exit_plan_v108_cli())
+    elif args.command in ("trailing-exit-lab-v108", "aggressive-opportunity-lab-v108"):
+        print(lab.trailing_exit_lab_v108_cli(
+            sample_dir=args.sample_dir, symbols=args.symbols,
+            timeframes=args.timeframes, sides=args.sides,
+            entry_family=args.entry_family, exit_policies=args.exit_policies,
+            cost_bps=args.cost_bps, slippage_bps=args.slippage_bps,
+            funding_mode=str(args.funding_mode).strip().lower() not in ("false", "0", "no"),
+            min_trades=args.min_trades, train_ratio=args.train_ratio,
+            walk_forward=str(args.walk_forward).strip().lower() not in ("false", "0", "no"),
+            max_grid_combos=args.max_grid_combos, seed=args.seed,
+            output_dir=args.output_dir))
+    elif args.command == "trailing-exit-report-v108":
+        print(lab.trailing_exit_report_v108_cli(output_dir=args.output_dir))
     elif args.command == "ohlcv-replay-loader-smoke-test":
         print(lab.ohlcv_replay_loader_smoke_test())
     elif args.command == "ohlcv-replay-loader-audit":
