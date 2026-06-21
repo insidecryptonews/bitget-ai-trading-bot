@@ -4727,8 +4727,15 @@ class ResearchLab:
         lines.append("entry_families: " + ",".join(plan["entry_families"]))
         lines.append("exit_policies: " + ",".join(plan["exit_policies"]))
         lines.append("same_bar_policy: " + plan["same_bar_policy"])
+        lines.append("gap_policy: " + plan["gap_policy"])
+        lines.append("walk_forward_modes:")
+        for k, v in plan["walk_forward_modes"].items():
+            lines.append(f"- {k}: {v}")
+        lines.append("candidates_are_hypotheses_not_signals: true")
+        lines.append("comparison_not_portfolio: true")
         lines.append("leverage_grid: " + ",".join(map(str, plan["leverage_grid"])))
         lines.append("leverage_recommendation: " + plan["leverage_recommendation"])
+        lines.append("leverage_research_status_without_edge: " + plan["leverage_research_status_without_edge"])
         lines.append("gates:")
         lines.extend(f"- {g}" for g in plan["gates"])
         lines.append("limitations:")
@@ -4747,7 +4754,11 @@ class ResearchLab:
                                    slippage_bps: float = 4.0,
                                    funding_mode: bool = True, min_trades: int = 30,
                                    train_ratio: float = 0.6,
-                                   walk_forward: bool = True,
+                                   walk_forward_mode: str = "rolling",
+                                   wf_train_frac: float = 0.5, wf_test_frac: float = 0.2,
+                                   wf_step_frac: float = 0.15, wf_min_folds: int = 3,
+                                   wf_anchored: bool = False,
+                                   gap_policy: str = "adverse_open",
                                    max_grid_combos: int = 500, seed: int = 7,
                                    output_dir: str = "",
                                    aggressive: bool = True) -> str:
@@ -4768,7 +4779,10 @@ class ResearchLab:
             timeframes=csv_arg(timeframes), sides=csv_arg(sides),
             entry_families=csv_arg(entry_family), exit_policies=csv_arg(exit_policies),
             cost_bps=cost_bps, slippage_bps=slippage_bps, funding_mode=funding_mode,
-            min_trades=min_trades, train_ratio=train_ratio, walk_forward=walk_forward,
+            min_trades=min_trades, train_ratio=train_ratio,
+            walk_forward_mode=walk_forward_mode, wf_train_frac=wf_train_frac,
+            wf_test_frac=wf_test_frac, wf_step_frac=wf_step_frac,
+            wf_min_folds=wf_min_folds, wf_anchored=wf_anchored, gap_policy=gap_policy,
             max_grid_combos=max_grid_combos, seed=seed,
             data_classification=classification, aggressive=aggressive)
         run_dir = ""
@@ -4779,25 +4793,44 @@ class ResearchLab:
         lines.append(f"sample_dir: {sample_dir}")
         lines.append(f"data_classification: {report.get('data_classification')}")
         lines.append(f"strategy_ready: {str(report.get('strategy_ready', False)).lower()}")
+        lines.append(f"edge_validated: {str(report.get('edge_validated', False)).lower()}")
         lines.append(f"evaluation_type: {report.get('evaluation_type')}")
+        lines.append(f"walk_forward_mode: {report.get('walk_forward_mode')}")
+        lines.append(f"wf_is_rolling: {str(report.get('wf_is_rolling', False)).lower()}")
+        lines.append(f"walk_forward_status: {report.get('walk_forward_status')}")
+        lines.append(f"gap_policy: {report.get('gap_policy')}")
+        lines.append(f"comparison_not_portfolio: {str(report.get('comparison_not_portfolio', True)).lower()}")
+        lines.append(f"candidates_are_hypotheses_not_signals: {str(report.get('candidates_are_hypotheses_not_signals', True)).lower()}")
         lines.append(f"errors: {report.get('errors')}")
+        lines.append(f"warnings: {report.get('warnings')}")
         lines.append(f"total_baseline_entries: {report.get('total_baseline_entries')}")
         lines.append(f"combos_evaluated: {report.get('combos_evaluated')}")
         lines.append(f"trades_simulated: {report.get('trades_simulated')}")
         lines.append(f"n_research_candidates: {report.get('n_research_candidates')}")
+        lines.append(f"n_research_candidate_only: {report.get('n_research_candidate_only')}")
+        lines.append(f"n_weak_research_hypothesis: {report.get('n_weak_research_hypothesis')}")
         lines.append(f"n_rejected_candidates: {report.get('n_rejected_candidates')}")
+        lines.append(f"side_concentration_warning: {report.get('side_concentration_warning')!r}")
+        lines.append(f"regime_window_dependency_warning: {str(report.get('regime_window_dependency_warning', True)).lower()}")
+        lines.append(f"multiple_comparisons_warning: {str(report.get('multiple_comparisons_warning', True)).lower()}")
+        lines.append(f"n_combos_tested: {report.get('n_combos_tested')}")
+        lines.append(f"n_candidates_after_gates: {report.get('n_candidates_after_gates')}")
+        lines.append(f"false_discovery_risk: {report.get('false_discovery_risk')}")
         g = report.get("metrics_by", {}).get("global", {})
-        lines.append(f"global_net_EV: {g.get('net_EV')}")
-        lines.append(f"global_net_PF: {g.get('profit_factor_net')}")
+        lines.append(f"global_policy_comparison_net_EV: {g.get('net_EV')}")
+        lines.append(f"global_policy_comparison_net_PF: {g.get('profit_factor_net')}")
         lines.append(f"global_win_rate: {g.get('win_rate')}")
+        lines.append(f"global_gap_adverse_count: {g.get('gap_adverse_count')}")
         lines.append("by_exit_policy_net_EV:")
         for k, v in report.get("metrics_by", {}).get("by_exit_policy", {}).items():
             lines.append(f"- {k}: net_EV={v.get('net_EV')} net_PF={v.get('profit_factor_net')} trades={v.get('trades')}")
-        lines.append("top_research_candidates:")
+        lines.append("top_research_candidates (HYPOTHESES not signals):")
         for c in report.get("research_candidates", [])[:8]:
-            lines.append(f"- {c['timeframe']}/{c['side']}/{c['entry_family']}/{c['exit_policy']} "
-                         f"net_EV={c['net_EV']} net_PF={c['net_PF']} oos_net_EV={c['oos_net_EV']} trades={c['trades']}")
+            lines.append(f"- [{c.get('candidate_quality_tier')}] {c['timeframe']}/{c['side']}/{c['entry_family']}/{c['exit_policy']} "
+                         f"net_EV={c['net_EV']} net_PF={c['net_PF']} wf_pass_rate={c.get('wf_pass_rate')} "
+                         f"wf_folds={c.get('wf_folds_passed')}/{c.get('wf_folds_total')} trades={c['trades']}")
         lev = report.get("aggressive_opportunity", {})
+        lines.append(f"leverage_research_status: {lev.get('leverage_research_status', 'BLOCKED_NO_VALIDATED_EDGE')}")
         lines.append(f"leverage_recommendation: {lev.get('leverage_recommendation', 'NO_REAL_LEVERAGE')}")
         lines.append(f"real_leverage_allowed: {str(lev.get('real_leverage_allowed', False)).lower()}")
         lines.append(f"output_run_dir: {run_dir or 'NONE'}")
@@ -4823,13 +4856,28 @@ class ResearchLab:
         else:
             s = summarize_run(summary)
             lines.append(f"data_classification: {s.get('data_classification')}")
+            lines.append(f"edge_validated: {str(s.get('edge_validated', False)).lower()}")
+            lines.append(f"candidates_are_hypotheses_not_signals: {str(s.get('candidates_are_hypotheses_not_signals', True)).lower()}")
+            lines.append(f"comparison_not_portfolio: {str(s.get('comparison_not_portfolio', True)).lower()}")
+            lines.append(f"walk_forward_mode: {s.get('walk_forward_mode')}")
+            lines.append(f"wf_is_rolling: {str(s.get('wf_is_rolling', False)).lower()}")
+            lines.append(f"walk_forward_status: {s.get('walk_forward_status')}")
+            lines.append(f"gap_policy: {s.get('gap_policy')}")
             lines.append(f"trades_simulated: {s.get('trades_simulated')}")
             lines.append(f"n_research_candidates: {s.get('n_research_candidates')}")
+            lines.append(f"n_research_candidate_only: {s.get('n_research_candidate_only')}")
+            lines.append(f"n_weak_research_hypothesis: {s.get('n_weak_research_hypothesis')}")
             lines.append(f"n_rejected_candidates: {s.get('n_rejected_candidates')}")
-            lines.append("top_research_candidates:")
+            lines.append(f"side_concentration_warning: {s.get('side_concentration_warning')!r}")
+            lines.append(f"regime_window_dependency_warning: {str(s.get('regime_window_dependency_warning', True)).lower()}")
+            lines.append(f"multiple_comparisons_warning: {str(s.get('multiple_comparisons_warning', True)).lower()}")
+            lines.append(f"n_combos_tested: {s.get('n_combos_tested')}")
+            lines.append(f"false_discovery_risk: {s.get('false_discovery_risk')}")
+            lines.append(f"leverage_research_status: {s.get('leverage_research_status')}")
+            lines.append("top_research_candidates (HYPOTHESES not signals):")
             for c in s.get("top_research_candidates", [])[:8]:
-                lines.append(f"- {c.get('timeframe')}/{c.get('side')}/{c.get('entry_family')}/{c.get('exit_policy')} "
-                             f"net_EV={c.get('net_EV')} oos_net_EV={c.get('oos_net_EV')}")
+                lines.append(f"- [{c.get('candidate_quality_tier')}] {c.get('timeframe')}/{c.get('side')}/{c.get('entry_family')}/{c.get('exit_policy')} "
+                             f"net_EV={c.get('net_EV')} wf_pass_rate={c.get('wf_pass_rate')}")
             lines.append("best_policy_by_side_timeframe:")
             for k, v in s.get("best_policy_by_side_timeframe", {}).items():
                 lines.append(f"- {k}: {v}")
@@ -6145,6 +6193,13 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-dir", default="", help="V10.8 research report output dir (default reports/research/v10_8). Never raw/DB/.env.")
     parser.add_argument("--max-grid-combos", type=int, default=500, help="V10.8 cap on evaluated parameter combos.")
     parser.add_argument("--seed", type=int, default=7, help="V10.8 deterministic seed for grid sampling.")
+    parser.add_argument("--walk-forward-mode", default="", help="V10.8.1 none|chronological_split|rolling (default rolling). Empty falls back to --walk-forward mapping.")
+    parser.add_argument("--wf-train-frac", type=float, default=0.5, help="V10.8.1 rolling WF train window fraction of the span.")
+    parser.add_argument("--wf-test-frac", type=float, default=0.2, help="V10.8.1 rolling WF test window fraction of the span.")
+    parser.add_argument("--wf-step-frac", type=float, default=0.15, help="V10.8.1 rolling WF step fraction of the span.")
+    parser.add_argument("--wf-min-folds", type=int, default=3, help="V10.8.1 minimum rolling WF folds for the top tier.")
+    parser.add_argument("--wf-anchored", default="false", help="V10.8.1 anchored rolling WF (growing train) true/false.")
+    parser.add_argument("--gap-policy", default="adverse_open", help="V10.8.1 gap fill policy: adverse_open (conservative).")
     return parser
 
 
@@ -6960,6 +7015,12 @@ def main() -> None:
     elif args.command == "trailing-exit-plan-v108":
         print(lab.trailing_exit_plan_v108_cli())
     elif args.command in ("trailing-exit-lab-v108", "aggressive-opportunity-lab-v108"):
+        # V10.8.1 — resolve walk-forward mode. Explicit --walk-forward-mode wins;
+        # else map the deprecated boolean --walk-forward (true→chronological_split).
+        wf_mode = str(args.walk_forward_mode).strip().lower()
+        if wf_mode not in ("none", "chronological_split", "rolling"):
+            wf_bool = str(args.walk_forward).strip().lower() not in ("false", "0", "no")
+            wf_mode = "chronological_split" if wf_bool else "none"
         print(lab.trailing_exit_lab_v108_cli(
             sample_dir=args.sample_dir, symbols=args.symbols,
             timeframes=args.timeframes, sides=args.sides,
@@ -6967,7 +7028,11 @@ def main() -> None:
             cost_bps=args.cost_bps, slippage_bps=args.slippage_bps,
             funding_mode=str(args.funding_mode).strip().lower() not in ("false", "0", "no"),
             min_trades=args.min_trades, train_ratio=args.train_ratio,
-            walk_forward=str(args.walk_forward).strip().lower() not in ("false", "0", "no"),
+            walk_forward_mode=wf_mode, wf_train_frac=args.wf_train_frac,
+            wf_test_frac=args.wf_test_frac, wf_step_frac=args.wf_step_frac,
+            wf_min_folds=args.wf_min_folds,
+            wf_anchored=str(args.wf_anchored).strip().lower() in ("true", "1", "yes"),
+            gap_policy=args.gap_policy,
             max_grid_combos=args.max_grid_combos, seed=args.seed,
             output_dir=args.output_dir))
     elif args.command == "trailing-exit-report-v108":

@@ -258,7 +258,7 @@ def test_metrics_contain_required_fields():
 
 def test_walk_forward_split_is_temporal():
     trades = [_mk_trade(0.01, ts) for ts in range(100, 0, -1)]  # unsorted ts
-    train, oos = L._split_train_oos(trades, 0.6)
+    train, oos = L.chronological_oos_single_split(trades, 0.6)
     assert len(train) + len(oos) == len(trades)
     assert max(t["entry_ts"] for t in train) <= min(t["entry_ts"] for t in oos)
 
@@ -270,8 +270,9 @@ def test_walk_forward_split_is_temporal():
 def test_anti_overfit_rejects_good_train_bad_oos():
     trades = ([_mk_trade(0.02, ts) for ts in range(1, 25)]      # train: positive
               + [_mk_trade(-0.015, ts) for ts in range(25, 41)])  # oos: negative
-    ev = L.evaluate_candidate(trades, costs=COSTS, min_trades=10,
-                              train_ratio=0.6, data_classification=L.CLS_INTERMEDIATE)
+    # chronological_split path exposes the single-split OOS gate explicitly
+    ev = L.evaluate_candidate(trades, costs=COSTS, min_trades=10, train_ratio=0.6,
+                              wf_mode=L.WF_SPLIT, data_classification=L.CLS_INTERMEDIATE)
     assert ev["candidate_status"] == L.CAND_REJECTED
     assert "oos_net_EV<=0" in ev["rejection_reasons"]
     assert ev["approved_for_paper"] is False and ev["approved_for_live"] is False
@@ -353,13 +354,13 @@ def test_lab_end_to_end_writes_reports_and_never_approves(tmp_path):
         entry_families=["breakout_momentum", "volatility_expansion"],
         exit_policies=["fixed_tp_sl_time", "atr_trailing", "break_even_lock"],
         cost_bps=6, slippage_bps=4, funding_mode=True, min_trades=10,
-        train_ratio=0.6, walk_forward=True, max_grid_combos=200, seed=7,
+        train_ratio=0.6, walk_forward_mode="rolling", max_grid_combos=200, seed=7,
         data_classification=L.CLS_INTERMEDIATE)
     assert rep["errors"] == []
     assert rep["trades_simulated"] > 0
-    # NO candidate is ever approved for paper/live
+    # NO candidate is ever approved for paper/live (tiers only)
     for c in rep["research_candidates"] + rep["rejected_candidates"]:
-        assert c["candidate_status"] in (L.CAND_REJECTED, L.CAND_RESEARCH_ONLY)
+        assert c["candidate_status"] in (L.CAND_REJECTED, L.CAND_WEAK, L.CAND_RESEARCH_ONLY)
     assert rep["final_recommendation"] == "NO LIVE"
     assert rep["strategy_ready"] is False
 
@@ -383,7 +384,10 @@ def test_intermediate_classification_caps_at_research_candidate(tmp_path):
         exit_policies=["atr_trailing"], min_trades=5, max_grid_combos=50,
         data_classification=L.CLS_INTERMEDIATE)
     statuses = {c["candidate_status"] for c in rep["research_candidates"] + rep["rejected_candidates"]}
-    assert statuses <= {L.CAND_REJECTED, L.CAND_RESEARCH_ONLY}
+    # INTERMEDIATE data caps the top tier to WEAK at best — never the full
+    # RESEARCH_CANDIDATE_ONLY tier, and never APPROVED.
+    assert statuses <= {L.CAND_REJECTED, L.CAND_WEAK}
+    assert L.CAND_RESEARCH_ONLY not in statuses
     assert "APPROVED_FOR_PAPER" not in statuses
     assert "APPROVED_FOR_LIVE" not in statuses
 
@@ -393,3 +397,189 @@ def test_output_dir_refuses_raw_falls_back_to_research(tmp_path):
     run_dir = L._safe_output_dir(str(tmp_path / "external_data" / "raw"))
     assert "external_data/raw" not in run_dir.replace("\\", "/")
     assert L.OUTPUT_ROOT.split("/")[-1] in run_dir.replace("\\", "/")
+
+
+# ==========================================================================
+# V10.8.1 — gap-adverse execution, rolling walk-forward, hardened reporting
+# ==========================================================================
+
+def test_long_gap_adverse_stop_fills_at_open_not_stop():
+    # LONG stop ~95; next bar opens at 90 (gaps below) -> exit at 90, not 95.
+    bars = [_bar(0, 100, 100, 100, 100), _bar(1, 100, 100, 100, 100),
+            _bar(2, 90, 91, 88, 89)]
+    e = _entry(bars, 1, "LONG", atr=1.0)
+    tr = L.simulate_trade(bars, [1.0, 1.0, 1.0], e, policy="fixed_tp_sl_time",
+                          params={"sl_pct": 0.05, "tp_pct": 0.20, "max_hold": 2},
+                          costs=COSTS, funding=[], gap_policy="adverse_open")
+    assert tr["exit_price"] == 90          # worse open, not the 95 stop
+    assert tr["gap_adverse"] is True
+    assert tr["gap_slippage_bps"] > 0
+
+
+def test_short_gap_adverse_stop_fills_at_open_not_stop():
+    # SHORT stop ~105; next bar opens at 110 (gaps above) -> exit at 110.
+    bars = [_bar(0, 100, 100, 100, 100), _bar(1, 100, 100, 100, 100),
+            _bar(2, 110, 112, 109, 111)]
+    e = _entry(bars, 1, "SHORT", atr=1.0)
+    tr = L.simulate_trade(bars, [1.0, 1.0, 1.0], e, policy="fixed_tp_sl_time",
+                          params={"sl_pct": 0.05, "tp_pct": 0.20, "max_hold": 2},
+                          costs=COSTS, funding=[], gap_policy="adverse_open")
+    assert tr["exit_price"] == 110
+    assert tr["gap_adverse"] is True
+
+
+def test_gap_favorable_does_not_over_improve_base_tp():
+    # LONG TP at 106; next bar gaps far above to 110 -> base fills at TP 106.
+    bars = [_bar(0, 100, 100, 100, 100), _bar(1, 100, 100, 100, 100),
+            _bar(2, 110, 112, 109, 111)]
+    e = _entry(bars, 1, "LONG", atr=1.0)
+    tr = L.simulate_trade(bars, [1.0, 1.0, 1.0], e, policy="fixed_tp_sl_time",
+                          params={"sl_pct": 0.05, "tp_pct": 0.06, "max_hold": 2},
+                          costs=COSTS, funding=[], gap_policy="adverse_open")
+    assert tr["exit_reason"] == "TP"
+    assert tr["exit_price"] == pytest.approx(106.0)   # not 110
+    assert tr["gap_adverse"] is False
+
+
+def test_gap_adverse_count_reported():
+    bars = [_bar(0, 100, 100, 100, 100), _bar(1, 100, 100, 100, 100),
+            _bar(2, 90, 91, 88, 89)]
+    e = _entry(bars, 1, "LONG", atr=1.0)
+    trades = [L.simulate_trade(bars, [1.0, 1.0, 1.0], e, policy="fixed_tp_sl_time",
+                               params={"sl_pct": 0.05, "tp_pct": 0.2, "max_hold": 2},
+                               costs=COSTS, funding=[]) for _ in range(3)]
+    m = L.compute_metrics(trades, COSTS)
+    assert m["gap_adverse_count"] == 3
+    assert m["gap_adverse_slippage_bps_estimate"] > 0
+
+
+def test_chronological_split_not_called_rolling_walk_forward():
+    # the single split is explicitly named and NOT a rolling walk-forward
+    assert hasattr(L, "chronological_oos_single_split")
+    ev = L.evaluate_candidate([_mk_trade(0.01, ts) for ts in range(40)], costs=COSTS,
+                              min_trades=10, wf_mode=L.WF_SPLIT,
+                              data_classification=L.CLS_INTERMEDIATE)
+    assert "walk_forward_not_rolling_single_split_only" in ev["warnings"]
+    assert ev["walk_forward"]["wf_is_rolling"] is False
+    # a single split can never reach the top research tier
+    assert ev["candidate_status"] in (L.CAND_REJECTED, L.CAND_WEAK)
+
+
+def test_rolling_walk_forward_creates_multiple_forward_folds():
+    trades = [_mk_trade(0.01, ts) for ts in range(80)]
+    wf = L.rolling_walk_forward(trades, costs=COSTS, train_frac=0.5, test_frac=0.2,
+                                step_frac=0.15, min_folds=3)
+    assert wf["wf_is_rolling"] is True
+    assert wf["wf_folds_total"] >= 3
+    assert wf["walk_forward_status"] == L.WF_STATUS_OK
+
+
+def test_rolling_walk_forward_never_uses_future_in_train():
+    trades = [_mk_trade(0.01, ts) for ts in range(80)]
+    wf = L.rolling_walk_forward(trades, costs=COSTS, train_frac=0.5, test_frac=0.2,
+                                step_frac=0.15, min_folds=3)
+    for f in wf["folds"]:
+        assert f["train_end"] <= f["test_start"]       # test strictly after train
+        assert f["train_start"] < f["train_end"]
+
+
+def test_candidate_rejected_when_train_good_but_rolling_folds_fail():
+    # strong positive cluster early (good train) but every later test window
+    # is negative -> rolling pass_rate collapses -> REJECTED.
+    trades = ([_mk_trade(0.03, ts) for ts in range(0, 40)]
+              + [_mk_trade(-0.005, ts) for ts in range(40, 80)])
+    ev = L.evaluate_candidate(trades, costs=COSTS, min_trades=10, wf_mode=L.WF_ROLLING,
+                              wf_train_frac=0.5, wf_test_frac=0.2, wf_step_frac=0.15,
+                              wf_min_folds=3, data_classification=L.CLS_INTERMEDIATE)
+    assert ev["candidate_status"] == L.CAND_REJECTED
+    assert any("rolling_wf_pass_rate_too_low" in r for r in ev["rejection_reasons"])
+
+
+def test_summary_flags_comparison_not_portfolio(tmp_path):
+    sample = tmp_path / "s"
+    _write_fixture(sample, ["BTCUSDT", "ETHUSDT"], {"BTCUSDT": 0.012, "ETHUSDT": 0.01})
+    rep = L.run_trailing_exit_lab(
+        sample_dir=str(sample), symbols=["BTCUSDT", "ETHUSDT"], timeframes=["4h"],
+        sides=["LONG", "SHORT"], entry_families=["breakout_momentum"],
+        exit_policies=["atr_trailing"], min_trades=10, max_grid_combos=50,
+        walk_forward_mode="rolling", data_classification=L.CLS_INTERMEDIATE)
+    assert rep["comparison_not_portfolio"] is True
+    assert rep["entries_are_baseline_not_validated_edge"] is True
+    assert rep["candidates_are_hypotheses_not_signals"] is True
+    assert rep["edge_validated"] is False
+    assert "global_policy_comparison_metrics" in rep
+    run_dir = L.write_reports(rep, output_dir=str(tmp_path / "out"))
+    summ = json.loads(Path(run_dir, "summary.json").read_text(encoding="utf-8"))
+    assert summ["comparison_not_portfolio"] is True
+    assert summ["paper_ready"] is False and summ["live_ready"] is False
+
+
+def test_report_flags_candidates_not_signals(tmp_path):
+    sample = tmp_path / "s"
+    _write_fixture(sample, ["BTCUSDT", "ETHUSDT"], {"BTCUSDT": 0.012, "ETHUSDT": 0.01})
+    rep = L.run_trailing_exit_lab(
+        sample_dir=str(sample), symbols=["BTCUSDT", "ETHUSDT"], timeframes=["4h"],
+        sides=["LONG", "SHORT"], entry_families=["breakout_momentum"],
+        exit_policies=["atr_trailing"], min_trades=10, max_grid_combos=50,
+        data_classification=L.CLS_INTERMEDIATE)
+    run_dir = L.write_reports(rep, output_dir=str(tmp_path / "out"))
+    md = Path(run_dir, "report.md").read_text(encoding="utf-8").lower()
+    assert "not signals" in md
+    assert "no live" in md
+
+
+def test_multiple_comparisons_warning_present(tmp_path):
+    sample = tmp_path / "s"
+    _write_fixture(sample, ["BTCUSDT", "ETHUSDT"], {"BTCUSDT": 0.012, "ETHUSDT": 0.01})
+    rep = L.run_trailing_exit_lab(
+        sample_dir=str(sample), symbols=["BTCUSDT", "ETHUSDT"], timeframes=["4h"],
+        sides=["LONG", "SHORT"],
+        entry_families=["breakout_momentum", "volatility_expansion"],
+        exit_policies=["atr_trailing", "break_even_lock", "fixed_tp_sl_time"],
+        min_trades=10, max_grid_combos=200, data_classification=L.CLS_INTERMEDIATE)
+    assert rep["multiple_comparisons_warning"] is True
+    assert rep["n_combos_tested"] >= 20
+    assert rep["false_discovery_risk"] in ("LOW", "MODERATE", "HIGH")
+
+
+def test_short_only_candidates_raise_concentration_warning(tmp_path):
+    # strong downtrend + SHORT-only -> accepted candidates are all SHORT.
+    sample = tmp_path / "s"
+    _write_fixture(sample, ["BTCUSDT", "ETHUSDT", "SOLUSDT"],
+                   {"BTCUSDT": -0.02, "ETHUSDT": -0.02, "SOLUSDT": -0.02})
+    rep = L.run_trailing_exit_lab(
+        sample_dir=str(sample), symbols=["BTCUSDT", "ETHUSDT", "SOLUSDT"],
+        timeframes=["4h"], sides=["SHORT"],
+        entry_families=["breakout_momentum", "volatility_expansion"],
+        exit_policies=["atr_trailing", "fixed_tp_sl_time"], min_trades=5,
+        max_grid_combos=50, walk_forward_mode="none",
+        data_classification=L.CLS_INTERMEDIATE)
+    if rep["n_research_candidates"] >= 1:
+        assert rep["side_concentration_warning"] == "SHORT_ONLY"
+
+
+def test_leverage_blocked_without_validated_edge():
+    m = L.compute_metrics([_mk_trade(0.02, 1 + i) for i in range(20)], COSTS)
+    blocked = L.leverage_simulation(m, sl_pct=0.02, edge_validated=False)
+    assert blocked["leverage_research_status"] == "BLOCKED_NO_VALIDATED_EDGE"
+    assert blocked["real_leverage_allowed"] is False
+    # even if an edge were 'validated', real leverage stays forbidden
+    openr = L.leverage_simulation(m, sl_pct=0.02, edge_validated=True)
+    assert openr["real_leverage_allowed"] is False
+    row20 = [r for r in blocked["rows"] if r["leverage"] == 20][0]
+    assert row20["dangerous_leverage_flag"] == "DANGEROUS_RESEARCH_ONLY"
+
+
+def test_no_approved_for_paper_or_live_anywhere(tmp_path):
+    sample = tmp_path / "s"
+    _write_fixture(sample, ["BTCUSDT", "ETHUSDT"], {"BTCUSDT": 0.012, "ETHUSDT": 0.01})
+    rep = L.run_trailing_exit_lab(
+        sample_dir=str(sample), symbols=["BTCUSDT", "ETHUSDT"], timeframes=["4h"],
+        sides=["LONG", "SHORT"], entry_families=["breakout_momentum"],
+        exit_policies=["atr_trailing"], min_trades=10, max_grid_combos=50,
+        data_classification=L.CLS_INTERMEDIATE)
+    blob = json.dumps({k: v for k, v in rep.items() if k != "_all_trades"}, default=str)
+    assert "APPROVED_FOR_PAPER" not in blob
+    assert "APPROVED_FOR_LIVE" not in blob
+    for c in rep["research_candidates"] + rep["rejected_candidates"]:
+        assert c["candidate_status"] in (L.CAND_REJECTED, L.CAND_WEAK, L.CAND_RESEARCH_ONLY)

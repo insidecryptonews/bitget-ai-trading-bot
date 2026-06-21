@@ -1,4 +1,4 @@
-"""ResearchOps V10.8 — Adaptive Trailing Profit Exit Lab (research-only).
+"""ResearchOps V10.8 - Adaptive Trailing Profit Exit Lab (research-only).
 
 A PURE, offline, deterministic laboratory to compare dynamic exit policies
 (break-even lock, ATR/percent/structure trailing, profit-protection ladder,
@@ -45,9 +45,27 @@ EXIT_REASONS = ("STOP", "TP", "TRAILING", "BREAK_EVEN", "TIME_DEATH",
 LEVERAGE_GRID = (1, 2, 3, 5, 10, 20)
 DANGEROUS_LEVERAGE = 20
 
-# Candidate verdicts — never APPROVED_FOR_PAPER/LIVE.
+# Candidate verdicts - never APPROVED_FOR_PAPER/LIVE.
 CAND_REJECTED = "REJECTED"
+CAND_WEAK = "WEAK_RESEARCH_HYPOTHESIS"
 CAND_RESEARCH_ONLY = "RESEARCH_CANDIDATE_ONLY"
+
+# V10.8.1 - walk-forward modes (the old simple split is NOT a walk-forward).
+WF_NONE = "none"
+WF_SPLIT = "chronological_split"          # single chronological OOS split
+WF_ROLLING = "rolling"                     # real rolling walk-forward
+WF_STATUS_OK = "OK"
+WF_STATUS_INSUFFICIENT = "INSUFFICIENT_FOLDS"
+WF_STATUS_SPLIT_ONLY = "CHRONOLOGICAL_SPLIT_ONLY"
+WF_STATUS_NONE = "NO_WALK_FORWARD"
+# rolling WF defaults + pass thresholds
+WF_TRAIN_FRAC = 0.5
+WF_TEST_FRAC = 0.2
+WF_STEP_FRAC = 0.15
+WF_MIN_FOLDS = 3
+MIN_OOS_PF = 1.0
+WF_STRONG_PASS_RATE = 0.6     # >= -> eligible RESEARCH_CANDIDATE_ONLY
+WF_WEAK_PASS_RATE = 0.34      # >= -> WEAK_RESEARCH_HYPOTHESIS; below -> rejected
 
 # Data classifications carried from the V10.6 validator.
 CLS_SAMPLE_ONLY = "SAMPLE_ONLY"
@@ -116,7 +134,7 @@ def _median(vals: list[float]) -> float:
 
 
 # --------------------------------------------------------------------------
-# A. Data loading (V10.6 sample) — read-only
+# A. Data loading (V10.6 sample) - read-only
 # --------------------------------------------------------------------------
 
 def load_ohlcv(path: str) -> list[dict[str, Any]]:
@@ -318,7 +336,7 @@ def generate_entries(*, symbol: str, timeframe: str, side: str, family: str,
 
 
 # --------------------------------------------------------------------------
-# C+D. Exit simulation — symmetric, monotonic stops, worst-case same-bar
+# C+D. Exit simulation - symmetric, monotonic stops, worst-case same-bar
 # --------------------------------------------------------------------------
 
 def _swing_level(bars: list[dict[str, Any]], upto: int, n: int, *, low: bool) -> float | None:
@@ -331,7 +349,8 @@ def _swing_level(bars: list[dict[str, Any]], upto: int, n: int, *, low: bool) ->
 def simulate_trade(bars: list[dict[str, Any]], atr: list[float | None],
                    entry: dict[str, Any], *, policy: str, params: dict[str, Any],
                    costs: Costs, funding: list[dict[str, Any]],
-                   same_bar_policy: str = "worst_case") -> dict[str, Any] | None:
+                   same_bar_policy: str = "worst_case",
+                   gap_policy: str = "adverse_open") -> dict[str, Any] | None:
     side = entry["side"]
     is_long = side == "LONG"
     ei = entry["entry_idx"]
@@ -355,6 +374,8 @@ def simulate_trade(bars: list[dict[str, Any]], atr: list[float | None],
     be_active = False
     trail_active = False
     same_bar_ambig = False
+    gap_adverse = False
+    gap_slippage_bps = 0.0
     time_to_lock = None
     last = min(ei + max_hold, len(bars) - 1)
     exit_reason = "END_OF_DATA"
@@ -370,27 +391,37 @@ def simulate_trade(bars: list[dict[str, Any]], atr: list[float | None],
     buffer_frac = costs.round_trip_fraction() / 2.0  # BE buffer covers ~fees
 
     for j in range(ei, last + 1):
-        hi, lo, cl = bars[j]["high"], bars[j]["low"], bars[j]["close"]
+        op, hi, lo, cl = (bars[j]["open"], bars[j]["high"], bars[j]["low"],
+                          bars[j]["close"])
         # --- hit checks use the stop/tp active coming INTO bar j (no lookahead) ---
         hit_stop = (lo <= stop) if is_long else (hi >= stop)
         hit_tp = has_tp and ((hi >= tp_price) if is_long else (lo <= tp_price))
+
+        # V10.8.1 - gap-adverse fill: if the bar OPENED beyond the stop, a real
+        # exit fills at the worse open, never optimistically at the stop level.
+        def _stop_fill() -> float:
+            if gap_policy != "adverse_open":
+                return stop
+            return min(stop, op) if is_long else max(stop, op)
+
         if hit_stop and hit_tp:
             same_bar_ambig = True
             if same_bar_policy == "best_case":
-                exit_reason, exit_price = "TP", tp_price
-            else:  # worst_case (default)
-                exit_reason = ("BREAK_EVEN" if be_active else
-                               "TRAILING" if trail_active else "STOP")
-                exit_reason = "SAME_BAR_AMBIGUITY_WORST_CASE"
-                exit_price = stop
-            exit_idx = j
+                exit_reason, exit_price, exit_idx = "TP", tp_price, j
+            else:  # worst_case (default) - the stop side, gap-adverse aware
+                fill = _stop_fill()
+                gap_adverse = fill != stop
+                exit_reason, exit_price, exit_idx = "SAME_BAR_AMBIGUITY_WORST_CASE", fill, j
             break
         if hit_stop:
+            fill = _stop_fill()
+            gap_adverse = fill != stop
             exit_reason = ("BREAK_EVEN" if be_active and abs(stop - ep) <= buffer_frac * ep * 2
                            else "TRAILING" if trail_active else "STOP")
-            exit_price, exit_idx = stop, j
+            exit_price, exit_idx = fill, j
             break
         if hit_tp:
+            # TP stays conservative - no gap-favorable improvement in the base.
             exit_reason, exit_price, exit_idx = "TP", tp_price, j
             break
 
@@ -481,6 +512,8 @@ def simulate_trade(bars: list[dict[str, Any]], atr: list[float | None],
     realized_fav = max(0.0, gross_ret)
     profit_capture = (realized_fav / mfe) if mfe > 1e-12 else 0.0
     giveback = ((mfe - realized_fav) / mfe) if mfe > 1e-12 else 0.0
+    if gap_adverse:
+        gap_slippage_bps = abs(stop - exit_price) / ep * 10_000.0
     return {
         "symbol": entry["symbol"], "timeframe": entry["timeframe"], "side": side,
         "family": entry["family"], "policy": policy, "entry_ts": entry["entry_ts"],
@@ -490,6 +523,8 @@ def simulate_trade(bars: list[dict[str, Any]], atr: list[float | None],
         "profit_capture": min(profit_capture, 1.0), "giveback": max(0.0, giveback),
         "be_activated": be_active, "trail_activated": trail_active,
         "time_to_lock": time_to_lock, "same_bar_ambiguous": same_bar_ambig,
+        "gap_adverse": gap_adverse, "gap_slippage_bps": round(gap_slippage_bps, 3),
+        "gap_policy": gap_policy,
         "fee_frac": 2.0 * costs.cost_bps / 10_000.0,
         "slippage_frac": 2.0 * costs.slippage_bps / 10_000.0,
         "funding_frac": funding_frac, "regimes": entry["regimes"],
@@ -571,6 +606,10 @@ def compute_metrics(trades: list[dict[str, Any]], costs: Costs) -> dict[str, Any
         "trailing_activation_rate": round(sum(1 for t in trades if t["trail_activated"]) / n, 4),
         "exit_reason_distribution": dist,
         "same_bar_ambiguity_count": sum(1 for t in trades if t["same_bar_ambiguous"]),
+        "gap_adverse_count": sum(1 for t in trades if t.get("gap_adverse")),
+        "gap_adverse_slippage_bps_estimate": round(
+            (sum(t.get("gap_slippage_bps", 0.0) for t in trades if t.get("gap_adverse"))
+             / max(1, sum(1 for t in trades if t.get("gap_adverse")))), 3),
         "cost_stress_x2": stress["net_EV_x2"],
         "cost_stress_x3": stress["net_EV_x3"],
         "net_EV_after_cost_stress": {"x2": stress["net_EV_x2"], "x3": stress["net_EV_x3"]},
@@ -579,12 +618,14 @@ def compute_metrics(trades: list[dict[str, Any]], costs: Costs) -> dict[str, Any
 
 
 # --------------------------------------------------------------------------
-# G. Aggressive opportunity (leverage) simulation — research-only
+# G. Aggressive opportunity (leverage) simulation - research-only
 # --------------------------------------------------------------------------
 
-def leverage_simulation(metrics: dict[str, Any], *, sl_pct: float) -> dict[str, Any]:
+def leverage_simulation(metrics: dict[str, Any], *, sl_pct: float,
+                        edge_validated: bool = False) -> dict[str, Any]:
     """Scale the (research) per-trade economics by leverage and flag danger.
-    NEVER recommends real leverage; pure what-if arithmetic."""
+    NEVER recommends real leverage; pure what-if arithmetic. Without a VALIDATED
+    edge the whole simulation is BLOCKED (no leverage research is meaningful)."""
     net_ev = metrics.get("net_EV", 0.0)
     max_dd = metrics.get("max_drawdown", 0.0)
     pf2 = metrics.get("net_PF_after_cost_stress", {}).get("x2", 0.0)
@@ -615,8 +656,12 @@ def leverage_simulation(metrics: dict[str, Any], *, sl_pct: float) -> dict[str, 
         "aggressive_opportunity_simulation": True,
         "leverage_grid": list(LEVERAGE_GRID),
         "rows": rows,
+        "edge_validated": bool(edge_validated),
+        "leverage_research_status": ("OPEN_RESEARCH" if edge_validated
+                                     else "BLOCKED_NO_VALIDATED_EDGE"),
         "leverage_recommendation": "NO_REAL_LEVERAGE",
         "real_leverage_allowed": False,
+        "uses_repeated_combo_trades_not_portfolio": True,
         **_safety_block(),
     }
 
@@ -625,61 +670,184 @@ def leverage_simulation(metrics: dict[str, Any], *, sl_pct: float) -> dict[str, 
 # H. Anti-overfit candidate gating + walk-forward
 # --------------------------------------------------------------------------
 
-def _split_train_oos(trades: list[dict[str, Any]], train_ratio: float
-                     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+def chronological_oos_single_split(trades: list[dict[str, Any]], train_ratio: float
+                                   ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """A SINGLE chronological train/OOS split. This is NOT a walk-forward; the
+    name is explicit so it is never mistaken for rolling validation."""
     ordered = sorted(trades, key=lambda t: t["entry_ts"])
     cut = int(len(ordered) * max(0.1, min(0.9, train_ratio)))
     return ordered[:cut], ordered[cut:]
 
 
-def evaluate_candidate(trades: list[dict[str, Any]], *, costs: Costs,
-                       min_trades: int, train_ratio: float,
-                       data_classification: str) -> dict[str, Any]:
-    full = compute_metrics(trades, costs)
-    rejection: list[str] = []
+def rolling_walk_forward(trades: list[dict[str, Any]], *, costs: Costs,
+                         train_frac: float = WF_TRAIN_FRAC,
+                         test_frac: float = WF_TEST_FRAC,
+                         step_frac: float = WF_STEP_FRAC,
+                         min_folds: int = WF_MIN_FOLDS, anchored: bool = False,
+                         min_trades_per_fold: int = 5) -> dict[str, Any]:
+    """REAL rolling walk-forward over the chronological time span of the trades.
+    Each fold trains on a window strictly BEFORE its test window (no future
+    leakage). anchored=True grows the train window from t0; otherwise it rolls."""
+    ordered = sorted(trades, key=lambda t: t["entry_ts"])
+    out: dict[str, Any] = {"wf_mode": WF_ROLLING, "wf_is_rolling": True,
+                           "folds": [], "wf_folds_total": 0, "wf_folds_passed": 0,
+                           "wf_pass_rate": 0.0, "walk_forward_status": WF_STATUS_INSUFFICIENT}
+    if len(ordered) < min_trades_per_fold * 2:
+        return out
+    t0, t1 = ordered[0]["entry_ts"], ordered[-1]["entry_ts"]
+    span = t1 - t0
+    if span <= 0:
+        return out
+    train_ms = span * train_frac
+    test_ms = span * test_frac
+    step_ms = max(1.0, span * step_frac)
+    folds = []
+    a = float(t0)
+    fold_id = 0
+    while True:
+        train_start = float(t0) if anchored else a
+        train_end = a + train_ms
+        test_start = train_end
+        test_end = test_start + test_ms
+        if test_start > t1:
+            break
+        tr_train = [t for t in ordered if train_start <= t["entry_ts"] < train_end]
+        tr_test = [t for t in ordered if test_start <= t["entry_ts"] < min(test_end, t1 + 1)]
+        # only count folds that actually have a test window with trades
+        if tr_test:
+            mtr = compute_metrics(tr_train, costs)
+            mte = compute_metrics(tr_test, costs)
+            te_pf = mte.get("profit_factor_net", 0.0)
+            te_pf = te_pf if not isinstance(te_pf, str) else math.inf
+            passed = (len(tr_test) >= min_trades_per_fold
+                      and mte.get("net_EV", 0.0) > 0 and te_pf >= MIN_OOS_PF)
+            reason = ""
+            if len(tr_test) < min_trades_per_fold:
+                reason = "too_few_test_trades"
+            elif mte.get("net_EV", 0.0) <= 0:
+                reason = "test_net_EV<=0"
+            elif te_pf < MIN_OOS_PF:
+                reason = "test_PF<1.0"
+            folds.append({
+                "fold_id": fold_id, "train_start": int(train_start),
+                "train_end": int(train_end), "test_start": int(test_start),
+                "test_end": int(min(test_end, t1)), "trades_train": mtr["trades"],
+                "trades_test": mte["trades"], "net_EV_train": mtr.get("net_EV"),
+                "net_EV_test": mte.get("net_EV"), "PF_train": mtr.get("profit_factor_net"),
+                "PF_test": mte.get("profit_factor_net"),
+                "drawdown_test": mte.get("max_drawdown"),
+                "candidate_passed_fold": passed, "failure_reason": reason})
+            fold_id += 1
+        a += step_ms
+        if a >= t1:
+            break
+    passed_n = sum(1 for f in folds if f["candidate_passed_fold"])
+    out["folds"] = folds
+    out["wf_folds_total"] = len(folds)
+    out["wf_folds_passed"] = passed_n
+    out["wf_pass_rate"] = round(passed_n / len(folds), 4) if folds else 0.0
+    out["walk_forward_status"] = (WF_STATUS_OK if len(folds) >= min_folds
+                                  else WF_STATUS_INSUFFICIENT)
+    return out
+
+
+def _base_rejections(full: dict[str, Any], trades: list[dict[str, Any]],
+                     min_trades: int) -> list[str]:
+    rej: list[str] = []
     if full["trades"] < min_trades:
-        rejection.append(f"too_few_trades:{full['trades']}<{min_trades}")
+        rej.append(f"too_few_trades:{full['trades']}<{min_trades}")
     if full.get("net_EV", 0.0) <= 0:
-        rejection.append("net_EV<=0")
+        rej.append("net_EV<=0")
     pf = full.get("profit_factor_net", 0.0)
     if not isinstance(pf, str) and pf < MIN_NET_PF:
-        rejection.append(f"net_PF<{MIN_NET_PF}")
+        rej.append(f"net_PF<{MIN_NET_PF}")
     if full.get("cost_stress_x2", 0.0) <= 0 or full.get("cost_stress_x3", 0.0) <= 0:
-        rejection.append("cost_stress_x2_or_x3_kills_edge")
+        rej.append("cost_stress_x2_or_x3_kills_edge")
     if full.get("profit_capture_ratio", 0.0) < MIN_PROFIT_CAPTURE:
-        rejection.append("profit_capture_too_low")
+        rej.append("profit_capture_too_low")
     if full.get("giveback_ratio", 1.0) > MAX_GIVEBACK:
-        rejection.append("giveback_too_high")
+        rej.append("giveback_too_high")
     td = full.get("exit_reason_distribution", {}).get("TIME_DEATH", 0)
     if full["trades"] and td / full["trades"] > MAX_TIME_DEATH_FRACTION:
-        rejection.append("too_many_time_death_exits")
-    # single-symbol dependence
+        rej.append("too_many_time_death_exits")
     by_sym: dict[str, list[dict[str, Any]]] = {}
     for t in trades:
         by_sym.setdefault(t["symbol"], []).append(t)
-    profitable_syms = sum(1 for ts in by_sym.values()
-                          if sum(x["net_ret"] for x in ts) > 0)
-    if len(by_sym) >= 3 and profitable_syms <= 1:
-        rejection.append("works_only_on_one_symbol")
-    # walk-forward OOS
-    train, oos = _split_train_oos(trades, train_ratio)
-    oos_metrics = compute_metrics(oos, costs)
-    train_metrics = compute_metrics(train, costs)
-    if len(oos) >= max(5, min_trades // 3):
-        if oos_metrics.get("net_EV", 0.0) <= 0:
-            rejection.append("oos_net_EV<=0")
+    profitable = sum(1 for ts in by_sym.values() if sum(x["net_ret"] for x in ts) > 0)
+    if len(by_sym) >= 3 and profitable <= 1:
+        rej.append("works_only_on_one_symbol")
+    return rej
+
+
+def evaluate_candidate(trades: list[dict[str, Any]], *, costs: Costs,
+                       min_trades: int, train_ratio: float = 0.6,
+                       data_classification: str = CLS_INTERMEDIATE,
+                       wf_mode: str = WF_ROLLING,
+                       wf_train_frac: float = WF_TRAIN_FRAC,
+                       wf_test_frac: float = WF_TEST_FRAC,
+                       wf_step_frac: float = WF_STEP_FRAC,
+                       wf_min_folds: int = WF_MIN_FOLDS,
+                       wf_anchored: bool = False) -> dict[str, Any]:
+    """Tiered, fail-closed candidate evaluation. Tiers: REJECTED <
+    WEAK_RESEARCH_HYPOTHESIS < RESEARCH_CANDIDATE_ONLY. NEVER approved."""
+    full = compute_metrics(trades, costs)
+    rejection = _base_rejections(full, trades, min_trades)
+    warnings: list[str] = []
+    min_per_fold = max(5, min_trades // 3)
+
+    wf: dict[str, Any] = {"wf_mode": wf_mode, "wf_is_rolling": wf_mode == WF_ROLLING,
+                          "wf_folds_total": 0, "wf_folds_passed": 0,
+                          "wf_pass_rate": 0.0, "folds": []}
+    oos_metrics: dict[str, Any] = {}
+    tier_ceiling = CAND_RESEARCH_ONLY  # best attainable given WF evidence
+
+    if wf_mode == WF_ROLLING:
+        wf = rolling_walk_forward(trades, costs=costs, train_frac=wf_train_frac,
+                                  test_frac=wf_test_frac, step_frac=wf_step_frac,
+                                  min_folds=wf_min_folds, anchored=wf_anchored,
+                                  min_trades_per_fold=min_per_fold)
+        if wf["walk_forward_status"] == WF_STATUS_INSUFFICIENT:
+            warnings.append("insufficient_wf_folds")
+            tier_ceiling = CAND_WEAK
+        elif wf["wf_pass_rate"] >= WF_STRONG_PASS_RATE:
+            tier_ceiling = CAND_RESEARCH_ONLY
+        elif wf["wf_pass_rate"] >= WF_WEAK_PASS_RATE:
+            tier_ceiling = CAND_WEAK
+        else:
+            rejection.append(f"rolling_wf_pass_rate_too_low:{wf['wf_pass_rate']}")
+    elif wf_mode == WF_SPLIT:
+        warnings.append("walk_forward_not_rolling_single_split_only")
+        wf["walk_forward_status"] = WF_STATUS_SPLIT_ONLY
+        train, oos = chronological_oos_single_split(trades, train_ratio)
+        oos_metrics = compute_metrics(oos, costs)
+        if len(oos) >= min_per_fold:
+            if oos_metrics.get("net_EV", 0.0) <= 0:
+                rejection.append("oos_net_EV<=0")
+        else:
+            rejection.append("insufficient_oos_trades")
+        tier_ceiling = CAND_WEAK  # a single split can never earn the top tier
+    else:  # WF_NONE
+        warnings.append("no_oos_validation")
+        wf["walk_forward_status"] = WF_STATUS_NONE
+        tier_ceiling = CAND_WEAK
+
+    if rejection:
+        tier = CAND_REJECTED
     else:
-        rejection.append("insufficient_oos_trades")
-    status = CAND_RESEARCH_ONLY if not rejection else CAND_REJECTED
-    # a non-READY dataset can NEVER exceed research-candidate
-    if data_classification != CLS_LONG_READY and status == CAND_RESEARCH_ONLY:
-        status = CAND_RESEARCH_ONLY  # explicit: stays research-only
+        tier = tier_ceiling
+        # an INTERMEDIATE (not LONG_READY) dataset can never reach the top tier
+        if data_classification != CLS_LONG_READY and tier == CAND_RESEARCH_ONLY:
+            tier = CAND_WEAK
+            warnings.append("dataset_not_long_ready_capped_to_weak")
+
     return {
-        "candidate_status": status,
+        "candidate_status": tier,
+        "candidate_quality_tier": tier,
         "rejection_reasons": rejection,
+        "warnings": warnings,
         "metrics_full": full,
-        "metrics_train": train_metrics,
         "metrics_oos": oos_metrics,
+        "walk_forward": wf,
         "approved_for_paper": False,
         "approved_for_live": False,
         **_safety_block(),
@@ -727,7 +895,14 @@ def run_trailing_exit_lab(*, sample_dir: str, symbols: list[str],
                           entry_families: list[str], exit_policies: list[str],
                           cost_bps: float = 6.0, slippage_bps: float = 4.0,
                           funding_mode: bool = True, min_trades: int = 30,
-                          train_ratio: float = 0.6, walk_forward: bool = True,
+                          train_ratio: float = 0.6,
+                          walk_forward_mode: str = WF_ROLLING,
+                          wf_train_frac: float = WF_TRAIN_FRAC,
+                          wf_test_frac: float = WF_TEST_FRAC,
+                          wf_step_frac: float = WF_STEP_FRAC,
+                          wf_min_folds: int = WF_MIN_FOLDS,
+                          wf_anchored: bool = False,
+                          gap_policy: str = "adverse_open",
                           max_grid_combos: int = 500, seed: int = 7,
                           data_classification: str = CLS_INTERMEDIATE,
                           aggressive: bool = True) -> dict[str, Any]:
@@ -736,6 +911,8 @@ def run_trailing_exit_lab(*, sample_dir: str, symbols: list[str],
     policies = [p for p in exit_policies if p in EXIT_POLICIES]
     sides = [s.upper() for s in sides if s.upper() in SIDES]
     timeframes = [t.lower() for t in timeframes]
+    if walk_forward_mode not in (WF_NONE, WF_SPLIT, WF_ROLLING):
+        walk_forward_mode = WF_ROLLING
 
     report: dict[str, Any] = {
         "tool_version": TOOL_VERSION, "generated_at": _now_iso(),
@@ -743,14 +920,27 @@ def run_trailing_exit_lab(*, sample_dir: str, symbols: list[str],
         "sides": sides, "entry_families": families, "exit_policies": policies,
         "cost_bps": cost_bps, "slippage_bps": slippage_bps,
         "funding_mode": funding_mode, "funding_applied": funding_mode,
-        "same_bar_policy": "worst_case", "train_ratio": train_ratio,
-        "walk_forward": walk_forward, "seed": seed,
+        "same_bar_policy": "worst_case", "gap_policy": gap_policy,
+        "train_ratio": train_ratio, "walk_forward_mode": walk_forward_mode,
+        "wf_is_rolling": walk_forward_mode == WF_ROLLING,
+        "wf_train_frac": wf_train_frac, "wf_test_frac": wf_test_frac,
+        "wf_step_frac": wf_step_frac, "wf_min_folds": wf_min_folds,
+        "wf_anchored": wf_anchored, "seed": seed,
         "data_classification": data_classification,
         "oi_regime_available": False, "liquidations_available": False,
-        "strategy_ready": False, "evaluation_type": "exit_policy_research_on_baseline_entries",
+        "strategy_ready": False, "edge_validated": False,
+        "evaluation_type": "exit_policy_research_on_baseline_entries",
+        # honesty disclaimers - these results are NOT a tradable portfolio
+        "comparison_not_portfolio": True,
+        "entries_are_baseline_not_validated_edge": True,
+        "candidates_are_hypotheses_not_signals": True,
+        "regime_window_dependency_warning": True,
         "errors": [], "warnings": [],
         **_safety_block(),
     }
+    if walk_forward_mode == WF_SPLIT:
+        report["warnings"].append("deprecated_walk_forward_bool_maps_to_chronological_split")
+        report["warnings"].append("walk_forward_not_rolling_single_split_only")
     if data_classification != CLS_LONG_READY:
         report["warnings"].append(
             f"data_classification={data_classification}: results are "
@@ -806,49 +996,108 @@ def run_trailing_exit_lab(*, sample_dir: str, symbols: list[str],
             atr = atr_cache[(sym, tf)]
             for e in ents:
                 tr = simulate_trade(bars, atr, e, policy=pol, params=params,
-                                    costs=costs, funding=funding_cache[sym])
+                                    costs=costs, funding=funding_cache[sym],
+                                    gap_policy=gap_policy)
                 if tr is not None:
                     tr["param_tag"] = json.dumps(params, sort_keys=True)
                     ctrades.append(tr)
         if not ctrades:
             continue
         all_trades.extend(ctrades)
-        evaluation = evaluate_candidate(ctrades, costs=costs, min_trades=min_trades,
-                                        train_ratio=train_ratio,
-                                        data_classification=data_classification)
+        evaluation = evaluate_candidate(
+            ctrades, costs=costs, min_trades=min_trades, train_ratio=train_ratio,
+            data_classification=data_classification, wf_mode=walk_forward_mode,
+            wf_train_frac=wf_train_frac, wf_test_frac=wf_test_frac,
+            wf_step_frac=wf_step_frac, wf_min_folds=wf_min_folds, wf_anchored=wf_anchored)
         m = evaluation["metrics_full"]
+        wf = evaluation["walk_forward"]
         candidates.append({
             "timeframe": tf, "side": side, "entry_family": fam, "exit_policy": pol,
             "params": params, "candidate_status": evaluation["candidate_status"],
+            "candidate_quality_tier": evaluation["candidate_quality_tier"],
             "rejection_reasons": evaluation["rejection_reasons"],
+            "warnings": evaluation.get("warnings", []),
             "trades": m["trades"], "net_EV": m.get("net_EV"),
             "net_PF": m.get("profit_factor_net"), "win_rate": m.get("win_rate"),
             "max_drawdown": m.get("max_drawdown"),
             "profit_capture_ratio": m.get("profit_capture_ratio"),
             "giveback_ratio": m.get("giveback_ratio"),
             "cost_stress_x2": m.get("cost_stress_x2"),
-            "oos_net_EV": evaluation["metrics_oos"].get("net_EV"),
+            "gap_adverse_count": m.get("gap_adverse_count"),
+            "gap_adverse_slippage_bps_estimate": m.get("gap_adverse_slippage_bps_estimate"),
+            "oos_net_EV": evaluation.get("metrics_oos", {}).get("net_EV"),
+            "wf_mode": wf.get("wf_mode"), "wf_is_rolling": wf.get("wf_is_rolling"),
+            "wf_folds_total": wf.get("wf_folds_total"),
+            "wf_folds_passed": wf.get("wf_folds_passed"),
+            "wf_pass_rate": wf.get("wf_pass_rate"),
+            "walk_forward_status": wf.get("walk_forward_status"),
+            "wf_folds": wf.get("folds", []),
             "exit_reason_distribution": m.get("exit_reason_distribution"),
             "metrics_full": m,
         })
 
     report["trades_simulated"] = len(all_trades)
-    accepted = [c for c in candidates if c["candidate_status"] == CAND_RESEARCH_ONLY]
+    # accepted = any non-REJECTED tier (WEAK or RESEARCH_CANDIDATE_ONLY)
+    accepted = [c for c in candidates if c["candidate_status"] != CAND_REJECTED]
     rejected = [c for c in candidates if c["candidate_status"] == CAND_REJECTED]
-    accepted.sort(key=lambda c: (c.get("net_EV") or -9, c.get("oos_net_EV") or -9), reverse=True)
+    tier_rank = {CAND_RESEARCH_ONLY: 2, CAND_WEAK: 1}
+    accepted.sort(key=lambda c: (tier_rank.get(c["candidate_status"], 0),
+                                 c.get("net_EV") or -9, c.get("wf_pass_rate") or 0),
+                  reverse=True)
     rejected.sort(key=lambda c: (c.get("net_EV") or -9), reverse=True)
     report["research_candidates"] = accepted[:25]
     report["rejected_candidates"] = rejected[:50]
     report["n_research_candidates"] = len(accepted)
     report["n_rejected_candidates"] = len(rejected)
+    report["n_research_candidate_only"] = sum(
+        1 for c in accepted if c["candidate_status"] == CAND_RESEARCH_ONLY)
+    report["n_weak_research_hypothesis"] = sum(
+        1 for c in accepted if c["candidate_status"] == CAND_WEAK)
 
-    # aggregate metric tables
+    # side concentration warning
+    acc_sides = {c["side"] for c in accepted}
+    if accepted and len(acc_sides) == 1:
+        report["side_concentration_warning"] = f"{acc_sides.pop()}_ONLY"
+    else:
+        report["side_concentration_warning"] = ""
+    # multiple-comparisons / false-discovery (n_combos = full grid attempted)
+    n_combos = max(report.get("combos_evaluated", 0), len(candidates))
+    n_acc = len(accepted)
+    report["multiple_comparisons_warning"] = True
+    report["n_combos_tested"] = n_combos
+    report["n_candidates_after_gates"] = n_acc
+    if n_combos >= 20 and (n_acc / max(1, n_combos)) < 0.1:
+        report["false_discovery_risk"] = "HIGH"
+    elif n_combos >= 20:
+        report["false_discovery_risk"] = "MODERATE"
+    else:
+        report["false_discovery_risk"] = "LOW"
+    # collect WF folds of the top accepted candidates for the folds report
+    report["walk_forward_folds"] = []
+    for c in accepted[:10]:
+        for f in c.get("wf_folds", []):
+            report["walk_forward_folds"].append({
+                "combo": f"{c['timeframe']}/{c['side']}/{c['entry_family']}/{c['exit_policy']}",
+                **f})
+    report["walk_forward_status"] = (
+        accepted[0]["walk_forward_status"] if accepted else
+        (WF_STATUS_OK if walk_forward_mode == WF_ROLLING else WF_STATUS_SPLIT_ONLY
+         if walk_forward_mode == WF_SPLIT else WF_STATUS_NONE))
+
+    # aggregate metric tables (POLICY COMPARISON - not a tradable portfolio)
     report["metrics_by"] = _aggregate_tables(all_trades, costs)
-    # leverage sim over the best accepted candidate (or global if none accepted)
+    report["global_policy_comparison_metrics"] = report["metrics_by"]["global"]
+    # leverage sim over the best accepted candidate - edge is NEVER validated
+    # here, so the whole simulation reports BLOCKED_NO_VALIDATED_EDGE.
     best = accepted[0] if accepted else (candidates[0] if candidates else None)
     if best is not None:
         report["aggressive_opportunity"] = leverage_simulation(
-            best["metrics_full"], sl_pct=float(best["params"].get("sl_pct", 0.02)))
+            best["metrics_full"], sl_pct=float(best["params"].get("sl_pct", 0.02)),
+            edge_validated=False)
+    # trim heavy per-candidate fold lists from the listed candidates (the folds
+    # already live in report["walk_forward_folds"]); keep summary.json lean.
+    for c in report["research_candidates"] + report["rejected_candidates"]:
+        c.pop("wf_folds", None)
     report["_all_trades"] = all_trades  # internal, for writers (not for JSON dump as-is)
     return report
 
@@ -871,7 +1120,7 @@ def _aggregate_tables(trades: list[dict[str, Any]], costs: Costs) -> dict[str, A
 
 
 # --------------------------------------------------------------------------
-# J. Report writers (reports/research/v10_8/<run_id>/) — never raw/DB/.env
+# J. Report writers (reports/research/v10_8/<run_id>/) - never raw/DB/.env
 # --------------------------------------------------------------------------
 
 def _safe_output_dir(output_dir: str | None) -> str:
@@ -920,19 +1169,35 @@ def write_reports(report: dict[str, Any], output_dir: str | None = None) -> str:
     def _cand_rows(items):
         return [{"timeframe": c["timeframe"], "side": c["side"],
                  "entry_family": c["entry_family"], "exit_policy": c["exit_policy"],
-                 "candidate_status": c["candidate_status"], "trades": c["trades"],
-                 "net_EV": c["net_EV"], "net_PF": c["net_PF"],
+                 "candidate_status": c["candidate_status"],
+                 "candidate_quality_tier": c.get("candidate_quality_tier"),
+                 "trades": c["trades"], "net_EV": c["net_EV"], "net_PF": c["net_PF"],
                  "win_rate": c["win_rate"], "max_drawdown": c["max_drawdown"],
                  "profit_capture_ratio": c["profit_capture_ratio"],
-                 "oos_net_EV": c["oos_net_EV"],
+                 "gap_adverse_count": c.get("gap_adverse_count"),
+                 "wf_mode": c.get("wf_mode"), "wf_folds_total": c.get("wf_folds_total"),
+                 "wf_folds_passed": c.get("wf_folds_passed"),
+                 "wf_pass_rate": c.get("wf_pass_rate"),
+                 "walk_forward_status": c.get("walk_forward_status"),
+                 "oos_net_EV": c.get("oos_net_EV"),
                  "rejection_reasons": ";".join(c["rejection_reasons"])} for c in items]
     ccols = ["timeframe", "side", "entry_family", "exit_policy", "candidate_status",
-             "trades", "net_EV", "net_PF", "win_rate", "max_drawdown",
-             "profit_capture_ratio", "oos_net_EV", "rejection_reasons"]
+             "candidate_quality_tier", "trades", "net_EV", "net_PF", "win_rate",
+             "max_drawdown", "profit_capture_ratio", "gap_adverse_count", "wf_mode",
+             "wf_folds_total", "wf_folds_passed", "wf_pass_rate", "walk_forward_status",
+             "oos_net_EV", "rejection_reasons"]
     _write_csv(os.path.join(run_dir, "candidate_ranking.csv"),
                _cand_rows(report.get("research_candidates", [])), ccols)
     _write_csv(os.path.join(run_dir, "rejected_candidates.csv"),
                _cand_rows(report.get("rejected_candidates", [])), ccols)
+
+    # walk_forward_folds.csv (rolling WF evidence for the top candidates)
+    wf_rows = report.get("walk_forward_folds", [])
+    _write_csv(os.path.join(run_dir, "walk_forward_folds.csv"), wf_rows,
+               ["combo", "fold_id", "train_start", "train_end", "test_start",
+                "test_end", "trades_train", "trades_test", "net_EV_train",
+                "net_EV_test", "PF_train", "PF_test", "drawdown_test",
+                "candidate_passed_fold", "failure_reason"])
 
     # stability_matrix.csv (by symbol/tf/side/regime)
     stab_rows = []
@@ -959,25 +1224,48 @@ def write_reports(report: dict[str, Any], output_dir: str | None = None) -> str:
 def _write_md(path: str, report: dict[str, Any]) -> None:
     g = report.get("metrics_by", {}).get("global", {})
     lines = [
-        "# ResearchOps V10.8 — Adaptive Trailing Exit Lab (RESEARCH ONLY)",
+        "# ResearchOps V10.8 - Adaptive Trailing Exit Lab (RESEARCH ONLY)",
+        "",
+        "> These candidates are HYPOTHESES, not signals. This is a policy "
+        "comparison, NOT a tradable portfolio. Entries are baseline and the "
+        "edge is NOT validated. NO LIVE.",
         "", f"- generated_at: {report.get('generated_at')}",
         f"- data_classification: {report.get('data_classification')}",
         f"- evaluation_type: {report.get('evaluation_type')}",
+        f"- walk_forward_mode: {report.get('walk_forward_mode')} (is_rolling={report.get('wf_is_rolling')})",
+        f"- walk_forward_status: {report.get('walk_forward_status')}",
+        f"- gap_policy: {report.get('gap_policy')}",
+        f"- comparison_not_portfolio: {report.get('comparison_not_portfolio')}",
+        f"- entries_are_baseline_not_validated_edge: {report.get('entries_are_baseline_not_validated_edge')}",
+        f"- candidates_are_hypotheses_not_signals: {report.get('candidates_are_hypotheses_not_signals')}",
+        f"- edge_validated: {report.get('edge_validated')}",
         f"- trades_simulated: {report.get('trades_simulated')}",
-        f"- research_candidates: {report.get('n_research_candidates')}",
+        f"- research_candidates: {report.get('n_research_candidates')} "
+        f"(research_candidate_only={report.get('n_research_candidate_only')}, "
+        f"weak={report.get('n_weak_research_hypothesis')})",
         f"- rejected_candidates: {report.get('n_rejected_candidates')}",
-        f"- global net_EV: {g.get('net_EV')} | net_PF: {g.get('profit_factor_net')}",
+        f"- side_concentration_warning: {report.get('side_concentration_warning')!r}",
+        f"- regime_window_dependency_warning: {report.get('regime_window_dependency_warning')}",
+        f"- multiple_comparisons_warning: {report.get('multiple_comparisons_warning')} "
+        f"(n_combos_tested={report.get('n_combos_tested')}, "
+        f"n_candidates_after_gates={report.get('n_candidates_after_gates')}, "
+        f"false_discovery_risk={report.get('false_discovery_risk')})",
+        f"- global_policy_comparison net_EV: {g.get('net_EV')} | net_PF: {g.get('profit_factor_net')}",
+        f"- gap_adverse_count (global): {g.get('gap_adverse_count')}",
         f"- oi_regime_available: {report.get('oi_regime_available')}",
         f"- liquidations_available: {report.get('liquidations_available')}",
-        "", "## Top research candidates (NOT approved for paper/live)",
+        "", "## Top research candidates (HYPOTHESES - NOT approved for paper/live, NOT signals)",
     ]
     for c in report.get("research_candidates", [])[:10]:
-        lines.append(f"- {c['timeframe']}/{c['side']}/{c['entry_family']}/{c['exit_policy']}"
-                     f" → net_EV={c['net_EV']} net_PF={c['net_PF']} trades={c['trades']}"
-                     f" oos_net_EV={c['oos_net_EV']}")
+        lines.append(f"- [{c.get('candidate_quality_tier')}] "
+                     f"{c['timeframe']}/{c['side']}/{c['entry_family']}/{c['exit_policy']}"
+                     f" -> net_EV={c['net_EV']} net_PF={c['net_PF']} trades={c['trades']}"
+                     f" wf_pass_rate={c.get('wf_pass_rate')} wf_folds={c.get('wf_folds_passed')}/{c.get('wf_folds_total')}")
     lines += ["", "## Safety",
               "- research_only: true", "- paper_ready: false", "- live_ready: false",
               "- can_send_real_orders: false", "- real_leverage_allowed: false",
+              "- leverage_research_status: BLOCKED_NO_VALIDATED_EDGE",
+              "- candidates are hypotheses, not signals",
               "- FINAL_RECOMMENDATION: NO LIVE", ""]
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", encoding="utf-8") as fh:
@@ -994,7 +1282,7 @@ def trailing_exit_plan() -> dict[str, Any]:
                       "exits (break-even lock, ATR/percent/structure trailing, "
                       "profit ladder, time-death) vs a fixed TP/SL/time baseline; "
                       "protect winners, let trends run, never give a winner back "
-                      "to a loss — WITHOUT real trading"),
+                      "to a loss - WITHOUT real trading"),
         "dataset_requirements": [
             "V10.6 sample dir from bitget-public-to-sample-v107",
             "<symbol>_<timeframe>_ohlcv.csv (timestamp,open,high,low,close,volume)",
@@ -1010,18 +1298,33 @@ def trailing_exit_plan() -> dict[str, Any]:
                   "profit_capture>=%.2f" % MIN_PROFIT_CAPTURE,
                   "giveback<=%.2f" % MAX_GIVEBACK, "time_death not dominant"],
         "same_bar_policy": "worst_case (default); best_case/open_path only as sensitivity",
+        "gap_policy": "adverse_open (default): an adverse gap fills at the worse "
+                      "open, never optimistically at the stop; favorable gaps do "
+                      "NOT improve the base TP",
+        "walk_forward_modes": {
+            WF_NONE: "no OOS validation (weak at best)",
+            WF_SPLIT: ("single chronological_oos_single_split - NOT a walk-forward; "
+                       "caps candidates at WEAK_RESEARCH_HYPOTHESIS"),
+            WF_ROLLING: ("REAL rolling walk-forward: multiple train->test folds, "
+                         "test always after train, no future leakage; needs "
+                         f">= {WF_MIN_FOLDS} folds for the top tier")},
         "regimes": ["trend_up", "trend_down", "range", "high_volatility",
                     "low_volatility", "funding_positive", "funding_negative",
                     "funding_extreme_positive", "funding_extreme_negative"],
         "aggressive_opportunity_simulation": True,
         "leverage_grid": list(LEVERAGE_GRID),
         "leverage_recommendation": "NO_REAL_LEVERAGE",
+        "leverage_research_status_without_edge": "BLOCKED_NO_VALIDATED_EDGE",
+        "candidates_are_hypotheses_not_signals": True,
+        "comparison_not_portfolio": True,
         "limitations": ["no OI history", "no historical liquidations",
-                        "exit research on BASELINE entries — entry edge NOT proven",
+                        "exit research on BASELINE entries - entry edge NOT proven",
                         "INTERMEDIATE samples never exceed RESEARCH_CANDIDATE_ONLY",
+                        "candidates are HYPOTHESES, not signals",
+                        "global metrics are a POLICY COMPARISON, not a portfolio",
                         "no paper/live readiness, no backtester-for-real-money"],
-        "candidate_statuses": [CAND_REJECTED, CAND_RESEARCH_ONLY,
-                               "never APPROVED_FOR_PAPER", "never APPROVED_FOR_LIVE"],
+        "candidate_quality_tiers": [CAND_REJECTED, CAND_WEAK, CAND_RESEARCH_ONLY,
+                                    "never APPROVED_FOR_PAPER", "never APPROVED_FOR_LIVE"],
         **_safety_block(),
     }
 
@@ -1037,15 +1340,33 @@ def summarize_run(summary: dict[str, Any]) -> dict[str, Any]:
     worst = sorted(rej, key=lambda c: (c.get("max_drawdown") or 0), reverse=True)[:5]
     return {
         "data_classification": summary.get("data_classification"),
+        "edge_validated": summary.get("edge_validated", False),
+        "candidates_are_hypotheses_not_signals": True,
+        "comparison_not_portfolio": True,
+        "walk_forward_mode": summary.get("walk_forward_mode"),
+        "wf_is_rolling": summary.get("wf_is_rolling"),
+        "walk_forward_status": summary.get("walk_forward_status"),
+        "gap_policy": summary.get("gap_policy"),
         "trades_simulated": summary.get("trades_simulated"),
         "n_research_candidates": summary.get("n_research_candidates"),
+        "n_research_candidate_only": summary.get("n_research_candidate_only"),
+        "n_weak_research_hypothesis": summary.get("n_weak_research_hypothesis"),
         "n_rejected_candidates": summary.get("n_rejected_candidates"),
+        "side_concentration_warning": summary.get("side_concentration_warning"),
+        "regime_window_dependency_warning": summary.get("regime_window_dependency_warning"),
+        "multiple_comparisons_warning": summary.get("multiple_comparisons_warning"),
+        "n_combos_tested": summary.get("n_combos_tested"),
+        "n_candidates_after_gates": summary.get("n_candidates_after_gates"),
+        "false_discovery_risk": summary.get("false_discovery_risk"),
+        "leverage_research_status": summary.get("aggressive_opportunity", {}).get(
+            "leverage_research_status", "BLOCKED_NO_VALIDATED_EDGE"),
         "top_research_candidates": cands[:10],
         "best_policy_by_side_timeframe": best_by,
         "worst_fragility": [{"combo": f"{c['timeframe']}/{c['side']}/{c['entry_family']}/{c['exit_policy']}",
                              "max_drawdown": c.get("max_drawdown"),
                              "why": ";".join(c.get("rejection_reasons", []))} for c in worst],
         "approved_for_paper": False, "approved_for_live": False,
+        "real_leverage_allowed": False,
         **_safety_block(),
     }
 
