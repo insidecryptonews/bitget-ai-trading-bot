@@ -4897,6 +4897,177 @@ class ResearchLab:
         # Shares the trailing-exit engine; emphasises the leverage simulation.
         return self.trailing_exit_lab_v108_cli(aggressive=True, **kwargs)
 
+    # ------------------------------------------------------------------
+    # ResearchOps V10.9 — coverage-aware readiness + multi-window validation.
+    # Research-only; nothing flips paper/live; honest about data limits.
+    # ------------------------------------------------------------------
+    def bitget_public_coverage_audit_v109_cli(self, *, staging_dir: str,
+                                              expected_days: int = 365) -> str:
+        import json as _json
+        from .labs.coverage_readiness_v10_9 import coverage_audit
+        r = coverage_audit(staging_dir, expected_days=expected_days)
+        lines = ["BITGET PUBLIC COVERAGE AUDIT V10.9 START"]
+        for k in ("staging_dir", "requested_days", "audit_status", "coverage_status",
+                  "global_actual_days_covered", "global_coverage_ratio",
+                  "requested_days_undercovered", "undercovered_timeframes",
+                  "undercovered_symbols", "coverage_warning_count"):
+            lines.append(f"{k}: {r.get(k)}")
+        lines.append("timeframe_coverage_summary: " + _json.dumps(r.get("timeframe_coverage_summary", {})))
+        lines.append("blockers:")
+        lines.extend(f"- {b}" for b in (r.get("blockers") or ["NONE"]))
+        lines.append("warnings:")
+        lines.extend(f"- {w}" for w in (r.get("warnings") or ["NONE"]))
+        lines.append("missing_oi_historical: true")
+        lines.append("missing_liquidations: true")
+        lines.append("report_json: " + _json.dumps(r, default=str))
+        lines += ["research_only: true", "paper_ready: false", "live_ready: false",
+                  "can_send_real_orders: false", "final_recommendation: NO LIVE",
+                  "BITGET PUBLIC COVERAGE AUDIT V10.9 END"]
+        return "\n".join(lines)
+
+    def provider_sample_coverage_v109_cli(self, *, sample_dir: str,
+                                          expected_days: int = 365,
+                                          provider_id: str = "bitget_official") -> str:
+        import json as _json
+        from .labs.coverage_readiness_v10_9 import sample_coverage
+        r = sample_coverage(sample_dir, expected_days=expected_days, provider_id=provider_id)
+        lines = ["PROVIDER SAMPLE COVERAGE V10.9 START"]
+        for k in ("sample_dir", "provider_id", "provider_verified", "requested_days",
+                  "actual_days_covered", "coverage_ratio_by_days", "requested_days_status",
+                  "data_classification", "sample_ready", "required_types_missing",
+                  "long_history_ready_but_underrequested"):
+            lines.append(f"{k}: {r.get(k)}")
+        lines.append("timeframe_coverage: " + _json.dumps(r.get("timeframe_coverage", {})))
+        lines.append("human_warnings:")
+        lines.extend(f"- {w}" for w in (r.get("human_warnings") or ["NONE"]))
+        lines += ["missing_oi_historical: true", "missing_liquidations: true",
+                  "research_only: true", "paper_ready: false", "live_ready: false",
+                  "can_send_real_orders: false", "final_recommendation: NO LIVE",
+                  "PROVIDER SAMPLE COVERAGE V10.9 END"]
+        return "\n".join(lines)
+
+    def data_readiness_sample_v109_cli(self, *, sample_dir: str,
+                                       expected_days: int = 365,
+                                       provider_id: str = "bitget_official") -> str:
+        import json as _json
+        from .labs.coverage_readiness_v10_9 import data_readiness_sample
+        r = data_readiness_sample(sample_dir, expected_days=expected_days, provider_id=provider_id)
+        lines = ["DATA READINESS SAMPLE V10.9 START"]
+        for k in ("sample_dir", "dataset_hash", "clean_days", "coverage_ratio",
+                  "requested_days", "requested_days_status", "missing_required_types",
+                  "provider_verified", "data_classification", "manifest_gate_status",
+                  "manifest_promotable", "backtester_readiness"):
+            lines.append(f"{k}: {r.get(k)}")
+        lines.append("backtester_blockers: " + _json.dumps(r.get("backtester_blockers", [])))
+        lines += ["provider_verified: false", "missing_oi_historical: true",
+                  "missing_liquidations: true", "research_only: true",
+                  "paper_ready: false", "live_ready: false",
+                  "can_send_real_orders: false", "final_recommendation: NO LIVE",
+                  "DATA READINESS SAMPLE V10.9 END"]
+        return "\n".join(lines)
+
+    def bitget_public_history_limits_v109_cli(self, *, symbols: str, timeframes: str,
+                                              apply: bool = False,
+                                              output_dir: str = "") -> str:
+        import json as _json
+        from .labs.coverage_readiness_v10_9 import history_limits_probe
+        r = history_limits_probe(symbols=self._v107_csv_arg(symbols),
+                                 timeframes=self._v107_csv_arg(timeframes),
+                                 apply=apply, output_dir=(output_dir or None))
+        lines = ["BITGET PUBLIC HISTORY LIMITS V10.9 START"]
+        for k in ("dry_run", "symbols", "timeframes", "no_private_auth", "no_env",
+                  "public_get_only", "provider_public_history_limit_detected",
+                  "recommended_expected_days_by_timeframe", "written_path"):
+            lines.append(f"{k}: {r.get(k)}")
+        lines.append("report_json: " + _json.dumps(r, default=str))
+        lines += ["research_only: true", "paper_ready: false", "live_ready: false",
+                  "can_send_real_orders: false", "final_recommendation: NO LIVE",
+                  "BITGET PUBLIC HISTORY LIMITS V10.9 END"]
+        return "\n".join(lines)
+
+    def multi_window_trailing_validation_v109_cli(self, *, sample_dir: str,
+                                                  windows: str, symbols: str,
+                                                  timeframes: str, sides: str,
+                                                  entry_family: str, exit_policies: str,
+                                                  cost_bps: float = 6.0,
+                                                  slippage_bps: float = 4.0,
+                                                  min_trades: int = 30,
+                                                  walk_forward_mode: str = "rolling",
+                                                  gap_policy: str = "adverse_open",
+                                                  max_grid_combos: int = 500, seed: int = 7,
+                                                  output_dir: str = "") -> str:
+        from .labs.coverage_readiness_v10_9 import (multi_window_validation,
+                                                    write_multi_window_reports)
+        from .labs.adaptive_trailing_exit_v10_8 import CLS_INTERMEDIATE
+        csv_arg = self._v107_csv_arg
+        classification = CLS_INTERMEDIATE
+        try:
+            from .labs.provider_sample_validator_v10_6 import validate_sample_dir
+            classification = validate_sample_dir(
+                sample_dir, expected_days=365,
+                provider_id="bitget_official").get("data_classification", CLS_INTERMEDIATE)
+        except Exception:
+            pass
+        windows_list = [int(w) for w in csv_arg(windows) if str(w).strip().isdigit()] or [90, 180, 270]
+        rep = multi_window_validation(
+            sample_dir=sample_dir, windows=windows_list, symbols=csv_arg(symbols),
+            timeframes=csv_arg(timeframes), sides=csv_arg(sides),
+            entry_families=csv_arg(entry_family), exit_policies=csv_arg(exit_policies),
+            cost_bps=cost_bps, slippage_bps=slippage_bps, min_trades=min_trades,
+            walk_forward_mode=walk_forward_mode, gap_policy=gap_policy,
+            max_grid_combos=max_grid_combos, seed=seed, data_classification=classification)
+        run_dir = ""
+        if not rep.get("errors"):
+            run_dir = write_multi_window_reports(rep, output_dir=(output_dir or None))
+        lines = ["MULTI WINDOW TRAILING VALIDATION V10.9 START"]
+        lines.append(f"sample_dir: {sample_dir}")
+        lines.append(f"data_classification: {rep.get('data_classification')}")
+        lines.append(f"edge_validated: {str(rep.get('edge_validated', False)).lower()}")
+        lines.append(f"candidates_are_hypotheses_not_signals: true")
+        lines.append(f"windows: {rep.get('windows')}")
+        lines.append(f"errors: {rep.get('errors')}")
+        lines.append("window_results:")
+        for wr in rep.get("window_results", []):
+            lines.append(f"- w={wr['window_days']}d trades={wr['trades_simulated']} "
+                         f"cands={wr['n_research_candidates']} net_EV={wr['global_net_EV']} "
+                         f"side_conc={wr['side_concentration_warning']!r}")
+        lines.append(f"n_multi_window_candidates: {rep.get('n_multi_window_candidates')}")
+        lines.append(f"n_research_candidate_only: {rep.get('n_research_candidate_only')}")
+        lines.append(f"n_weak_research_hypothesis: {rep.get('n_weak_research_hypothesis')}")
+        lines.append(f"side_concentration_warning: {rep.get('side_concentration_warning')!r}")
+        lines.append(f"any_window_positive_global_edge: {rep.get('any_window_positive_global_edge')}")
+        lines.append(f"false_discovery_risk: {rep.get('false_discovery_risk')}")
+        lines.append("candidates_stable_across_windows (hypotheses not signals):")
+        for a in [c for c in rep.get("multi_window_candidates", []) if c["windows_passed"] >= 2][:8]:
+            lines.append(f"- [{a['final_tier']}] {a['candidate_id']} passed "
+                         f"{a['windows_passed']}/{a['windows_tested']} windows")
+        lines.append(f"output_run_dir: {run_dir or 'NONE'}")
+        lines += ["missing_oi_historical: true", "missing_liquidations: true",
+                  "research_only: true", "paper_ready: false", "live_ready: false",
+                  "can_send_real_orders: false", "final_recommendation: NO LIVE",
+                  "MULTI WINDOW TRAILING VALIDATION V10.9 END"]
+        return "\n".join(lines)
+
+    def provider_gap_plan_v109_cli(self) -> str:
+        import json as _json
+        from .labs.coverage_readiness_v10_9 import provider_gap_plan, write_provider_gap_plan
+        r = provider_gap_plan()
+        md_path, json_path = write_provider_gap_plan(r)
+        lines = ["PROVIDER GAP PLAN V10.9 START"]
+        lines.append("what_is_missing:")
+        lines.extend(f"- {x}" for x in r["what_is_missing"])
+        lines.append("minimum_required_data: " + ",".join(r["minimum_required_data"]))
+        lines.append(f"no_paid_download_before_sample_validation: {r['no_paid_download_before_sample_validation']}")
+        lines.append("candidate_providers:")
+        lines.extend(f"- {p['name']}: {p['status']}" for p in r["candidate_providers"])
+        lines.append(f"md_path: {md_path}")
+        lines.append(f"json_path: {json_path}")
+        lines.append("report_json: " + _json.dumps(r, default=str))
+        lines += ["research_only: true", "paper_ready: false", "live_ready: false",
+                  "can_send_real_orders: false", "final_recommendation: NO LIVE",
+                  "PROVIDER GAP PLAN V10.9 END"]
+        return "\n".join(lines)
+
     def trader_dashboard_contract_v105_cli(self) -> str:
         from .labs.trader_dashboard_v104 import (
             DISABLED_CONTROLS,
@@ -6052,6 +6223,12 @@ def build_argument_parser() -> argparse.ArgumentParser:
             "trailing-exit-lab-v108",
             "trailing-exit-report-v108",
             "aggressive-opportunity-lab-v108",
+            "bitget-public-coverage-audit-v109",
+            "provider-sample-coverage-v109",
+            "data-readiness-sample-v109",
+            "bitget-public-history-limits-v109",
+            "multi-window-trailing-validation-v109",
+            "provider-gap-plan-v109",
             "ohlcv-replay-loader-smoke-test",
             "ohlcv-replay-loader-audit",
             "duplicate-module-audit-smoke-test",
@@ -6200,6 +6377,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--wf-min-folds", type=int, default=3, help="V10.8.1 minimum rolling WF folds for the top tier.")
     parser.add_argument("--wf-anchored", default="false", help="V10.8.1 anchored rolling WF (growing train) true/false.")
     parser.add_argument("--gap-policy", default="adverse_open", help="V10.8.1 gap fill policy: adverse_open (conservative).")
+    parser.add_argument("--windows", default="90,180,270", help="V10.9 multi-window validation windows in days (comma-separated).")
     return parser
 
 
@@ -7037,6 +7215,32 @@ def main() -> None:
             output_dir=args.output_dir))
     elif args.command == "trailing-exit-report-v108":
         print(lab.trailing_exit_report_v108_cli(output_dir=args.output_dir))
+    elif args.command == "bitget-public-coverage-audit-v109":
+        print(lab.bitget_public_coverage_audit_v109_cli(
+            staging_dir=args.staging_dir, expected_days=args.expected_days))
+    elif args.command == "provider-sample-coverage-v109":
+        print(lab.provider_sample_coverage_v109_cli(
+            sample_dir=args.sample_dir, expected_days=args.expected_days,
+            provider_id=(args.provider or "bitget_official")))
+    elif args.command == "data-readiness-sample-v109":
+        print(lab.data_readiness_sample_v109_cli(
+            sample_dir=args.sample_dir, expected_days=args.expected_days,
+            provider_id=(args.provider or "bitget_official")))
+    elif args.command == "bitget-public-history-limits-v109":
+        print(lab.bitget_public_history_limits_v109_cli(
+            symbols=args.symbols, timeframes=args.timeframes,
+            apply=bool(args.apply) and not bool(args.dry_run), output_dir=args.output_dir))
+    elif args.command == "multi-window-trailing-validation-v109":
+        print(lab.multi_window_trailing_validation_v109_cli(
+            sample_dir=args.sample_dir, windows=args.windows, symbols=args.symbols,
+            timeframes=args.timeframes, sides=args.sides, entry_family=args.entry_family,
+            exit_policies=args.exit_policies, cost_bps=args.cost_bps,
+            slippage_bps=args.slippage_bps, min_trades=args.min_trades,
+            walk_forward_mode=(str(args.walk_forward_mode).strip().lower() or "rolling"),
+            gap_policy=args.gap_policy, max_grid_combos=args.max_grid_combos,
+            seed=args.seed, output_dir=args.output_dir))
+    elif args.command == "provider-gap-plan-v109":
+        print(lab.provider_gap_plan_v109_cli())
     elif args.command == "ohlcv-replay-loader-smoke-test":
         print(lab.ohlcv_replay_loader_smoke_test())
     elif args.command == "ohlcv-replay-loader-audit":
