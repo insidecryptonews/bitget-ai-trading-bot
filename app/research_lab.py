@@ -5676,10 +5676,12 @@ class ResearchLab:
     def bitget_intraday_audit_v1013_cli(self, *, staging_dir, symbols="") -> str:
         from .labs import intraday_data_foundation_v10_13 as I
         syms = self._v107_csv_arg(symbols) or None
-        r = I.bitget_intraday_audit(staging_dir if staging_dir else "")
+        r = I.bitget_intraday_audit(staging_dir if staging_dir else "", symbols=syms)
         lines = ["BITGET INTRADAY AUDIT V10.13 START", f"audit_of: {r.get('audit_of')}",
+                 f"audit_symbols_filter: {r.get('audit_symbols_filter')}",
                  f"errors: {r.get('errors')}", f"status: {r.get('status')}",
                  f"intraday_timeframes_present: {r.get('intraday_timeframes_present')}",
+                 f"intraday_symbols: {r.get('intraday_symbols')}",
                  f"n_intraday_symbols: {r.get('n_intraday_symbols')}",
                  f"min_intraday_days: {r.get('min_intraday_days')}",
                  f"quality_issues_count: {len(r.get('quality_issues', []))}"]

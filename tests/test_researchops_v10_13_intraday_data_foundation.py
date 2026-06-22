@@ -229,6 +229,78 @@ def test_bridge_not_ready_without_intraday(tmp_path):
     assert b["ready_for_paper"] is False and b["ready_for_live"] is False
 
 
+# ==========================================================================
+# V10.13.1 - intraday audit CLI contract hotfix (--symbols was ignored)
+# ==========================================================================
+
+def _bare_lab():
+    from app.research_lab import ResearchLab
+    return ResearchLab.__new__(ResearchLab)
+
+
+def _three_sym_intraday(tmp_path):
+    s = tmp_path / "stage"
+    for sym in ("BTCUSDT", "ETHUSDT", "SOLUSDT"):
+        _write_ohlcv(s, sym, "1m", _clean("1m", 200))
+    return s
+
+
+# 1. audit --symbols BTCUSDT filters to BTCUSDT only (module level)
+def test_audit_symbol_filter_single(tmp_path):
+    s = _three_sym_intraday(tmp_path)
+    r = I.bitget_intraday_audit(str(s), symbols=["BTCUSDT"])
+    assert r["intraday_symbols"] == ["BTCUSDT"]
+    assert r["n_intraday_symbols"] == 1
+    assert r["audit_symbols_filter"] == ["BTCUSDT"]
+
+
+# 2. audit --symbols BTCUSDT,ETHUSDT filters to those two
+def test_audit_symbol_filter_two(tmp_path):
+    s = _three_sym_intraday(tmp_path)
+    r = I.bitget_intraday_audit(str(s), symbols=["BTCUSDT", "ETHUSDT"])
+    assert sorted(r["intraday_symbols"]) == ["BTCUSDT", "ETHUSDT"]
+    assert r["n_intraday_symbols"] == 2
+
+
+# 3. no --symbols audits all available symbols
+def test_audit_symbol_filter_all(tmp_path):
+    s = _three_sym_intraday(tmp_path)
+    r = I.bitget_intraday_audit(str(s))
+    assert sorted(r["intraday_symbols"]) == ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
+    assert r["audit_symbols_filter"] == "ALL"
+
+
+# 1/2/3 again but through the CLI (the layer that had the dropped arg)
+def test_audit_cli_symbol_filter(tmp_path):
+    s = _three_sym_intraday(tmp_path)
+    lab = _bare_lab()
+    one = lab.bitget_intraday_audit_v1013_cli(staging_dir=str(s), symbols="BTCUSDT")
+    assert "intraday_symbols: ['BTCUSDT']" in one
+    assert "audit_symbols_filter: ['BTCUSDT']" in one
+    two = lab.bitget_intraday_audit_v1013_cli(staging_dir=str(s), symbols="BTCUSDT,ETHUSDT")
+    assert "SOLUSDT" not in two.split("intraday_symbols:")[1].split("\n")[0]
+    assert "BTCUSDT" in two and "ETHUSDT" in two
+    alls = lab.bitget_intraday_audit_v1013_cli(staging_dir=str(s), symbols="")
+    assert "audit_symbols_filter: ALL" in alls
+    # 5/6/7/8 safety invariants on every audit output
+    for out in (one, two, alls):
+        assert "paper_ready: false" in out and "live_ready: false" in out
+        assert "can_send_real_orders: false" in out
+        assert "final_recommendation: NO LIVE" in out
+
+
+# 4. dangerous path still blocked; absolute outside repo blocked; relative ok
+def test_staging_gate_hardening(tmp_path):
+    assert I.safe_intraday_staging_dir("external_data/raw/x") is not None
+    assert I.safe_intraday_staging_dir(
+        "external_data/staging/bitget_public_intraday_v10_13/run1") is None
+    # absolute path outside the repo is rejected even if it contains the marker
+    bad_abs = "/tmp/external_data/staging/bitget_public_intraday_v10_13/run1"
+    if os.path.isabs(bad_abs):
+        assert I.safe_intraday_staging_dir(bad_abs) in (
+            "absolute_path_outside_repo", "unresolvable_absolute_path")
+
+
 # canonical schemas expose the 5 required tables
 def test_canonical_schemas():
     sc = I.canonical_intraday_schemas()

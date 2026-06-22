@@ -132,6 +132,16 @@ def safe_intraday_staging_dir(staging_dir: Any) -> str | None:
             return f"forbidden_segment:{s}"
     if not _subseq(low, [m.lower() for m in _STAGING_MARKER]):
         return "not_under_intraday_staging_marker"
+    # V10.13.1 hardening: relative paths under the marker are fine; an ABSOLUTE
+    # path must still resolve INSIDE the current repo (no odd absolute roots).
+    if os.path.isabs(staging_dir):
+        try:
+            real = os.path.realpath(staging_dir)
+            cwd = os.path.realpath(os.getcwd())
+            if os.path.commonpath([real, cwd]) != cwd:
+                return "absolute_path_outside_repo"
+        except Exception:
+            return "unresolvable_absolute_path"
     return None
 
 
@@ -461,9 +471,10 @@ def bitget_intraday_probe(*, symbols, timeframes, days=2, max_requests=6, apply=
     return rep
 
 
-def bitget_intraday_audit(staging_dir) -> dict[str, Any]:
-    rep = intraday_data_readiness(staging_dir)
+def bitget_intraday_audit(staging_dir, symbols=None) -> dict[str, Any]:
+    rep = intraday_data_readiness(staging_dir, symbols)
     rep["audit_of"] = staging_dir
+    rep["audit_symbols_filter"] = list(symbols) if symbols else "ALL"
     rep["tool_version"] = TOOL_VERSION
     return rep
 
