@@ -5447,10 +5447,18 @@ class ResearchLab:
                  f"intraday_status: {rep.get('intraday_status')}",
                  f"scalping_conclusive: {str(rep.get('scalping_conclusive', False)).lower()}",
                  f"false_discovery_risk: {rep.get('false_discovery_risk')}",
+                 f"no_lookahead_status: {rep.get('no_lookahead_status')}",
+                 f"memory_cases_total: {rep.get('memory_cases_total')}",
+                 f"memory_cases_future_excluded: {rep.get('memory_cases_future_excluded')}",
+                 f"same_timestamp_excluded: {rep.get('same_timestamp_excluded')}",
                  f"pattern_memory_cases: {rep.get('pattern_memory_cases')}",
                  f"raw_setups: {rep.get('raw_setups')}",
-                 f"passed_quality_gate: {rep.get('passed_quality_gate')}",
-                 f"passed_pattern_memory: {rep.get('passed_pattern_memory')}",
+                 f"passed_structural_pre_gate: {rep.get('passed_structural_pre_gate')}",
+                 f"failed_structural_pre_gate: {rep.get('failed_structural_pre_gate')}",
+                 f"passed_pattern_memory_gate: {rep.get('passed_pattern_memory_gate')}",
+                 f"failed_pattern_memory_gate: {rep.get('failed_pattern_memory_gate')}",
+                 f"passed_full_quality_and_pattern_gate: {rep.get('passed_full_quality_and_pattern_gate')}",
+                 f"passed_quality_gate_legacy_alias: {rep.get('passed_quality_gate_legacy_alias')}",
                  f"n_shadow_trades: {rep.get('n_shadow_trades')}",
                  f"n_rejected: {rep.get('n_rejected')}",
                  f"rejection_breakdown: {rep.get('rejection_breakdown')}",
@@ -5554,8 +5562,11 @@ class ResearchLab:
             lines.append("status: NO_RUN_FOUND (run intelligent-shadow-scalper-v1012 first)")
         else:
             for k in ("sample_dir", "mode", "intraday_status", "scalping_conclusive",
-                      "false_discovery_risk", "raw_setups", "passed_quality_gate",
-                      "passed_pattern_memory", "n_shadow_trades", "n_rejected",
+                      "false_discovery_risk", "no_lookahead_status", "memory_cases_total",
+                      "memory_cases_future_excluded", "same_timestamp_excluded",
+                      "raw_setups", "passed_structural_pre_gate", "failed_structural_pre_gate",
+                      "passed_pattern_memory_gate", "failed_pattern_memory_gate",
+                      "passed_full_quality_and_pattern_gate", "n_shadow_trades", "n_rejected",
                       "rejection_breakdown"):
                 lines.append(f"{k}: {s.get(k)}")
             lines.append(f"shadow_net_EV: {s.get('metrics', {}).get('net_EV')}")

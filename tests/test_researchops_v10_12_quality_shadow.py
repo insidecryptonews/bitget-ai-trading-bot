@@ -51,14 +51,14 @@ def _write_sample(sample_dir, symbols, tf="6h", n=300, seed_base=0):
 
 
 def _mem(net, count, *, symbols=("BTCUSDT", "ETHUSDT"), months=3, side="LONG",
-         tf="6h", strat="micro_breakout", went_green=True):
+         tf="6h", strat="micro_breakout", went_green=True, start_day=0):
     cases = []
     for i in range(count):
         sym = symbols[i % len(symbols)]
         cases.append({
-            "pattern_id": f"{sym}{i}", "symbol": sym, "timeframe": tf, "side": side,
+            "pattern_id": f"{sym}{start_day}_{i}", "symbol": sym, "timeframe": tf, "side": side,
             "strategy_family": strat, "exit_policy": "micro_profit_take",
-            "entry_ts": 1700000000000 + i * H.DAY_MS, "net_result": net,
+            "entry_ts": 1700000000000 + (start_day + i) * H.DAY_MS, "net_result": net,
             "gross_result": net + 0.0022, "closed_green": net > 0,
             "went_green": went_green, "green_to_red_failure": bool(went_green and net <= 0),
             "MFE": abs(net) + 0.001, "MAE": 0.002, "month_bucket": i % months,
@@ -78,10 +78,15 @@ def _qf(side="LONG", tf="6h", strat="micro_breakout"):
             "trend_regime": "range", "funding_regime": "flat"}
 
 
+# candidate evaluated far AFTER all default _mem cases (so they count as "past")
+FUTURE_TS = 1700000000000 + 10_000 * H.DAY_MS
+
+
 def _strong(**over):
     kw = dict(side="LONG", timeframe="6h", strategy_family="micro_breakout", signal_idx=100,
               tp_pct=0.006, sl_pct=0.005, atr_pct=0.01, range_to_atr=1.5, recent_return=0.02,
-              round_trip_fraction=0.0022, spread_fraction=0.0002, setup_quality=0.6)
+              round_trip_fraction=0.0022, spread_fraction=0.0002, setup_quality=0.6,
+              candidate_entry_ts=FUTURE_TS)
     kw.update(over)
     return kw
 
@@ -300,3 +305,103 @@ def test_plan_flags_no_live():
     assert p["paper_candidate_future"] is False
     assert "APPROVED_FOR_PAPER" in p["never"] and "set_leverage" in p["never"]
     assert p["final_recommendation"] == "NO LIVE"
+
+
+# ==========================================================================
+# V10.12.1 - no-lookahead pattern memory (prefix-only) hotfix
+# ==========================================================================
+T0 = 1700000000000
+
+
+def _ts(day):
+    return T0 + day * H.DAY_MS
+
+
+# 1. FUTURE positive memory cannot approve a PAST setup
+def test_future_memory_cannot_approve_past_setup():
+    future_winners = _mem(0.01, 40, start_day=200)   # all AFTER the candidate
+    r = H.quality_pre_gate(**_strong(features=_qf(), memory_cases=future_winners,
+                                     candidate_entry_ts=_ts(100)))
+    assert r["memory_cases_future_excluded"] == 40
+    assert r["memory_cases_prefix_used"] == 0
+    assert r["shadow_allowed"] is False
+    assert r["quality_gate_decision"] == H.Q_NOSIM
+
+
+# 2. PAST positive memory CAN clear the gate in a controlled fixture
+def test_past_memory_can_pass_gate():
+    past_winners = _mem(0.01, 40, start_day=0)        # all BEFORE the candidate
+    r = H.quality_pre_gate(**_strong(features=_qf(), memory_cases=past_winners,
+                                     candidate_entry_ts=_ts(100)))
+    assert r["no_lookahead_status"] == "OK_PREFIX_ONLY"
+    assert r["memory_cases_prefix_used"] == 40
+    assert r["memory_cases_future_excluded"] == 0
+    assert r["quality_gate_decision"] == H.Q_PASS
+    assert r["shadow_allowed"] is True
+
+
+# 3. mutating FUTURE outcomes does not change the PAST decision
+def test_future_mutation_does_not_change_past_decision():
+    past = _mem(0.01, 40, start_day=0)
+    fut_a = _mem(-0.01, 20, start_day=200)
+    fut_b = _mem(99.0, 20, start_day=200)            # absurdly positive future
+    d1 = H.quality_pre_gate(**_strong(features=_qf(), memory_cases=past + fut_a,
+                                      candidate_entry_ts=_ts(100)))
+    d2 = H.quality_pre_gate(**_strong(features=_qf(), memory_cases=past + fut_b,
+                                      candidate_entry_ts=_ts(100)))
+    assert d1["quality_gate_decision"] == d2["quality_gate_decision"]
+    assert d1["memory_cases_prefix_used"] == d2["memory_cases_prefix_used"] == 40
+    assert d1["pattern_net_EV"] == d2["pattern_net_EV"]
+
+
+# 4. same-timestamp case is excluded
+def test_same_timestamp_excluded():
+    cases = _mem(0.01, 1, start_day=100)              # exactly at candidate ts
+    past, meta = H.prefix_memory_cases_for_candidate(cases, _ts(100))
+    assert meta["same_timestamp_excluded"] == 1
+    assert meta["memory_cases_prefix_used"] == 0
+    assert past == []
+
+
+# 4b. own pattern_id excluded; missing candidate_entry_ts fails closed
+def test_prefix_fail_closed_and_self_exclusion():
+    cases = _mem(0.01, 3, start_day=0)
+    past, meta = H.prefix_memory_cases_for_candidate(
+        cases, _ts(100), candidate_pattern_id=cases[0]["pattern_id"])
+    assert meta["self_excluded"] == 1 and meta["memory_cases_prefix_used"] == 2
+    past2, meta2 = H.prefix_memory_cases_for_candidate(cases, None)
+    assert meta2["no_lookahead_status"] == "FAIL_MISSING_CANDIDATE_ENTRY_TS"
+    assert past2 == [] and "missing_candidate_entry_ts_no_memory_used" in meta2["warnings"]
+    # the gate must also fail closed when candidate_entry_ts is missing
+    g = H.quality_pre_gate(**_strong(features=_qf(), memory_cases=_mem(0.01, 40),
+                                     candidate_entry_ts=None))
+    assert g["no_lookahead_status"] == "FAIL_MISSING_CANDIDATE_ENTRY_TS"
+    assert g["quality_gate_decision"] == H.Q_NOSIM
+
+
+# 5/6. run report carries the no-lookahead audit + the clear funnel metrics
+def test_run_report_has_causal_audit_and_clear_metrics(tmp_path):
+    rep = _run(tmp_path, n=320)
+    assert rep["no_lookahead_status"] == "OK_PREFIX_ONLY"
+    for k in ("memory_cases_total", "memory_cases_future_excluded", "same_timestamp_excluded",
+              "passed_structural_pre_gate", "failed_structural_pre_gate",
+              "passed_pattern_memory_gate", "failed_pattern_memory_gate",
+              "passed_full_quality_and_pattern_gate", "n_shadow_trades"):
+        assert k in rep, k
+    # offline replay over real history must exclude future cases for early setups
+    assert rep["memory_cases_future_excluded"] > 0
+
+
+# 7. full-gate count reconciles with simulated shadow trades
+def test_full_gate_reconciles_with_shadow_trades(tmp_path):
+    rep = _run(tmp_path, n=320)
+    # every full-gate pass becomes a shadow trade unless the sim returns None
+    assert rep["n_shadow_trades"] <= rep["passed_full_quality_and_pattern_gate"]
+    # with negative-EV synthetic data both are zero (decision machine refuses)
+    assert rep["passed_full_quality_and_pattern_gate"] == rep["n_shadow_trades"]
+
+
+# legacy alias documented (not removed) and equals structural pre-gate
+def test_legacy_alias_documented(tmp_path):
+    rep = _run(tmp_path, n=320)
+    assert rep["passed_quality_gate_legacy_alias"] == rep["passed_structural_pre_gate"]

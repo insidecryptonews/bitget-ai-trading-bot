@@ -124,13 +124,57 @@ def _clamp01(x: float) -> float:
 
 
 # --------------------------------------------------------------------------
+# 1. No-lookahead pattern memory: a candidate may only see STRICTLY-PAST cases.
+# --------------------------------------------------------------------------
+
+def prefix_memory_cases_for_candidate(memory_cases, candidate_entry_ts,
+                                      candidate_pattern_id=None):
+    """Return only the pattern-memory cases that a decision at
+    ``candidate_entry_ts`` could legitimately have observed: strictly earlier
+    entries. Same-timestamp cases and the candidate's own case are excluded.
+
+    If ``candidate_entry_ts`` is missing we FAIL CLOSED: no memory is used (we
+    never fall back to the full sample, which would leak the future).
+
+    Returns (past_cases, meta) where meta carries the audit trail."""
+    total = len(memory_cases or [])
+    if candidate_entry_ts is None:
+        return [], {"memory_cases_total": total, "memory_cases_prefix_used": 0,
+                    "memory_cases_future_excluded": 0, "same_timestamp_excluded": 0,
+                    "self_excluded": 0, "candidate_entry_ts": None,
+                    "no_lookahead_status": "FAIL_MISSING_CANDIDATE_ENTRY_TS",
+                    "warnings": ["missing_candidate_entry_ts_no_memory_used"]}
+    past, future_excl, same_excl, self_excl = [], 0, 0, 0
+    for c in (memory_cases or []):
+        ts = c.get("entry_ts")
+        if ts is None:
+            continue
+        if candidate_pattern_id is not None and c.get("pattern_id") == candidate_pattern_id:
+            self_excl += 1
+            continue
+        if ts == candidate_entry_ts:
+            same_excl += 1
+            continue
+        if ts > candidate_entry_ts:
+            future_excl += 1
+            continue
+        past.append(c)
+    return past, {"memory_cases_total": total, "memory_cases_prefix_used": len(past),
+                  "memory_cases_future_excluded": future_excl,
+                  "same_timestamp_excluded": same_excl, "self_excluded": self_excl,
+                  "candidate_entry_ts": candidate_entry_ts,
+                  "no_lookahead_status": "OK_PREFIX_ONLY", "warnings": []}
+
+
+# --------------------------------------------------------------------------
 # 2. Quality Pre-Gate (per setup). Fail-closed, ordered priority.
 # --------------------------------------------------------------------------
 
 def quality_pre_gate(*, side, timeframe, strategy_family, signal_idx,
                      tp_pct, sl_pct, atr_pct, range_to_atr, recent_return,
                      round_trip_fraction, spread_fraction, setup_quality,
-                     features=None, memory_cases=None,
+                     features=None, memory_cases=None, candidate_entry_ts=None,
+                     candidate_pattern_id=None,
                      false_discovery_risk="LOW", dup_last_idx=None,
                      thresholds=None, cost_bps=6.0, slippage_bps=4.0,
                      spread_bps=2.0) -> dict[str, Any]:
@@ -155,6 +199,9 @@ def quality_pre_gate(*, side, timeframe, strategy_family, signal_idx,
         "expected_move_vs_cost": round(expected_move_vs_cost, 4) if math.isfinite(expected_move_vs_cost) else None,
         "atr_pct": round(float(atr_pct), 6), "range_to_atr": round(float(range_to_atr), 4),
         "sl_pct": round(float(sl_pct), 6), "pattern_memory_decision": "NOT_CHECKED",
+        "candidate_entry_ts": candidate_entry_ts, "no_lookahead_status": "NOT_APPLICABLE_NO_MEMORY",
+        "memory_cases_total": 0, "memory_cases_prefix_used": 0,
+        "memory_cases_future_excluded": 0, "same_timestamp_excluded": 0,
         "quality_gate_reasons": reasons, **_safety()}
 
     def finish(decision: str) -> dict[str, Any]:
@@ -193,10 +240,22 @@ def quality_pre_gate(*, side, timeframe, strategy_family, signal_idx,
                      ("cost", cost_score), ("move", move_score)), key=lambda kv: kv[1])[0]
         reasons.append(f"quality_score={quality_score}<{th.min_quality_score}|weakest={worst}")
         return finish({"vol": Q_VOL, "range": Q_RANGE, "cost": Q_COST, "move": Q_RANGE}[worst])
-    # 8. historical pattern memory (V10.11)
+    # 8. historical pattern memory (V10.11) - PREFIX ONLY, no lookahead
     if memory_cases is not None and features is not None:
+        past_cases, meta = prefix_memory_cases_for_candidate(
+            memory_cases, candidate_entry_ts, candidate_pattern_id)
+        out["no_lookahead_status"] = meta["no_lookahead_status"]
+        out["memory_cases_total"] = meta["memory_cases_total"]
+        out["memory_cases_prefix_used"] = meta["memory_cases_prefix_used"]
+        out["memory_cases_future_excluded"] = meta["memory_cases_future_excluded"]
+        out["same_timestamp_excluded"] = meta["same_timestamp_excluded"]
+        if meta["no_lookahead_status"] != "OK_PREFIX_ONLY":
+            # missing candidate_entry_ts -> fail closed, never use full memory
+            reasons.extend(meta["warnings"])
+            out["pattern_memory_decision"] = "FAIL_MISSING_TIMESTAMP"
+            return finish(Q_NOSIM)
         q = pmem.query_similar(
-            memory_cases, features, min_similar=th.min_similar_cases,
+            past_cases, features, min_similar=th.min_similar_cases,
             cost_bps=cost_bps, slippage_bps=slippage_bps, spread_bps=spread_bps,
             false_discovery_risk=false_discovery_risk)
         dec = q.get("decision")
@@ -442,10 +501,15 @@ def run_intelligent_shadow(*, sample_dir, symbols, timeframes, sides, strategy_f
     report["pattern_gate_n_queries"] = gate.get("n_queries", 0)
     report["pattern_gate_n_passed"] = gate.get("n_passed", 0)
 
-    # 2. iterate the sample, evaluate candidate setups through both gates
+    # 2. iterate the sample, evaluate candidate setups through both gates.
+    # Each candidate may only see STRICTLY-PAST memory (no lookahead).
     raw = 0
-    passed_quality_structural = 0
+    passed_structural = 0
     passed_pattern = 0
+    passed_full = 0
+    future_excluded_total = 0
+    same_ts_excluded_total = 0
+    no_lookahead_ok = True
     shadow_trades: list[dict[str, Any]] = []
     rejected: list[dict[str, Any]] = []
     quality_rows: list[dict[str, Any]] = []
@@ -487,22 +551,31 @@ def run_intelligent_shadow(*, sample_dir, symbols, timeframes, sides, strategy_f
                             range_to_atr=s["range_to_atr"], recent_return=s["recent_return"],
                             round_trip_fraction=rt, spread_fraction=spread_fraction,
                             setup_quality=s["setup_quality"], features=feat,
-                            memory_cases=mem_cases, false_discovery_risk=fdr,
+                            memory_cases=mem_cases, candidate_entry_ts=e["entry_ts"],
+                            false_discovery_risk=fdr,
                             dup_last_idx=dup_tracker.get(grp), thresholds=th,
                             cost_bps=cost_bps, slippage_bps=slippage_bps, spread_bps=spread_bps)
                         qg["symbol"] = sym
                         dup_tracker[grp] = e["signal_idx"]
                         quality_rows.append(qg)
+                        future_excluded_total += qg.get("memory_cases_future_excluded", 0)
+                        same_ts_excluded_total += qg.get("same_timestamp_excluded", 0)
+                        if qg.get("no_lookahead_status") == "FAIL_MISSING_CANDIDATE_ENTRY_TS":
+                            no_lookahead_ok = False
                         report["pattern_decisions"].append({
                             "symbol": sym, "group": f"{tf}/{side}/{fam}",
                             "pattern_memory_decision": qg.get("pattern_memory_decision"),
+                            "memory_cases_prefix_used": qg.get("memory_cases_prefix_used"),
+                            "memory_cases_future_excluded": qg.get("memory_cases_future_excluded"),
                             "pattern_net_EV": qg.get("pattern_net_EV"),
                             "pattern_closed_green_rate": qg.get("pattern_closed_green_rate")})
                         if qg["quality_gate_decision"] not in (Q_COST, Q_VOL, Q_RANGE,
                                                                Q_SPREAD, Q_RISK, Q_DUP):
-                            passed_quality_structural += 1
+                            passed_structural += 1
                         if qg.get("pattern_memory_decision") == pmem.PASS:
                             passed_pattern += 1
+                        if qg["shadow_allowed"]:
+                            passed_full += 1
                         if qg["shadow_allowed"]:
                             tr = micro.simulate_micro_trade(
                                 bars, atr_list, e, policy=exit_policy, params=params,
@@ -528,10 +601,22 @@ def run_intelligent_shadow(*, sample_dir, symbols, timeframes, sides, strategy_f
     report["shadow_trades"] = shadow_trades
     report["rejected_setups"] = rejected
     report["raw_setups"] = raw
-    report["passed_quality_gate"] = passed_quality_structural
-    report["passed_pattern_memory"] = passed_pattern
+    # Clear, non-misleading funnel metrics (V10.12.1): "structural" is NOT
+    # "high quality final" - it only means the cheap structural checks passed.
+    report["passed_structural_pre_gate"] = passed_structural
+    report["failed_structural_pre_gate"] = raw - passed_structural
+    report["passed_pattern_memory_gate"] = passed_pattern
+    report["failed_pattern_memory_gate"] = passed_structural - passed_pattern
+    report["passed_full_quality_and_pattern_gate"] = passed_full
     report["n_shadow_trades"] = len(shadow_trades)
     report["n_rejected"] = len(rejected)
+    # legacy alias kept for back-compat; documented as STRUCTURAL only
+    report["passed_quality_gate_legacy_alias"] = passed_structural
+    # no-lookahead audit trail
+    report["no_lookahead_status"] = "OK_PREFIX_ONLY" if no_lookahead_ok else "FAIL_LOOKAHEAD_DETECTED"
+    report["memory_cases_total"] = len(mem_cases)
+    report["memory_cases_future_excluded"] = future_excluded_total
+    report["same_timestamp_excluded"] = same_ts_excluded_total
     report["metrics"] = metrics
     # rejection breakdown
     breakdown: dict[str, int] = {}
@@ -578,10 +663,12 @@ def write_v1012_reports(report, output_dir=None) -> str:
                ["symbol", "timeframe", "side", "strategy_family", "signal_idx",
                 "setup_quality_score", "cost_to_target_ratio", "expected_move_vs_cost",
                 "atr_pct", "range_to_atr", "sl_pct", "quality_gate_decision",
-                "pattern_memory_decision", "shadow_allowed"])
+                "pattern_memory_decision", "no_lookahead_status", "candidate_entry_ts",
+                "memory_cases_total", "memory_cases_prefix_used",
+                "memory_cases_future_excluded", "same_timestamp_excluded", "shadow_allowed"])
     _write_csv(os.path.join(run_dir, "pattern_memory_decisions.csv"), report.get("pattern_decisions", []),
-               ["symbol", "group", "pattern_memory_decision", "pattern_net_EV",
-                "pattern_closed_green_rate"])
+               ["symbol", "group", "pattern_memory_decision", "memory_cases_prefix_used",
+                "memory_cases_future_excluded", "pattern_net_EV", "pattern_closed_green_rate"])
     _write_csv(os.path.join(run_dir, "shadow_trades.csv"), report.get("shadow_trades", []),
                ["symbol", "timeframe", "side", "strategy_family", "policy", "entry_ts",
                 "entry_price", "exit_price", "exit_reason", "net_pnl", "gross_pnl",
@@ -659,11 +746,19 @@ def _write_report_md(path, report):
         f"- intraday_status: {report.get('intraday_status')}",
         f"- scalping_conclusive: {report.get('scalping_conclusive')}",
         f"- false_discovery_risk: {report.get('false_discovery_risk')}",
-        "", "## Funnel",
+        "", "## No-lookahead audit",
+        f"- no_lookahead_status: {report.get('no_lookahead_status')}",
+        f"- memory_cases_total: {report.get('memory_cases_total')}",
+        f"- memory_cases_future_excluded: {report.get('memory_cases_future_excluded')}",
+        f"- same_timestamp_excluded: {report.get('same_timestamp_excluded')}",
+        "", "## Funnel (structural pre-gate is NOT 'high quality final')",
         f"- raw_setups: {report.get('raw_setups')}",
-        f"- passed_quality_gate: {report.get('passed_quality_gate')}",
-        f"- passed_pattern_memory: {report.get('passed_pattern_memory')}",
-        f"- shadow_trades: {report.get('n_shadow_trades')}",
+        f"- passed_structural_pre_gate: {report.get('passed_structural_pre_gate')}",
+        f"- failed_structural_pre_gate: {report.get('failed_structural_pre_gate')}",
+        f"- passed_pattern_memory_gate: {report.get('passed_pattern_memory_gate')}",
+        f"- failed_pattern_memory_gate: {report.get('failed_pattern_memory_gate')}",
+        f"- passed_full_quality_and_pattern_gate: {report.get('passed_full_quality_and_pattern_gate')}",
+        f"- n_shadow_trades: {report.get('n_shadow_trades')}",
         f"- rejected: {report.get('n_rejected')}",
         f"- rejection_breakdown: {report.get('rejection_breakdown')}",
         "", "## Shadow trade metrics (passed both gates)",
