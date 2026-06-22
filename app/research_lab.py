@@ -5725,6 +5725,58 @@ class ResearchLab:
                   "final_recommendation: NO LIVE", "INTRADAY TO SHADOW READINESS V10.13 END"]
         return "\n".join(lines)
 
+    # ------------------------------------------------------------------
+    # ResearchOps V10.15 - Cross-Exchange PUBLIC OHLCV collector.
+    # ------------------------------------------------------------------
+    def cross_exchange_ohlcv_plan_v1015_cli(self, *, exchanges, symbols, timeframe="1h", days=365) -> str:
+        import json as _json
+        from .labs import cross_exchange_public_ohlcv_v10_15 as X
+        c = self._v107_csv_arg
+        p = X.cross_exchange_plan(c(exchanges) or None, c(symbols), timeframe, days)
+        lines = ["CROSS EXCHANGE OHLCV PLAN V10.15 START",
+                 f"exchanges: {p['exchanges']}", f"symbols: {p['symbols']}",
+                 f"timeframe: {p['timeframe']}", f"requested_days: {p['requested_days']}",
+                 f"method: {p['method']}", f"auth: {p['auth']}",
+                 f"public_only: {p['public_only']}", f"no_network: {p['no_network']}",
+                 f"endpoints: {_json.dumps(p['endpoints'])}",
+                 f"staging_target: {p['staging_target']}", f"note: {p['note']}"]
+        lines += ["research_only: true", "shadow_only: true", "paper_ready: false",
+                  "live_ready: false", "can_send_real_orders: false",
+                  "final_recommendation: NO LIVE", "CROSS EXCHANGE OHLCV PLAN V10.15 END"]
+        return "\n".join(lines)
+
+    def cross_exchange_ohlcv_fetch_v1015_cli(self, *, exchanges, symbols, timeframe="1h",
+                                             days=365, max_requests=400, apply=False,
+                                             output_dir="") -> str:
+        from .labs import cross_exchange_public_ohlcv_v10_15 as X
+        c = self._v107_csv_arg
+        rep = X.cross_exchange_fetch(exchanges=c(exchanges), symbols=c(symbols),
+                                     timeframe=timeframe, days=days,
+                                     max_requests=max_requests, apply=apply)
+        manifests = []
+        if apply and not rep.get("errors") and rep.get("coverage"):
+            manifests = X.write_manifest(rep, output_dir=(output_dir or None))
+        lines = ["CROSS EXCHANGE OHLCV FETCH V10.15 START",
+                 f"dry_run: {str(rep['dry_run']).lower()}", f"exchanges: {rep['exchanges']}",
+                 f"symbols: {rep['symbols']}", f"timeframe: {rep['timeframe']}",
+                 f"requested_days: {rep['requested_days']}", f"max_requests: {rep['max_requests']}",
+                 f"requests_made: {rep.get('requests_made')}",
+                 f"staging_dirs: {rep.get('staging_dirs')}",
+                 f"missing_symbols: {rep.get('missing_symbols')}",
+                 f"errors: {rep.get('errors')}", f"warnings: {rep.get('warnings')}",
+                 f"manifests: {manifests}", f"note: {rep.get('note')}"]
+        lines.append("coverage:")
+        for cv in rep.get("coverage", []):
+            lines.append(f"- {cv['exchange']}/{cv['symbol']}: rows={cv['rows']} days={cv['days_covered']} "
+                         f"gaps={cv.get('gaps')} dups={cv.get('duplicates')} "
+                         f"nonmono={cv.get('non_monotonic')} invalid={cv.get('invalid_ohlc')}")
+        if rep.get("planned_fetches"):
+            lines.append(f"planned_fetches: {rep['planned_fetches']}")
+        lines += ["public_only: true", "auth: none", "research_only: true", "shadow_only: true",
+                  "paper_ready: false", "live_ready: false", "can_send_real_orders: false",
+                  "final_recommendation: NO LIVE", "CROSS EXCHANGE OHLCV FETCH V10.15 END"]
+        return "\n".join(lines)
+
     def trader_dashboard_contract_v105_cli(self) -> str:
         from .labs.trader_dashboard_v104 import (
             DISABLED_CONTROLS,
@@ -6907,6 +6959,8 @@ def build_argument_parser() -> argparse.ArgumentParser:
             "bitget-intraday-audit-v1013",
             "intraday-sample-build-v1013",
             "intraday-to-shadow-readiness-v1013",
+            "cross-exchange-ohlcv-plan-v1015",
+            "cross-exchange-ohlcv-fetch-v1015",
             "ohlcv-replay-loader-smoke-test",
             "ohlcv-replay-loader-audit",
             "duplicate-module-audit-smoke-test",
@@ -7073,6 +7127,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--min-profit-factor", type=float, default=1.2, help="V10.12 minimum required profit factor.")
     parser.add_argument("--min-closed-green-rate", type=float, default=0.5, help="V10.12 minimum closed-green rate.")
     parser.add_argument("--max-candidates-per-run", type=int, default=400, help="V10.12 cap on evaluated candidate setups.")
+    parser.add_argument("--exchanges", default="binance_futures,bybit_linear", help="V10.15 cross-exchange public collectors: binance_futures,bybit_linear.")
     parser.add_argument("--mode", default="offline-replay", help="V10.12 shadow runner mode: offline-replay/latest-snapshot/forward-shadow.")
     parser.add_argument("--offline-replay", action="store_true", help="V10.12 shadow runner: replay history bar-by-bar.")
     parser.add_argument("--latest-snapshot", action="store_true", help="V10.12 shadow runner: evaluate only the latest point.")
@@ -8027,6 +8082,15 @@ def main() -> None:
     elif args.command == "intraday-to-shadow-readiness-v1013":
         print(lab.intraday_to_shadow_readiness_v1013_cli(
             sample_dir=args.sample_dir, symbols=args.symbols))
+    elif args.command == "cross-exchange-ohlcv-plan-v1015":
+        print(lab.cross_exchange_ohlcv_plan_v1015_cli(
+            exchanges=args.exchanges, symbols=args.symbols,
+            timeframe=args.timeframe, days=args.days))
+    elif args.command == "cross-exchange-ohlcv-fetch-v1015":
+        print(lab.cross_exchange_ohlcv_fetch_v1015_cli(
+            exchanges=args.exchanges, symbols=args.symbols, timeframe=args.timeframe,
+            days=args.days, max_requests=args.max_requests, apply=args.apply,
+            output_dir=args.output_dir))
     elif args.command == "ohlcv-replay-loader-smoke-test":
         print(lab.ohlcv_replay_loader_smoke_test())
     elif args.command == "ohlcv-replay-loader-audit":
