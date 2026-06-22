@@ -199,3 +199,105 @@ def test_build_refuses_missing_sample():
                                  strategy_families=["micro_breakout"])
     assert "sample_dir_not_found" in mem["errors"]
     assert mem["final_recommendation"] == "NO LIVE"
+
+
+# ==========================================================================
+# V10.11.1 — CLI contract hotfix: exit-policy resolution + empty-memory status
+# ==========================================================================
+
+V108_DEFAULTS = ["fixed_tp_sl_time", "break_even_lock", "atr_trailing", "percent_trailing",
+                 "structure_trailing", "hybrid_trailing", "time_death_exit",
+                 "profit_protection_ladder"]
+
+
+def _full_build(tmp_path, exit_policies, symbols=("BTCUSDT", "ETHUSDT"), tf="6h", n=260):
+    sample = tmp_path / "s"
+    _write_sample(sample, list(symbols), tf, n)
+    return P.build_pattern_memory(
+        sample_dir=str(sample), symbols=list(symbols), timeframes=[tf],
+        sides=["LONG", "SHORT"],
+        strategy_families=["micro_breakout", "volatility_burst_scalp"],
+        exit_policies=exit_policies)
+
+
+# 1. resolver unit: V10.8 defaults / empty / garbage -> micro defaults
+def test_resolve_micro_exit_policies():
+    import app.labs.micro_scalp_shadow_v10_10 as M
+    pol, src, warn = P.resolve_micro_exit_policies(V108_DEFAULTS)
+    assert src == "micro_defaults" and "invalid_or_non_micro_exit_policies_ignored" in warn
+    assert pol == list(M.EXIT_POLICIES)
+    pol, src, warn = P.resolve_micro_exit_policies(None)
+    assert src == "micro_defaults" and warn == [] and pol == list(M.EXIT_POLICIES)
+    pol, src, warn = P.resolve_micro_exit_policies(["micro_profit_take", "instant_green_lock"])
+    assert src == "user_micro_policies" and pol == ["micro_profit_take", "instant_green_lock"]
+    pol, src, warn = P.resolve_micro_exit_policies(["micro_profit_take", "atr_trailing"])
+    assert src == "user_micro_policies" and pol == ["micro_profit_take"]
+    assert "invalid_or_non_micro_exit_policies_ignored" in warn
+
+
+# 2. documented command (no --exit-policies -> CLI passes the global V10.8 default
+#    string): must NOT build a silent empty memory.
+def test_build_with_v108_defaults_not_silent_empty(tmp_path):
+    mem = _full_build(tmp_path, V108_DEFAULTS)
+    assert mem["errors"] == []
+    assert mem["exit_policies_source"] == "micro_defaults"
+    assert mem["build_status"] == "MEMORY_BUILT"
+    assert mem["n_cases"] > 0
+    assert "invalid_or_non_micro_exit_policies_ignored" in mem["warnings"]
+
+
+# 3. None/absent exit policies -> micro defaults, non-empty
+def test_build_without_exit_policies_uses_micro_defaults(tmp_path):
+    mem = _full_build(tmp_path, None)
+    assert mem["exit_policies_source"] == "micro_defaults"
+    assert mem["build_status"] == "MEMORY_BUILT" and mem["n_cases"] > 0
+
+
+# 4. explicit micro policies respected
+def test_build_with_explicit_micro_policies(tmp_path):
+    mem = _full_build(tmp_path, ["micro_profit_take", "instant_green_lock"])
+    assert mem["exit_policies_source"] == "user_micro_policies"
+    assert mem["exit_policies_used"] == ["micro_profit_take", "instant_green_lock"]
+    assert mem["build_status"] == "MEMORY_BUILT" and mem["n_cases"] > 0
+
+
+# 5. empty memory is never a silent success
+def test_empty_memory_has_status_and_warning(tmp_path):
+    sample = tmp_path / "tiny"
+    _write_sample(sample, ["BTCUSDT"], "6h", n=20)  # below warmup -> 0 cases
+    mem = P.build_pattern_memory(
+        sample_dir=str(sample), symbols=["BTCUSDT"], timeframes=["6h"],
+        sides=["LONG"], strategy_families=["micro_breakout"])
+    assert mem["errors"] == [] and mem["n_cases"] == 0
+    assert mem["build_status"] == "EMPTY_MEMORY"
+    assert "pattern_memory_empty" in mem["warnings"]
+    assert mem["suggested_command"].startswith("python -m app.research_lab")
+
+
+def _bare_lab():
+    from app.research_lab import ResearchLab
+    return ResearchLab.__new__(ResearchLab)
+
+
+# 6. query without --sample-dir: useful message, never a bare sample_dir_not_found
+def test_query_no_sample_dir_is_useful():
+    out = _bare_lab().pattern_memory_query_v1011_cli(
+        sample_dir="", symbols="", timeframes="", sides="", strategy_families="")
+    assert "errors: ['sample_dir_not_found']" not in out
+    assert ("NO_PATTERN_MEMORY_FOUND" in out
+            or "PATTERN_MEMORY_REQUIRES_SAMPLE_DIR" in out)
+    assert "suggested_command:" in out
+    assert "final_recommendation: NO LIVE" in out
+    assert "Traceback" not in out
+
+
+# 7. shadow-gate without --sample-dir: same
+def test_shadow_gate_no_sample_dir_is_useful():
+    out = _bare_lab().pattern_memory_shadow_gate_v1011_cli(
+        sample_dir="", symbols="", timeframes="", sides="", strategy_families="")
+    assert "errors: ['sample_dir_not_found']" not in out
+    assert ("NO_PATTERN_MEMORY_FOUND" in out
+            or "PATTERN_MEMORY_REQUIRES_SAMPLE_DIR" in out)
+    assert "suggested_command:" in out
+    assert "final_recommendation: NO LIVE" in out
+    assert "Traceback" not in out

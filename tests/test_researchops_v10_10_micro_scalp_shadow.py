@@ -187,6 +187,27 @@ def test_leverage_never_real_and_20x_dangerous():
     assert openr["real_leverage_allowed"] is False   # still never real
 
 
+# V10.11.1 — --leverage-sim is now honored (was ignored: fixed grid contract bug)
+def test_resolve_leverage_grid():
+    assert M.resolve_leverage_grid([1, 2]) == [1, 2]
+    assert M.resolve_leverage_grid(["3", "1", "1", "5"]) == [1, 3, 5]
+    assert M.resolve_leverage_grid([]) == list(M.LEVERAGE_GRID)   # fallback
+    assert M.resolve_leverage_grid(None) == list(M.LEVERAGE_GRID)
+    assert M.resolve_leverage_grid(["x", -3, 9999]) == list(M.LEVERAGE_GRID)  # all invalid
+
+
+def test_leverage_sim_honors_grid_and_marks_20_dangerous():
+    m = M.micro_metrics([_mk(0.01, i) for i in range(20)], COSTS)
+    lev = M.leverage_sim(m, sl_pct=0.005, edge_validated=False, leverage_grid=[1, 2])
+    assert lev["leverage_grid"] == [1, 2]
+    assert [r["leverage"] for r in lev["rows"]] == [1, 2]   # no 20x leaked in
+    assert lev["real_leverage_allowed"] is False
+    lev20 = M.leverage_sim(m, sl_pct=0.005, edge_validated=False, leverage_grid=[20])
+    assert lev20["leverage_grid"] == [20]
+    assert lev20["rows"][0]["dangerous_leverage_flag"] == "DANGEROUS_RESEARCH_ONLY"
+    assert lev20["real_leverage_allowed"] is False
+
+
 # 13. one-window-only never SHADOW
 def test_one_window_only_not_shadow():
     # positive recent 90d, negative older -> 180d window fails -> only 1 window

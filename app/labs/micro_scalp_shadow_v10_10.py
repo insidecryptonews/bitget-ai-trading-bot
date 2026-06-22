@@ -446,11 +446,28 @@ def compounding_sim(trades, *, initial_capital=100.0, risk_per_trade=0.01,
             "compounding_status": status, **_safety()}
 
 
-def leverage_sim(metrics, *, sl_pct, edge_validated=False) -> dict[str, Any]:
+def resolve_leverage_grid(raw) -> list[int]:
+    """V10.11.1 — honor the CLI's --leverage-sim instead of the fixed grid.
+    Empty/invalid input falls back to the default LEVERAGE_GRID. Values are
+    de-duplicated, sorted, and clamped to a research-only range; this NEVER
+    enables real leverage (real_leverage_allowed stays False)."""
+    vals = []
+    for x in (raw or []):
+        try:
+            v = int(x)
+        except (TypeError, ValueError):
+            continue
+        if 1 <= v <= 125:
+            vals.append(v)
+    return sorted(set(vals)) if vals else list(LEVERAGE_GRID)
+
+
+def leverage_sim(metrics, *, sl_pct, edge_validated=False, leverage_grid=None) -> dict[str, Any]:
+    grid = resolve_leverage_grid(leverage_grid) if leverage_grid is not None else list(LEVERAGE_GRID)
     rows = []
     net_ev = metrics.get("net_EV", 0.0)
     mm = 0.005
-    for lev in LEVERAGE_GRID:
+    for lev in grid:
         liq = max(0.0, (1.0 / lev) - mm)
         safe = sl_pct < liq
         dang = (lev >= DANGEROUS_LEVERAGE) or not safe or net_ev <= 0
@@ -458,7 +475,7 @@ def leverage_sim(metrics, *, sl_pct, edge_validated=False) -> dict[str, Any]:
                      "liquidation_distance_estimate": round(liq, 5),
                      "stop_inside_safe_zone": safe,
                      "dangerous_leverage_flag": "DANGEROUS_RESEARCH_ONLY" if dang else "research_only"})
-    return {"leverage_grid": list(LEVERAGE_GRID), "rows": rows,
+    return {"leverage_grid": list(grid), "rows": rows,
             "edge_validated": bool(edge_validated),
             "leverage_research_status": "OPEN_RESEARCH" if edge_validated else "BLOCKED_NO_VALIDATED_EDGE",
             "leverage_recommendation": "NO_REAL_LEVERAGE", "real_leverage_allowed": False,
@@ -553,6 +570,7 @@ def run_micro_scalp_tournament(*, sample_dir, symbols, timeframes, sides,
                                initial_capital=100.0, risk_per_trade=0.01,
                                max_daily_loss=0.1, max_consecutive_losses=8,
                                compound_mode="capped_fraction",
+                               leverage_grid=None,
                                data_classification=lab.CLS_INTERMEDIATE) -> dict[str, Any]:
     windows = windows or [90, 180]
     costs = MicroCosts(cost_bps, slippage_bps, spread_bps, funding_mode, latency_bars)
@@ -671,7 +689,8 @@ def run_micro_scalp_tournament(*, sample_dir, symbols, timeframes, sides,
             risk_per_trade=risk_per_trade, max_daily_loss=max_daily_loss,
             max_consecutive_losses=max_consecutive_losses, compound_mode=compound_mode)
         report["aggressive_opportunity"] = leverage_sim(
-            best["metrics"], sl_pct=float(best["params"].get("sl_pct", 0.005)), edge_validated=False)
+            best["metrics"], sl_pct=float(best["params"].get("sl_pct", 0.005)),
+            edge_validated=False, leverage_grid=leverage_grid)
     # shadow journal rows (sample of would-be decisions)
     for t in all_trades[:2000]:
         report["_journal"].append({

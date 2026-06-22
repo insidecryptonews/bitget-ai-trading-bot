@@ -159,13 +159,33 @@ def feature_vector(bars, atr_list, emaf, emas, i, *, entry, costs) -> dict[str, 
 # 4. Build the offline pattern memory from V10.10 shadow trades
 # --------------------------------------------------------------------------
 
+def resolve_micro_exit_policies(raw) -> tuple[list[str], str, list[str]]:
+    """V10.11.1 — never silently build an empty memory. Returns
+    (policies, source, warnings). If the caller passed no MICRO policies (e.g.
+    the global V10.8 trailing default, or empty/garbage), fall back to the micro
+    defaults; if it mixed micro + non-micro, keep the micro ones and warn."""
+    raw = list(raw or [])
+    micro_valid = [p for p in raw if p in micro.EXIT_POLICIES]
+    non_micro = [p for p in raw if p not in micro.EXIT_POLICIES]
+    warnings: list[str] = []
+    if not micro_valid:
+        policies, source = list(micro.EXIT_POLICIES), "micro_defaults"
+        if non_micro:
+            warnings.append("invalid_or_non_micro_exit_policies_ignored")
+    else:
+        policies, source = micro_valid, "user_micro_policies"
+        if non_micro:
+            warnings.append("invalid_or_non_micro_exit_policies_ignored")
+    return policies, source, warnings
+
+
 def build_pattern_memory(*, sample_dir, symbols, timeframes, sides,
                          strategy_families, exit_policies=None, cost_bps=6.0,
                          slippage_bps=4.0, spread_bps=2.0, latency_bars=1,
                          funding_mode=True, gap_policy="adverse_open",
                          max_entries_per_combo=60) -> dict[str, Any]:
     costs = micro.MicroCosts(cost_bps, slippage_bps, spread_bps, funding_mode, latency_bars)
-    exit_policies = [p for p in (exit_policies or list(micro.EXIT_POLICIES)) if p in micro.EXIT_POLICIES]
+    exit_policies, ep_source, ep_warnings = resolve_micro_exit_policies(exit_policies)
     families = [f for f in strategy_families if f in micro.STRATEGY_FAMILIES]
     sides = [s.upper() for s in sides if s.upper() in micro.SIDES]
     timeframes = [t.lower() for t in timeframes]
@@ -173,8 +193,15 @@ def build_pattern_memory(*, sample_dir, symbols, timeframes, sides,
         "tool_version": TOOL_VERSION, "generated_at": _now_iso(), "sample_dir": sample_dir,
         "symbols": symbols, "timeframes": timeframes, "sides": sides,
         "strategy_families": families, "exit_policies": exit_policies,
+        "exit_policies_source": ep_source, "exit_policies_used": exit_policies,
+        "build_status": "EMPTY_MEMORY",
+        "suggested_command": (
+            "python -m app.research_lab pattern-memory-build-v1011 --sample-dir "
+            "<sample> --symbols BTCUSDT,ETHUSDT --timeframes 4h,6h --sides LONG,SHORT "
+            "--strategy-families micro_breakout,micro_reversal"),
         "orderbook_real": False, "missing_oi_historical": True,
-        "missing_liquidations": True, "cases": [], "errors": [], **_safety()}
+        "missing_liquidations": True, "cases": [], "errors": [],
+        "warnings": list(ep_warnings), **_safety()}
     if not (isinstance(sample_dir, str) and os.path.isdir(sample_dir)):
         report["errors"].append("sample_dir_not_found")
         return report
@@ -235,6 +262,12 @@ def build_pattern_memory(*, sample_dir, symbols, timeframes, sides,
     report["cases"] = cases
     report["n_cases"] = len(cases)
     report["cost_model"] = costs.as_dict()
+    if cases:
+        report["build_status"] = "MEMORY_BUILT"
+    else:
+        report["build_status"] = "EMPTY_MEMORY"
+        if "pattern_memory_empty" not in report["warnings"]:
+            report["warnings"].append("pattern_memory_empty")
     return report
 
 

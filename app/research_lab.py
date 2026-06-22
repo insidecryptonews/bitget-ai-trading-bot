@@ -5111,6 +5111,7 @@ class ResearchLab:
                                                 max_daily_loss: float = 0.1,
                                                 max_consecutive_losses: int = 8,
                                                 compound_mode: str = "capped_fraction",
+                                                leverage_sim: str = "",
                                                 output_dir: str = "") -> str:
         from .labs.micro_scalp_shadow_v10_10 import (run_micro_scalp_tournament,
                                                      write_micro_reports)
@@ -5125,6 +5126,7 @@ class ResearchLab:
         except Exception:
             pass
         wins = [int(w) for w in csv_arg(windows) if str(w).strip().isdigit()] or [90, 180]
+        lev_grid = [int(x) for x in csv_arg(leverage_sim) if str(x).strip().isdigit()] or None
         rep = run_micro_scalp_tournament(
             sample_dir=sample_dir, symbols=csv_arg(symbols), timeframes=csv_arg(timeframes),
             sides=csv_arg(sides), strategy_families=csv_arg(strategy_families),
@@ -5134,7 +5136,7 @@ class ResearchLab:
             max_grid_combos=max_grid_combos, seed=seed, initial_capital=initial_capital,
             risk_per_trade=risk_per_trade, max_daily_loss=max_daily_loss,
             max_consecutive_losses=max_consecutive_losses, compound_mode=compound_mode,
-            data_classification=classification)
+            leverage_grid=lev_grid, data_classification=classification)
         run_dir = ""
         if not rep.get("errors"):
             run_dir = write_micro_reports(rep, output_dir=(output_dir or None))
@@ -5163,6 +5165,9 @@ class ResearchLab:
         lines.append(f"compounding_status: {comp.get('compounding_status')}")
         lines.append(f"compounding_final_equity: {comp.get('final_equity')}")
         lines.append(f"leverage_research_status: {lev.get('leverage_research_status', 'BLOCKED_NO_VALIDATED_EDGE')}")
+        lines.append(f"leverage_grid: {','.join(str(x) for x in lev.get('leverage_grid', []))}")
+        _dang = [str(r['leverage']) for r in lev.get('rows', []) if r.get('dangerous_leverage_flag') == 'DANGEROUS_RESEARCH_ONLY']
+        lines.append(f"dangerous_leverage_levels: {','.join(_dang) or 'NONE'}")
         lines.append(f"real_leverage_allowed: {str(lev.get('real_leverage_allowed', False)).lower()}")
         lines.append("top_candidates (hypotheses not signals):")
         for c in rep.get("candidates", [])[:8]:
@@ -5214,6 +5219,39 @@ class ResearchLab:
             cost_bps=cost_bps, slippage_bps=slippage_bps, spread_bps=spread_bps,
             latency_bars=latency_bars)
 
+    def _v1011_no_sample_dir_lines(self, *, header: str, footer: str, command: str) -> list:
+        # V10.11.1 — query/gate without --sample-dir must not emit a bare
+        # "sample_dir_not_found" (bad UX) nor a traceback, and must never look
+        # like it ran a real memory. We point at the latest persisted report if
+        # one exists; we deliberately do NOT rebuild from it because the report
+        # stores summary stats only (the full causal feature cases are not
+        # persisted), so re-querying needs --sample-dir to rebuild the memory.
+        from .labs.pattern_memory_v10_11 import latest_pattern_summary
+        suggested = (f"python -m app.research_lab {command} --sample-dir <sample> "
+                     "--symbols BTCUSDT,ETHUSDT --timeframes 4h,6h --sides LONG,SHORT "
+                     "--strategy-families micro_breakout,micro_reversal")
+        s = None
+        try:
+            s = latest_pattern_summary(None)
+        except Exception:
+            s = None
+        lines = [header]
+        if s is not None:
+            lines.append("status: PATTERN_MEMORY_REQUIRES_SAMPLE_DIR")
+            lines.append("note: a prior build exists under reports/research/v10_11, but it stores"
+                         " summary stats only (feature cases are not persisted); pass --sample-dir to rebuild.")
+            lines.append(f"last_report_n_cases: {s.get('n_cases')}")
+            lines.append(f"last_report_n_passed: {s.get('n_passed')}")
+            lines.append(f"last_report_n_failed: {s.get('n_failed')}")
+        else:
+            lines.append("status: NO_PATTERN_MEMORY_FOUND")
+            lines.append("note: no pattern memory in this session and no prior build under reports/research/v10_11.")
+        lines.append(f"suggested_command: {suggested}")
+        lines += ["research_only: true", "shadow_only: true", "edge_validated: false",
+                  "paper_ready: false", "live_ready: false", "can_send_real_orders: false",
+                  "paper_filter_enabled: false", "final_recommendation: NO LIVE", footer]
+        return lines
+
     def pattern_memory_plan_v1011_cli(self) -> str:
         import json as _json
         from .labs.pattern_memory_v10_11 import pattern_memory_plan
@@ -5242,13 +5280,21 @@ class ResearchLab:
             cost_bps=cost_bps, slippage_bps=slippage_bps, spread_bps=spread_bps,
             latency_bars=latency_bars)
         run_dir = ""
-        if not mem.get("errors"):
+        if not mem.get("errors") and mem.get("n_cases", 0) > 0:
             gate = shadow_gate(mem)
             run_dir = write_pattern_reports(mem, gate, output_dir=(output_dir or None))
         lines = ["PATTERN MEMORY BUILD V10.11 START",
                  f"sample_dir: {sample_dir}", f"errors: {mem.get('errors')}",
+                 f"build_status: {mem.get('build_status')}",
+                 f"exit_policies_source: {mem.get('exit_policies_source')}",
+                 f"exit_policies_used: {','.join(mem.get('exit_policies_used', []))}",
                  f"n_cases: {mem.get('n_cases')}", f"orderbook_real: false",
                  f"output_run_dir: {run_dir or 'NONE'}"]
+        if mem.get("warnings"):
+            lines.append("warnings:")
+            lines.extend(f"- {w}" for w in mem["warnings"])
+        if mem.get("build_status") == "EMPTY_MEMORY":
+            lines.append(f"suggested_command: {mem.get('suggested_command')}")
         lines += ["missing_oi_historical: true", "missing_liquidations: true",
                   "research_only: true", "shadow_only: true", "edge_validated: false",
                   "paper_ready: false", "live_ready: false", "can_send_real_orders: false",
@@ -5259,6 +5305,11 @@ class ResearchLab:
                                        strategy_families, exit_policies="", cost_bps=6.0,
                                        slippage_bps=4.0, spread_bps=2.0, latency_bars=1) -> str:
         from .labs.pattern_memory_v10_11 import shadow_gate
+        if not (isinstance(sample_dir, str) and sample_dir.strip()):
+            return "\n".join(self._v1011_no_sample_dir_lines(
+                header="PATTERN MEMORY QUERY V10.11 START",
+                footer="PATTERN MEMORY QUERY V10.11 END",
+                command="pattern-memory-query-v1011"))
         mem = self._v1011_build_memory(
             sample_dir=sample_dir, symbols=symbols, timeframes=timeframes, sides=sides,
             strategy_families=strategy_families, exit_policies=exit_policies,
@@ -5284,6 +5335,11 @@ class ResearchLab:
                                              slippage_bps=4.0, spread_bps=2.0, latency_bars=1,
                                              output_dir="") -> str:
         from .labs.pattern_memory_v10_11 import shadow_gate, write_pattern_reports
+        if not (isinstance(sample_dir, str) and sample_dir.strip()):
+            return "\n".join(self._v1011_no_sample_dir_lines(
+                header="PATTERN MEMORY SHADOW GATE V10.11 START",
+                footer="PATTERN MEMORY SHADOW GATE V10.11 END",
+                command="pattern-memory-shadow-gate-v1011"))
         mem = self._v1011_build_memory(
             sample_dir=sample_dir, symbols=symbols, timeframes=timeframes, sides=sides,
             strategy_families=strategy_families, exit_policies=exit_policies,
@@ -7538,7 +7594,8 @@ def main() -> None:
             gap_policy=args.gap_policy, max_grid_combos=args.max_grid_combos, seed=args.seed,
             initial_capital=args.initial_capital, risk_per_trade=args.risk_per_trade,
             max_daily_loss=args.max_daily_loss, max_consecutive_losses=args.max_consecutive_losses,
-            compound_mode=args.compound_mode, output_dir=args.output_dir))
+            compound_mode=args.compound_mode, leverage_sim=args.leverage_sim,
+            output_dir=args.output_dir))
     elif args.command == "micro-scalp-report-v1010":
         print(lab.micro_scalp_report_v1010_cli(output_dir=args.output_dir))
     elif args.command == "pattern-memory-plan-v1011":
