@@ -5199,6 +5199,138 @@ class ResearchLab:
                   "final_recommendation: NO LIVE", "MICRO SCALP REPORT V10.10 END"]
         return "\n".join(lines)
 
+    # ------------------------------------------------------------------
+    # ResearchOps V10.11 — Pattern Memory & Similarity Decision Gate.
+    # ------------------------------------------------------------------
+    def _v1011_build_memory(self, *, sample_dir, symbols, timeframes, sides,
+                            strategy_families, exit_policies, cost_bps, slippage_bps,
+                            spread_bps, latency_bars):
+        from .labs.pattern_memory_v10_11 import build_pattern_memory
+        c = self._v107_csv_arg
+        pols = c(exit_policies) or None
+        return build_pattern_memory(
+            sample_dir=sample_dir, symbols=c(symbols), timeframes=c(timeframes),
+            sides=c(sides), strategy_families=c(strategy_families), exit_policies=pols,
+            cost_bps=cost_bps, slippage_bps=slippage_bps, spread_bps=spread_bps,
+            latency_bars=latency_bars)
+
+    def pattern_memory_plan_v1011_cli(self) -> str:
+        import json as _json
+        from .labs.pattern_memory_v10_11 import pattern_memory_plan
+        p = pattern_memory_plan()
+        lines = ["PATTERN MEMORY PLAN V10.11 START", "objective: " + p["objective"]]
+        lines.append("feature_vector: " + ",".join(map(str, p["feature_vector"])))
+        lines.append("gate_conditions:")
+        lines.extend(f"- {g}" for g in p["gate_conditions"])
+        lines.append("decision_codes: " + ",".join(p["decision_codes"]))
+        lines.append("never: " + ",".join(p["never"]))
+        lines.append("orderbook_real: false")
+        lines.append("plan_json: " + _json.dumps(p, default=str))
+        lines += ["research_only: true", "shadow_only: true", "paper_ready: false",
+                  "live_ready: false", "can_send_real_orders: false",
+                  "final_recommendation: NO LIVE", "PATTERN MEMORY PLAN V10.11 END"]
+        return "\n".join(lines)
+
+    def pattern_memory_build_v1011_cli(self, *, sample_dir, symbols, timeframes, sides,
+                                       strategy_families, exit_policies="", cost_bps=6.0,
+                                       slippage_bps=4.0, spread_bps=2.0, latency_bars=1,
+                                       output_dir="") -> str:
+        from .labs.pattern_memory_v10_11 import shadow_gate, write_pattern_reports
+        mem = self._v1011_build_memory(
+            sample_dir=sample_dir, symbols=symbols, timeframes=timeframes, sides=sides,
+            strategy_families=strategy_families, exit_policies=exit_policies,
+            cost_bps=cost_bps, slippage_bps=slippage_bps, spread_bps=spread_bps,
+            latency_bars=latency_bars)
+        run_dir = ""
+        if not mem.get("errors"):
+            gate = shadow_gate(mem)
+            run_dir = write_pattern_reports(mem, gate, output_dir=(output_dir or None))
+        lines = ["PATTERN MEMORY BUILD V10.11 START",
+                 f"sample_dir: {sample_dir}", f"errors: {mem.get('errors')}",
+                 f"n_cases: {mem.get('n_cases')}", f"orderbook_real: false",
+                 f"output_run_dir: {run_dir or 'NONE'}"]
+        lines += ["missing_oi_historical: true", "missing_liquidations: true",
+                  "research_only: true", "shadow_only: true", "edge_validated: false",
+                  "paper_ready: false", "live_ready: false", "can_send_real_orders: false",
+                  "final_recommendation: NO LIVE", "PATTERN MEMORY BUILD V10.11 END"]
+        return "\n".join(lines)
+
+    def pattern_memory_query_v1011_cli(self, *, sample_dir, symbols, timeframes, sides,
+                                       strategy_families, exit_policies="", cost_bps=6.0,
+                                       slippage_bps=4.0, spread_bps=2.0, latency_bars=1) -> str:
+        from .labs.pattern_memory_v10_11 import shadow_gate
+        mem = self._v1011_build_memory(
+            sample_dir=sample_dir, symbols=symbols, timeframes=timeframes, sides=sides,
+            strategy_families=strategy_families, exit_policies=exit_policies,
+            cost_bps=cost_bps, slippage_bps=slippage_bps, spread_bps=spread_bps,
+            latency_bars=latency_bars)
+        lines = ["PATTERN MEMORY QUERY V10.11 START", f"n_cases: {mem.get('n_cases')}",
+                 f"errors: {mem.get('errors')}"]
+        if not mem.get("errors"):
+            gate = shadow_gate(mem)
+            lines.append("similarity_queries:")
+            for q in gate.get("queries", []):
+                lines.append(f"- {q.get('group')}: cases={q.get('similar_cases_count')} "
+                             f"net_EV={q.get('net_EV')} PF={q.get('profit_factor')} "
+                             f"closed_green={q.get('closed_green_rate')} windows={q.get('windows_covered')} "
+                             f"symbols={q.get('symbols_covered')} -> {q.get('decision')}")
+        lines += ["research_only: true", "shadow_only: true", "edge_validated: false",
+                  "paper_ready: false", "live_ready: false", "can_send_real_orders: false",
+                  "final_recommendation: NO LIVE", "PATTERN MEMORY QUERY V10.11 END"]
+        return "\n".join(lines)
+
+    def pattern_memory_shadow_gate_v1011_cli(self, *, sample_dir, symbols, timeframes, sides,
+                                             strategy_families, exit_policies="", cost_bps=6.0,
+                                             slippage_bps=4.0, spread_bps=2.0, latency_bars=1,
+                                             output_dir="") -> str:
+        from .labs.pattern_memory_v10_11 import shadow_gate, write_pattern_reports
+        mem = self._v1011_build_memory(
+            sample_dir=sample_dir, symbols=symbols, timeframes=timeframes, sides=sides,
+            strategy_families=strategy_families, exit_policies=exit_policies,
+            cost_bps=cost_bps, slippage_bps=slippage_bps, spread_bps=spread_bps,
+            latency_bars=latency_bars)
+        lines = ["PATTERN MEMORY SHADOW GATE V10.11 START", f"sample_dir: {sample_dir}",
+                 f"errors: {mem.get('errors')}", f"n_cases: {mem.get('n_cases')}"]
+        run_dir = ""
+        if not mem.get("errors"):
+            gate = shadow_gate(mem)
+            run_dir = write_pattern_reports(mem, gate, output_dir=(output_dir or None))
+            lines.append(f"n_queries: {gate.get('n_queries')}")
+            lines.append(f"n_passed_shadow_gate: {gate.get('n_passed')}")
+            lines.append(f"n_failed: {gate.get('n_failed')}")
+            lines.append(f"false_discovery_risk: {gate.get('false_discovery_risk')}")
+            lines.append(f"side_concentration_warning: {gate.get('side_concentration_warning')!r}")
+            lines.append(f"passed_queries: {gate.get('passed_queries')}")
+            lines.append("decisions:")
+            for g, d in gate.get("decisions", {}).items():
+                lines.append(f"- {g}: {d}")
+        lines.append(f"output_run_dir: {run_dir or 'NONE'}")
+        lines += ["orderbook_real: false", "missing_oi_historical: true",
+                  "missing_liquidations: true", "research_only: true", "shadow_only: true",
+                  "edge_validated: false", "paper_ready: false", "live_ready: false",
+                  "can_send_real_orders: false", "approved_for_paper: false",
+                  "approved_for_live: false", "final_recommendation: NO LIVE",
+                  "PATTERN MEMORY SHADOW GATE V10.11 END"]
+        return "\n".join(lines)
+
+    def pattern_memory_report_v1011_cli(self, *, output_dir="") -> str:
+        from .labs.pattern_memory_v10_11 import latest_pattern_summary
+        s = latest_pattern_summary(output_dir or None)
+        lines = ["PATTERN MEMORY REPORT V10.11 START"]
+        if s is None:
+            lines.append("status: NO_RUN_FOUND (run pattern-memory-shadow-gate-v1011 first)")
+        else:
+            for k in ("sample_dir", "n_cases", "n_queries", "n_passed", "n_failed",
+                      "false_discovery_risk", "side_concentration_warning",
+                      "passed_queries", "edge_validated"):
+                lines.append(f"{k}: {s.get(k)}")
+            lines.append("approved_for_paper: false")
+            lines.append("approved_for_live: false")
+        lines += ["research_only: true", "shadow_only: true", "paper_ready: false",
+                  "live_ready: false", "can_send_real_orders: false",
+                  "final_recommendation: NO LIVE", "PATTERN MEMORY REPORT V10.11 END"]
+        return "\n".join(lines)
+
     def trader_dashboard_contract_v105_cli(self) -> str:
         from .labs.trader_dashboard_v104 import (
             DISABLED_CONTROLS,
@@ -6363,6 +6495,12 @@ def build_argument_parser() -> argparse.ArgumentParser:
             "micro-scalp-plan-v1010",
             "micro-scalp-shadow-tournament-v1010",
             "micro-scalp-report-v1010",
+            "pattern-memory-plan-v1011",
+            "pattern-memory-build-v1011",
+            "pattern-memory-query-v1011",
+            "pattern-memory-shadow-gate-v1011",
+            "micro-scalp-pattern-shadow-v1011",
+            "pattern-memory-report-v1011",
             "ohlcv-replay-loader-smoke-test",
             "ohlcv-replay-loader-audit",
             "duplicate-module-audit-smoke-test",
@@ -7403,6 +7541,31 @@ def main() -> None:
             compound_mode=args.compound_mode, output_dir=args.output_dir))
     elif args.command == "micro-scalp-report-v1010":
         print(lab.micro_scalp_report_v1010_cli(output_dir=args.output_dir))
+    elif args.command == "pattern-memory-plan-v1011":
+        print(lab.pattern_memory_plan_v1011_cli())
+    elif args.command == "pattern-memory-build-v1011":
+        print(lab.pattern_memory_build_v1011_cli(
+            sample_dir=args.sample_dir, symbols=args.symbols, timeframes=args.timeframes,
+            sides=args.sides, strategy_families=args.strategy_families,
+            exit_policies=args.exit_policies, cost_bps=args.cost_bps,
+            slippage_bps=args.slippage_bps, spread_bps=args.spread_bps,
+            latency_bars=args.latency_bars, output_dir=args.output_dir))
+    elif args.command == "pattern-memory-query-v1011":
+        print(lab.pattern_memory_query_v1011_cli(
+            sample_dir=args.sample_dir, symbols=args.symbols, timeframes=args.timeframes,
+            sides=args.sides, strategy_families=args.strategy_families,
+            exit_policies=args.exit_policies, cost_bps=args.cost_bps,
+            slippage_bps=args.slippage_bps, spread_bps=args.spread_bps,
+            latency_bars=args.latency_bars))
+    elif args.command in ("pattern-memory-shadow-gate-v1011", "micro-scalp-pattern-shadow-v1011"):
+        print(lab.pattern_memory_shadow_gate_v1011_cli(
+            sample_dir=args.sample_dir, symbols=args.symbols, timeframes=args.timeframes,
+            sides=args.sides, strategy_families=args.strategy_families,
+            exit_policies=args.exit_policies, cost_bps=args.cost_bps,
+            slippage_bps=args.slippage_bps, spread_bps=args.spread_bps,
+            latency_bars=args.latency_bars, output_dir=args.output_dir))
+    elif args.command == "pattern-memory-report-v1011":
+        print(lab.pattern_memory_report_v1011_cli(output_dir=args.output_dir))
     elif args.command == "ohlcv-replay-loader-smoke-test":
         print(lab.ohlcv_replay_loader_smoke_test())
     elif args.command == "ohlcv-replay-loader-audit":
