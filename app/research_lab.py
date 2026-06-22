@@ -5073,6 +5073,132 @@ class ResearchLab:
                   "PROVIDER GAP PLAN V10.9 END"]
         return "\n".join(lines)
 
+    # ------------------------------------------------------------------
+    # ResearchOps V10.10 — Micro-Scalp Shadow Tournament (shadow/research only).
+    # ------------------------------------------------------------------
+    def micro_scalp_plan_v1010_cli(self) -> str:
+        import json as _json
+        from .labs.micro_scalp_shadow_v10_10 import micro_scalp_plan
+        p = micro_scalp_plan()
+        lines = ["MICRO SCALP PLAN V10.10 START", "objective: " + p["objective"]]
+        lines.append("strategy_families: " + ",".join(p["strategy_families"]))
+        lines.append("exit_policies: " + ",".join(p["exit_policies"]))
+        lines.append("gates:")
+        lines.extend(f"- {g}" for g in p["gates"])
+        lines.append("risks:")
+        lines.extend(f"- {r}" for r in p["risks"])
+        lines.append("candidate_tiers: " + ",".join(p["candidate_tiers"]))
+        lines.append("orderbook_real: false")
+        lines.append("leverage_recommendation: " + p["leverage_recommendation"])
+        lines.append("plan_json: " + _json.dumps(p, default=str))
+        lines += ["research_only: true", "shadow_only: true", "paper_ready: false",
+                  "live_ready: false", "can_send_real_orders: false",
+                  "paper_filter_enabled: false", "final_recommendation: NO LIVE",
+                  "MICRO SCALP PLAN V10.10 END"]
+        return "\n".join(lines)
+
+    def micro_scalp_shadow_tournament_v1010_cli(self, *, sample_dir: str, symbols: str,
+                                                timeframes: str, sides: str,
+                                                strategy_families: str,
+                                                cost_bps: float = 6.0, slippage_bps: float = 4.0,
+                                                spread_bps: float = 2.0, latency_bars: int = 1,
+                                                min_trades: int = 30, windows: str = "90,180",
+                                                walk_forward_mode: str = "rolling",
+                                                gap_policy: str = "adverse_open",
+                                                max_grid_combos: int = 500, seed: int = 7,
+                                                initial_capital: float = 100.0,
+                                                risk_per_trade: float = 0.01,
+                                                max_daily_loss: float = 0.1,
+                                                max_consecutive_losses: int = 8,
+                                                compound_mode: str = "capped_fraction",
+                                                output_dir: str = "") -> str:
+        from .labs.micro_scalp_shadow_v10_10 import (run_micro_scalp_tournament,
+                                                     write_micro_reports)
+        from .labs.adaptive_trailing_exit_v10_8 import CLS_INTERMEDIATE
+        csv_arg = self._v107_csv_arg
+        classification = CLS_INTERMEDIATE
+        try:
+            from .labs.provider_sample_validator_v10_6 import validate_sample_dir
+            classification = validate_sample_dir(
+                sample_dir, expected_days=365,
+                provider_id="bitget_official").get("data_classification", CLS_INTERMEDIATE)
+        except Exception:
+            pass
+        wins = [int(w) for w in csv_arg(windows) if str(w).strip().isdigit()] or [90, 180]
+        rep = run_micro_scalp_tournament(
+            sample_dir=sample_dir, symbols=csv_arg(symbols), timeframes=csv_arg(timeframes),
+            sides=csv_arg(sides), strategy_families=csv_arg(strategy_families),
+            cost_bps=cost_bps, slippage_bps=slippage_bps, spread_bps=spread_bps,
+            latency_bars=latency_bars, min_trades=min_trades, windows=wins,
+            walk_forward_mode=walk_forward_mode, gap_policy=gap_policy,
+            max_grid_combos=max_grid_combos, seed=seed, initial_capital=initial_capital,
+            risk_per_trade=risk_per_trade, max_daily_loss=max_daily_loss,
+            max_consecutive_losses=max_consecutive_losses, compound_mode=compound_mode,
+            data_classification=classification)
+        run_dir = ""
+        if not rep.get("errors"):
+            run_dir = write_micro_reports(rep, output_dir=(output_dir or None))
+        g = rep.get("global_metrics", {})
+        comp = rep.get("compounding", {})
+        lev = rep.get("aggressive_opportunity", {})
+        lines = ["MICRO SCALP SHADOW TOURNAMENT V10.10 START"]
+        lines.append(f"sample_dir: {sample_dir}")
+        lines.append(f"data_classification: {rep.get('data_classification')}")
+        lines.append(f"edge_validated: {str(rep.get('edge_validated', False)).lower()}")
+        lines.append(f"orderbook_real: false")
+        lines.append(f"errors: {rep.get('errors')}")
+        lines.append(f"max_candidate_quality_tier: {rep.get('max_candidate_quality_tier')}")
+        lines.append(f"combos_evaluated: {rep.get('combos_evaluated')}")
+        lines.append(f"trades_simulated: {rep.get('trades_simulated')}")
+        lines.append(f"n_candidates: {rep.get('n_candidates')}")
+        lines.append(f"n_shadow_test_candidate: {rep.get('n_shadow_test_candidate')}")
+        lines.append(f"n_weak: {rep.get('n_weak')}")
+        lines.append(f"n_rejected: {rep.get('n_rejected')}")
+        lines.append(f"global_net_EV: {g.get('net_EV')}")
+        lines.append(f"global_net_PF: {g.get('net_PF')}")
+        lines.append(f"global_closed_green_rate: {g.get('closed_green_rate')}")
+        lines.append(f"global_green_to_red_rate: {g.get('green_to_red_rate')}")
+        lines.append(f"side_concentration_warning: {rep.get('side_concentration_warning')!r}")
+        lines.append(f"false_discovery_risk: {rep.get('false_discovery_risk')}")
+        lines.append(f"compounding_status: {comp.get('compounding_status')}")
+        lines.append(f"compounding_final_equity: {comp.get('final_equity')}")
+        lines.append(f"leverage_research_status: {lev.get('leverage_research_status', 'BLOCKED_NO_VALIDATED_EDGE')}")
+        lines.append(f"real_leverage_allowed: {str(lev.get('real_leverage_allowed', False)).lower()}")
+        lines.append("top_candidates (hypotheses not signals):")
+        for c in rep.get("candidates", [])[:8]:
+            lines.append(f"- [{c['final_tier']}] {c['timeframe']}/{c['side']}/{c['strategy_family']}/{c['exit_policy']} "
+                         f"net_EV={c['net_EV']} closed_green={c['closed_green_rate']} windows={c['windows_passed']}/{c['windows_tested']}")
+        lines.append(f"output_run_dir: {run_dir or 'NONE'}")
+        lines += ["missing_oi_historical: true", "missing_liquidations: true",
+                  "research_only: true", "shadow_only: true", "paper_ready: false",
+                  "live_ready: false", "can_send_real_orders: false",
+                  "paper_filter_enabled: false", "final_recommendation: NO LIVE",
+                  "MICRO SCALP SHADOW TOURNAMENT V10.10 END"]
+        return "\n".join(lines)
+
+    def micro_scalp_report_v1010_cli(self, *, output_dir: str = "") -> str:
+        from .labs.micro_scalp_shadow_v10_10 import latest_micro_summary, summarize_micro
+        summary = latest_micro_summary(output_dir or None)
+        lines = ["MICRO SCALP REPORT V10.10 START"]
+        if summary is None:
+            lines.append("status: NO_RUN_FOUND (run micro-scalp-shadow-tournament-v1010 first)")
+        else:
+            s = summarize_micro(summary)
+            for k in ("data_classification", "edge_validated", "trades_simulated",
+                      "n_candidates", "n_shadow_test_candidate", "n_weak", "n_rejected",
+                      "global_net_EV", "global_closed_green_rate", "side_concentration_warning",
+                      "false_discovery_risk", "compounding_status", "leverage_research_status"):
+                lines.append(f"{k}: {s.get(k)}")
+            lines.append("top_candidates (hypotheses not signals):")
+            for c in s.get("top_candidates", [])[:8]:
+                lines.append(f"- [{c.get('final_tier')}] {c.get('timeframe')}/{c.get('side')}/{c.get('strategy_family')}/{c.get('exit_policy')} net_EV={c.get('net_EV')}")
+            lines.append("approved_for_paper: false")
+            lines.append("approved_for_live: false")
+        lines += ["research_only: true", "shadow_only: true", "paper_ready: false",
+                  "live_ready: false", "can_send_real_orders: false",
+                  "final_recommendation: NO LIVE", "MICRO SCALP REPORT V10.10 END"]
+        return "\n".join(lines)
+
     def trader_dashboard_contract_v105_cli(self) -> str:
         from .labs.trader_dashboard_v104 import (
             DISABLED_CONTROLS,
@@ -6234,6 +6360,9 @@ def build_argument_parser() -> argparse.ArgumentParser:
             "bitget-public-history-limits-v109",
             "multi-window-trailing-validation-v109",
             "provider-gap-plan-v109",
+            "micro-scalp-plan-v1010",
+            "micro-scalp-shadow-tournament-v1010",
+            "micro-scalp-report-v1010",
             "ohlcv-replay-loader-smoke-test",
             "ohlcv-replay-loader-audit",
             "duplicate-module-audit-smoke-test",
@@ -6385,6 +6514,15 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--windows", default="90,180,270", help="V10.9 multi-window validation windows in days (comma-separated).")
     parser.add_argument("--requested-days", default="60,180,365", help="V10.9.1 comma-separated requested-day probes for bitget-public-history-limits-v109.")
     parser.add_argument("--max-requests", type=int, default=12, help="V10.9.1 max bounded GET requests per symbol/timeframe in history-limits probe.")
+    parser.add_argument("--strategy-families", default="micro_breakout,micro_reversal,momentum_continuation,mean_reversion_snapback,orderbook_pressure_proxy,trend_micro_pullback,volatility_burst_scalp", help="V10.10 comma-separated micro-scalp strategy families.")
+    parser.add_argument("--initial-capital", type=float, default=100.0, help="V10.10 simulated initial capital USDT (no real money).")
+    parser.add_argument("--risk-per-trade", type=float, default=0.01, help="V10.10 simulated risk fraction per trade.")
+    parser.add_argument("--max-daily-loss", type=float, default=0.1, help="V10.10 simulated max daily loss fraction.")
+    parser.add_argument("--max-consecutive-losses", type=int, default=8, help="V10.10 simulated loss-streak circuit breaker.")
+    parser.add_argument("--compound-mode", default="capped_fraction", help="V10.10 compounding: none|fixed_fraction|capped_fraction.")
+    parser.add_argument("--leverage-sim", default="1,2,3,5,10", help="V10.10 simulated leverage grid (research only; 20x DANGEROUS).")
+    parser.add_argument("--spread-bps", type=float, default=2.0, help="V10.10 spread cost bps in shadow execution sim.")
+    parser.add_argument("--latency-bars", type=int, default=1, help="V10.10 fill latency in bars (>=1, no lookahead).")
     return parser
 
 
@@ -7250,6 +7388,21 @@ def main() -> None:
             seed=args.seed, output_dir=args.output_dir))
     elif args.command == "provider-gap-plan-v109":
         print(lab.provider_gap_plan_v109_cli())
+    elif args.command == "micro-scalp-plan-v1010":
+        print(lab.micro_scalp_plan_v1010_cli())
+    elif args.command == "micro-scalp-shadow-tournament-v1010":
+        print(lab.micro_scalp_shadow_tournament_v1010_cli(
+            sample_dir=args.sample_dir, symbols=args.symbols, timeframes=args.timeframes,
+            sides=args.sides, strategy_families=args.strategy_families,
+            cost_bps=args.cost_bps, slippage_bps=args.slippage_bps, spread_bps=args.spread_bps,
+            latency_bars=args.latency_bars, min_trades=args.min_trades, windows=args.windows,
+            walk_forward_mode=(str(args.walk_forward_mode).strip().lower() or "rolling"),
+            gap_policy=args.gap_policy, max_grid_combos=args.max_grid_combos, seed=args.seed,
+            initial_capital=args.initial_capital, risk_per_trade=args.risk_per_trade,
+            max_daily_loss=args.max_daily_loss, max_consecutive_losses=args.max_consecutive_losses,
+            compound_mode=args.compound_mode, output_dir=args.output_dir))
+    elif args.command == "micro-scalp-report-v1010":
+        print(lab.micro_scalp_report_v1010_cli(output_dir=args.output_dir))
     elif args.command == "ohlcv-replay-loader-smoke-test":
         print(lab.ohlcv_replay_loader_smoke_test())
     elif args.command == "ohlcv-replay-loader-audit":
