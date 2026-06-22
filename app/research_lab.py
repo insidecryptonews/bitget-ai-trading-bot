@@ -5664,6 +5664,8 @@ class ResearchLab:
                                     days=days, max_requests=max_requests, apply=apply)
         lines = ["BITGET INTRADAY PROBE V10.13 START", f"dry_run: {str(r['dry_run']).lower()}",
                  f"symbols: {r['symbols']}", f"timeframes: {r['timeframes']}",
+                 f"requested_days: {r.get('requested_days')}", f"max_requests: {r.get('max_requests')}",
+                 f"requests_made: {r.get('requests_made')}",
                  f"public_state: {r['public_state']}", f"errors: {r.get('errors')}",
                  f"warnings: {r.get('warnings')}", f"staging_dir: {r.get('staging_dir') or 'NONE'}",
                  f"files: {r.get('files')}", f"planned_fetches: {r.get('planned_fetches')}",

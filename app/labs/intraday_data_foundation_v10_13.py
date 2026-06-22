@@ -405,8 +405,56 @@ def bitget_intraday_plan(symbols=None, timeframes=None, days=7) -> dict[str, Any
             "staging_target": STAGING_ROOT + "/<run_id>/", **_safety()}
 
 
+_PAGE_LIMIT = 1000              # Bitget candles max per call
+_CAP_WINDOW_DAYS = 80           # stay under Bitget's 90-day interval cap
+_PER_SERIES_EMPTY_STOP = 2      # consecutive empty windows -> reached queryable limit
+
+
+def _fetch_series_backward(tx, sym, tf, *, days, request_budget, rate_per_s,
+                           rep) -> tuple[list[dict[str, Any]], int]:
+    """Page a single symbol/timeframe BACKWARD from now (newest -> oldest) using
+    bounded [startTime,endTime] windows of <=1000 bars, stopping at the queryable
+    limit (empty pages), the request budget, or `days`. Public GET only."""
+    import time
+    gran = b7._GRANULARITY.get(tf, tf)              # type: ignore[attr-defined]
+    bar_ms = TF_MS[tf]
+    window_ms = min(_CAP_WINDOW_DAYS * DAY_MS, _PAGE_LIMIT * bar_ms)
+    now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+    floor_ms = now_ms - int(days) * DAY_MS
+    by_ts: dict[int, dict[str, Any]] = {}
+    cursor_end, used, empties = now_ms, 0, 0
+    while cursor_end > floor_ms and used < request_budget:
+        win_start = max(floor_ms, cursor_end - window_ms)
+        try:
+            payload = tx(b7.EP_CANDLES, {"symbol": sym, "productType": b7.PRODUCT_TYPE,
+                                         "granularity": gran, "startTime": win_start,
+                                         "endTime": cursor_end, "limit": _PAGE_LIMIT})
+            used += 1
+        except Exception as exc:
+            rep["errors"].append(f"fetch_failed:{sym}:{tf}:{type(exc).__name__}")
+            used += 1
+            break
+        page = b7.parse_candles(payload, symbol=sym, timeframe=tf)
+        if not page:
+            empties += 1
+            if empties >= _PER_SERIES_EMPTY_STOP:
+                break                                # reached queryable limit
+            cursor_end = win_start                   # step older once more, then stop
+            continue
+        empties = 0
+        oldest = min(r["timestamp_ms"] for r in page)
+        for r in page:
+            by_ts[r["timestamp_ms"]] = r
+        if oldest >= cursor_end:                     # no backward progress
+            break
+        cursor_end = min(win_start, oldest - bar_ms)
+        if rate_per_s > 0:
+            time.sleep(1.0 / rate_per_s)
+    return [by_ts[k] for k in sorted(by_ts)], used
+
+
 def bitget_intraday_probe(*, symbols, timeframes, days=2, max_requests=6, apply=False,
-                          transport=None, staging_root=None, limit=200) -> dict[str, Any]:
+                          transport=None, staging_root=None, rate_per_s=4.0) -> dict[str, Any]:
     tfs = [t for t in timeframes if t in INTRADAY_TFS]
     syms = [str(s).strip().upper() for s in symbols if str(s).strip()]
     run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -415,13 +463,15 @@ def bitget_intraday_probe(*, symbols, timeframes, days=2, max_requests=6, apply=
         "symbols": syms, "timeframes": tfs, "requested_days": int(days),
         "max_requests": int(max_requests), "dry_run": (not apply),
         "endpoints_called": [], "files": [], "rows_written": {}, "errors": [],
-        "warnings": [], "staging_dir": "", "public_state": P_PUBLIC_LIMITED, **_safety()}
+        "warnings": [], "staging_dir": "", "public_state": P_PUBLIC_LIMITED,
+        "requests_made": 0, "coverage": [], **_safety()}
     if not syms or not tfs:
         rep["errors"].append("nothing_to_probe (need symbols + 1m/3m/5m/15m timeframes)")
         return rep
     if not apply:
         rep["planned_fetches"] = [f"candles:{s}:{tf}" for s in syms for tf in tfs]
-        rep["note"] = "dry-run: no network, no writes. Pass --apply for a small public probe."
+        rep["note"] = ("dry-run: no network, no writes. Pass --apply to page Bitget public "
+                       "candles backward (newest->oldest) up to --days / --max-requests.")
         return rep
 
     base = staging_root or STAGING_ROOT
@@ -434,27 +484,22 @@ def bitget_intraday_probe(*, symbols, timeframes, days=2, max_requests=6, apply=
     tx = transport or b7.default_transport
     os.makedirs(run_dir, exist_ok=True)
     rep["staging_dir"] = run_dir
+    budget = max(1, int(max_requests))
     requests_made = 0
     for s in syms:
         for tf in tfs:
-            if requests_made >= int(max_requests):
+            remaining = budget - requests_made
+            if remaining <= 0:
                 rep["warnings"].append("max_requests_reached")
                 break
-            gran = b7._GRANULARITY.get(tf, tf)  # type: ignore[attr-defined]
-            try:
-                payload = tx(b7.EP_CANDLES, {"symbol": s, "productType": b7.PRODUCT_TYPE,
-                                             "granularity": gran, "limit": int(limit)})
-                requests_made += 1
-                rep["endpoints_called"].append(f"{b7.EP_CANDLES}?symbol={s}&granularity={gran}")
-            except Exception as exc:
-                rep["errors"].append(f"fetch_failed:{s}:{tf}:{type(exc).__name__}")
-                requests_made += 1
-                continue
-            rows = b7.parse_candles(payload, symbol=s, timeframe=tf)
+            rows, used = _fetch_series_backward(
+                tx, s, tf, days=days, request_budget=remaining,
+                rate_per_s=rate_per_s, rep=rep)
+            requests_made += used
+            rep["endpoints_called"].append(f"{b7.EP_CANDLES}?symbol={s}&granularity={tf}")
             if not rows:
                 rep["warnings"].append(f"empty:{s}:{tf}")
                 continue
-            rows.sort(key=lambda r: r["timestamp_ms"])
             path = os.path.join(run_dir, f"{s}_{tf}_ohlcv.csv")
             with open(path, "w", newline="", encoding="utf-8") as f:
                 w = csv.writer(f)
@@ -465,9 +510,14 @@ def bitget_intraday_probe(*, symbols, timeframes, days=2, max_requests=6, apply=
             span_days = round((rows[-1]["timestamp_ms"] - rows[0]["timestamp_ms"]) / DAY_MS, 3)
             rep["files"].append({"file": f"{s}_{tf}_ohlcv.csv", "rows": len(rows),
                                  "days_covered": span_days})
+            rep["coverage"].append({"symbol": s, "timeframe": tf, "rows": len(rows),
+                                    "days_covered": span_days,
+                                    "first_ts": rows[0]["timestamp_ms"],
+                                    "last_ts": rows[-1]["timestamp_ms"]})
             rep["rows_written"][f"{s}_{tf}"] = len(rows)
-    rep["note"] = ("public 1m/5m is queryable-limited; a single page covers only a small "
-                   "recent window -> confirms PUBLIC_LIMITED, not enough for validation")
+    rep["requests_made"] = requests_made
+    rep["note"] = ("paged Bitget public candles backward within bounded windows; 1m/5m are "
+                   "queryable-limited (~1 month) -> PUBLIC_LIMITED. No trades/orderbook/OI/liq.")
     return rep
 
 

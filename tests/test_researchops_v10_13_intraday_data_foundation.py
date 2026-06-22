@@ -301,6 +301,59 @@ def test_staging_gate_hardening(tmp_path):
             "absolute_path_outside_repo", "unresolvable_absolute_path")
 
 
+# ==========================================================================
+# V10.13.2 - bounded backward pagination for the public intraday probe
+# ==========================================================================
+
+def _page(end_ms, n, bar_ms):
+    # Bitget candle row: [ts, open, high, low, close, vol_base, vol_quote]
+    data = []
+    for i in range(n):
+        ts = end_ms - (i + 1) * bar_ms
+        data.append([ts, "100", "101", "99", "100.5", "10", "1000"])
+    return {"data": data}
+
+
+def test_backward_pagination_stops_on_empty():
+    bar = I.TF_MS["1m"]
+    calls = {"n": 0}
+
+    def tx(path, params, **kw):
+        calls["n"] += 1
+        # one full page, then empty (queryable limit reached)
+        return _page(int(params["endTime"]), 1000 if calls["n"] == 1 else 0, bar)
+
+    rep = {"errors": []}
+    rows, used = I._fetch_series_backward(tx, "BTCUSDT", "1m", days=365,
+                                          request_budget=50, rate_per_s=0, rep=rep)
+    assert len(rows) == 1000           # deduped, sorted
+    assert rows == sorted(rows, key=lambda r: r["timestamp_ms"])
+    assert used <= 3                   # stopped quickly on consecutive empties
+    assert rep["errors"] == []
+
+
+def test_backward_pagination_respects_budget():
+    bar = I.TF_MS["5m"]
+
+    def tx(path, params, **kw):
+        return _page(int(params["endTime"]), 1000, bar)   # always full -> infinite without budget
+
+    rep = {"errors": []}
+    rows, used = I._fetch_series_backward(tx, "ETHUSDT", "5m", days=3650,
+                                          request_budget=4, rate_per_s=0, rep=rep)
+    assert used == 4                   # hard-stopped at the request budget
+    assert len(rows) > 0
+
+
+def test_probe_dry_run_lists_backward_plan():
+    rp = I.bitget_intraday_probe(symbols=["BTCUSDT", "ETHUSDT"], timeframes=["1m", "5m"],
+                                 days=365, max_requests=1000, apply=False)
+    assert rp["dry_run"] is True
+    assert rp["staging_dir"] == "" and rp["requests_made"] == 0
+    assert len(rp["planned_fetches"]) == 4
+    assert rp["final_recommendation"] == "NO LIVE"
+
+
 # canonical schemas expose the 5 required tables
 def test_canonical_schemas():
     sc = I.canonical_intraday_schemas()
