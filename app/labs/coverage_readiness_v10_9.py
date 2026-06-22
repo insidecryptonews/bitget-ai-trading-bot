@@ -19,6 +19,7 @@ candidate. FINAL_RECOMMENDATION: NO LIVE.
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 import math
 import os
@@ -53,6 +54,33 @@ def _ratio(actual: float, requested_days: float) -> float:
     if requested_days <= 0:
         return 0.0
     return round(min(2.0, actual / requested_days), 4)
+
+
+_FORBIDDEN_OUTPUT_SEGMENTS = ("raw", "backup", "backups", "vault", "vaults",
+                              "training_exports", "secret", "secrets", "credential",
+                              "credentials")
+_FORBIDDEN_OUTPUT_SUFFIXES = (".env", ".db", ".sqlite", ".sqlite3", ".zip",
+                              ".tar", ".gz", ".pem", ".key")
+
+
+def _safe_output_base(output_dir: str | None) -> str:
+    """Return a safe report base dir; fall back to OUTPUT_ROOT for anything
+    unsafe (raw/backup/vault/.env/db/zip/secret/traversal/percent/symlink)."""
+    base = output_dir or OUTPUT_ROOT
+    if not isinstance(base, str) or not base.strip() or "%" in base:
+        return OUTPUT_ROOT
+    raw = base.strip()
+    if ".." in raw.replace("\\", "/").split("/"):
+        return OUTPUT_ROOT
+    try:
+        real = os.path.realpath(raw).replace("\\", "/")
+    except Exception:
+        return OUTPUT_ROOT
+    segs = [s.lower() for s in real.split("/") if s]
+    for s in segs:
+        if s in _FORBIDDEN_OUTPUT_SEGMENTS or s.endswith(_FORBIDDEN_OUTPUT_SUFFIXES) or ".env" in s:
+            return OUTPUT_ROOT
+    return base
 
 
 def _read_run_report(staging_dir: str) -> dict[str, Any] | None:
@@ -328,8 +356,9 @@ def history_limits_probe(*, symbols: list[str], timeframes: list[str],
             "use 6H for the longest history; 4H only up to its real coverage",
             "for full 365d OHLCV+OI+liquidations, a verified external provider is needed"]
 
-    # write report (research-only safe dir)
-    base = output_dir or OUTPUT_ROOT
+    # write report (research-only safe dir; raw/backup/vault/.env/db blocked)
+    base = _safe_output_base(output_dir)
+    report["output_base_safe"] = base
     try:
         run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         run_dir = os.path.join(base, run_id)
@@ -410,8 +439,34 @@ def _slice_sample(sample_dir: str, window_days: int, out_dir: str) -> str:
     return out_dir
 
 
-def _cand_key(c: dict[str, Any]) -> str:
-    return f"{c['timeframe']}/{c['side']}/{c['entry_family']}/{c['exit_policy']}"
+_TIER_RANK = {lab.CAND_REJECTED: 0, lab.CAND_WEAK: 1, lab.CAND_RESEARCH_ONLY: 2}
+
+
+def _candidate_id(c: dict[str, Any], *, gap_policy: str, wf_mode: str,
+                  cost_bps: float, slippage_bps: float) -> str:
+    """Unique configuration id — INCLUDES params + cost + gap + WF so two
+    param variants never collapse into one bucket (V10.9.1 fix)."""
+    ph = hashlib.sha256(json.dumps(c.get("params", {}), sort_keys=True).encode()).hexdigest()[:10]
+    return (f"{c['timeframe']}/{c['side']}/{c['entry_family']}/{c['exit_policy']}"
+            f"/p{ph}/gp:{gap_policy}/wf:{wf_mode}/c{cost_bps}-{slippage_bps}")
+
+
+def _tf_available_days(sample_dir: str, symbols: list[str],
+                       timeframes: list[str]) -> dict[str, float]:
+    """Min available span (days) per timeframe across the requested symbols."""
+    out: dict[str, float] = {}
+    for tf in timeframes:
+        spans = []
+        for sym in symbols:
+            p = os.path.join(sample_dir, f"{sym}_{tf}_ohlcv.csv")
+            if not os.path.isfile(p):
+                continue
+            bars = lab.load_ohlcv(p)
+            if len(bars) > 1:
+                spans.append((bars[-1]["ts"] - bars[0]["ts"]) / DAY_MS)
+        if spans:
+            out[tf] = round(min(spans), 2)
+    return out
 
 
 def multi_window_validation(*, sample_dir: str, windows: list[int],
@@ -424,6 +479,8 @@ def multi_window_validation(*, sample_dir: str, windows: list[int],
                             max_grid_combos: int = 500, seed: int = 7,
                             data_classification: str = lab.CLS_INTERMEDIATE
                             ) -> dict[str, Any]:
+    windows = sorted({int(w) for w in windows if int(w) > 0})
+    timeframes = [t.lower() for t in timeframes]
     report: dict[str, Any] = {
         "tool_version": TOOL_VERSION, "sample_dir": sample_dir,
         "windows": windows, "walk_forward_mode": walk_forward_mode,
@@ -431,19 +488,58 @@ def multi_window_validation(*, sample_dir: str, windows: list[int],
         "edge_validated": False, "comparison_not_portfolio": True,
         "candidates_are_hypotheses_not_signals": True,
         "missing_oi_historical": True, "missing_liquidations": True,
-        "window_results": [], "multi_window_candidates": [],
+        "window_results": [], "window_coverage": [], "multi_window_candidates": [],
         "errors": [], "warnings": [], **_safety()}
     if not os.path.isdir(sample_dir):
         report["errors"].append("sample_dir_not_found")
         return report
 
+    # --- C. global cap from sample coverage: with this data the BEST attainable
+    # tier is WEAK (missing OI/liquidations, provider not verified). ---
+    sc = sample_coverage(sample_dir, expected_days=(max(windows) if windows else 365),
+                         provider_id="bitget_official")
+    missing_req = sc.get("required_types_missing", [])
+    meets = sc.get("requested_days_status") == "MEETS_REQUESTED_DAYS"
+    ok_for_top = (meets and sc.get("sample_ready") and not missing_req
+                  and sc.get("provider_verified") is True)
+    max_tier = lab.CAND_RESEARCH_ONLY if ok_for_top else lab.CAND_WEAK
+    report["max_candidate_quality_tier"] = max_tier
+    report["sample_requested_days_status"] = sc.get("requested_days_status")
+    report["sample_ready"] = sc.get("sample_ready")
+    report["provider_verified"] = False
+    if not ok_for_top:
+        report["warnings"].append("candidate_tier_capped_to_weak (requested-days/OI/liquidations/provider gaps)")
+
+    # --- B. per-timeframe coverage per window ---
+    tf_avail = _tf_available_days(sample_dir, symbols, timeframes)
+    report["timeframe_available_days"] = tf_avail
+    tf_valid_windows: dict[str, list[int]] = {}
+    for tf in timeframes:
+        avail = tf_avail.get(tf, 0.0)
+        tf_valid_windows[tf] = [w for w in windows if avail >= w * FULL_COVERAGE_RATIO]
+
     appear: dict[str, dict[str, Any]] = {}
     global_net_evs: list[float] = []
     tmp_root = tempfile.mkdtemp(prefix="v109_mw_")
     for w in windows:
+        valid_tfs = [tf for tf in timeframes if w in tf_valid_windows.get(tf, [])]
+        undercov = [tf for tf in timeframes if tf not in valid_tfs]
+        wstatus = ("WINDOW_OK" if not undercov else
+                   "WINDOW_UNDERCOVERED" if valid_tfs else "WINDOW_INSUFFICIENT")
+        for tf in undercov:
+            ratio = round((tf_avail.get(tf, 0.0) / w), 3) if w else 0.0
+            report["warnings"].append(f"window_timeframe_undercovered:{w}:{tf}:{ratio}")
+        report["window_coverage"].append({
+            "window_days": w, "valid_timeframes": valid_tfs,
+            "undercovered_timeframes": undercov, "window_coverage_status": wstatus})
+        if not valid_tfs:
+            report["window_results"].append({
+                "window_days": w, "skipped": True, "reason": "no_covered_timeframe",
+                "window_coverage_status": wstatus})
+            continue
         wdir = _slice_sample(sample_dir, int(w), os.path.join(tmp_root, f"w{w}"))
         rep = lab.run_trailing_exit_lab(
-            sample_dir=wdir, symbols=symbols, timeframes=timeframes, sides=sides,
+            sample_dir=wdir, symbols=symbols, timeframes=valid_tfs, sides=sides,
             entry_families=entry_families, exit_policies=exit_policies,
             cost_bps=cost_bps, slippage_bps=slippage_bps, min_trades=min_trades,
             walk_forward_mode=walk_forward_mode, gap_policy=gap_policy,
@@ -452,7 +548,9 @@ def multi_window_validation(*, sample_dir: str, windows: list[int],
         g = rep.get("metrics_by", {}).get("global", {})
         global_net_evs.append(g.get("net_EV", 0.0) or 0.0)
         report["window_results"].append({
-            "window_days": w, "trades_simulated": rep.get("trades_simulated"),
+            "window_days": w, "valid_timeframes": valid_tfs,
+            "window_coverage_status": wstatus,
+            "trades_simulated": rep.get("trades_simulated"),
             "n_research_candidates": rep.get("n_research_candidates"),
             "n_rejected": rep.get("n_rejected_candidates"),
             "global_net_EV": g.get("net_EV"),
@@ -460,33 +558,54 @@ def multi_window_validation(*, sample_dir: str, windows: list[int],
             "gap_adverse_count": g.get("gap_adverse_count"),
             "side_concentration_warning": rep.get("side_concentration_warning"),
             "false_discovery_risk": rep.get("false_discovery_risk")})
+        # --- A. per-window dedup: best net_EV per candidate_id; count window ONCE ---
+        best_in_window: dict[str, dict[str, Any]] = {}
         for c in rep.get("research_candidates", []):
-            k = _cand_key(c)
-            a = appear.setdefault(k, {"candidate_id": k, "windows_tested": 0,
-                                      "windows_passed": 0, "net_EV_by_window": {},
-                                      "PF_by_window": {}, "drawdown_by_window": {},
-                                      "gap_adverse_by_window": {}, "side": c["side"]})
+            cid = _candidate_id(c, gap_policy=gap_policy, wf_mode=walk_forward_mode,
+                                cost_bps=cost_bps, slippage_bps=slippage_bps)
+            cur = best_in_window.get(cid)
+            if cur is None or (c.get("net_EV") or -9) > (cur.get("net_EV") or -9):
+                best_in_window[cid] = c
+        for cid, c in best_in_window.items():
+            a = appear.setdefault(cid, {
+                "candidate_id": cid, "timeframe": c["timeframe"], "side": c["side"],
+                "entry_family": c["entry_family"], "exit_policy": c["exit_policy"],
+                "params": c.get("params"), "_passed_windows": set(),
+                "net_EV_by_window": {}, "PF_by_window": {}, "drawdown_by_window": {},
+                "gap_adverse_by_window": {}})
             a["net_EV_by_window"][str(w)] = c.get("net_EV")
             a["PF_by_window"][str(w)] = c.get("net_PF")
             a["drawdown_by_window"][str(w)] = c.get("max_drawdown")
             a["gap_adverse_by_window"][str(w)] = c.get("gap_adverse_count")
             if (c.get("net_EV") or 0) > 0:
-                a["windows_passed"] += 1
-    for k, a in appear.items():
-        a["windows_tested"] = len(windows)
-        a["pass_rate_by_window"] = round(a["windows_passed"] / max(1, len(windows)), 4)
-        # multi-window tier: needs >=2 windows with positive EV for the top tier
-        if a["windows_passed"] >= 2:
-            tier = (lab.CAND_RESEARCH_ONLY if data_classification == lab.CLS_LONG_READY
-                    else lab.CAND_WEAK)
-        elif a["windows_passed"] == 1:
-            tier = lab.CAND_WEAK
-        else:
-            tier = lab.CAND_REJECTED
-        a["final_tier"] = tier
+                a["_passed_windows"].add(w)   # set => never double counts a window
 
-    cands = sorted(appear.values(), key=lambda a: (a["windows_passed"],
-                   sum(v or 0 for v in a["net_EV_by_window"].values())), reverse=True)
+    for cid, a in appear.items():
+        tf = a["timeframe"]
+        a["windows_tested"] = len(tf_valid_windows.get(tf, []))
+        a["windows_passed"] = len(a.pop("_passed_windows"))
+        # hard invariant: passed can NEVER exceed tested
+        if a["windows_passed"] > a["windows_tested"]:
+            a["final_tier"] = lab.CAND_REJECTED
+            a["warning"] = "invalid_window_pass_count"
+            report["warnings"].append(f"invalid_window_pass_count:{cid}")
+            a["pass_rate_by_window"] = None
+            continue
+        a["pass_rate_by_window"] = round(
+            a["windows_passed"] / a["windows_tested"], 4) if a["windows_tested"] else 0.0
+        if a["windows_passed"] >= 2 and a["windows_tested"] >= 2:
+            base_tier = lab.CAND_RESEARCH_ONLY
+        elif a["windows_passed"] == 1:
+            base_tier = lab.CAND_WEAK
+        else:
+            base_tier = lab.CAND_REJECTED
+        # apply the global cap (min by tier rank)
+        a["final_tier"] = (base_tier if _TIER_RANK[base_tier] <= _TIER_RANK[max_tier]
+                           else max_tier)
+
+    cands = sorted(appear.values(), key=lambda a: (
+        _TIER_RANK.get(a["final_tier"], 0), a["windows_passed"],
+        sum(v or 0 for v in a["net_EV_by_window"].values())), reverse=True)
     report["multi_window_candidates"] = cands
     report["n_multi_window_candidates"] = sum(
         1 for a in cands if a["final_tier"] != lab.CAND_REJECTED)
@@ -505,10 +624,7 @@ def multi_window_validation(*, sample_dir: str, windows: list[int],
 
 
 def write_multi_window_reports(report: dict[str, Any], output_dir: str | None = None) -> str:
-    base = output_dir or OUTPUT_ROOT
-    norm = base.replace("\\", "/")
-    if any(s in norm.split("/") for s in ("raw", "backups", "vault", "vaults")) or "%" in norm:
-        base = OUTPUT_ROOT
+    base = _safe_output_base(output_dir)
     run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     run_dir = os.path.join(base, run_id, "multi_window")
     os.makedirs(run_dir, exist_ok=True)

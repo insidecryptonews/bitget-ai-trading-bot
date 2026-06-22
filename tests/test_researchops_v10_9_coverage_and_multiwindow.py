@@ -324,3 +324,95 @@ def test_outputs_never_flip_paper_live():
     for p in plans:
         assert p["paper_ready"] is False and p["live_ready"] is False
         assert p["can_send_real_orders"] is False
+
+
+# ==========================================================================
+# V10.9.1 — multi-window hotfix (candidate_id/dedup, coverage gate, caps,
+# history-limits args, path safety)
+# ==========================================================================
+
+def _mw_sample(sample_dir, symbols, fours_days=205, sixes_days=285):
+    for s in symbols:
+        _write_sample_ohlcv(sample_dir, s, "4h", fours_days)
+        _write_sample_ohlcv(sample_dir, s, "6h", sixes_days)
+
+
+def test_candidate_id_includes_params():
+    c1 = {"timeframe": "4h", "side": "LONG", "entry_family": "breakout_momentum",
+          "exit_policy": "atr_trailing", "params": {"atr_mult": 2.5}}
+    c2 = {**c1, "params": {"atr_mult": 3.5}}
+    id1 = C._candidate_id(c1, gap_policy="adverse_open", wf_mode="rolling", cost_bps=6, slippage_bps=4)
+    id2 = C._candidate_id(c2, gap_policy="adverse_open", wf_mode="rolling", cost_bps=6, slippage_bps=4)
+    assert id1 != id2   # different params => different candidate ids
+
+
+def test_windows_passed_never_exceeds_windows_tested(tmp_path):
+    sample = tmp_path / "s"
+    _mw_sample(sample, ["BTCUSDT", "ETHUSDT", "SOLUSDT"], 205, 285)
+    rep = C.multi_window_validation(
+        sample_dir=str(sample), windows=[90, 180, 270],
+        symbols=["BTCUSDT", "ETHUSDT", "SOLUSDT"], timeframes=["4h", "6h"],
+        sides=["LONG", "SHORT"],
+        entry_families=["breakout_momentum", "volatility_expansion"],
+        exit_policies=["atr_trailing", "fixed_tp_sl_time", "break_even_lock"],
+        min_trades=10, walk_forward_mode="rolling", max_grid_combos=200)
+    for a in rep["multi_window_candidates"]:
+        assert a["windows_passed"] <= a["windows_tested"], a
+        if a.get("pass_rate_by_window") is not None:
+            assert a["pass_rate_by_window"] <= 1.0
+    assert not any("invalid_window_pass_count" in w for w in rep["warnings"])
+
+
+def test_window_270_marks_4h_undercovered(tmp_path):
+    sample = tmp_path / "s"
+    _mw_sample(sample, ["BTCUSDT", "ETHUSDT"], 205, 285)   # 4h<270, 6h<270
+    rep = C.multi_window_validation(
+        sample_dir=str(sample), windows=[180, 270], symbols=["BTCUSDT", "ETHUSDT"],
+        timeframes=["4h", "6h"], sides=["LONG", "SHORT"],
+        entry_families=["breakout_momentum"], exit_policies=["atr_trailing"],
+        min_trades=10, max_grid_combos=80)
+    wc270 = [w for w in rep["window_coverage"] if w["window_days"] == 270][0]
+    assert "4h" in wc270["undercovered_timeframes"]
+    assert wc270["window_coverage_status"] in ("WINDOW_UNDERCOVERED", "WINDOW_INSUFFICIENT")
+    assert any(w.startswith("window_timeframe_undercovered:270:4h") for w in rep["warnings"])
+
+
+def test_intermediate_sample_caps_tier_to_weak(tmp_path):
+    sample = tmp_path / "s"
+    _mw_sample(sample, ["BTCUSDT", "ETHUSDT", "SOLUSDT"], 205, 285)
+    rep = C.multi_window_validation(
+        sample_dir=str(sample), windows=[60, 120], symbols=["BTCUSDT", "ETHUSDT", "SOLUSDT"],
+        timeframes=["6h"], sides=["LONG", "SHORT"],
+        entry_families=["breakout_momentum", "volatility_expansion"],
+        exit_policies=["atr_trailing", "fixed_tp_sl_time"], min_trades=10,
+        max_grid_combos=120)
+    assert rep["max_candidate_quality_tier"] == C.lab.CAND_WEAK
+    tiers = {a["final_tier"] for a in rep["multi_window_candidates"]}
+    assert C.lab.CAND_RESEARCH_ONLY not in tiers
+    assert tiers <= {C.lab.CAND_REJECTED, C.lab.CAND_WEAK}
+
+
+def test_safe_output_base_blocks_unsafe_paths(tmp_path):
+    assert C._safe_output_base(str(tmp_path / "external_data" / "raw")) == C.OUTPUT_ROOT
+    assert C._safe_output_base(str(tmp_path / "x" / ".." / "y")) == C.OUTPUT_ROOT
+    assert C._safe_output_base("reports/research/v10_9") == "reports/research/v10_9"
+    assert C._safe_output_base(str(tmp_path / "backups")) == C.OUTPUT_ROOT
+
+
+def test_history_limits_accepts_requested_days_dry_run(tmp_path):
+    r = C.history_limits_probe(symbols=["BTCUSDT"], timeframes=["4h", "6h"],
+                               requested_days=[60, 180, 365], apply=False,
+                               output_dir=str(tmp_path))
+    assert r["dry_run"] is True
+    assert r["requested_days_probed"] == [60, 180, 365]
+    assert r["written_path"] == ""
+
+
+def test_history_limits_apply_refuses_raw_output(tmp_path):
+    def fake(path, params, *, timeout=10.0):
+        return {"code": "00000", "data": []}
+    r = C.history_limits_probe(symbols=["BTCUSDT"], timeframes=["4h"], apply=True,
+                               transport=fake, output_dir=str(tmp_path / "external_data" / "raw"))
+    # unsafe output dir falls back to the canonical research root
+    assert "external_data/raw" not in r["written_path"].replace("\\", "/")
+    assert C.OUTPUT_ROOT.split("/")[-1] in r.get("output_base_safe", "")

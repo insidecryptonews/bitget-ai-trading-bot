@@ -4967,13 +4967,18 @@ class ResearchLab:
         return "\n".join(lines)
 
     def bitget_public_history_limits_v109_cli(self, *, symbols: str, timeframes: str,
+                                              requested_days: str = "",
                                               apply: bool = False,
+                                              max_requests: int = 12,
                                               output_dir: str = "") -> str:
         import json as _json
         from .labs.coverage_readiness_v10_9 import history_limits_probe
+        rdays = [int(d) for d in self._v107_csv_arg(requested_days) if str(d).strip().isdigit()] or None
         r = history_limits_probe(symbols=self._v107_csv_arg(symbols),
                                  timeframes=self._v107_csv_arg(timeframes),
-                                 apply=apply, output_dir=(output_dir or None))
+                                 requested_days=rdays, apply=apply,
+                                 max_requests=int(max_requests),
+                                 output_dir=(output_dir or None))
         lines = ["BITGET PUBLIC HISTORY LIMITS V10.9 START"]
         for k in ("dry_run", "symbols", "timeframes", "no_private_auth", "no_env",
                   "public_get_only", "provider_public_history_limit_detected",
@@ -6378,6 +6383,8 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--wf-anchored", default="false", help="V10.8.1 anchored rolling WF (growing train) true/false.")
     parser.add_argument("--gap-policy", default="adverse_open", help="V10.8.1 gap fill policy: adverse_open (conservative).")
     parser.add_argument("--windows", default="90,180,270", help="V10.9 multi-window validation windows in days (comma-separated).")
+    parser.add_argument("--requested-days", default="60,180,365", help="V10.9.1 comma-separated requested-day probes for bitget-public-history-limits-v109.")
+    parser.add_argument("--max-requests", type=int, default=12, help="V10.9.1 max bounded GET requests per symbol/timeframe in history-limits probe.")
     return parser
 
 
@@ -7229,7 +7236,9 @@ def main() -> None:
     elif args.command == "bitget-public-history-limits-v109":
         print(lab.bitget_public_history_limits_v109_cli(
             symbols=args.symbols, timeframes=args.timeframes,
-            apply=bool(args.apply) and not bool(args.dry_run), output_dir=args.output_dir))
+            requested_days=args.requested_days,
+            apply=bool(args.apply) and not bool(args.dry_run),
+            max_requests=args.max_requests, output_dir=args.output_dir))
     elif args.command == "multi-window-trailing-validation-v109":
         print(lab.multi_window_trailing_validation_v109_cli(
             sample_dir=args.sample_dir, windows=args.windows, symbols=args.symbols,
