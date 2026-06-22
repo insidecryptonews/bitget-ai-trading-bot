@@ -5580,6 +5580,147 @@ class ResearchLab:
                   "final_recommendation: NO LIVE", "INTELLIGENT SHADOW REPORT V10.12 END"]
         return "\n".join(lines)
 
+    # ------------------------------------------------------------------
+    # ResearchOps V10.13 - Intraday Data Foundation + Provider Readiness.
+    # ------------------------------------------------------------------
+    def intraday_data_readiness_v1013_cli(self, *, sample_dir, symbols="", output_dir="") -> str:
+        import json as _json
+        from .labs import intraday_data_foundation_v10_13 as I
+        syms = self._v107_csv_arg(symbols) or None
+        r = I.intraday_data_readiness(sample_dir, syms)
+        matrix = I.provider_readiness_matrix()
+        bridge = I.intraday_to_shadow_readiness(sample_dir, syms)
+        run_dir = ""
+        if not r.get("errors"):
+            run_dir = I.write_v1013_reports(r, matrix, bridge=bridge, output_dir=(output_dir or None))
+        lines = ["INTRADAY DATA READINESS V10.13 START", f"sample_dir: {sample_dir}",
+                 f"errors: {r.get('errors')}", f"status: {r.get('status')}",
+                 f"scalping_data_status: {r.get('scalping_data_status')}",
+                 f"intraday_timeframes_present: {r.get('intraday_timeframes_present')}",
+                 f"fallback_only: {r.get('fallback_only')}",
+                 f"n_intraday_symbols: {r.get('n_intraday_symbols')}",
+                 f"min_intraday_days: {r.get('min_intraday_days')}",
+                 f"has_funding: {r.get('has_funding')}", f"has_trades: {r.get('has_trades')}",
+                 f"has_orderbook: {r.get('has_orderbook')}",
+                 f"has_oi_historical: {r.get('has_oi_historical')}",
+                 f"has_liquidations: {r.get('has_liquidations')}",
+                 f"has_real_spread: {r.get('has_real_spread')}",
+                 f"provider_verified: {r.get('provider_verified')}",
+                 f"quality_issues_count: {len(r.get('quality_issues', []))}",
+                 f"bridge_status: {bridge.get('bridge_status')}",
+                 f"output_run_dir: {run_dir or 'NONE'}"]
+        lines += ["research_only: true", "shadow_only: true", "paper_ready: false",
+                  "live_ready: false", "can_send_real_orders: false",
+                  "paper_filter_enabled: false", "paper_candidate_future: false",
+                  "final_recommendation: NO LIVE", "INTRADAY DATA READINESS V10.13 END"]
+        return "\n".join(lines)
+
+    def provider_readiness_matrix_v1013_cli(self, *, output_dir="") -> str:
+        import json as _json
+        from .labs import intraday_data_foundation_v10_13 as I
+        m = I.provider_readiness_matrix()
+        lines = ["PROVIDER READINESS MATRIX V10.13 START",
+                 f"no_paid_download: {m['no_paid_download']}",
+                 f"no_paid_activation: {m['no_paid_activation']}",
+                 f"no_api_key_usage: {m['no_api_key_usage']}",
+                 f"verified_count: {m['verified_count']}"]
+        for p in m["providers"]:
+            lines.append(f"- {p['name']} [{p['state']}] key={p['requires_api_key']} "
+                         f"1m5m={p['ohlcv_1m_5m']} trades={p['trades_history']} "
+                         f"orderbook_l2={p['orderbook_l2']} oi={p['oi_historical']} "
+                         f"liq={p['liquidations']} -> {p['recommendation']}")
+        if output_dir:
+            r = {"status": "MATRIX_ONLY", "coverage_rows": [], "quality_issues": []}
+            run = I.write_v1013_reports({**r, **I._safety()}, m, output_dir=output_dir)
+            lines.append(f"output_run_dir: {run}")
+        lines += ["research_only: true", "shadow_only: true", "paper_ready: false",
+                  "live_ready: false", "can_send_real_orders: false",
+                  "final_recommendation: NO LIVE", "PROVIDER READINESS MATRIX V10.13 END"]
+        return "\n".join(lines)
+
+    def bitget_intraday_plan_v1013_cli(self, *, symbols="", timeframes="", days=7) -> str:
+        import json as _json
+        from .labs import intraday_data_foundation_v10_13 as I
+        c = self._v107_csv_arg
+        p = I.bitget_intraday_plan(c(symbols) or None, c(timeframes) or None, days=days)
+        lines = ["BITGET INTRADAY PLAN V10.13 START", f"endpoint: {p['endpoint']}",
+                 f"method: {p['method']}", f"auth: {p['auth']}",
+                 f"public_only: {p['public_only']}", f"no_network: {p['no_network']}",
+                 f"symbols: {p['symbols']}", f"timeframes: {p['timeframes']}",
+                 f"planned_fetches: {p['planned_fetches']}",
+                 f"coverage_notes: {_json.dumps(p['coverage_notes'])}",
+                 f"honest_expectation: {p['honest_expectation']}",
+                 f"staging_target: {p['staging_target']}"]
+        lines += ["research_only: true", "shadow_only: true", "paper_ready: false",
+                  "live_ready: false", "can_send_real_orders: false",
+                  "final_recommendation: NO LIVE", "BITGET INTRADAY PLAN V10.13 END"]
+        return "\n".join(lines)
+
+    def bitget_intraday_probe_v1013_cli(self, *, symbols, timeframes="1m,5m", days=2,
+                                        max_requests=6, apply=False) -> str:
+        from .labs import intraday_data_foundation_v10_13 as I
+        c = self._v107_csv_arg
+        r = I.bitget_intraday_probe(symbols=c(symbols), timeframes=c(timeframes) or ["1m", "5m"],
+                                    days=days, max_requests=max_requests, apply=apply)
+        lines = ["BITGET INTRADAY PROBE V10.13 START", f"dry_run: {str(r['dry_run']).lower()}",
+                 f"symbols: {r['symbols']}", f"timeframes: {r['timeframes']}",
+                 f"public_state: {r['public_state']}", f"errors: {r.get('errors')}",
+                 f"warnings: {r.get('warnings')}", f"staging_dir: {r.get('staging_dir') or 'NONE'}",
+                 f"files: {r.get('files')}", f"planned_fetches: {r.get('planned_fetches')}",
+                 f"note: {r.get('note')}"]
+        lines += ["public_only: true", "auth: none", "research_only: true", "shadow_only: true",
+                  "paper_ready: false", "live_ready: false", "can_send_real_orders: false",
+                  "final_recommendation: NO LIVE", "BITGET INTRADAY PROBE V10.13 END"]
+        return "\n".join(lines)
+
+    def bitget_intraday_audit_v1013_cli(self, *, staging_dir, symbols="") -> str:
+        from .labs import intraday_data_foundation_v10_13 as I
+        syms = self._v107_csv_arg(symbols) or None
+        r = I.bitget_intraday_audit(staging_dir if staging_dir else "")
+        lines = ["BITGET INTRADAY AUDIT V10.13 START", f"audit_of: {r.get('audit_of')}",
+                 f"errors: {r.get('errors')}", f"status: {r.get('status')}",
+                 f"intraday_timeframes_present: {r.get('intraday_timeframes_present')}",
+                 f"n_intraday_symbols: {r.get('n_intraday_symbols')}",
+                 f"min_intraday_days: {r.get('min_intraday_days')}",
+                 f"quality_issues_count: {len(r.get('quality_issues', []))}"]
+        lines += ["research_only: true", "shadow_only: true", "paper_ready: false",
+                  "live_ready: false", "can_send_real_orders: false",
+                  "final_recommendation: NO LIVE", "BITGET INTRADAY AUDIT V10.13 END"]
+        return "\n".join(lines)
+
+    def intraday_sample_build_v1013_cli(self, *, staging_dir, output_dir="", apply=False) -> str:
+        from .labs import intraday_data_foundation_v10_13 as I
+        r = I.intraday_sample_build(staging_dir if staging_dir else "",
+                                    output_dir=(output_dir or None), apply=apply)
+        lines = ["INTRADAY SAMPLE BUILD V10.13 START", f"staging_dir: {staging_dir}",
+                 f"dry_run: {str(r.get('dry_run')).lower()}", f"errors: {r.get('errors')}",
+                 f"status: {r.get('status')}", f"intraday_status: {r.get('intraday_status')}",
+                 f"dataset_hash: {r.get('dataset_hash')}",
+                 f"n_series: {r.get('manifest', {}).get('n_series')}",
+                 f"manifest_dir: {r.get('manifest_dir', 'NONE (dry-run)')}"]
+        lines += ["wrote_raw: false", "wrote_db: false", "research_only: true",
+                  "shadow_only: true", "paper_ready: false", "live_ready: false",
+                  "can_send_real_orders: false", "final_recommendation: NO LIVE",
+                  "INTRADAY SAMPLE BUILD V10.13 END"]
+        return "\n".join(lines)
+
+    def intraday_to_shadow_readiness_v1013_cli(self, *, sample_dir, symbols="") -> str:
+        from .labs import intraday_data_foundation_v10_13 as I
+        syms = self._v107_csv_arg(symbols) or None
+        r = I.intraday_to_shadow_readiness(sample_dir, syms)
+        lines = ["INTRADAY TO SHADOW READINESS V10.13 START", f"sample_dir: {sample_dir}",
+                 f"intraday_status: {r.get('intraday_status')}",
+                 f"bridge_status: {r.get('bridge_status')}",
+                 f"can_feed_v1010_micro_scalp: {str(r.get('can_feed_v1010_micro_scalp')).lower()}",
+                 f"can_feed_v1011_pattern_memory: {str(r.get('can_feed_v1011_pattern_memory')).lower()}",
+                 f"can_feed_v1012_intelligent_shadow: {str(r.get('can_feed_v1012_intelligent_shadow')).lower()}",
+                 f"missing_microstructure: {str(r.get('missing_microstructure')).lower()}",
+                 "ready_for_paper: false", "ready_for_live: false"]
+        lines += ["research_only: true", "shadow_only: true", "paper_ready: false",
+                  "live_ready: false", "can_send_real_orders: false",
+                  "final_recommendation: NO LIVE", "INTRADAY TO SHADOW READINESS V10.13 END"]
+        return "\n".join(lines)
+
     def trader_dashboard_contract_v105_cli(self) -> str:
         from .labs.trader_dashboard_v104 import (
             DISABLED_CONTROLS,
@@ -6755,6 +6896,13 @@ def build_argument_parser() -> argparse.ArgumentParser:
             "intelligent-shadow-scalper-v1012",
             "intelligent-shadow-plan-v1012",
             "intelligent-shadow-report-v1012",
+            "intraday-data-readiness-v1013",
+            "provider-readiness-matrix-v1013",
+            "bitget-intraday-plan-v1013",
+            "bitget-intraday-probe-v1013",
+            "bitget-intraday-audit-v1013",
+            "intraday-sample-build-v1013",
+            "intraday-to-shadow-readiness-v1013",
             "ohlcv-replay-loader-smoke-test",
             "ohlcv-replay-loader-audit",
             "duplicate-module-audit-smoke-test",
@@ -7854,6 +8002,27 @@ def main() -> None:
             print(lab.intelligent_shadow_scalper_v1012_cli(**_kw))
         else:
             print(lab.real_time_shadow_runner_v1012_cli(**_kw))
+    elif args.command == "intraday-data-readiness-v1013":
+        print(lab.intraday_data_readiness_v1013_cli(
+            sample_dir=args.sample_dir, symbols=args.symbols, output_dir=args.output_dir))
+    elif args.command == "provider-readiness-matrix-v1013":
+        print(lab.provider_readiness_matrix_v1013_cli(output_dir=args.output_dir))
+    elif args.command == "bitget-intraday-plan-v1013":
+        print(lab.bitget_intraday_plan_v1013_cli(
+            symbols=args.symbols, timeframes=args.timeframes, days=args.days))
+    elif args.command == "bitget-intraday-probe-v1013":
+        print(lab.bitget_intraday_probe_v1013_cli(
+            symbols=args.symbols, timeframes=(args.timeframes or "1m,5m"),
+            days=args.days, max_requests=args.max_requests, apply=args.apply))
+    elif args.command == "bitget-intraday-audit-v1013":
+        print(lab.bitget_intraday_audit_v1013_cli(
+            staging_dir=args.staging_dir, symbols=args.symbols))
+    elif args.command == "intraday-sample-build-v1013":
+        print(lab.intraday_sample_build_v1013_cli(
+            staging_dir=args.staging_dir, output_dir=args.output_dir, apply=args.apply))
+    elif args.command == "intraday-to-shadow-readiness-v1013":
+        print(lab.intraday_to_shadow_readiness_v1013_cli(
+            sample_dir=args.sample_dir, symbols=args.symbols))
     elif args.command == "ohlcv-replay-loader-smoke-test":
         print(lab.ohlcv_replay_loader_smoke_test())
     elif args.command == "ohlcv-replay-loader-audit":
