@@ -5387,6 +5387,188 @@ class ResearchLab:
                   "final_recommendation: NO LIVE", "PATTERN MEMORY REPORT V10.11 END"]
         return "\n".join(lines)
 
+    # ------------------------------------------------------------------
+    # ResearchOps V10.12 - Quality-Gated Intelligent Shadow Scalper.
+    # ------------------------------------------------------------------
+    def _v1012_thresholds(self, **kw):
+        from .labs.high_quality_shadow_v10_12 import QualityThresholds
+        return QualityThresholds(**{k: v for k, v in kw.items() if v is not None})
+
+    def _v1012_mode(self, mode, offline_replay, latest_snapshot, forward_shadow):
+        if forward_shadow:
+            return "forward-shadow"
+        if latest_snapshot:
+            return "latest-snapshot"
+        if offline_replay:
+            return "offline-replay"
+        return (str(mode).strip().lower() or "offline-replay")
+
+    def intraday_data_readiness_v1012_cli(self, *, sample_dir, symbols="") -> str:
+        import json as _json
+        from .labs.high_quality_shadow_v10_12 import intraday_data_readiness
+        syms = self._v107_csv_arg(symbols) or None
+        r = intraday_data_readiness(sample_dir, syms)
+        lines = ["INTRADAY DATA READINESS V10.12 START"]
+        for k in ("sample_dir", "status", "has_1m", "has_3m", "has_5m",
+                  "intraday_symbols", "intraday_days_by_tf", "missing_orderbook",
+                  "missing_trades", "missing_oi_historical", "missing_liquidations",
+                  "scalping_ready", "microstructure_ready", "scalping_not_ready_reason"):
+            if k in r:
+                lines.append(f"{k}: {r.get(k)}")
+        lines.append("errors: " + _json.dumps(r.get("errors", [])))
+        lines += ["research_only: true", "shadow_only: true", "paper_ready: false",
+                  "live_ready: false", "can_send_real_orders: false",
+                  "paper_filter_enabled: false", "final_recommendation: NO LIVE",
+                  "INTRADAY DATA READINESS V10.12 END"]
+        return "\n".join(lines)
+
+    def _v1012_run(self, *, sample_dir, symbols, timeframes, sides, strategy_families,
+                   mode, cost_bps, slippage_bps, spread_bps, latency_bars, gap_policy,
+                   max_candidates_per_run, min_quality_score, min_similar_cases,
+                   min_net_ev, min_profit_factor, min_closed_green_rate):
+        from .labs.high_quality_shadow_v10_12 import run_intelligent_shadow
+        c = self._v107_csv_arg
+        th = self._v1012_thresholds(
+            min_quality_score=min_quality_score, min_similar_cases=min_similar_cases,
+            min_net_ev=min_net_ev, min_profit_factor=min_profit_factor,
+            min_closed_green_rate=min_closed_green_rate)
+        return run_intelligent_shadow(
+            sample_dir=sample_dir, symbols=c(symbols), timeframes=c(timeframes),
+            sides=c(sides), strategy_families=c(strategy_families), mode=mode,
+            cost_bps=cost_bps, slippage_bps=slippage_bps, spread_bps=spread_bps,
+            latency_bars=latency_bars, gap_policy=gap_policy,
+            max_candidates_per_run=max_candidates_per_run, thresholds=th)
+
+    def _v1012_summary_lines(self, rep, *, header, footer):
+        m = rep.get("metrics", {})
+        pc = rep.get("paper_candidate", {})
+        lines = [header, f"sample_dir: {rep.get('sample_dir')}", f"mode: {rep.get('mode')}",
+                 f"errors: {rep.get('errors')}",
+                 f"intraday_status: {rep.get('intraday_status')}",
+                 f"scalping_conclusive: {str(rep.get('scalping_conclusive', False)).lower()}",
+                 f"false_discovery_risk: {rep.get('false_discovery_risk')}",
+                 f"pattern_memory_cases: {rep.get('pattern_memory_cases')}",
+                 f"raw_setups: {rep.get('raw_setups')}",
+                 f"passed_quality_gate: {rep.get('passed_quality_gate')}",
+                 f"passed_pattern_memory: {rep.get('passed_pattern_memory')}",
+                 f"n_shadow_trades: {rep.get('n_shadow_trades')}",
+                 f"n_rejected: {rep.get('n_rejected')}",
+                 f"rejection_breakdown: {rep.get('rejection_breakdown')}",
+                 f"shadow_net_EV: {m.get('net_EV')}",
+                 f"shadow_net_PF: {m.get('net_PF')}",
+                 f"shadow_closed_green_rate: {m.get('closed_green_rate')}",
+                 f"paper_candidate_future: {str(pc.get('paper_candidate_future', False)).lower()}"]
+        if rep.get("warnings"):
+            lines.append("warnings: " + ",".join(rep["warnings"]))
+        lines += ["orderbook_real: false", "missing_oi_historical: true",
+                  "missing_liquidations: true", "research_only: true", "shadow_only: true",
+                  "edge_validated: false", "paper_ready: false", "live_ready: false",
+                  "can_send_real_orders: false", "paper_filter_enabled: false",
+                  "approved_for_paper: false", "approved_for_live: false",
+                  "final_recommendation: NO LIVE", footer]
+        return lines
+
+    def intelligent_shadow_scalper_v1012_cli(self, *, sample_dir, symbols, timeframes,
+                                             sides, strategy_families, mode="offline-replay",
+                                             offline_replay=False, latest_snapshot=False,
+                                             forward_shadow=False, cost_bps=6.0,
+                                             slippage_bps=4.0, spread_bps=2.0, latency_bars=1,
+                                             gap_policy="adverse_open",
+                                             max_candidates_per_run=400, min_quality_score=0.55,
+                                             min_similar_cases=30, min_net_ev=0.0,
+                                             min_profit_factor=1.2, min_closed_green_rate=0.5,
+                                             output_dir="") -> str:
+        from .labs.high_quality_shadow_v10_12 import write_v1012_reports
+        resolved = self._v1012_mode(mode, offline_replay, latest_snapshot, forward_shadow)
+        rep = self._v1012_run(
+            sample_dir=sample_dir, symbols=symbols, timeframes=timeframes, sides=sides,
+            strategy_families=strategy_families, mode=resolved, cost_bps=cost_bps,
+            slippage_bps=slippage_bps, spread_bps=spread_bps, latency_bars=latency_bars,
+            gap_policy=gap_policy, max_candidates_per_run=max_candidates_per_run,
+            min_quality_score=min_quality_score, min_similar_cases=min_similar_cases,
+            min_net_ev=min_net_ev, min_profit_factor=min_profit_factor,
+            min_closed_green_rate=min_closed_green_rate)
+        run_dir = ""
+        if not rep.get("errors"):
+            run_dir = write_v1012_reports(rep, output_dir=(output_dir or None))
+        lines = self._v1012_summary_lines(
+            rep, header="INTELLIGENT SHADOW SCALPER V10.12 START",
+            footer="INTELLIGENT SHADOW SCALPER V10.12 END")
+        lines.insert(-1, f"output_run_dir: {run_dir or 'NONE'}")
+        return "\n".join(lines)
+
+    def real_time_shadow_runner_v1012_cli(self, *, sample_dir, symbols, timeframes,
+                                          sides, strategy_families, mode="offline-replay",
+                                          offline_replay=False, latest_snapshot=False,
+                                          forward_shadow=False, cost_bps=6.0,
+                                          slippage_bps=4.0, spread_bps=2.0, latency_bars=1,
+                                          gap_policy="adverse_open",
+                                          max_candidates_per_run=400, min_quality_score=0.55,
+                                          min_similar_cases=30, min_net_ev=0.0,
+                                          min_profit_factor=1.2, min_closed_green_rate=0.5,
+                                          output_dir="") -> str:
+        from .labs.high_quality_shadow_v10_12 import write_shadow_journal
+        resolved = self._v1012_mode(mode, offline_replay, latest_snapshot, forward_shadow)
+        rep = self._v1012_run(
+            sample_dir=sample_dir, symbols=symbols, timeframes=timeframes, sides=sides,
+            strategy_families=strategy_families, mode=resolved, cost_bps=cost_bps,
+            slippage_bps=slippage_bps, spread_bps=spread_bps, latency_bars=latency_bars,
+            gap_policy=gap_policy, max_candidates_per_run=max_candidates_per_run,
+            min_quality_score=min_quality_score, min_similar_cases=min_similar_cases,
+            min_net_ev=min_net_ev, min_profit_factor=min_profit_factor,
+            min_closed_green_rate=min_closed_green_rate)
+        journal_dir = ""
+        if not rep.get("errors"):
+            journal_dir = write_shadow_journal(rep, output_dir=(output_dir or None))
+        lines = self._v1012_summary_lines(
+            rep, header="REAL-TIME SHADOW RUNNER V10.12 START",
+            footer="REAL-TIME SHADOW RUNNER V10.12 END")
+        if not rep.get("scalping_conclusive"):
+            lines.insert(1, "INTRADAY_DATA_REQUIRED: true (4h/6h is a NON-CONCLUSIVE demo, scalping NOT validated)")
+        lines.insert(-1, f"journal_dir: {journal_dir or 'NONE'}")
+        lines.insert(-1, "uses_private_exchange: false")
+        return "\n".join(lines)
+
+    def intelligent_shadow_plan_v1012_cli(self) -> str:
+        import json as _json
+        from .labs.high_quality_shadow_v10_12 import intelligent_shadow_plan
+        p = intelligent_shadow_plan()
+        lines = ["INTELLIGENT SHADOW PLAN V10.12 START", "objective: " + p["objective"]]
+        lines.append("flow: " + " -> ".join(p["flow"]))
+        lines.append("quality_gate_decisions: " + ",".join(p["quality_gate_decisions"]))
+        lines.append("modes: " + ",".join(p["modes"]))
+        lines.append("intraday_states: " + ",".join(p["intraday_states"]))
+        lines.append("never: " + ",".join(p["never"]))
+        lines.append("plan_json: " + _json.dumps(p, default=str))
+        lines += ["research_only: true", "shadow_only: true", "paper_ready: false",
+                  "live_ready: false", "can_send_real_orders: false",
+                  "paper_filter_enabled: false", "final_recommendation: NO LIVE",
+                  "INTELLIGENT SHADOW PLAN V10.12 END"]
+        return "\n".join(lines)
+
+    def intelligent_shadow_report_v1012_cli(self, *, output_dir="") -> str:
+        from .labs.high_quality_shadow_v10_12 import latest_v1012_summary
+        s = latest_v1012_summary(output_dir or None)
+        lines = ["INTELLIGENT SHADOW REPORT V10.12 START"]
+        if s is None:
+            lines.append("status: NO_RUN_FOUND (run intelligent-shadow-scalper-v1012 first)")
+        else:
+            for k in ("sample_dir", "mode", "intraday_status", "scalping_conclusive",
+                      "false_discovery_risk", "raw_setups", "passed_quality_gate",
+                      "passed_pattern_memory", "n_shadow_trades", "n_rejected",
+                      "rejection_breakdown"):
+                lines.append(f"{k}: {s.get(k)}")
+            lines.append(f"shadow_net_EV: {s.get('metrics', {}).get('net_EV')}")
+            lines.append(f"shadow_net_PF: {s.get('metrics', {}).get('net_PF')}")
+            lines.append(f"shadow_closed_green_rate: {s.get('metrics', {}).get('closed_green_rate')}")
+            lines.append("approved_for_paper: false")
+            lines.append("approved_for_live: false")
+            lines.append("paper_candidate_future: false")
+        lines += ["research_only: true", "shadow_only: true", "paper_ready: false",
+                  "live_ready: false", "can_send_real_orders: false",
+                  "final_recommendation: NO LIVE", "INTELLIGENT SHADOW REPORT V10.12 END"]
+        return "\n".join(lines)
+
     def trader_dashboard_contract_v105_cli(self) -> str:
         from .labs.trader_dashboard_v104 import (
             DISABLED_CONTROLS,
@@ -6557,6 +6739,11 @@ def build_argument_parser() -> argparse.ArgumentParser:
             "pattern-memory-shadow-gate-v1011",
             "micro-scalp-pattern-shadow-v1011",
             "pattern-memory-report-v1011",
+            "intraday-data-readiness-v1012",
+            "real-time-shadow-runner-v1012",
+            "intelligent-shadow-scalper-v1012",
+            "intelligent-shadow-plan-v1012",
+            "intelligent-shadow-report-v1012",
             "ohlcv-replay-loader-smoke-test",
             "ohlcv-replay-loader-audit",
             "duplicate-module-audit-smoke-test",
@@ -6717,6 +6904,16 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--leverage-sim", default="1,2,3,5,10", help="V10.10 simulated leverage grid (research only; 20x DANGEROUS).")
     parser.add_argument("--spread-bps", type=float, default=2.0, help="V10.10 spread cost bps in shadow execution sim.")
     parser.add_argument("--latency-bars", type=int, default=1, help="V10.10 fill latency in bars (>=1, no lookahead).")
+    parser.add_argument("--min-quality-score", type=float, default=0.55, help="V10.12 quality pre-gate floor (0..1).")
+    parser.add_argument("--min-similar-cases", type=int, default=30, help="V10.12 minimum similar pattern-memory cases.")
+    parser.add_argument("--min-net-ev", type=float, default=0.0, help="V10.12 minimum required net EV after costs.")
+    parser.add_argument("--min-profit-factor", type=float, default=1.2, help="V10.12 minimum required profit factor.")
+    parser.add_argument("--min-closed-green-rate", type=float, default=0.5, help="V10.12 minimum closed-green rate.")
+    parser.add_argument("--max-candidates-per-run", type=int, default=400, help="V10.12 cap on evaluated candidate setups.")
+    parser.add_argument("--mode", default="offline-replay", help="V10.12 shadow runner mode: offline-replay/latest-snapshot/forward-shadow.")
+    parser.add_argument("--offline-replay", action="store_true", help="V10.12 shadow runner: replay history bar-by-bar.")
+    parser.add_argument("--latest-snapshot", action="store_true", help="V10.12 shadow runner: evaluate only the latest point.")
+    parser.add_argument("--forward-shadow", action="store_true", help="V10.12 shadow runner: forward shadow (no orders, no live, no paper).")
     return parser
 
 
@@ -7623,6 +7820,29 @@ def main() -> None:
             latency_bars=args.latency_bars, output_dir=args.output_dir))
     elif args.command == "pattern-memory-report-v1011":
         print(lab.pattern_memory_report_v1011_cli(output_dir=args.output_dir))
+    elif args.command == "intraday-data-readiness-v1012":
+        print(lab.intraday_data_readiness_v1012_cli(
+            sample_dir=args.sample_dir, symbols=args.symbols))
+    elif args.command == "intelligent-shadow-plan-v1012":
+        print(lab.intelligent_shadow_plan_v1012_cli())
+    elif args.command == "intelligent-shadow-report-v1012":
+        print(lab.intelligent_shadow_report_v1012_cli(output_dir=args.output_dir))
+    elif args.command in ("intelligent-shadow-scalper-v1012", "real-time-shadow-runner-v1012"):
+        _kw = dict(
+            sample_dir=args.sample_dir, symbols=args.symbols, timeframes=args.timeframes,
+            sides=args.sides, strategy_families=args.strategy_families, mode=args.mode,
+            offline_replay=args.offline_replay, latest_snapshot=args.latest_snapshot,
+            forward_shadow=args.forward_shadow, cost_bps=args.cost_bps,
+            slippage_bps=args.slippage_bps, spread_bps=args.spread_bps,
+            latency_bars=args.latency_bars, gap_policy=args.gap_policy,
+            max_candidates_per_run=args.max_candidates_per_run,
+            min_quality_score=args.min_quality_score, min_similar_cases=args.min_similar_cases,
+            min_net_ev=args.min_net_ev, min_profit_factor=args.min_profit_factor,
+            min_closed_green_rate=args.min_closed_green_rate, output_dir=args.output_dir)
+        if args.command == "intelligent-shadow-scalper-v1012":
+            print(lab.intelligent_shadow_scalper_v1012_cli(**_kw))
+        else:
+            print(lab.real_time_shadow_runner_v1012_cli(**_kw))
     elif args.command == "ohlcv-replay-loader-smoke-test":
         print(lab.ohlcv_replay_loader_smoke_test())
     elif args.command == "ohlcv-replay-loader-audit":
