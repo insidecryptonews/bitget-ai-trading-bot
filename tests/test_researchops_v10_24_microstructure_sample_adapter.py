@@ -7,6 +7,7 @@ staging-only normalization, CLI isolation, and the NO-LIVE invariants.
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 from pathlib import Path
@@ -44,6 +45,9 @@ def test_plan_no_network_no_writes_no_live():
     assert p["reads_only_local_files"] is True
     assert p["paper_ready"] is False and p["live_ready"] is False
     assert p["can_send_real_orders"] is False and p["final_recommendation"] == "NO LIVE"
+    txt = json.dumps(p)
+    for banned in ("PAPER_READY", "LIVE_READY", "APPROVED_FOR_LIVE", "APPROVED_FOR_PAPER"):
+        assert banned not in txt
 
 
 # ---- empty / detection ----------------------------------------------------
@@ -88,6 +92,8 @@ def test_orderbook_valid_spread_computed(tmp_path):
     rep = M.validate_sample(str(tmp_path))
     ob = rep["by_type"]["orderbook"]
     assert ob["valid"] is True and ob["spread_median"] is not None and ob["depth_levels"] >= 1
+    assert ob["l1_imbalance_median"] == 0
+    assert ob["l5_imbalance_median"] == 0
 
 
 def test_liquidations_schema_detected(tmp_path):
@@ -117,18 +123,146 @@ def test_full_sample_research_ready(tmp_path):
            [[B + int(i * 40 * DAY / 40), "BTCUSDT", 49995, 50005] for i in range(40)])
     _write(tmp_path / "open_interest.csv", ["timestamp", "symbol", "open_interest"],
            [[B + i * DAY, "BTCUSDT", 1000 + i] for i in range(40)])
+    _write(tmp_path / "liquidations.csv", ["timestamp", "symbol", "side", "price", "size", "notional"],
+           [[B + i * DAY, "BTCUSDT", "sell" if i % 2 else "buy", 50000, 2, 100000]
+            for i in range(40)])
     rep = M.validate_sample(str(tmp_path))
     cls = rep["classification"]
     assert cls["verdict"] == M.C_READY
+    assert cls["active_gaps"] == []
+    assert cls["can_research_microstructure"] is True
+    assert cls["funding_optional_reason"]
     assert cls["future_research_ready_if_sample_passes"] is True
     assert cls["future_labs_ready"]["aggressive_flow_imbalance"] is True
+
+
+def test_ready_not_emitted_when_liquidations_missing(tmp_path):
+    h, r = _trades(side=True, span_days=40)
+    _write(tmp_path / "trades.csv", h, r)
+    _write(tmp_path / "orderbook_l2.csv",
+           ["timestamp", "symbol", "bid_price_1", "ask_price_1"],
+           [[B + i * DAY, "BTCUSDT", 49995, 50005] for i in range(40)])
+    _write(tmp_path / "open_interest.csv", ["timestamp", "symbol", "open_interest"],
+           [[B + i * DAY, "BTCUSDT", 1000 + i] for i in range(40)])
+    rep = M.validate_sample(str(tmp_path))
+    assert rep["classification"]["verdict"] != M.C_READY
+    assert M.C_NEEDS_LIQ in rep["classification"]["active_gaps"]
+    assert rep["classification"]["can_research_microstructure"] is False
+
+
+def test_trade_zero_price_or_negative_size_invalidates(tmp_path):
+    _write(tmp_path / "trades.csv",
+           ["timestamp", "symbol", "price", "size", "aggressor_side"],
+           [[B + i * DAY, "BTCUSDT", 50000, 1, "buy"] for i in range(38)]
+           + [[B + 38 * DAY, "BTCUSDT", 0, 1, "sell"],
+              [B + 39 * DAY, "BTCUSDT", 50000, -1, "sell"]])
+    rep = M.validate_sample(str(tmp_path))
+    tr = rep["by_type"]["trades"]
+    assert tr["valid"] is False
+    assert "trades:trade_price_not_strictly_positive" in rep["classification"]["critical_errors"]
+    assert "trades:trade_size_not_strictly_positive" in rep["classification"]["critical_errors"]
+    assert rep["classification"]["verdict"] == M.C_INVALID
+
+
+def test_liquidations_without_notional_or_size_invalidates(tmp_path):
+    _write(tmp_path / "liquidations.csv",
+           ["timestamp", "symbol", "side", "price", "size", "notional"],
+           [[B + i * DAY, "BTCUSDT", "sell", 50000, "", ""] for i in range(40)])
+    rep = M.validate_sample(str(tmp_path))
+    liq = rep["by_type"]["liquidations"]
+    assert liq["valid"] is False
+    assert liq["notional_calculable"] is False
+    assert "liquidations:liquidation_size_not_strictly_positive" in rep["classification"]["critical_errors"]
+
+
+def test_liquidations_calculates_notional_when_price_size_present(tmp_path):
+    _write(tmp_path / "liquidations.csv",
+           ["timestamp", "symbol", "side", "price", "size"],
+           [[B + i * DAY, "BTCUSDT", "sell", 50000, 2] for i in range(40)])
+    rep = M.validate_sample(str(tmp_path))
+    liq = rep["by_type"]["liquidations"]
+    assert liq["valid"] is True
+    assert liq["notional_calculable"] is True
+
+
+def test_liquidations_invalid_side_invalidates(tmp_path):
+    _write(tmp_path / "liquidations.csv",
+           ["timestamp", "symbol", "side", "price", "size", "notional"],
+           [[B + i * DAY, "BTCUSDT", "hold", 50000, 2, 100000] for i in range(40)])
+    rep = M.validate_sample(str(tmp_path))
+    assert rep["by_type"]["liquidations"]["valid"] is False
+    assert "liquidations:liquidation_side_invalid" in rep["classification"]["critical_errors"]
+
+
+def test_oi_and_funding_numeric_range_fail_closed(tmp_path):
+    _write(tmp_path / "open_interest.csv", ["timestamp", "symbol", "open_interest"],
+           [[B + i * DAY, "BTCUSDT", -1 if i % 2 else "bad"] for i in range(40)])
+    _write(tmp_path / "funding.csv", ["timestamp", "symbol", "funding_rate"],
+           [[B + i * DAY, "BTCUSDT", 0.5 if i % 2 else "bad"] for i in range(40)])
+    rep = M.validate_sample(str(tmp_path))
+    assert rep["by_type"]["oi"]["valid"] is False
+    assert rep["by_type"]["funding"]["valid"] is False
+    assert "oi:oi_negative_or_non_numeric" in rep["classification"]["critical_errors"]
+    assert "funding:funding_rate_invalid_or_absurd" in rep["classification"]["critical_errors"]
+
+
+def test_future_and_non_monotonic_timestamps_invalid(tmp_path):
+    future = 4_000_000_000_000
+    _write(tmp_path / "trades.csv",
+           ["timestamp", "symbol", "price", "size", "aggressor_side"],
+           [[B + DAY, "BTCUSDT", 50000, 1, "buy"],
+            [B, "BTCUSDT", 50001, 1, "sell"],
+            [future, "BTCUSDT", 50002, 1, "buy"]])
+    rep = M.validate_sample(str(tmp_path))
+    assert rep["by_type"]["trades"]["valid"] is False
+    errs = rep["classification"]["critical_errors"]
+    assert "trades:future_timestamps" in errs
+    assert "trades:non_monotonic_timestamps" in errs
+
+
+def test_huge_timestamp_gap_blocks_ready(tmp_path):
+    ts = [B, B + DAY, B + 2 * DAY, B + 40 * DAY]
+    _write(tmp_path / "trades.csv", ["timestamp", "symbol", "price", "size", "aggressor_side"],
+           [[t, "BTCUSDT", 50000, 1, "buy"] for t in ts])
+    _write(tmp_path / "orderbook_l2.csv", ["timestamp", "symbol", "bid_price_1", "ask_price_1"],
+           [[t, "BTCUSDT", 49995, 50005] for t in ts])
+    _write(tmp_path / "open_interest.csv", ["timestamp", "symbol", "open_interest"],
+           [[t, "BTCUSDT", 1000] for t in ts])
+    _write(tmp_path / "liquidations.csv", ["timestamp", "symbol", "side", "price", "size", "notional"],
+           [[t, "BTCUSDT", "sell", 50000, 1, 50000] for t in ts])
+    rep = M.validate_sample(str(tmp_path))
+    assert rep["classification"]["verdict"] != M.C_READY
+    assert M.C_NEEDS_HISTORY in rep["classification"]["active_gaps"]
+
+
+def test_duplicate_timestamps_severe_invalidates(tmp_path):
+    _write(tmp_path / "trades.csv",
+           ["timestamp", "symbol", "price", "size", "aggressor_side"],
+           [[B, "BTCUSDT", 50000 + i, 1, "buy"] for i in range(40)])
+    rep = M.validate_sample(str(tmp_path))
+    tr = rep["by_type"]["trades"]
+    assert tr["duplicate_count"] == 39
+    assert tr["valid"] is False
+    assert "trades:duplicate_timestamps" in rep["classification"]["critical_errors"]
+
+
+def test_orderbook_negative_bid_or_ask_invalid(tmp_path):
+    h = ["timestamp", "symbol", "bid_price_1", "bid_size_1", "ask_price_1", "ask_size_1"]
+    rows = [[B + i * DAY, "BTCUSDT", -1, 1, 50005, 1] for i in range(40)]
+    _write(tmp_path / "orderbook_l2.csv", h, rows)
+    rep = M.validate_sample(str(tmp_path))
+    ob = rep["by_type"]["orderbook"]
+    assert ob["valid"] is False
+    assert ob["invalid_price_rows"] == 40
+    assert "orderbook:orderbook_bid_ask_not_strictly_positive" in rep["classification"]["critical_errors"]
 
 
 # ---- path safety ----------------------------------------------------------
 
 def test_unsafe_sample_dir_blocked():
     for bad in ("external_data/raw/x", "secrets/.env", "a/../b", "x/db/y",
-                "backups/z", "vault/z", "x/credentials/y"):
+                "backups/z", "vault/z", "x/credentials/y", "prod/sample",
+                "production/sample", "live/sample", "private/sample"):
         with pytest.raises(ValueError):
             M.assert_safe_sample_dir(bad)
 
@@ -160,11 +294,34 @@ def test_normalization_writes_only_staging_marker(tmp_path):
             pass
 
 
-def test_safe_normalized_dir_requires_marker():
+def test_safe_normalized_dir_requires_exact_staging_marker(tmp_path):
     M.safe_normalized_dir("run1", f"external_data/staging/{M.STAGING_MARKER}")
-    for bad in ("external_data/staging/other", "external_data/raw", "vault"):
+    for bad in (f"external_data/staging/{M.STAGING_MARKER}/nested",
+                "external_data/staging/other", "external_data/raw", "vault"):
         with pytest.raises(ValueError):
             M.safe_normalized_dir("run1", bad)
+    with pytest.raises(ValueError):
+        M.safe_normalized_dir("../run1", f"external_data/staging/{M.STAGING_MARKER}")
+    fake_marker = tmp_path / M.STAGING_MARKER
+    fake_marker.mkdir()
+    with pytest.raises(ValueError):
+        M.safe_normalized_dir("run1", str(fake_marker))
+
+
+def test_symlinked_sample_file_blocked(tmp_path):
+    target = tmp_path / "outside.csv"
+    _write(target, ["timestamp", "symbol", "price", "size", "aggressor_side"],
+           [[B, "BTCUSDT", 50000, 1, "buy"]])
+    sample = tmp_path / "sample"
+    sample.mkdir()
+    link = sample / "trades.csv"
+    try:
+        link.symlink_to(target)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlink creation unavailable on this platform")
+    rep = M.validate_sample(str(sample))
+    assert rep["classification"]["verdict"] == M.C_NO_SAMPLE
+    assert any("unsafe_sample_file" in e for e in rep["errors"])
 
 
 # ---- CLI isolation (no config/.env/DB) ------------------------------------
@@ -190,6 +347,10 @@ def test_cli_commands_allowlisted_and_isolated(monkeypatch, capsys):
                         lambda *a, **k: (_ for _ in ()).throw(AssertionError("no db")))
     _run_main(["microstructure-sample-plan-v1024"])
     assert "MICROSTRUCTURE SAMPLE PLAN V10.24" in capsys.readouterr().out
+    _run_main(["microstructure-sample-validate-v1024", "--sample-dir", "external_data/staging/missing-v1024"])
+    out = capsys.readouterr().out
+    assert "MICROSTRUCTURE SAMPLE VALIDATE V10.24" in out
+    assert "NO LIVE" in out
     _run_main(["microstructure-sample-report-v1024", "--output-dir", "reports/research/v10_24"])
     assert "MICROSTRUCTURE SAMPLE REPORT V10.24" in capsys.readouterr().out
 

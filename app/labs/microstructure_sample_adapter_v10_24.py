@@ -20,6 +20,7 @@ import os
 import re
 import statistics as st
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from . import FINAL_RECOMMENDATION_NO_LIVE
@@ -43,9 +44,11 @@ C_NEEDS_AGGRESSOR = "NEEDS_AGGRESSOR_SIDE"
 C_NEEDS_LIQ = "NEEDS_LIQUIDATIONS"
 C_NEEDS_OI = "NEEDS_OI"
 
-_FORBIDDEN_SEG = ("raw", "backup", "backups", "vault", "vaults", "training_exports",
-                  "secret", "secrets", "credential", "credentials", "db", "database",
-                  ".git", "node_modules", "codex_result.md", "code_result.md")
+_FORBIDDEN_SEG = ("raw", "backup", "backups", "vault", "vaults", "prod",
+                  "production", "live", "real", "private", "training_exports",
+                  "secret", "secrets", "credential", "credentials", "db",
+                  "database", ".git", "node_modules", "codex_result.md",
+                  "code_result.md")
 _FORBIDDEN_SUF = (".env", ".db", ".sqlite", ".sqlite3", ".pem", ".key")
 
 _TS_FIELDS = ("timestamp", "ts", "exchange_timestamp", "time", "datetime")
@@ -70,30 +73,72 @@ def _now_stamp() -> str:
 # Path safety
 # --------------------------------------------------------------------------
 
+def _repo_root() -> Path:
+    return Path(__file__).resolve().parents[2]
+
+
+def _resolved(path: str | os.PathLike[str], *, relative_to_repo: bool = False) -> Path:
+    p = Path(path)
+    if relative_to_repo and not p.is_absolute():
+        p = _repo_root() / p
+    return p.resolve(strict=False)
+
+
+def _is_relative_to(path: Path, parent: Path) -> bool:
+    try:
+        path.relative_to(parent)
+        return True
+    except ValueError:
+        return False
+
+
+def _path_segments(path: str | os.PathLike[str]) -> list[str]:
+    return [p.lower() for p in Path(path).parts if p not in ("", os.sep, ".")]
+
+
+def _assert_no_forbidden_path(path: str | os.PathLike[str], what: str) -> None:
+    segs = _path_segments(path)
+    if ".." in segs:
+        raise ValueError(f"{what} traversal blocked")
+    for seg in segs:
+        if seg in _FORBIDDEN_SEG or seg.endswith(_FORBIDDEN_SUF) or ".env" in seg:
+            raise ValueError(f"forbidden {what} segment: {seg}")
+
+
 def assert_safe_sample_dir(path: str) -> str:
-    """Reject reading from dangerous locations (.env/db/raw/backups/vault/traversal)."""
+    """Reject reading from dangerous locations (.env/db/raw/prod/backups/vault)."""
     if not isinstance(path, str) or not path.strip():
         raise ValueError("empty sample dir")
-    norm = path.replace("\\", "/")
-    segs = [s for s in norm.split("/") if s and s not in (".",)]
-    if ".." in segs:
-        raise ValueError("path traversal blocked")
-    for s in (x.lower() for x in segs):
-        if s in _FORBIDDEN_SEG or s.endswith(_FORBIDDEN_SUF) or ".env" in s:
-            raise ValueError(f"forbidden sample segment: {s}")
+    _assert_no_forbidden_path(path, "sample")
+    resolved = _resolved(path)
+    _assert_no_forbidden_path(resolved, "sample")
+    if Path(path).exists() and Path(path).is_symlink():
+        raise ValueError("sample dir symlink blocked")
     return path
+
+
+def assert_safe_sample_file(sample_dir: str, file_path: str) -> None:
+    base = _resolved(sample_dir)
+    original = Path(file_path)
+    resolved = _resolved(file_path)
+    _assert_no_forbidden_path(original, "sample file")
+    _assert_no_forbidden_path(resolved, "sample file")
+    if original.exists() and original.is_symlink():
+        raise ValueError("sample file symlink blocked")
+    if not _is_relative_to(resolved, base):
+        raise ValueError("sample file escapes sample dir")
 
 
 def safe_normalized_dir(run_id: str, base: str | None = None) -> str:
     """Normalized outputs may ONLY be written under the v10_24 staging marker."""
-    root = base or DEFAULT_SAMPLE_DIR
-    segs = [s for s in root.replace("\\", "/").split("/") if s]
-    if ".." in segs or STAGING_MARKER not in segs:
-        raise ValueError("normalization must live under the v10_24 staging marker")
-    for s in (x.lower() for x in segs):
-        if s in _FORBIDDEN_SEG or s.endswith(_FORBIDDEN_SUF):
-            raise ValueError(f"forbidden normalized segment: {s}")
-    return os.path.join(root, run_id, "normalized").replace("\\", "/")
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+", str(run_id or "")):
+        raise ValueError("unsafe normalization run_id")
+    expected_root = _resolved(DEFAULT_SAMPLE_DIR, relative_to_repo=True)
+    root = _resolved(base or DEFAULT_SAMPLE_DIR, relative_to_repo=True)
+    _assert_no_forbidden_path(root, "normalized")
+    if root != expected_root:
+        raise ValueError("normalization must live under the exact v10_24 staging marker")
+    return str(root.joinpath(run_id, "normalized")).replace("\\", "/")
 
 
 def _safe_output_base(output_dir: str | None) -> str:
@@ -200,18 +245,86 @@ def detect_type(fname: str, header: list[str]) -> str:
     return "unknown"
 
 
-def _coverage(ts_list: list[int]) -> dict[str, Any]:
+def _parse_float(v: Any) -> float | None:
+    try:
+        n = float(str(v).strip())
+    except (TypeError, ValueError):
+        return None
+    if math.isnan(n) or math.isinf(n):
+        return None
+    return n
+
+
+def _parse_positive(v: Any) -> float | None:
+    n = _parse_float(v)
+    return n if n is not None and n > 0 else None
+
+
+def _parse_nonnegative(v: Any) -> float | None:
+    n = _parse_float(v)
+    return n if n is not None and n >= 0 else None
+
+
+def _median(vals: list[float]) -> float | None:
+    return round(st.median(vals), 6) if vals else None
+
+
+def _p95(vals: list[float]) -> float | None:
+    if len(vals) <= 5:
+        return None
+    idx = min(len(vals) - 1, int((len(vals) - 1) * 0.95))
+    return round(sorted(vals)[idx], 6)
+
+
+def _coverage(ts_list: list[int], invalid_ts: int = 0) -> dict[str, Any]:
     if not ts_list:
         return {"rows": 0, "coverage_days": 0.0, "first_ts": None, "last_ts": None,
-                "monotonic": True, "duplicates": 0, "future_ts": 0}
+                "monotonic": True, "duplicates": 0, "duplicate_count": 0,
+                "future_ts": 0, "future_ts_count": 0, "invalid_ts_count": invalid_ts,
+                "median_gap_seconds": None, "max_gap_seconds": None,
+                "gap_count": 0, "expected_interval_seconds": None}
     s = sorted(ts_list)
+    gaps = [(s[i + 1] - s[i]) / 1000 for i in range(len(s) - 1) if s[i + 1] > s[i]]
+    expected = st.median(gaps) if gaps else None
+    gap_threshold = max((expected or 0) * 10, 3600) if expected else None
+    gap_count = sum(1 for g in gaps if gap_threshold and g > gap_threshold)
     now_ms = int(datetime.now(timezone.utc).timestamp() * 1000) + DAY_MS
+    duplicates = len(ts_list) - len(set(ts_list))
+    future = sum(1 for t in s if t > now_ms)
     return {"rows": len(ts_list),
             "coverage_days": round((s[-1] - s[0]) / DAY_MS, 2),
             "first_ts": s[0], "last_ts": s[-1],
             "monotonic": all(ts_list[i] <= ts_list[i + 1] for i in range(len(ts_list) - 1)),
-            "duplicates": len(ts_list) - len(set(ts_list)),
-            "future_ts": sum(1 for t in s if t > now_ms)}
+            "duplicates": duplicates, "duplicate_count": duplicates,
+            "future_ts": future, "future_ts_count": future,
+            "invalid_ts_count": invalid_ts,
+            "median_gap_seconds": round(st.median(gaps), 3) if gaps else None,
+            "max_gap_seconds": round(max(gaps), 3) if gaps else None,
+            "gap_count": gap_count,
+            "expected_interval_seconds": round(expected, 3) if expected else None}
+
+
+def _duplicate_limit(cov: dict[str, Any]) -> int:
+    rows = int(cov.get("rows") or 0)
+    return max(1, int(rows * 0.01))
+
+
+def _quality_flags(
+    cov: dict[str, Any], *, require_no_gaps: bool = False, warning_mode: bool = False
+) -> list[str]:
+    flags: list[str] = []
+    if cov.get("invalid_ts_count"):
+        flags.append("invalid_timestamps")
+    if cov.get("future_ts_count"):
+        flags.append("future_timestamps")
+    if cov.get("monotonic") is False:
+        flags.append("non_monotonic_timestamps")
+    duplicate_count = int(cov.get("duplicate_count") or 0)
+    if duplicate_count and (warning_mode or duplicate_count > _duplicate_limit(cov)):
+        flags.append("duplicate_timestamps")
+    if require_no_gaps and cov.get("gap_count"):
+        flags.append("timestamp_gaps")
+    return flags
 
 
 # --------------------------------------------------------------------------
@@ -220,137 +333,317 @@ def _coverage(ts_list: list[int]) -> dict[str, Any]:
 
 def validate_trades(rows: list[dict[str, str]]) -> dict[str, Any]:
     ts, prices, sizes, sides, syms = [], [], [], [], set()
+    invalid_ts = missing_price = nonpositive_price = 0
+    missing_size = nonpositive_size = missing_side = invalid_side = 0
     for r in rows:
         t = _to_ms(_first(r, _TS_FIELDS))
-        try:
-            p = float(_first(r, ("price",)) or "nan")
-            sz = float(_first(r, _SIZE_FIELDS) or "nan")
-        except (TypeError, ValueError):
-            p = sz = float("nan")
         if t is not None:
             ts.append(t)
-        if not math.isnan(p):
+        else:
+            invalid_ts += 1
+        p_raw = _first(r, ("price",))
+        p = _parse_positive(p_raw)
+        if p is not None:
             prices.append(p)
-        if not math.isnan(sz):
+        elif p_raw is None:
+            missing_price += 1
+        else:
+            nonpositive_price += 1
+        sz_raw = _first(r, _SIZE_FIELDS)
+        sz = _parse_positive(sz_raw)
+        if sz is not None:
             sizes.append(sz)
-        sd = _norm_side(_first(r, _SIDE_FIELDS))
+        elif sz_raw is None:
+            missing_size += 1
+        else:
+            nonpositive_size += 1
+        side_raw = _first(r, _SIDE_FIELDS)
+        sd = _norm_side(side_raw)
         if sd:
             sides.append(sd)
+        elif side_raw is None:
+            missing_side += 1
+        else:
+            invalid_side += 1
         sym = _first(r, ("symbol", "instrument", "pair"))
         if sym:
             syms.add(str(sym))
-    cov = _coverage(ts)
-    has_aggr = len(sides) >= max(1, int(0.5 * len(rows)))
+    cov = _coverage(ts, invalid_ts)
+    has_aggr = bool(rows) and len(sides) == len(rows)
     buys = sides.count("buy")
     sells = sides.count("sell")
-    valid = bool(rows) and bool(prices) and all(p > 0 for p in prices[:5000]) and bool(sizes)
+    critical = _quality_flags(cov)
+    if missing_price or nonpositive_price:
+        critical.append("trade_price_not_strictly_positive")
+    if missing_size or nonpositive_size:
+        critical.append("trade_size_not_strictly_positive")
+    valid = bool(rows) and not critical and len(prices) == len(rows) and len(sizes) == len(rows) and has_aggr
     return {"type": "trades", "valid": valid, "has_aggressor_side": has_aggr,
             "symbols": sorted(syms), "coverage": cov,
             "buy_sell_imbalance": round((buys - sells) / (buys + sells), 4) if (buys + sells) else None,
             "trades_per_min": round(len(ts) / max(1.0, cov["coverage_days"] * 1440), 3) if cov["coverage_days"] else None,
-            "price_positive": all(p > 0 for p in prices[:5000]), "size_positive": all(s > 0 for s in sizes[:5000])}
+            "price_positive": missing_price == 0 and nonpositive_price == 0,
+            "size_positive": missing_size == 0 and nonpositive_size == 0,
+            "side_available": missing_side == 0,
+            "side_valid": missing_side == 0 and invalid_side == 0,
+            "timestamp_valid": invalid_ts == 0 and cov.get("future_ts_count") == 0,
+            "duplicate_count": cov.get("duplicate_count", 0),
+            "monotonic": cov.get("monotonic", True),
+            "future_ts_count": cov.get("future_ts_count", 0),
+            "missing_price_count": missing_price,
+            "nonpositive_price_count": nonpositive_price,
+            "missing_size_count": missing_size,
+            "nonpositive_size_count": nonpositive_size,
+            "missing_side_count": missing_side,
+            "invalid_side_count": invalid_side,
+            "critical_errors": critical,
+            "warnings": _quality_flags(cov, require_no_gaps=True, warning_mode=True)}
 
 
 def validate_orderbook(rows: list[dict[str, str]]) -> dict[str, Any]:
     ts, spreads, crossed, depth_levels = [], [], 0, 0
+    invalid_ts = invalid_price = invalid_size = 0
+    l1_imbalance: list[float] = []
+    l5_imbalance: list[float] = []
     syms = set()
     for r in rows:
         low = {k.lower(): v for k, v in r.items()}
         t = _to_ms(_first(r, _TS_FIELDS))
         if t is not None:
             ts.append(t)
+        else:
+            invalid_ts += 1
         sym = _first(r, ("symbol", "instrument", "pair"))
         if sym:
             syms.add(str(sym))
         bid = ask = None
+        bids: list[tuple[float, float | None]] = []
+        asks: list[tuple[float, float | None]] = []
         if "bids" in low and "asks" in low:               # nested json string
             try:
-                bids = json.loads(low["bids"]); asks = json.loads(low["asks"])
-                bid = float(bids[0][0]); ask = float(asks[0][0])
-                depth_levels = max(depth_levels, min(len(bids), len(asks)))
+                raw_bids = json.loads(low["bids"])
+                raw_asks = json.loads(low["asks"])
+                for level in raw_bids[:20]:
+                    is_level = isinstance(level, (list, tuple))
+                    price = _parse_positive(level[0] if is_level and level else None)
+                    size_raw = level[1] if is_level and len(level) > 1 else None
+                    size = _parse_positive(size_raw)
+                    if size_raw is not None and size is None:
+                        invalid_size += 1
+                    if price is not None:
+                        bids.append((price, size))
+                for level in raw_asks[:20]:
+                    is_level = isinstance(level, (list, tuple))
+                    price = _parse_positive(level[0] if is_level and level else None)
+                    size_raw = level[1] if is_level and len(level) > 1 else None
+                    size = _parse_positive(size_raw)
+                    if size_raw is not None and size is None:
+                        invalid_size += 1
+                    if price is not None:
+                        asks.append((price, size))
             except Exception:
                 pass
         else:                                              # flat bid_price_1 / ask_price_1
-            try:
-                bid = float(low.get("bid_price_1"))
-                ask = float(low.get("ask_price_1"))
-            except (TypeError, ValueError):
-                bid = ask = None
-            lv = sum(1 for k in low if k.startswith("bid_price"))
-            depth_levels = max(depth_levels, lv)
+            levels = sorted(
+                int(m.group(1)) for k in low for m in [re.match(r"bid_price_(\d+)$", k)] if m
+            )
+            for level in levels[:20]:
+                bid_p = _parse_positive(low.get(f"bid_price_{level}"))
+                ask_p = _parse_positive(low.get(f"ask_price_{level}"))
+                bid_s_raw = low.get(f"bid_size_{level}") or low.get(f"bid_qty_{level}")
+                ask_s_raw = low.get(f"ask_size_{level}") or low.get(f"ask_qty_{level}")
+                bid_s = _parse_positive(bid_s_raw)
+                ask_s = _parse_positive(ask_s_raw)
+                if bid_s_raw not in (None, "") and bid_s is None:
+                    invalid_size += 1
+                if ask_s_raw not in (None, "") and ask_s is None:
+                    invalid_size += 1
+                if bid_p is not None:
+                    bids.append((bid_p, bid_s))
+                if ask_p is not None:
+                    asks.append((ask_p, ask_s))
+        if bids and asks:
+            bid, ask = bids[0][0], asks[0][0]
+            depth_levels = max(depth_levels, min(len(bids), len(asks)))
         if bid is not None and ask is not None and bid > 0 and ask > 0:
             if bid >= ask:
                 crossed += 1
             else:
                 spreads.append((ask - bid) / ((ask + bid) / 2))
-    cov = _coverage(ts)
-    valid = bool(rows) and bool(spreads) and crossed == 0
+            if bids[0][1] is not None and asks[0][1] is not None:
+                denom = (bids[0][1] or 0) + (asks[0][1] or 0)
+                if denom > 0:
+                    l1_imbalance.append(((bids[0][1] or 0) - (asks[0][1] or 0)) / denom)
+            bid_sum = sum(sz for _, sz in bids[:5] if sz is not None)
+            ask_sum = sum(sz for _, sz in asks[:5] if sz is not None)
+            if bid_sum + ask_sum > 0:
+                l5_imbalance.append((bid_sum - ask_sum) / (bid_sum + ask_sum))
+        else:
+            invalid_price += 1
+    cov = _coverage(ts, invalid_ts)
+    critical = _quality_flags(cov)
+    if invalid_price:
+        critical.append("orderbook_bid_ask_not_strictly_positive")
+    if crossed:
+        critical.append("crossed_orderbook")
+    if invalid_size:
+        critical.append("orderbook_size_not_strictly_positive")
+    valid = bool(rows) and bool(spreads) and not critical
     return {"type": "orderbook", "valid": valid, "symbols": sorted(syms), "coverage": cov,
             "depth_levels": depth_levels, "crossed_book_rows": crossed,
-            "spread_median": round(st.median(spreads), 6) if spreads else None,
-            "spread_p95": round(sorted(spreads)[int(len(spreads) * 0.95)], 6) if len(spreads) > 5 else None}
+            "spread_median": _median(spreads),
+            "spread_p95": _p95(spreads),
+            "l1_imbalance_median": _median(l1_imbalance),
+            "l5_imbalance_median": _median(l5_imbalance),
+            "invalid_price_rows": invalid_price,
+            "invalid_size_rows": invalid_size,
+            "critical_errors": critical,
+            "warnings": _quality_flags(cov, require_no_gaps=True, warning_mode=True)}
 
 
 def validate_oi(rows: list[dict[str, str]]) -> dict[str, Any]:
     ts, vals, syms = [], 0, set()
+    invalid_ts = missing_value = nonpositive_value = missing_symbol = 0
     for r in rows:
         t = _to_ms(_first(r, _TS_FIELDS))
         if t is not None:
             ts.append(t)
-        if _first(r, _OI_FIELDS) is not None:
+        else:
+            invalid_ts += 1
+        raw = _first(r, _OI_FIELDS)
+        val = _parse_nonnegative(raw)
+        if val is not None:
             vals += 1
+        elif raw is None:
+            missing_value += 1
+        else:
+            nonpositive_value += 1
         sym = _first(r, ("symbol", "instrument", "pair"))
         if sym:
             syms.add(str(sym))
-    cov = _coverage(ts)
-    missing = round(1 - vals / len(rows), 4) if rows else 1.0
-    return {"type": "oi", "valid": bool(rows) and vals > 0, "symbols": sorted(syms),
-            "coverage": cov, "missing_ratio": missing}
+        else:
+            missing_symbol += 1
+    cov = _coverage(ts, invalid_ts)
+    missing = round((missing_value + nonpositive_value) / len(rows), 4) if rows else 1.0
+    critical = _quality_flags(cov)
+    if missing_value or nonpositive_value:
+        critical.append("oi_negative_or_non_numeric")
+    if missing_symbol:
+        critical.append("oi_symbol_missing")
+    return {"type": "oi", "valid": bool(rows) and not critical and vals == len(rows),
+            "symbols": sorted(syms), "coverage": cov, "missing_ratio": missing,
+            "missing_symbol_count": missing_symbol,
+            "critical_errors": critical,
+            "warnings": _quality_flags(cov, require_no_gaps=True, warning_mode=True)}
 
 
 def validate_funding(rows: list[dict[str, str]]) -> dict[str, Any]:
     ts, vals, syms = [], 0, set()
+    invalid_ts = missing_value = invalid_value = missing_symbol = 0
     for r in rows:
         t = _to_ms(_first(r, _TS_FIELDS))
         if t is not None:
             ts.append(t)
+        else:
+            invalid_ts += 1
         low = {k.lower(): v for k, v in r.items()}
-        if str(low.get("funding_rate", "")).strip() != "":
+        raw = low.get("funding_rate")
+        val = _parse_float(raw)
+        if val is not None and abs(val) <= 0.05:
             vals += 1
+        elif raw is None or str(raw).strip() == "":
+            missing_value += 1
+        else:
+            invalid_value += 1
         sym = _first(r, ("symbol", "instrument", "pair"))
         if sym:
             syms.add(str(sym))
-    cov = _coverage(ts)
-    return {"type": "funding", "valid": bool(rows) and vals > 0, "symbols": sorted(syms),
-            "coverage": cov, "missing_ratio": round(1 - vals / len(rows), 4) if rows else 1.0}
+        else:
+            missing_symbol += 1
+    cov = _coverage(ts, invalid_ts)
+    critical = _quality_flags(cov)
+    if missing_value or invalid_value:
+        critical.append("funding_rate_invalid_or_absurd")
+    if missing_symbol:
+        critical.append("funding_symbol_missing")
+    return {"type": "funding", "valid": bool(rows) and not critical and vals == len(rows),
+            "symbols": sorted(syms), "coverage": cov,
+            "missing_ratio": round((missing_value + invalid_value) / len(rows), 4) if rows else 1.0,
+            "missing_symbol_count": missing_symbol,
+            "critical_errors": critical,
+            "warnings": _quality_flags(cov, require_no_gaps=True, warning_mode=True)}
 
 
 def validate_liquidations(rows: list[dict[str, str]]) -> dict[str, Any]:
     ts, sides, notional_ok, syms = [], [], 0, set()
+    invalid_ts = missing_side = invalid_side = 0
+    missing_price = nonpositive_price = missing_size = nonpositive_size = 0
+    missing_notional = nonpositive_notional = missing_symbol = 0
     for r in rows:
         t = _to_ms(_first(r, _TS_FIELDS))
         if t is not None:
             ts.append(t)
-        sd = _norm_side(_first(r, _SIDE_FIELDS))
+        else:
+            invalid_ts += 1
+        side_raw = _first(r, _SIDE_FIELDS)
+        sd = _norm_side(side_raw)
         if sd:
             sides.append(sd)
+        elif side_raw is None:
+            missing_side += 1
+        else:
+            invalid_side += 1
         low = {k.lower(): v for k, v in r.items()}
-        try:
-            if str(low.get("notional", "")).strip() != "":
-                notional_ok += 1
+        p_raw = _first(r, ("price",))
+        sz_raw = _first(r, _SIZE_FIELDS)
+        p = _parse_positive(p_raw)
+        sz = _parse_positive(sz_raw)
+        if p is None:
+            if p_raw is None:
+                missing_price += 1
             else:
-                p = float(_first(r, ("price",)) or "nan")
-                sz = float(_first(r, _SIZE_FIELDS) or "nan")
-                if not math.isnan(p) and not math.isnan(sz):
-                    notional_ok += 1
-        except (TypeError, ValueError):
-            pass
+                nonpositive_price += 1
+        if sz is None:
+            if sz_raw is None:
+                missing_size += 1
+            else:
+                nonpositive_size += 1
+        n_raw = low.get("notional")
+        n = _parse_positive(n_raw)
+        if n is not None:
+            notional_ok += 1
+        elif p is not None and sz is not None:
+            notional_ok += 1
+        elif n_raw is None or str(n_raw).strip() == "":
+            missing_notional += 1
+        else:
+            nonpositive_notional += 1
         sym = _first(r, ("symbol", "instrument", "pair"))
         if sym:
             syms.add(str(sym))
-    cov = _coverage(ts)
-    return {"type": "liquidations", "valid": bool(rows) and bool(sides), "symbols": sorted(syms),
-            "coverage": cov, "side_valid": bool(sides), "notional_calculable": notional_ok > 0}
+        else:
+            missing_symbol += 1
+    cov = _coverage(ts, invalid_ts)
+    critical = _quality_flags(cov)
+    if missing_price or nonpositive_price:
+        critical.append("liquidation_price_not_strictly_positive")
+    if missing_size or nonpositive_size:
+        critical.append("liquidation_size_not_strictly_positive")
+    if missing_notional or nonpositive_notional:
+        critical.append("liquidation_notional_not_calculable")
+    if missing_side or invalid_side:
+        critical.append("liquidation_side_invalid")
+    if missing_symbol:
+        critical.append("liquidation_symbol_missing")
+    return {"type": "liquidations", "valid": bool(rows) and not critical and notional_ok == len(rows)
+            and len(sides) == len(rows), "symbols": sorted(syms), "coverage": cov,
+            "side_valid": missing_side == 0 and invalid_side == 0,
+            "notional_calculable": notional_ok == len(rows),
+            "missing_side_count": missing_side,
+            "invalid_side_count": invalid_side,
+            "missing_symbol_count": missing_symbol,
+            "critical_errors": critical,
+            "warnings": _quality_flags(cov, require_no_gaps=True, warning_mode=True)}
 
 
 _VALIDATORS = {"trades": validate_trades, "orderbook": validate_orderbook,
@@ -377,8 +670,8 @@ def microstructure_plan() -> dict[str, Any]:
             "liquidations": ["timestamp", "symbol", "side", "price", "size|qty", "notional?"]},
         "verdicts": [C_NO_SAMPLE, C_INVALID, C_PARTIAL, C_READY, C_NEEDS_HISTORY,
                      C_NEEDS_ORDERBOOK, C_NEEDS_AGGRESSOR, C_NEEDS_LIQ, C_NEEDS_OI],
-        "never": ["place_order", "create_order", "set_leverage", "private_get", "private_post",
-                  "paid_download", "db_write", "raw_write", "PAPER_READY", "LIVE_READY"],
+        "never": ["order_submission", "leverage_or_margin_change", "private_exchange_endpoint",
+                  "paid_download", "db_write", "raw_write", "paper_or_live_promotion"],
         "writes_on_plan": False, **_safety()}
 
 
@@ -398,16 +691,35 @@ def _future_research_ready(present: dict[str, dict]) -> dict[str, bool]:
 
 def classify_sample(present: dict[str, dict], files_seen: int) -> dict[str, Any]:
     gaps: list[str] = []
+    critical_errors: list[str] = []
+    warnings: list[str] = []
     valid_types = {k for k, v in present.items() if v.get("valid")}
     if files_seen == 0 or not present:
-        return {"verdict": C_NO_SAMPLE, "gaps": [], "valid_types": [],
-                "future_research_ready_if_sample_passes": False}
-    if not valid_types:
-        return {"verdict": C_INVALID, "gaps": ["no valid recognized data files"], "valid_types": [],
-                "future_research_ready_if_sample_passes": False}
+        return {"verdict": C_NO_SAMPLE, "gaps": [], "active_gaps": [],
+                "valid_types": [], "critical_errors": [],
+                "warnings": [], "can_research_microstructure": False,
+                "future_research_ready_if_sample_passes": False,
+                "why_not_ready": ["no sample files"]}
     max_cov = max((v.get("coverage", {}).get("coverage_days", 0) or 0) for v in present.values())
+    required_types = ("trades", "orderbook", "oi", "liquidations")
+    required_covs = [
+        present[t].get("coverage", {}).get("coverage_days", 0) or 0
+        for t in required_types
+        if present.get(t, {}).get("valid")
+    ]
+    min_required_cov = min(required_covs) if required_covs else 0
     tr = present.get("trades", {})
-    if tr.get("valid") and not tr.get("has_aggressor_side"):
+    for dtype, metrics in sorted(present.items()):
+        for err in metrics.get("critical_errors", []):
+            if dtype == "trades" and err in ("missing_or_invalid_aggressor_side",):
+                continue
+            critical_errors.append(f"{dtype}:{err}")
+        for warn in metrics.get("warnings", []):
+            warnings.append(f"{dtype}:{warn}")
+        cov = metrics.get("coverage", {})
+        if cov.get("gap_count"):
+            gaps.append(C_NEEDS_HISTORY)
+    if tr and not tr.get("has_aggressor_side"):
         gaps.append(C_NEEDS_AGGRESSOR)
     if "trades" not in valid_types:
         gaps.append(C_NEEDS_AGGRESSOR)
@@ -417,25 +729,57 @@ def classify_sample(present: dict[str, dict], files_seen: int) -> dict[str, Any]
         gaps.append(C_NEEDS_OI)
     if "liquidations" not in valid_types:
         gaps.append(C_NEEDS_LIQ)
-    if max_cov < MIN_HISTORY_DAYS:
+    if max_cov < MIN_HISTORY_DAYS or any(
+        present.get(t, {}).get("valid")
+        and (present[t].get("coverage", {}).get("coverage_days", 0) or 0) < MIN_HISTORY_DAYS
+        for t in required_types
+    ):
         gaps.append(C_NEEDS_HISTORY)
-    ready = (tr.get("valid") and tr.get("has_aggressor_side") and "orderbook" in valid_types
-             and ("oi" in valid_types or "funding" in valid_types) and max_cov >= MIN_HISTORY_DAYS)
+    funding_optional_reason = None
+    if "funding" not in present and "oi" in valid_types:
+        funding_optional_reason = "funding is optional for V10.24 readiness when OI is present and valid"
+    if "funding" in present and "funding" not in valid_types:
+        critical_errors.append("funding:present_but_invalid")
+    active_gaps = sorted(set(gaps))
+    critical_errors = sorted(set(critical_errors))
+    ready = (
+        tr.get("valid")
+        and tr.get("has_aggressor_side")
+        and "orderbook" in valid_types
+        and "oi" in valid_types
+        and "liquidations" in valid_types
+        and min_required_cov >= MIN_HISTORY_DAYS
+        and not active_gaps
+        and not critical_errors
+    )
     if ready:
         verdict = C_READY
-    elif max_cov < MIN_HISTORY_DAYS and valid_types:
+    elif critical_errors:
+        verdict = C_INVALID
+    elif C_NEEDS_HISTORY in active_gaps and valid_types:
         verdict = C_NEEDS_HISTORY
-    elif tr.get("valid") and not tr.get("has_aggressor_side"):
+    elif tr and not tr.get("has_aggressor_side"):
         verdict = C_NEEDS_AGGRESSOR
     elif "orderbook" not in valid_types:
         verdict = C_NEEDS_ORDERBOOK
-    elif "oi" not in valid_types and "funding" not in valid_types:
+    elif "liquidations" not in valid_types:
+        verdict = C_NEEDS_LIQ
+    elif "oi" not in valid_types:
         verdict = C_NEEDS_OI
     else:
         verdict = C_PARTIAL
-    return {"verdict": verdict, "gaps": sorted(set(gaps)), "valid_types": sorted(valid_types),
+    why_not_ready = critical_errors + active_gaps
+    return {"verdict": verdict, "readiness_verdict": verdict,
+            "gaps": active_gaps, "active_gaps": active_gaps,
+            "critical_errors": critical_errors,
+            "warnings": sorted(set(warnings)),
+            "why_not_ready": why_not_ready,
+            "valid_types": sorted(valid_types),
             "max_coverage_days": max_cov,
+            "min_required_coverage_days": min_required_cov,
+            "can_research_microstructure": bool(ready),
             "future_research_ready_if_sample_passes": bool(ready),
+            "funding_optional_reason": funding_optional_reason,
             "future_labs_ready": _future_research_ready(present)}
 
 
@@ -448,11 +792,20 @@ def validate_sample(sample_dir: str, apply_normalization: bool = False) -> dict[
     except ValueError as e:
         rep["errors"].append(f"unsafe_sample_dir:{e}")
         rep["classification"] = {"verdict": C_INVALID, "gaps": ["unsafe sample dir"],
-                                 "future_research_ready_if_sample_passes": False}
+                                 "active_gaps": ["unsafe sample dir"],
+                                 "valid_types": [],
+                                 "critical_errors": [f"unsafe_sample_dir:{e}"],
+                                 "warnings": [],
+                                 "can_research_microstructure": False,
+                                 "future_research_ready_if_sample_passes": False,
+                                 "why_not_ready": [f"unsafe_sample_dir:{e}"]}
         return rep
     if not os.path.isdir(sample_dir):
-        rep["classification"] = {"verdict": C_NO_SAMPLE, "gaps": [],
-                                 "future_research_ready_if_sample_passes": False}
+        rep["classification"] = {"verdict": C_NO_SAMPLE, "gaps": [], "active_gaps": [],
+                                 "valid_types": [], "critical_errors": [], "warnings": [],
+                                 "can_research_microstructure": False,
+                                 "future_research_ready_if_sample_passes": False,
+                                 "why_not_ready": ["sample dir missing"]}
         return rep
     present: dict[str, dict] = {}
     files_seen = 0
@@ -461,6 +814,14 @@ def validate_sample(sample_dir: str, apply_normalization: bool = False) -> dict[
         if not os.path.isfile(path) or not name.lower().endswith((".csv", ".tsv")):
             continue
         files_seen += 1
+        try:
+            assert_safe_sample_file(sample_dir, path)
+        except ValueError as e:
+            rep["errors"].append(f"unsafe_sample_file:{name}:{e}")
+            rep["files"].append({"file": name, "detected_type": "unknown", "rows": 0,
+                                 "truncated": False, "columns": [], "valid": False,
+                                 "error": f"unsafe_sample_file:{e}"})
+            continue
         header, rows, truncated = _read_csv(path)
         dtype = detect_type(name, header)
         info = {"file": name, "detected_type": dtype, "rows": len(rows),
@@ -476,10 +837,16 @@ def validate_sample(sample_dir: str, apply_normalization: bool = False) -> dict[
         rep["files"].append(info)
     rep["by_type"] = {k: v for k, v in present.items()}
     rep["classification"] = classify_sample(present, files_seen)
-    if apply_normalization and rep["classification"]["valid_types"]:
+    rep["critical_errors"] = rep["classification"].get("critical_errors", [])
+    rep["warnings"] = rep["classification"].get("warnings", [])
+    if (apply_normalization and rep["classification"].get("valid_types")
+            and not rep["classification"].get("critical_errors")):
         rep["normalization"] = _write_normalized(sample_dir, rep)
     else:
-        rep["normalization"] = {"applied": False, "reason": "flag off or no valid types"}
+        reason = "flag off or no valid types"
+        if apply_normalization and rep["classification"].get("critical_errors"):
+            reason = "blocked by critical validation errors"
+        rep["normalization"] = {"applied": False, "reason": reason}
     return rep
 
 
@@ -498,7 +865,9 @@ def _write_normalized(sample_dir: str, rep: dict[str, Any]) -> dict[str, Any]:
         dtype = finfo["detected_type"]
         if dtype not in headers or not finfo.get("valid"):
             continue
-        header, rows, _ = _read_csv(os.path.join(sample_dir, finfo["file"]))
+        src_path = os.path.join(sample_dir, finfo["file"])
+        assert_safe_sample_file(sample_dir, src_path)
+        header, rows, _ = _read_csv(src_path)
         out_path = os.path.join(out_dir, f"{dtype}_normalized.csv").replace("\\", "/")
         new_file = not os.path.exists(out_path)
         with open(out_path, "a", newline="", encoding="utf-8") as f:
@@ -547,8 +916,14 @@ def write_reports(rep: dict[str, Any], output_dir: str | None = None) -> dict[st
     md = os.path.join(base, "microstructure_sample_readiness_report.md").replace("\\", "/")
     lines = ["# V10.24 Microstructure Sample Readiness (research only)", "",
              f"sample_dir: {rep.get('sample_dir')}", f"verdict: {cls.get('verdict')}",
-             f"valid_types: {cls.get('valid_types')}", f"gaps: {cls.get('gaps')}",
+             f"readiness_verdict: {cls.get('readiness_verdict') or cls.get('verdict')}",
+             f"can_research_microstructure: {cls.get('can_research_microstructure')}",
+             f"valid_types: {cls.get('valid_types')}", f"active_gaps: {cls.get('active_gaps')}",
+             f"critical_errors: {cls.get('critical_errors')}",
+             f"why_not_ready: {cls.get('why_not_ready')}",
              f"max_coverage_days: {cls.get('max_coverage_days')}",
+             f"min_required_coverage_days: {cls.get('min_required_coverage_days')}",
+             f"funding_optional_reason: {cls.get('funding_optional_reason')}",
              f"future_research_ready_if_sample_passes: {cls.get('future_research_ready_if_sample_passes')}",
              "", "## future labs ready (only if a passing sample arrives)"]
     for lab, ok in (cls.get("future_labs_ready") or {}).items():
