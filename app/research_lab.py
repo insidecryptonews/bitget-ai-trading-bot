@@ -5826,24 +5826,44 @@ class ResearchLab:
                   "FORWARD SHADOW REGIME RUN V10.21 END"]
         return "\n".join(lines)
 
-    def forward_shadow_regime_report_v1021_cli(self, *, output_dir="") -> str:
+    def forward_shadow_regime_report_v1021_cli(self, *, output_dir="", last_n=10) -> str:
         import json as _json
+        import os
         from .labs import forward_shadow_regime_v10_21 as R
         base = R._safe_output_base(output_dir or None, R.JOURNAL_ROOT)
         tl = os.path.join(base, "regime_timeline.jsonl")
         lines = ["FORWARD SHADOW REGIME REPORT V10.21 START", f"journal_dir: {base}"]
-        if os.path.isfile(tl):
-            rows = [l for l in open(tl, encoding="utf-8").read().splitlines() if l.strip()]
-            lines.append(f"snapshots_logged: {len(rows)}")
-            for l in rows[-10:]:
-                try:
-                    d = _json.loads(l)
-                    lines.append(f"- {d.get('ts')}: basket={d.get('basket')} {d.get('per_symbol')}")
-                except Exception:
-                    continue
-        else:
+        if not os.path.isfile(tl):
             lines.append("status: NO_JOURNAL_YET (run forward-shadow-regime-run-v1021 first)")
-        lines += ["descriptive_only: true", "makes_no_trades: true", "edge_validated: false",
+        else:
+            rows = []
+            for l in open(tl, encoding="utf-8").read().splitlines():
+                if l.strip():
+                    try:
+                        rows.append(_json.loads(l))
+                    except Exception:
+                        continue
+            s = R.summarize_timeline(rows, last_n=int(last_n))
+            latest = s.get("latest") or {}
+            lines.append(f"snapshots_logged: {s['snapshots']}")
+            lines.append(f"latest_timestamp: {latest.get('ts')}")
+            lines.append(f"basket_regime: {latest.get('basket')}")
+            for sym, v in (latest.get("per_symbol") or {}).items():
+                streak = s["streaks"].get(sym, {}).get("consecutive_snapshots", 1)
+                lines.append(f"{sym}: {v}  (x{streak} consecutive snapshots)")
+            lines.append("regime_changes_vs_previous:")
+            if s["changes"]:
+                for c in s["changes"]:
+                    lines.append(f"- {c['symbol']}: {c['from']} -> {c['to']} [{c['event']}]")
+            else:
+                lines.append("- none (stable vs previous snapshot)")
+            lines.append(f"weakest_symbols: {', '.join(s['weakest']) or 'none'}")
+            lines.append(f"recovering_symbols: {', '.join(s['recovering']) or 'none'}")
+            lines.append(f"evolution_last_{last_n} (oldest->newest):")
+            for e in s["evolution"]:
+                lines.append(f"- {e['ts']}: basket={e['basket']} {e['per_symbol']}")
+        lines += ["actions:", "- no real orders", "- risk context only", "- no edge validated",
+                  "descriptive_only: true", "makes_no_trades: true", "edge_validated: false",
                   "research_only: true", "shadow_only: true", "paper_ready: false",
                   "live_ready: false", "can_send_real_orders: false",
                   "final_recommendation: NO LIVE", "FORWARD SHADOW REGIME REPORT V10.21 END"]
@@ -7175,6 +7195,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--train-ratio", type=float, default=0.6, help="V10.8 train fraction for walk-forward OOS split.")
     parser.add_argument("--walk-forward", default="true", help="V10.8 enable walk-forward OOS gating (true/false).")
     parser.add_argument("--output-dir", default="", help="V10.8 research report output dir (default reports/research/v10_8). Never raw/DB/.env.")
+    parser.add_argument("--last-n", type=int, default=10, help="V10.21 forward-shadow report: number of recent snapshots to show.")
     parser.add_argument("--max-grid-combos", type=int, default=500, help="V10.8 cap on evaluated parameter combos.")
     parser.add_argument("--seed", type=int, default=7, help="V10.8 deterministic seed for grid sampling.")
     parser.add_argument("--walk-forward-mode", default="", help="V10.8.1 none|chronological_split|rolling (default rolling). Empty falls back to --walk-forward mapping.")
@@ -8176,7 +8197,7 @@ def main() -> None:
             sample_dir=args.sample_dir, symbols=args.symbols,
             timeframe=args.timeframe, output_dir=args.output_dir))
     elif args.command == "forward-shadow-regime-report-v1021":
-        print(lab.forward_shadow_regime_report_v1021_cli(output_dir=args.output_dir))
+        print(lab.forward_shadow_regime_report_v1021_cli(output_dir=args.output_dir, last_n=args.last_n))
     elif args.command == "ohlcv-replay-loader-smoke-test":
         print(lab.ohlcv_replay_loader_smoke_test())
     elif args.command == "ohlcv-replay-loader-audit":

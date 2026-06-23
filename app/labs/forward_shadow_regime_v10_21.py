@@ -153,6 +153,21 @@ def classify_symbol(bars: list[dict[str, float]], *, symbol: str = "", timeframe
     return out
 
 
+def _counts(per_symbol: list[dict[str, Any]]) -> dict[str, int]:
+    v = [s.get("verdict") for s in per_symbol]
+    return {"risk_off_count": v.count(R_RISK_OFF), "long_blocked_count": v.count(R_LONG_BLOCKED),
+            "bounce_count": v.count(R_BOUNCE), "range_count": v.count(R_RANGE),
+            "risk_on_count": v.count(R_RISK_ON), "no_edge_count": v.count(R_NO_EDGE)}
+
+
+def _action_hint(basket_verdict: str) -> str:
+    return {
+        R_RISK_OFF: "RESEARCH CONTEXT: risk-off basket -> longs unfavorable / reduce-risk context (NO orders)",
+        R_RANGE: "RESEARCH CONTEXT: range/low-vol -> no-trade context, cost>move (NO orders)",
+        R_RISK_ON: "RESEARCH CONTEXT: broad uptrend -> risk-on context (NOT a validated long signal)",
+    }.get(basket_verdict, "RESEARCH CONTEXT: no validated edge -> observe only (NO orders)")
+
+
 def classify_basket(per_symbol: list[dict[str, Any]]) -> dict[str, Any]:
     usable = [s for s in per_symbol if s["regime"] not in ("INSUFFICIENT_DATA",)]
     n = len(usable) or 1
@@ -194,6 +209,8 @@ def run_regime(sample_dir: str, symbols: list[str], timeframe: str = "1d") -> di
         per.append(classify_symbol(_read_ohlcv(path), symbol=s, timeframe=timeframe))
     rep["per_symbol"] = per
     rep["basket"] = classify_basket(per)
+    rep["counts"] = _counts(per)
+    rep["action_hint"] = _action_hint(rep["basket"]["basket_verdict"])
     return rep
 
 
@@ -205,12 +222,55 @@ def write_journal(rep: dict[str, Any], output_dir: str | None = None) -> str:
     with open(path, "w", encoding="utf-8") as f:
         json.dump(rep, f, indent=2, default=str)
     # append a flat line to a rolling journal for easy time-series viewing
-    line = {"ts": rep["generated_at"], "timeframe": rep.get("timeframe"),
+    counts = rep.get("counts") or _counts(rep.get("per_symbol", []))
+    line = {"ts": rep["generated_at"], "sample_dir": rep.get("sample_dir"),
+            "timeframe": rep.get("timeframe"),
+            "symbols": [s["symbol"] for s in rep.get("per_symbol", [])],
             "basket": rep.get("basket", {}).get("basket_verdict"),
-            "per_symbol": {s["symbol"]: s["verdict"] for s in rep.get("per_symbol", [])}}
+            "per_symbol": {s["symbol"]: s["verdict"] for s in rep.get("per_symbol", [])},
+            "action_hint": rep.get("action_hint") or _action_hint(rep.get("basket", {}).get("basket_verdict", "")),
+            "makes_no_trades": True, "can_send_real_orders": False,
+            "final_recommendation": FINAL_RECOMMENDATION_NO_LIVE, **counts}
     with open(os.path.join(base, "regime_timeline.jsonl"), "a", encoding="utf-8") as f:
         f.write(json.dumps(line, default=str) + "\n")
     return path
+
+
+def summarize_timeline(rows: list[dict[str, Any]], last_n: int = 10) -> dict[str, Any]:
+    """Read-only analysis of journaled snapshots: latest, evolution, regime
+    changes, consecutive-snapshot streaks, weakest/recovering symbols."""
+    out: dict[str, Any] = {"snapshots": len(rows), "latest": None, "previous": None,
+                           "changes": [], "streaks": {}, "weakest": [], "recovering": [],
+                           "evolution": []}
+    rows = [r for r in rows if isinstance(r, dict) and r.get("per_symbol")]
+    if not rows:
+        return out
+    latest = rows[-1]
+    out["latest"] = latest
+    out["previous"] = rows[-2] if len(rows) >= 2 else None
+    out["evolution"] = [{"ts": r.get("ts"), "basket": r.get("basket"),
+                         "per_symbol": r.get("per_symbol")} for r in rows[-last_n:]]
+    # per-symbol verdict change vs previous snapshot + consecutive streak
+    syms = list(latest.get("per_symbol", {}).keys())
+    for sym in syms:
+        cur = latest["per_symbol"].get(sym)
+        prev = (out["previous"] or {}).get("per_symbol", {}).get(sym) if out["previous"] else None
+        if prev is not None and prev != cur:
+            tag = "ENTERED_RISK_OFF" if cur == R_RISK_OFF else (
+                "EXITED_RISK_OFF" if prev == R_RISK_OFF else (
+                    "NEW_BOUNCE_CANDIDATE" if cur == R_BOUNCE else "REGIME_CHANGE"))
+            out["changes"].append({"symbol": sym, "from": prev, "to": cur, "event": tag})
+        # streak: trailing snapshots with same verdict as current
+        streak = 0
+        for r in reversed(rows):
+            if r.get("per_symbol", {}).get(sym) == cur:
+                streak += 1
+            else:
+                break
+        out["streaks"][sym] = {"verdict": cur, "consecutive_snapshots": streak}
+    out["weakest"] = [s for s in syms if latest["per_symbol"][s] in (R_RISK_OFF, R_LONG_BLOCKED)]
+    out["recovering"] = [s for s in syms if latest["per_symbol"][s] in (R_BOUNCE, R_RISK_ON)]
+    return out
 
 
 def forward_shadow_regime_plan() -> dict[str, Any]:

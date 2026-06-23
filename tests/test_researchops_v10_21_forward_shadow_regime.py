@@ -96,6 +96,54 @@ def test_safety_flags_everywhere():
         assert out["final_recommendation"] == "NO LIVE"
 
 
+def test_counts_and_action_hint():
+    per = [R.classify_symbol(_bars([100 * (0.985 ** i) for i in range(80)]), symbol="XRPUSDT"),
+           R.classify_symbol(_bars([100 * (1.015 ** i) for i in range(80)]), symbol="BTCUSDT")]
+    c = R._counts(per)
+    assert set(c) >= {"risk_off_count", "bounce_count", "no_edge_count", "range_count"}
+    assert sum(c.values()) == len(per)
+    assert "NO orders" in R._action_hint(R.R_RISK_OFF)
+
+
+def test_journal_line_enriched(tmp_path):
+    s = tmp_path / "s"
+    os.makedirs(s)
+    closes = [100 * (0.985 ** i) for i in range(80)]
+    lines = ["timestamp,open,high,low,close,volume"] + \
+            [f"{1700000000000 + i*R.DAY_MS},{c},{c*1.01},{c*0.99},{c},10" for i, c in enumerate(closes)]
+    Path(s, "XRPUSDT_1d_ohlcv.csv").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    rep = R.run_regime(str(s), ["XRPUSDT"], timeframe="1d")
+    assert "counts" in rep and "action_hint" in rep
+    j = R.write_journal(rep, output_dir=str(tmp_path / "out"))
+    tl = os.path.join(str(tmp_path / "out"), "regime_timeline.jsonl")
+    import json
+    line = json.loads(Path(tl).read_text(encoding="utf-8").splitlines()[-1])
+    assert line["makes_no_trades"] is True
+    assert line["can_send_real_orders"] is False
+    assert line["final_recommendation"] == "NO LIVE"
+    assert "risk_off_count" in line and "no_edge_count" in line
+    assert "action_hint" in line
+
+
+def test_summarize_detects_regime_change():
+    rows = [
+        {"ts": "t1", "basket": "RISK_ON", "per_symbol": {"BTCUSDT": R.R_RISK_ON, "XRPUSDT": R.R_NO_EDGE}},
+        {"ts": "t2", "basket": "RISK_OFF_EARLY_WARNING",
+         "per_symbol": {"BTCUSDT": R.R_RISK_ON, "XRPUSDT": R.R_RISK_OFF}},
+    ]
+    s = R.summarize_timeline(rows, last_n=5)
+    assert s["snapshots"] == 2
+    events = {(c["symbol"], c["event"]) for c in s["changes"]}
+    assert ("XRPUSDT", "ENTERED_RISK_OFF") in events
+    assert s["streaks"]["BTCUSDT"]["consecutive_snapshots"] == 2  # unchanged across both
+    assert "XRPUSDT" in s["weakest"]
+
+
+def test_summarize_empty():
+    s = R.summarize_timeline([], last_n=5)
+    assert s["snapshots"] == 0 and s["latest"] is None and s["changes"] == []
+
+
 def test_module_no_dangerous_primitives():
     import re
     src = Path(MODULE_PATH).read_text(encoding="utf-8")
