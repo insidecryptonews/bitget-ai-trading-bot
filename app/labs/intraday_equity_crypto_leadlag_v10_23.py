@@ -204,22 +204,33 @@ def intraday_leadlag_fetch(equities: list[str], cryptos: list[str], timeframes: 
 
 
 # --------------------------------------------------------------------------
-# No-lookahead alignment (the crux)
+# Timestamp normalization (the crux of V10.23.2)
 # --------------------------------------------------------------------------
+# Yahoo chart timestamps are bar OPEN times. A bar with open ts=o covers
+# [o, o+interval) and its close is only KNOWN at o+interval. To make
+# no-lookahead trivially correct we re-index every series by CLOSE time:
+#   close_ts = open_ts + interval
+# After normalization a key k IS the moment that bar became known, so a bar is
+# usable as a feature iff k <= decision_ts, and labels use keys k > decision_ts.
 
-def _ret_n_closed(series: dict[int, float], decision_ts: int, interval: int, n: int) -> tuple[float, int] | None:
-    """Return (return over last n CLOSED bars before decision_ts, last_close_ts).
-    A bar with open ts=o has closed at o+interval; it is usable iff o+interval<=decision_ts."""
-    keys = sorted(series)
-    closed = [k for k in keys if k + interval <= decision_ts]
+def normalize_to_close_ts(series_open_indexed: dict[int, float], interval: int) -> dict[int, float]:
+    """Convert a raw Yahoo {open_ts: close_price} series to {close_ts: close_price}."""
+    return {int(o) + int(interval): float(c) for o, c in series_open_indexed.items()}
+
+
+def _ret_n_closed(series_close_indexed: dict[int, float], decision_ts: int, n: int) -> tuple[float, int] | None:
+    """Return (return over last n bars known by decision_ts, last_close_ts).
+    `series_close_indexed` is indexed by CLOSE time, so a bar is usable iff its
+    key <= decision_ts. No `+interval` here -- the series is already normalized."""
+    closed = [k for k in sorted(series_close_indexed) if k <= decision_ts]
     if len(closed) < n + 1:
         return None
-    last_open = closed[-1]
-    prev_open = closed[-1 - n]
-    a, b = series[prev_open], series[last_open]
+    last_close = closed[-1]
+    prev_close = closed[-1 - n]
+    a, b = series_close_indexed[prev_close], series_close_indexed[last_close]
     if a <= 0:
         return None
-    return (b / a - 1.0, last_open + interval)
+    return (b / a - 1.0, last_close)
 
 
 class FeatureGuard(dict):
@@ -242,45 +253,47 @@ class FeatureGuard(dict):
 def align_no_lookahead(crypto: dict[str, dict[int, float]], equity: dict[str, dict[int, float]],
                        interval: int, horizons: tuple[int, ...] = (1, 2, 4, 8),
                        max_staleness_h: int = 2) -> dict[str, Any]:
-    """Build decision rows on the crypto hourly grid with SEPARATE namespaces:
-      features (feature_*) -> only data known at decision_ts (closed bars);
-      labels   (label_*)   -> only crypto bars strictly AFTER decision_ts.
-    The crypto 'past' feature uses close[t] (the bar that closed exactly at t,
-    known at the decision instant); labels use close[t+h] (strictly future)."""
+    """Build decision rows on the crypto CLOSE-TIME grid with SEPARATE namespaces.
+    INPUT SERIES MUST BE CLOSE-INDEXED (see normalize_to_close_ts). A key k is the
+    moment that bar became known, so:
+      features (feature_*) -> only bars with close_ts <= decision_ts;
+      labels   (label_*)   -> only crypto bars with close_ts > decision_ts.
+    decision_ts is itself a crypto close_ts (a moment a bar just closed)."""
     btc = crypto.get("BTC-USD") or {}
     grid = sorted(btc)
     rows: list[dict[str, Any]] = []
-    for t in grid:
+    for t in grid:                       # t is a CLOSE timestamp
         if (t + max(horizons) * interval) not in btc:
             continue
         features: dict[str, float] = {}
         feat_ts: list[int] = []
         fresh = False
-        # equity features: most-recent CLOSED bar (open+interval<=t), require freshness
+        # equity features: most-recent bar whose close_ts <= t, require freshness
         for sym, ser in equity.items():
-            r1 = _ret_n_closed(ser, t, interval, 1)
+            r1 = _ret_n_closed(ser, t, 1)
             if r1 is None:
                 continue
             features[f"feature_{sym}_ret_1h"] = r1[0]
             feat_ts.append(r1[1])
             if (t - r1[1]) <= max_staleness_h * interval:
                 fresh = True
-            r2 = _ret_n_closed(ser, t, interval, 2)
+            r2 = _ret_n_closed(ser, t, 2)
             if r2 is not None:
                 features[f"feature_{sym}_ret_2h"] = r2[0]
         if not features or not fresh:
             continue
-        # crypto PAST features: close[t]/close[t-n] (all <= decision_ts)
+        # crypto PAST features: close known at t (close_ts==t) over close_ts<=t
         for cs, ser in crypto.items():
-            base = ser.get(t)
+            base = ser.get(t)            # bar that CLOSED at t -> known at t
             if base is None or base <= 0:
                 continue
             for n, lbl in ((1, "1h"), (2, "2h"), (4, "4h")):
                 prev = ser.get(t - n * interval)
                 if prev and prev > 0:
                     features[f"feature_{cs}_past_ret_{lbl}"] = base / prev - 1.0
-        # crypto labels: strictly future
+        # crypto labels: strictly future (close_ts > t)
         labels: dict[str, float] = {}
+        label_close_ts: list[int] = []
         ok_future = True
         for cs, ser in crypto.items():
             base = ser.get(t)
@@ -288,26 +301,30 @@ def align_no_lookahead(crypto: dict[str, dict[int, float]], equity: dict[str, di
                 ok_future = False
                 break
             for h in horizons:
-                fv = ser.get(t + h * interval)
+                close_ts = t + h * interval
+                fv = ser.get(close_ts)
                 if fv is None:
                     ok_future = False
                     break
                 labels[f"label_{cs}_future_ret_{h}h"] = fv / base - 1.0
+                label_close_ts.append(close_ts)
             if not ok_future:
                 break
         if not ok_future:
             continue
-        feat_max_ts = max(feat_ts + [t])   # crypto past feature uses close at t
+        feat_max_ts = max(feat_ts + [t])     # crypto past feature uses close known at t
         label_start = t + interval
         rows.append({"decision_ts": t, "feat_max_ts": feat_max_ts, "label_start_ts": label_start,
-                     "features": features, "labels": labels})
+                     "min_label_close_ts": min(label_close_ts), "features": features, "labels": labels})
     ok = all(r["feat_max_ts"] <= r["decision_ts"] < r["label_start_ts"] for r in rows)
-    # also assert no label_ key ever sits in features (namespace integrity)
+    labels_future = all(r["min_label_close_ts"] > r["decision_ts"] for r in rows)
     ns_ok = all(not any(k.startswith("label_") for k in r["features"]) for r in rows)
-    status = "OK" if (ok and ns_ok and rows) else ("NO_DATA" if not rows else "NO_LOOKAHEAD_FAIL")
+    status = "OK" if (ok and labels_future and ns_ok and rows) else ("NO_DATA" if not rows else "NO_LOOKAHEAD_FAIL")
     return {"rows": rows, "no_lookahead_status": status,
-            "features_max_ts_le_decision": ok, "namespace_separated": ns_ok,
-            "equity_bar_close_aligned": True, "n_rows": len(rows)}
+            "features_max_ts_le_decision": ok, "labels_strictly_future": labels_future,
+            "namespace_separated": ns_ok, "features_use_closed_bars_only": ok,
+            "crypto_bar_close_aligned": True, "equity_bar_close_aligned": True,
+            "n_rows": len(rows)}
 
 
 # --------------------------------------------------------------------------
@@ -471,21 +488,31 @@ def _effective_days(crypto: dict[str, dict[int, float]], interval: int) -> int:
 
 def run_study(crypto: dict[str, dict[int, float]], equity: dict[str, dict[int, float]],
               interval: int, days: int, requested_days: int | None = None) -> dict[str, Any]:
-    aligned = align_no_lookahead(crypto, equity, interval)
+    # INPUT is raw Yahoo (open-indexed). Normalize EVERYTHING to close_ts first so
+    # the alignment can never use a not-yet-closed bar as a feature.
+    crypto_c = {s: normalize_to_close_ts(ser, interval) for s, ser in crypto.items()}
+    equity_c = {s: normalize_to_close_ts(ser, interval) for s, ser in equity.items()}
+    aligned = align_no_lookahead(crypto_c, equity_c, interval)
     rows = aligned["rows"]
-    eff_days = _effective_days(crypto, interval)
+    eff_days = _effective_days(crypto_c, interval)
     req_days = int(requested_days if requested_days is not None else days)
     data_source_limited = eff_days <= 75 and req_days > eff_days + 30
     rep: dict[str, Any] = {"tool_version": TOOL_VERSION, "generated_at": _now_stamp(),
                            "n_decision_rows": aligned["n_rows"],
+                           "timestamp_semantics": "yahoo_open_ts_normalized_to_close_ts",
+                           "raw_ts_semantics": "open_time",
+                           "analysis_ts_semantics": "close_time",
                            "no_lookahead": {"status": aligned["no_lookahead_status"],
                                             "features_max_ts_le_decision": aligned["features_max_ts_le_decision"],
+                                            "labels_strictly_future": aligned.get("labels_strictly_future"),
                                             "namespace_separated": aligned.get("namespace_separated"),
+                                            "features_use_closed_bars_only": aligned.get("features_use_closed_bars_only"),
+                                            "crypto_bar_close_aligned": aligned.get("crypto_bar_close_aligned"),
                                             "equity_bar_close_aligned": aligned["equity_bar_close_aligned"],
                                             "label_start_after_decision": True},
                            "timezone": "UTC", "equity_session": "regular_only (includePrePost=false)",
                            "equity_freshness": "closed bar, <=2h stale",
-                           "equities": sorted(equity), "cryptos": sorted(crypto),
+                           "equities": sorted(equity_c), "cryptos": sorted(crypto_c),
                            "interval_seconds": interval,
                            "requested_days": req_days, "effective_days": eff_days,
                            "data_source_limited_60d": bool(data_source_limited or eff_days <= 75),
@@ -526,32 +553,50 @@ def write_reports(rep: dict[str, Any], output_dir: str | None = None) -> dict[st
     return paths
 
 
+# A predictor's OOS precision/lift is meaningless if it fired only a handful of
+# times -- with ~10 OOS events even a RANDOM mask shows "lift ~2-4x". Require a
+# minimum alert count AND that the score beat the random fixed-mask baseline.
+MIN_SIGNAL_FLAGS = 20
+RANDOM_BEAT_MARGIN = 1.3
+
+
 def classify(evald: dict[str, Any], n_rows: int, no_lookahead: str, days: int) -> dict[str, Any]:
     reasons = []
     if no_lookahead != "OK":
         return {"verdict": C_NO_LOOKAHEAD_FAIL, "reasons": ["alignment failed"], **_safety()}
-    score = evald["predictors"].get("risk_off_score>=thr", {})
-    # corrected BTC-only baseline uses PAST features only (best of the two past lookbacks)
-    btc1 = evald["predictors"].get("BTC-only(past_ret_1h<0)", {}).get("OOS", {})
-    btc4 = evald["predictors"].get("BTC-only(past_ret_4h<0)", {}).get("OOS", {})
-    s_oos = score.get("OOS", {})
-    btc_prec = max(btc1.get("precision", 0.0), btc4.get("precision", 0.0))
+    preds = evald.get("predictors", {})
+    s_oos = preds.get("risk_off_score>=thr", {}).get("OOS", {})
+    btc1 = preds.get("BTC-only(past_ret_1h<0)", {}).get("OOS", {})
+    btc4 = preds.get("BTC-only(past_ret_4h<0)", {}).get("OOS", {})
+    rnd = preds.get("random_fixed_mask(IS-calibrated)", {}).get("OOS", {})
+    s_prec = s_oos.get("precision", 0.0)
+    s_flags = s_oos.get("flags", 0)
     lift = s_oos.get("lift", 0.0)
-    beats_btc = s_oos.get("precision", 0) > btc_prec
+    btc_prec = max(btc1.get("precision", 0.0), btc4.get("precision", 0.0))
+    rnd_prec = rnd.get("precision", 0.0)
     low_sample = days <= 75 or n_rows < 400
-    if lift > 1.3 and beats_btc and s_oos.get("flags", 0) >= 10:
-        verdict = C_CANDIDATE if low_sample else C_WEAK
-        reasons.append(f"OOS lift {lift} >1.3 and beats BTC-only")
-    elif lift > 1.0 and beats_btc:
-        verdict = C_WEAK
-        reasons.append(f"OOS lift {lift} modest")
+    enough_flags = s_flags >= MIN_SIGNAL_FLAGS
+    beats_btc = s_prec > btc_prec
+    beats_random = s_prec > 0 and s_prec > rnd_prec * RANDOM_BEAT_MARGIN
+    if not enough_flags:
+        verdict = C_REJECTED
+        reasons.append(f"score fired only {s_flags} OOS alerts (<{MIN_SIGNAL_FLAGS}); "
+                       f"lift {lift} indistinguishable from noise (random OOS lift {rnd.get('lift', 0.0)})")
+    elif not beats_random:
+        verdict = C_REJECTED
+        reasons.append(f"score OOS precision {s_prec} does not beat random {rnd_prec} (x{RANDOM_BEAT_MARGIN})")
     elif not beats_btc:
         verdict = C_BTC_BETTER
         reasons.append("BTC-only OOS precision >= cross-asset score")
+    elif lift > 1.3:
+        verdict = C_CANDIDATE if low_sample else C_WEAK
+        reasons.append(f"OOS lift {lift}>1.3, beats BTC-only and random, {s_flags} flags")
     else:
-        verdict = C_REJECTED
-        reasons.append(f"OOS lift {lift} <=1.0")
+        verdict = C_WEAK
+        reasons.append(f"OOS lift {lift} modest but beats baselines")
     if low_sample:
         reasons.append("LOW_SAMPLE_WARNING / DATA_SOURCE_LIMITED_60D")
     return {"verdict": verdict, "secondary": C_DATA_LIMITED if low_sample else None,
-            "reasons": reasons, "low_sample_warning": low_sample, **_safety()}
+            "reasons": reasons, "low_sample_warning": low_sample,
+            "min_signal_flags": MIN_SIGNAL_FLAGS, "score_oos_flags": s_flags,
+            "beats_random": beats_random, "beats_btc_only": beats_btc, **_safety()}

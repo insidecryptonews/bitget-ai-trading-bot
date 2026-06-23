@@ -5873,28 +5873,33 @@ class ResearchLab:
     # ResearchOps V10.23 - Intraday Equity->Crypto Lead-Lag Study (research only).
     # ------------------------------------------------------------------
     @staticmethod
-    def _v1023_effective(timeframes, days):
-        """V10.23 defaults override the misleading global parser defaults (5m/30d):
-        timeframes -> 1h, days -> 60, unless the user explicitly passed others."""
-        tfs = ResearchLab._v107_csv_arg(timeframes) if timeframes else []
-        tfs = [t for t in tfs if t in ("1h", "15m")] or ["1h"]
+    def _v1023_effective(timeframes, days, *, days_explicit=False, tf_explicit=True):
+        """V10.23 effective inputs. The global parser defaults (5m/30d) are
+        misleading; here defaults are 1h/60d UNLESS the user explicitly passed the
+        flag. `days_explicit`/`tf_explicit` come from inspecting argv in dispatch
+        so an explicit `--days 30` is RESPECTED (not silently turned into 60)."""
+        raw = ResearchLab._v107_csv_arg(timeframes) if timeframes else []
+        parsed = [t for t in raw if t in ("1h", "15m")]
+        tfs = parsed if (tf_explicit and parsed) else ["1h"]
         try:
             d = int(days)
         except (TypeError, ValueError):
-            d = 0
-        eff_days = 60 if d in (0, 30) else d
-        return tfs, eff_days, d
+            d = None
+        req_days = d if (days_explicit and d is not None) else 60
+        return tfs, req_days
 
-    def intraday_leadlag_plan_v1023_cli(self, *, equities, cryptos, timeframes, days=60) -> str:
+    def intraday_leadlag_plan_v1023_cli(self, *, equities, cryptos, timeframes, days=60,
+                                        days_explicit=False, tf_explicit=False) -> str:
         import json as _json
         from .labs import intraday_equity_crypto_leadlag_v10_23 as L
-        tfs, eff_days, req_days = self._v1023_effective(timeframes, days)
+        tfs, req_days = self._v1023_effective(timeframes, days, days_explicit=days_explicit, tf_explicit=tf_explicit)
         p = L.intraday_leadlag_plan(self._v107_csv_arg(equities), self._v107_csv_arg(cryptos),
-                                    tfs, eff_days)
+                                    tfs, req_days)
         out = ["INTRADAY LEADLAG PLAN V10.23 START", "objective: " + p["objective"],
                f"equities: {','.join(p['equities'])}", f"cryptos: {','.join(p['cryptos'])}",
-               f"effective_timeframes: {','.join(tfs)}", f"effective_days: {eff_days}",
-               f"requested_days: {req_days}", f"timeframes: {','.join(p['timeframes'])}",
+               f"effective_timeframes: {','.join(tfs)}", f"requested_days: {req_days}",
+               f"days_explicit: {days_explicit}  tf_explicit: {tf_explicit}",
+               f"timestamp_semantics: yahoo_open_ts_normalized_to_close_ts",
                f"source: {p['source']}", f"limits: {p['limits']}",
                "no_lookahead_rules: " + " | ".join(p["no_lookahead_rules"]),
                f"writes_network_on_plan: {p['writes_network_on_plan']}",
@@ -5903,14 +5908,15 @@ class ResearchLab:
                "final_recommendation: NO LIVE", "INTRADAY LEADLAG PLAN V10.23 END"]
         return "\n".join(out)
 
-    def intraday_leadlag_fetch_v1023_cli(self, *, equities, cryptos, timeframes, days=60, apply=False) -> str:
+    def intraday_leadlag_fetch_v1023_cli(self, *, equities, cryptos, timeframes, days=60, apply=False,
+                                         days_explicit=False, tf_explicit=False) -> str:
         from .labs import intraday_equity_crypto_leadlag_v10_23 as L
-        tfs, eff_days, req_days = self._v1023_effective(timeframes, days)
+        tfs, req_days = self._v1023_effective(timeframes, days, days_explicit=days_explicit, tf_explicit=tf_explicit)
         rep = L.intraday_leadlag_fetch(self._v107_csv_arg(equities), self._v107_csv_arg(cryptos),
-                                       tfs, eff_days, apply=bool(apply))
+                                       tfs, req_days, apply=bool(apply))
         out = ["INTRADAY LEADLAG FETCH V10.23 START", f"mode: {rep['mode']}",
-               f"effective_timeframes: {','.join(tfs)}", f"effective_days: {eff_days}",
-               f"requested_days: {req_days}", f"run_id: {rep['run_id']}"]
+               f"effective_timeframes: {','.join(tfs)}", f"requested_days: {req_days}",
+               f"days_explicit: {days_explicit}  tf_explicit: {tf_explicit}", f"run_id: {rep['run_id']}"]
         if rep["mode"] == "APPLY":
             out.append(f"staging_dir: {rep.get('staging_dir')}")
             out.append(f"downloaded: {len(rep['downloaded'])} series")
@@ -5926,29 +5932,31 @@ class ResearchLab:
         return "\n".join(out)
 
     def intraday_leadlag_study_v1023_cli(self, *, equities, cryptos, timeframe="1h",
-                                         sample_dir="", days=60, output_dir="") -> str:
+                                         sample_dir="", days=60, output_dir="",
+                                         days_explicit=False, tf_explicit=False) -> str:
         from .labs import intraday_equity_crypto_leadlag_v10_23 as L
         eqs = self._v107_csv_arg(equities)
         crs = self._v107_csv_arg(cryptos)
-        tf = timeframe if timeframe in ("1h", "15m") else "1h"
-        _tfs, eff_days, req_days = self._v1023_effective(tf, days)
+        tfs, req_days = self._v1023_effective(timeframe, days, days_explicit=days_explicit, tf_explicit=tf_explicit)
+        tf = tfs[0]
         interval = 3600 if tf == "1h" else 900
         if sample_dir:
             crypto, equity = L.load_staged(sample_dir, tf, eqs, crs)
         else:
             # fetch live in-memory (staging-only writes are reserved for the fetch CLI)
-            crypto = {s: {r["ts"]: r["close"] for r in L.fetch_series(s, tf, eff_days)} for s in crs}
-            equity = {s.replace("^", "_idx_"): {r["ts"]: r["close"] for r in L.fetch_series(s, tf, eff_days)} for s in eqs}
-        rep = L.run_study(crypto, equity, interval, eff_days, requested_days=req_days)
+            crypto = {s: {r["ts"]: r["close"] for r in L.fetch_series(s, tf, req_days)} for s in crs}
+            equity = {s.replace("^", "_idx_"): {r["ts"]: r["close"] for r in L.fetch_series(s, tf, req_days)} for s in eqs}
+        rep = L.run_study(crypto, equity, interval, req_days, requested_days=req_days)
         paths = L.write_reports(rep, output_dir=(output_dir or None))
         cls = rep["classification"]
         es = rep.get("event_study", {}).get("horizons", {})
         ev = rep.get("evaluation", {})
         out = ["INTRADAY LEADLAG STUDY V10.23 START",
-               f"effective_timeframe: {tf}  effective_days: {eff_days}  requested_days: {req_days}",
+               f"effective_timeframe: {tf}  requested_days: {req_days}  days_explicit: {days_explicit}  tf_explicit: {tf_explicit}",
+               f"timestamp_semantics: {rep.get('timestamp_semantics')}  features_use_closed_bars_only: {rep['no_lookahead'].get('features_use_closed_bars_only')}",
                f"effective_days_in_data: {rep.get('effective_days')}  data_source_limited_60d: {rep.get('data_source_limited_60d')}",
                f"decision_rows: {rep['n_decision_rows']}",
-               f"no_lookahead_status: {rep['no_lookahead']['status']}  namespace_separated: {rep['no_lookahead'].get('namespace_separated')}",
+               f"no_lookahead_status: {rep['no_lookahead']['status']}  namespace_separated: {rep['no_lookahead'].get('namespace_separated')}  labels_strictly_future: {rep['no_lookahead'].get('labels_strictly_future')}",
                f"equities: {','.join(rep['equities'])}  cryptos: {','.join(rep['cryptos'])}",
                "event_study (BTC mean future return after equity shock vs no-shock):"]
         for h, d in es.items():
@@ -7364,10 +7372,11 @@ def build_argument_parser() -> argparse.ArgumentParser:
 
 # Commands that are research-only / public-data and MUST run with NO config load,
 # NO .env, NO Database, NO keys. They are dispatched BEFORE any of that happens.
+# Only commands that have a real handler below AND a parser entry belong here
+# (fail-closed: an unhandled/nonexistent command must never look allowlisted).
 PUBLIC_RESEARCH_ONLY_COMMANDS = frozenset({
     "intraday-leadlag-plan-v1023",
     "intraday-leadlag-fetch-v1023",
-    "intraday-leadlag-build-v1023",
     "intraday-leadlag-study-v1023",
     "intraday-leadlag-report-v1023",
 })
@@ -7376,19 +7385,26 @@ PUBLIC_RESEARCH_ONLY_COMMANDS = frozenset({
 def _dispatch_public_research_only(args) -> None:
     """Fail-closed early dispatch for V10.23 public-research commands. Builds a
     ResearchLab WITHOUT __init__ (no db/config) since these handlers only use
-    stateless helpers + the public-GET lab module."""
+    stateless helpers + the public-GET lab module. Explicit-flag detection from
+    argv lets V10.23 honor an explicit `--days`/`--timeframe` vs the global default."""
+    import sys as _sys
+    argvset = set(_sys.argv)
+    days_explicit = "--days" in argvset
+    tf_explicit = ("--timeframe" in argvset) or ("--timeframes" in argvset)
     lab = ResearchLab.__new__(ResearchLab)
     if args.command == "intraday-leadlag-plan-v1023":
         print(lab.intraday_leadlag_plan_v1023_cli(
-            equities=args.equities, cryptos=args.cryptos, timeframes=args.timeframes, days=args.days))
+            equities=args.equities, cryptos=args.cryptos, timeframes=args.timeframes,
+            days=args.days, days_explicit=days_explicit, tf_explicit=tf_explicit))
     elif args.command == "intraday-leadlag-fetch-v1023":
         print(lab.intraday_leadlag_fetch_v1023_cli(
             equities=args.equities, cryptos=args.cryptos, timeframes=args.timeframes,
-            days=args.days, apply=args.apply))
+            days=args.days, apply=args.apply, days_explicit=days_explicit, tf_explicit=tf_explicit))
     elif args.command == "intraday-leadlag-study-v1023":
         print(lab.intraday_leadlag_study_v1023_cli(
             equities=args.equities, cryptos=args.cryptos, timeframe=args.timeframe,
-            sample_dir=args.sample_dir, days=args.days, output_dir=args.output_dir))
+            sample_dir=args.sample_dir, days=args.days, output_dir=args.output_dir,
+            days_explicit=days_explicit, tf_explicit=tf_explicit))
     elif args.command == "intraday-leadlag-report-v1023":
         print(lab.intraday_leadlag_report_v1023_cli(output_dir=args.output_dir))
 

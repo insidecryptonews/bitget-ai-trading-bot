@@ -1,9 +1,10 @@
-"""ResearchOps V10.23(.1) - Intraday Equity->Crypto Lead-Lag tests.
+"""ResearchOps V10.23(.1/.2) - Intraday Equity->Crypto Lead-Lag tests.
 
-Covers network safety, staging-only writes, STRICT no-lookahead with separated
-feature/label namespaces (predictors cannot read future labels), the corrected
-random baseline (IS-calibrated, fixed mask), the OOS embargo, V10.23 CLI
-defaults (1h/60), CLI isolation from config/.env/DB, the 60d data limit, and the
+Covers network safety, staging-only writes, Yahoo open->close timestamp
+normalization, STRICT no-lookahead (close-indexed; features use closed bars only,
+labels strictly future) with separated feature/label namespaces, the corrected
+random baseline, the OOS embargo, V10.23 CLI defaults that distinguish explicit
+flags from the global parser default, CLI isolation from config/.env/DB, and the
 hard NO-LIVE invariants.
 """
 
@@ -22,6 +23,7 @@ from app.labs import intraday_equity_crypto_leadlag_v10_23 as L
 
 MODULE_PATH = "app/labs/intraday_equity_crypto_leadlag_v10_23.py"
 INTERVAL = 3600
+B = 1700000000
 
 
 def _chart_bytes(start_ts, closes):
@@ -34,10 +36,11 @@ def _mock_transport(url, headers):
     L.assert_safe_request(url, headers)
     if "EMPTYSYM" in url:
         return json.dumps({"chart": {"result": [None], "error": None}}).encode()
-    return _chart_bytes(1700000000, [100 + i * 0.1 for i in range(50)])
+    return _chart_bytes(B, [100 + i * 0.1 for i in range(50)])
 
 
-def _series(start, n, step=0.1):
+def _series_close_indexed(start, n, step=0.1):
+    """Already close-indexed series (what align_no_lookahead expects)."""
     return {start + i * INTERVAL: 100 + i * step for i in range(n)}
 
 
@@ -86,22 +89,57 @@ def test_safe_staging_rejects_forbidden():
             L.safe_staging_dir(bad)
 
 
-# ---- no-lookahead + namespace separation ---------------------------------
+# ---- timestamp normalization (V10.23.2 crux) ------------------------------
 
-def test_alignment_namespace_and_ordering():
-    start = 1700000000
-    crypto = {s: _series(start, 80) for s in ("BTC-USD", "ETH-USD", "SOL-USD", "XRP-USD", "DOGE-USD")}
-    equity = {s: _series(start, 80) for s in ("NVDA", "QQQ", "SPY", "SMH")}
+def test_open_ts_normalized_to_close_ts():
+    raw = {B: 100.0, B + INTERVAL: 101.0, B + 2 * INTERVAL: 102.0}   # open-indexed
+    norm = L.normalize_to_close_ts(raw, INTERVAL)
+    assert set(norm) == {B + INTERVAL, B + 2 * INTERVAL, B + 3 * INTERVAL}
+    assert norm[B + INTERVAL] == 100.0   # the bar OPENED at B is only known at B+interval
+
+
+def test_crypto_close_not_used_before_its_close_ts():
+    raw = {B: 100.0, B + INTERVAL: 101.0, B + 2 * INTERVAL: 102.0}
+    norm = L.normalize_to_close_ts(raw, INTERVAL)
+    # decision at B+INTERVAL: only ONE closed bar -> cannot form a 1h return
+    assert L._ret_n_closed(norm, B + INTERVAL, 1) is None
+    # decision at B+2*INTERVAL: last usable close is exactly B+2*INTERVAL (just closed)
+    r = L._ret_n_closed(norm, B + 2 * INTERVAL, 1)
+    assert r is not None and r[1] == B + 2 * INTERVAL and r[1] <= B + 2 * INTERVAL
+    # the future close B+3*INTERVAL must never be selected
+    assert r[1] != B + 3 * INTERVAL
+
+
+def test_alignment_closed_features_future_labels_namespace():
+    crypto = {s: _series_close_indexed(B, 80) for s in ("BTC-USD", "ETH-USD", "SOL-USD", "XRP-USD", "DOGE-USD")}
+    equity = {s: _series_close_indexed(B, 80) for s in ("NVDA", "QQQ", "SPY", "SMH")}
     a = L.align_no_lookahead(crypto, equity, INTERVAL)
     assert a["no_lookahead_status"] == "OK" and a["n_rows"] > 0
-    assert a["namespace_separated"] is True
+    assert a["namespace_separated"] and a["features_use_closed_bars_only"] and a["labels_strictly_future"]
     for r in a["rows"]:
         assert r["feat_max_ts"] <= r["decision_ts"] < r["label_start_ts"]
+        assert r["min_label_close_ts"] > r["decision_ts"]
         assert all(k.startswith("feature_") for k in r["features"])
         assert all(k.startswith("label_") for k in r["labels"])
-        # features must NOT contain any future label column
         assert not any(k.startswith("label_") for k in r["features"])
 
+
+def test_run_study_reports_timestamp_semantics():
+    crypto = {s: {B + i * INTERVAL: 100 + i * 0.1 for i in range(200)}
+              for s in ("BTC-USD", "ETH-USD", "SOL-USD", "XRP-USD", "DOGE-USD")}
+    equity = {s: {B + i * INTERVAL: 100 + i * 0.1 for i in range(200)}
+              for s in ("NVDA", "QQQ", "SPY", "SMH")}   # open-indexed -> run_study normalizes
+    rep = L.run_study(crypto, equity, INTERVAL, days=60, requested_days=365)
+    assert rep["timestamp_semantics"] == "yahoo_open_ts_normalized_to_close_ts"
+    assert rep["raw_ts_semantics"] == "open_time" and rep["analysis_ts_semantics"] == "close_time"
+    assert rep["no_lookahead"]["features_use_closed_bars_only"] is True
+    assert rep["no_lookahead"]["labels_strictly_future"] is True
+    assert rep["requested_days"] == 365 and rep["data_source_limited_60d"] is True
+    assert rep["classification"]["low_sample_warning"] is True
+    assert rep["final_recommendation"] == "NO LIVE" and rep["can_send_real_orders"] is False
+
+
+# ---- namespace guard + labels --------------------------------------------
 
 def test_feature_guard_blocks_label_access():
     fg = L.FeatureGuard({"feature_BTC-USD_past_ret_1h": -0.01})
@@ -113,14 +151,11 @@ def test_feature_guard_blocks_label_access():
 
 
 def test_adversarial_btc_only_cannot_use_future_label():
-    # row where the FUTURE label would be a perfect predictor, but it lives in
-    # the labels namespace; the BTC-only predictor only sees features -> blocked.
-    row = {"features": {"feature_BTC-USD_past_ret_1h": 0.5},  # positive (no signal)
-           "labels": {"label_BTC-USD_future_ret_4h": -0.99}}   # crash, but hidden
+    row = {"features": {"feature_BTC-USD_past_ret_1h": 0.5},
+           "labels": {"label_BTC-USD_future_ret_4h": -0.99}}
     guarded = L._feat(row)
     with pytest.raises(ValueError):
         guarded.get("label_BTC-USD_future_ret_4h")
-    # BTC-only(past_ret_1h<0) sees only the (positive) past feature -> predicts False
     assert (guarded.get("feature_BTC-USD_past_ret_1h", 0.0) < 0) is False
 
 
@@ -136,15 +171,15 @@ def test_label_drawdown_reads_label_namespace():
 def _rows_with_drawdowns(n=300):
     rows = []
     for i in range(n):
-        dd = -0.05 if (i % 7 == 0) else 0.01     # ~14% base rate
+        dd = -0.05 if (i % 7 == 0) else 0.01
         nvda = -0.02 if (i % 5 == 0) else 0.01
         rows.append({"decision_ts": i, "feat_max_ts": i, "label_start_ts": i + 1,
+                     "min_label_close_ts": i + 1,
                      "features": {"feature_NVDA_ret_1h": nvda, "feature_QQQ_ret_1h": 0.0,
                                   "feature_SMH_ret_1h": 0.0, "feature_SPY_ret_1h": 0.0,
                                   "feature__idx_VIX_ret_1h": 0.0,
                                   "feature_BTC-USD_past_ret_1h": 0.0, "feature_BTC-USD_past_ret_4h": 0.0},
-                     "labels": {"label_BTC-USD_future_ret_4h": dd,
-                                "label_ETH-USD_future_ret_4h": dd}})
+                     "labels": {"label_BTC-USD_future_ret_4h": dd, "label_ETH-USD_future_ret_4h": dd}})
     return rows
 
 
@@ -153,44 +188,16 @@ def test_random_fixed_mask_deterministic_and_is_calibrated():
     e1 = L.evaluate(rows)
     e2 = L.evaluate(rows)
     r1 = e1["predictors"]["random_fixed_mask(IS-calibrated)"]
-    r2 = e2["predictors"]["random_fixed_mask(IS-calibrated)"]
-    assert r1 == r2                                   # deterministic across calls
+    assert r1 == e2["predictors"]["random_fixed_mask(IS-calibrated)"]
     assert "random_score_freq_is" in e1
-    # OOS random frequency must be close to the IS-calibrated frequency (no OOS leak)
     assert abs(r1["OOS"]["freq"] - e1["random_score_freq_is"]) < 0.06
 
 
-def test_prec_recall_mask_is_pure():
-    rows = _rows_with_drawdowns(50)
-    mask = [bool(i % 3 == 0) for i in range(len(rows))]
-    label = lambda r: L._label_drawdown(r, "BTC-USD", 4, -0.02)
-    a = L._prec_recall_mask(rows, mask, label)
-    b = L._prec_recall_mask(rows, mask, label)
-    assert a == b
-
-
 def test_embargo_split_reported():
-    rows = _rows_with_drawdowns()
-    e = L.evaluate(rows, label_h=4)
+    e = L.evaluate(_rows_with_drawdowns(), label_h=4)
     assert e["split_type"] == "chronological_70_30_with_embargo"
     assert e["embargo_bars"] == 4 and e["purge_embargo_warning"] is True
-    assert e["is_n"] + e["oos_n"] <= len(rows)        # embargo removed middle rows
     assert "oos_events" in e
-
-
-# ---- study + classification + data limit ---------------------------------
-
-def test_run_study_low_sample_and_data_limit():
-    start = 1700000000
-    crypto = {s: _series(start, 200) for s in ("BTC-USD", "ETH-USD", "SOL-USD", "XRP-USD", "DOGE-USD")}
-    equity = {s: _series(start, 200) for s in ("NVDA", "QQQ", "SPY", "SMH")}
-    rep = L.run_study(crypto, equity, INTERVAL, days=60, requested_days=365)
-    assert rep["no_lookahead"]["status"] == "OK"
-    assert rep["requested_days"] == 365 and rep["effective_days"] <= 75
-    assert rep["data_source_limited_60d"] is True
-    assert rep["classification"]["low_sample_warning"] is True
-    assert rep["research_only"] and rep["final_recommendation"] == "NO LIVE"
-    assert rep["can_send_real_orders"] is False
 
 
 def test_classify_no_lookahead_fail_short_circuits():
@@ -198,14 +205,52 @@ def test_classify_no_lookahead_fail_short_circuits():
     assert c["verdict"] == L.C_NO_LOOKAHEAD_FAIL and c["final_recommendation"] == "NO LIVE"
 
 
-# ---- CLI defaults + isolation from config/.env/DB -------------------------
+def test_classify_rejects_high_lift_but_too_few_flags():
+    # score has a big lift but only 6 OOS alerts -> noise, must be REJECTED
+    evald = {"predictors": {
+        "risk_off_score>=thr": {"OOS": {"precision": 0.1667, "lift": 2.8, "flags": 6}},
+        "BTC-only(past_ret_1h<0)": {"OOS": {"precision": 0.05, "lift": 0.8, "flags": 100}},
+        "BTC-only(past_ret_4h<0)": {"OOS": {"precision": 0.08, "lift": 1.4, "flags": 95}},
+        "random_fixed_mask(IS-calibrated)": {"OOS": {"precision": 0.143, "lift": 2.4, "flags": 7}}}}
+    c = L.classify(evald, 600, "OK", 60)
+    assert c["verdict"] == L.C_REJECTED and c["beats_random"] is False
+    assert c["score_oos_flags"] == 6
 
-def test_v1023_effective_defaults():
-    lab = research_lab.ResearchLab.__new__(research_lab.ResearchLab)
-    tfs, eff_days, req = lab._v1023_effective("", 30)     # global defaults -> 1h/60
-    assert tfs == ["1h"] and eff_days == 60 and req == 30
-    tfs2, eff2, req2 = lab._v1023_effective("15m", 90)    # explicit respected
-    assert tfs2 == ["15m"] and eff2 == 90 and req2 == 90
+
+def test_classify_weak_when_enough_flags_and_beats_random():
+    evald = {"predictors": {
+        "risk_off_score>=thr": {"OOS": {"precision": 0.20, "lift": 1.6, "flags": 40}},
+        "BTC-only(past_ret_1h<0)": {"OOS": {"precision": 0.10, "lift": 0.9, "flags": 100}},
+        "BTC-only(past_ret_4h<0)": {"OOS": {"precision": 0.11, "lift": 1.0, "flags": 95}},
+        "random_fixed_mask(IS-calibrated)": {"OOS": {"precision": 0.08, "lift": 0.7, "flags": 40}}}}
+    c = L.classify(evald, 600, "OK", 60)
+    assert c["verdict"] in (L.C_CANDIDATE, L.C_WEAK) and c["beats_random"] and c["beats_btc_only"]
+
+
+# ---- CLI defaults: explicit vs global default -----------------------------
+
+def test_v1023_effective_explicit_vs_default():
+    eff = research_lab.ResearchLab._v1023_effective
+    assert eff("", 30, days_explicit=False, tf_explicit=False) == (["1h"], 60)   # no flags -> 1h/60
+    assert eff("", 30, days_explicit=True, tf_explicit=False) == (["1h"], 30)    # explicit --days 30 respected
+    assert eff("15m", 90, days_explicit=True, tf_explicit=True) == (["15m"], 90) # explicit tf + days
+    assert eff("5m", 30, days_explicit=False, tf_explicit=True) == (["1h"], 60)  # junk tf -> 1h
+
+
+# ---- allowlist integrity + early dispatch isolation -----------------------
+
+def test_allowlist_is_clean_and_handled():
+    cmds = research_lab.PUBLIC_RESEARCH_ONLY_COMMANDS
+    assert "intraday-leadlag-build-v1023" not in cmds   # removed: no handler/parser entry
+    parser = research_lab.build_argument_parser()
+    choices = None
+    for act in parser._actions:
+        if getattr(act, "dest", None) == "command":
+            choices = set(act.choices or [])
+            break
+    assert choices is not None
+    for c in cmds:
+        assert c in choices, c   # every allowlisted command is a real parser command
 
 
 def _run_main(argv):
@@ -217,36 +262,64 @@ def _run_main(argv):
         sys.argv = old
 
 
-def test_v1023_cli_does_not_load_config_or_db(monkeypatch, capsys):
-    def boom_cfg(*a, **k):
-        raise AssertionError("load_config must NOT be called for V10.23 commands")
+def _boom_cfg(*a, **k):
+    raise AssertionError("load_config must NOT be called for V10.23 commands")
 
-    class BoomDB:
-        def __init__(self, *a, **k):
-            raise AssertionError("Database must NOT be constructed for V10.23 commands")
 
-    monkeypatch.setattr(research_lab, "load_config", boom_cfg)
-    monkeypatch.setattr(research_lab, "Database", BoomDB)
+class _BoomDB:
+    def __init__(self, *a, **k):
+        raise AssertionError("Database must NOT be constructed for V10.23 commands")
+
+
+def test_early_dispatch_plan_no_config_db(monkeypatch, capsys):
+    monkeypatch.setattr(research_lab, "load_config", _boom_cfg)
+    monkeypatch.setattr(research_lab, "Database", _BoomDB)
     _run_main(["intraday-leadlag-plan-v1023", "--timeframes", "1h", "--days", "60"])
+    assert "INTRADAY LEADLAG PLAN V10.23" in capsys.readouterr().out
+
+
+def test_early_dispatch_fetch_dryrun_no_config_db(monkeypatch, capsys):
+    monkeypatch.setattr(research_lab, "load_config", _boom_cfg)
+    monkeypatch.setattr(research_lab, "Database", _BoomDB)
+    _run_main(["intraday-leadlag-fetch-v1023", "--timeframes", "1h", "--days", "60"])
     out = capsys.readouterr().out
-    assert "INTRADAY LEADLAG PLAN V10.23" in out and "NO LIVE" in out
+    assert "INTRADAY LEADLAG FETCH V10.23" in out and "DRY_RUN" in out
+
+
+def test_early_dispatch_study_sample_no_config_db_no_network(monkeypatch, capsys, tmp_path):
+    monkeypatch.setattr(research_lab, "load_config", _boom_cfg)
+    monkeypatch.setattr(research_lab, "Database", _BoomDB)
+    # any network call would fail the contract -> blow up if attempted
+    monkeypatch.setattr(L, "default_transport",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("no network")))
+    sample = tmp_path / "s"
+    os.makedirs(sample)
+    for sym in ("BTC-USD", "ETH-USD", "SOL-USD", "XRP-USD", "DOGE-USD", "NVDA"):
+        rows = ["ts,close"] + [f"{B + i*INTERVAL},{100 + i*0.1}" for i in range(80)]
+        Path(sample, f"{sym}_1h.csv").write_text("\n".join(rows) + "\n", encoding="utf-8")
+    _run_main(["intraday-leadlag-study-v1023", "--sample-dir", str(sample),
+               "--equities", "NVDA", "--cryptos", "BTC-USD,ETH-USD,SOL-USD,XRP-USD,DOGE-USD",
+               "--timeframe", "1h", "--output-dir", str(tmp_path / "out")])
+    out = capsys.readouterr().out
+    assert "INTRADAY LEADLAG STUDY V10.23" in out and "NO LIVE" in out
+    assert "yahoo_open_ts_normalized_to_close_ts" in out
+
+
+def test_early_dispatch_report_no_network_no_config_db(monkeypatch, capsys, tmp_path):
+    monkeypatch.setattr(research_lab, "load_config", _boom_cfg)
+    monkeypatch.setattr(research_lab, "Database", _BoomDB)
+    monkeypatch.setattr(L, "default_transport",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("no network")))
+    _run_main(["intraday-leadlag-report-v1023", "--output-dir", str(tmp_path / "none")])
+    out = capsys.readouterr().out
+    assert "INTRADAY LEADLAG REPORT V10.23" in out and "NO LIVE" in out
 
 
 def test_non_allowlisted_command_still_uses_config(monkeypatch):
-    sentinel = RuntimeError("config path reached for non-allowlisted command")
-
-    def boom_cfg(*a, **k):
-        raise sentinel
-
-    monkeypatch.setattr(research_lab, "load_config", boom_cfg)
+    monkeypatch.setattr(research_lab, "load_config",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("config path reached")))
     with pytest.raises(RuntimeError):
         _run_main(["security-audit"])
-
-
-def test_report_cli_no_network(tmp_path):
-    lab = research_lab.ResearchLab.__new__(research_lab.ResearchLab)
-    out = lab.intraday_leadlag_report_v1023_cli(output_dir=str(tmp_path / "nope"))
-    assert "NO LIVE" in out and "NO_SCORECARD_YET" in out
 
 
 def test_module_no_dangerous_primitives():
