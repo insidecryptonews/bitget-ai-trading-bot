@@ -39,12 +39,15 @@ DEFAULT_RATE_PER_S = 5.0
 MAX_REQUESTS_HARD = 2000
 
 TF_MS = {"1m": 60_000, "3m": 180_000, "5m": 300_000, "15m": 900_000,
-         "30m": 1_800_000, "1h": 3_600_000, "2h": 7_200_000, "4h": 14_400_000}
+         "30m": 1_800_000, "1h": 3_600_000, "2h": 7_200_000, "4h": 14_400_000,
+         "6h": 21_600_000, "12h": 43_200_000, "1d": 86_400_000}
 
 # ---- exchange registry (PUBLIC endpoints only) ----------------------------
 # Each: host, path, page_limit, interval map, param builder, parser.
-_BINANCE_INTERVAL = {"1m": "1m", "5m": "5m", "15m": "15m", "1h": "1h", "4h": "4h"}
-_BYBIT_INTERVAL = {"1m": "1", "5m": "5", "15m": "15", "1h": "60", "4h": "240"}
+_BINANCE_INTERVAL = {"1m": "1m", "5m": "5m", "15m": "15m", "1h": "1h", "2h": "2h",
+                     "4h": "4h", "6h": "6h", "12h": "12h", "1d": "1d"}
+_BYBIT_INTERVAL = {"1m": "1", "5m": "5", "15m": "15", "1h": "60", "2h": "120",
+                   "4h": "240", "6h": "360", "12h": "720", "1d": "D"}
 
 EXCHANGES = ("binance_futures", "bybit_linear")
 _ALLOW = {

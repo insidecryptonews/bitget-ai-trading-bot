@@ -175,3 +175,16 @@ def test_module_no_dangerous_primitives():
         assert tok not in src, tok
     # parsers exist for both venues
     assert "parse_binance" in src and "parse_bybit" in src
+
+
+# V10.18 - higher timeframes added to the collector (2h/6h/12h/1d)
+def test_higher_timeframes_supported():
+    for tf in ("2h", "4h", "6h", "12h", "1d"):
+        assert tf in X.TF_MS, tf
+        assert tf in X._BINANCE_INTERVAL and tf in X._BYBIT_INTERVAL, tf
+    assert X._BYBIT_INTERVAL["1d"] == "D" and X._BINANCE_INTERVAL["1d"] == "1d"
+    # params build correctly for a 1d binance request (no crash, right interval)
+    p = X._build_params("binance_futures", "BTCUSDT", "1d", 0, 1, 100)
+    assert p["interval"] == "1d"
+    p2 = X._build_params("bybit_linear", "BTCUSDT", "6h", 0, 1, 100)
+    assert p2["interval"] == "360"
