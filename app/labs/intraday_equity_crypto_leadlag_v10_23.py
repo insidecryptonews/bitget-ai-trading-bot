@@ -222,38 +222,64 @@ def _ret_n_closed(series: dict[int, float], decision_ts: int, interval: int, n: 
     return (b / a - 1.0, last_open + interval)
 
 
+class FeatureGuard(dict):
+    """A features view that REFUSES to return any future-label column. A predictor
+    that accidentally reads a `label_*` key raises instead of leaking the future."""
+
+    def _check(self, k: Any) -> None:
+        if isinstance(k, str) and k.startswith("label_"):
+            raise ValueError(f"lookahead blocked: predictor read future label {k!r}")
+
+    def __getitem__(self, k):
+        self._check(k)
+        return super().__getitem__(k)
+
+    def get(self, k, default=None):
+        self._check(k)
+        return super().get(k, default)
+
+
 def align_no_lookahead(crypto: dict[str, dict[int, float]], equity: dict[str, dict[int, float]],
                        interval: int, horizons: tuple[int, ...] = (1, 2, 4, 8),
                        max_staleness_h: int = 2) -> dict[str, Any]:
-    """Build decision rows on the crypto hourly grid. Features come ONLY from
-    equity bars closed at or before decision_ts; labels come ONLY from crypto
-    bars strictly after decision_ts."""
+    """Build decision rows on the crypto hourly grid with SEPARATE namespaces:
+      features (feature_*) -> only data known at decision_ts (closed bars);
+      labels   (label_*)   -> only crypto bars strictly AFTER decision_ts.
+    The crypto 'past' feature uses close[t] (the bar that closed exactly at t,
+    known at the decision instant); labels use close[t+h] (strictly future)."""
     btc = crypto.get("BTC-USD") or {}
     grid = sorted(btc)
     rows: list[dict[str, Any]] = []
-    feat_max_ts_global, label_min_start_global = [], []
     for t in grid:
-        # need future for max horizon
         if (t + max(horizons) * interval) not in btc:
             continue
-        # equity features: most-recent-closed bar; require freshness (during/just after session)
-        eq_feats: dict[str, float] = {}
-        eq_close_ts: list[int] = []
+        features: dict[str, float] = {}
+        feat_ts: list[int] = []
         fresh = False
+        # equity features: most-recent CLOSED bar (open+interval<=t), require freshness
         for sym, ser in equity.items():
             r1 = _ret_n_closed(ser, t, interval, 1)
             if r1 is None:
                 continue
-            eq_feats[f"{sym}_ret1"] = r1[0]
-            eq_close_ts.append(r1[1])
+            features[f"feature_{sym}_ret_1h"] = r1[0]
+            feat_ts.append(r1[1])
             if (t - r1[1]) <= max_staleness_h * interval:
                 fresh = True
             r2 = _ret_n_closed(ser, t, interval, 2)
             if r2 is not None:
-                eq_feats[f"{sym}_ret2"] = r2[0]
-        if not eq_feats or not fresh:
+                features[f"feature_{sym}_ret_2h"] = r2[0]
+        if not features or not fresh:
             continue
-        # crypto labels (future only)
+        # crypto PAST features: close[t]/close[t-n] (all <= decision_ts)
+        for cs, ser in crypto.items():
+            base = ser.get(t)
+            if base is None or base <= 0:
+                continue
+            for n, lbl in ((1, "1h"), (2, "2h"), (4, "4h")):
+                prev = ser.get(t - n * interval)
+                if prev and prev > 0:
+                    features[f"feature_{cs}_past_ret_{lbl}"] = base / prev - 1.0
+        # crypto labels: strictly future
         labels: dict[str, float] = {}
         ok_future = True
         for cs, ser in crypto.items():
@@ -266,23 +292,22 @@ def align_no_lookahead(crypto: dict[str, dict[int, float]], equity: dict[str, di
                 if fv is None:
                     ok_future = False
                     break
-                labels[f"{cs}_ret{h}h"] = fv / base - 1.0
+                labels[f"label_{cs}_future_ret_{h}h"] = fv / base - 1.0
             if not ok_future:
                 break
         if not ok_future:
             continue
-        feat_max_ts = max(eq_close_ts)
+        feat_max_ts = max(feat_ts + [t])   # crypto past feature uses close at t
         label_start = t + interval
-        feat_max_ts_global.append(feat_max_ts)
-        label_min_start_global.append(label_start)
         rows.append({"decision_ts": t, "feat_max_ts": feat_max_ts, "label_start_ts": label_start,
-                     **eq_feats, **labels})
-    # no-lookahead audit
+                     "features": features, "labels": labels})
     ok = all(r["feat_max_ts"] <= r["decision_ts"] < r["label_start_ts"] for r in rows)
-    status = "OK" if (ok and rows) else ("NO_DATA" if not rows else "NO_LOOKAHEAD_FAIL")
+    # also assert no label_ key ever sits in features (namespace integrity)
+    ns_ok = all(not any(k.startswith("label_") for k in r["features"]) for r in rows)
+    status = "OK" if (ok and ns_ok and rows) else ("NO_DATA" if not rows else "NO_LOOKAHEAD_FAIL")
     return {"rows": rows, "no_lookahead_status": status,
-            "features_max_ts_le_decision": ok, "equity_bar_close_aligned": True,
-            "n_rows": len(rows)}
+            "features_max_ts_le_decision": ok, "namespace_separated": ns_ok,
+            "equity_bar_close_aligned": True, "n_rows": len(rows)}
 
 
 # --------------------------------------------------------------------------
@@ -293,38 +318,46 @@ def _mean(xs: list[float]) -> float:
     return st.mean(xs) if xs else 0.0
 
 
+def _feat(r: dict[str, Any]) -> "FeatureGuard":
+    return FeatureGuard(r.get("features", {}))
+
+
+def _label_drawdown(r: dict[str, Any], sym: str = "BTC-USD", h: int = 4, thr: float = -0.02) -> bool:
+    # reads ONLY the future-label namespace
+    return r.get("labels", {}).get(f"label_{sym}_future_ret_{h}h", 0.0) <= thr
+
+
 def event_study(rows: list[dict[str, Any]]) -> dict[str, Any]:
-    """After an equity shock (NVDA -1% / QQQ -0.7% / SMH -0.8% over last 1h),
-    what does crypto do next? Compare to non-shock baseline."""
+    """After an equity shock (NVDA -1% / QQQ -0.7% / SMH -0.8% over last closed 1h
+    bar), what does crypto do next? Uses past features for the trigger and future
+    labels for the outcome (no crossover)."""
     def shock(r):
-        return (r.get("NVDA_ret1", 0) <= -0.01 or r.get("QQQ_ret1", 0) <= -0.007
-                or r.get("SMH_ret1", 0) <= -0.008)
+        f = _feat(r)
+        return (f.get("feature_NVDA_ret_1h", 0) <= -0.01 or f.get("feature_QQQ_ret_1h", 0) <= -0.007
+                or f.get("feature_SMH_ret_1h", 0) <= -0.008)
     sh = [r for r in rows if shock(r)]
     no = [r for r in rows if not shock(r)]
     out = {"n_shock": len(sh), "n_no_shock": len(no), "horizons": {}}
     for h in (1, 2, 4, 8):
-        k = f"BTC-USD_ret{h}h"
-        ek = f"ETH-USD_ret{h}h"
+        k = f"label_BTC-USD_future_ret_{h}h"
+        ek = f"label_ETH-USD_future_ret_{h}h"
         out["horizons"][f"{h}h"] = {
-            "btc_after_shock": round(_mean([r[k] for r in sh if k in r]), 5),
-            "btc_no_shock": round(_mean([r[k] for r in no if k in r]), 5),
-            "eth_after_shock": round(_mean([r[ek] for r in sh if ek in r]), 5),
-            "eth_no_shock": round(_mean([r[ek] for r in no if ek in r]), 5)}
+            "btc_after_shock": round(_mean([r["labels"][k] for r in sh if k in r["labels"]]), 5),
+            "btc_no_shock": round(_mean([r["labels"][k] for r in no if k in r["labels"]]), 5),
+            "eth_after_shock": round(_mean([r["labels"][ek] for r in sh if ek in r["labels"]]), 5),
+            "eth_no_shock": round(_mean([r["labels"][ek] for r in no if ek in r["labels"]]), 5)}
     return out
 
 
-def risk_off_score(r: dict[str, Any]) -> int:
+def risk_off_score(f: dict[str, Any]) -> int:
+    """Score from PAST closed equity features only (f is a features dict/guard)."""
     s = 0
-    s += 25 if r.get("NVDA_ret1", 0) <= -0.01 else 0
-    s += 20 if r.get("QQQ_ret1", 0) <= -0.007 else 0
-    s += 20 if r.get("SMH_ret1", 0) <= -0.008 else 0
-    s += 15 if r.get("SPY_ret1", 0) <= -0.005 else 0
-    s += 20 if r.get("_idx_VIX_ret1", 0) >= 0.02 else 0
+    s += 25 if f.get("feature_NVDA_ret_1h", 0) <= -0.01 else 0
+    s += 20 if f.get("feature_QQQ_ret_1h", 0) <= -0.007 else 0
+    s += 20 if f.get("feature_SMH_ret_1h", 0) <= -0.008 else 0
+    s += 15 if f.get("feature_SPY_ret_1h", 0) <= -0.005 else 0
+    s += 20 if f.get("feature__idx_VIX_ret_1h", 0) >= 0.02 else 0
     return s
-
-
-def _label_drawdown(r: dict[str, Any], sym: str = "BTC-USD", h: int = 4, thr: float = -0.02) -> bool:
-    return r.get(f"{sym}_ret{h}h", 0.0) <= thr
 
 
 def _prec_recall(rows, pred, label):
@@ -336,29 +369,47 @@ def _prec_recall(rows, pred, label):
     return {"precision": round(p, 4), "recall": round(rc, 4), "flags": tp + fp, "tp": tp}
 
 
+def _prec_recall_mask(rows, mask: list[bool], label):
+    """Precision/recall against a FIXED precomputed boolean mask (no re-randomizing)."""
+    tp = fp = fn = 0
+    for r, m in zip(rows, mask):
+        lab = label(r)
+        if m and lab:
+            tp += 1
+        elif m and not lab:
+            fp += 1
+        elif (not m) and lab:
+            fn += 1
+    p = tp / (tp + fp) if (tp + fp) else 0.0
+    rc = tp / (tp + fn) if (tp + fn) else 0.0
+    return {"precision": round(p, 4), "recall": round(rc, 4), "flags": tp + fp, "tp": tp}
+
+
 def evaluate(rows: list[dict[str, Any]], label_h: int = 4, label_thr: float = -0.02,
              score_thr: int = 45, seed: int = 7) -> dict[str, Any]:
     label = lambda r: _label_drawdown(r, "BTC-USD", label_h, label_thr)
     n = len(rows)
+    embargo = label_h  # labels overlap label_h bars -> embargo around the split
     cut = int(n * 0.7)
-    rng = random.Random(seed)
+    is_rows = rows[:max(0, cut - embargo)]
+    oos_rows = rows[cut + embargo:]
+    # predictors read ONLY features (via FeatureGuard); labels are inaccessible to them
     preds = {
-        "risk_off_score>=thr": lambda r: risk_off_score(r) >= score_thr,
-        "BTC-only(btc1<0)": lambda r: r.get("BTC-USD_ret1h", 0) < 0,
-        "QQQ-only(qqq1<-0.7%)": lambda r: r.get("QQQ_ret1", 0) <= -0.007,
-        "NVDA-only(nvda1<-1%)": lambda r: r.get("NVDA_ret1", 0) <= -0.01,
-        "VIX-only(vix1>=2%)": lambda r: r.get("_idx_VIX_ret1", 0) >= 0.02,
-        "always_riskoff_after_red_eq": lambda r: any(r.get(f"{s}_ret1", 0) < 0 for s in ("NVDA", "QQQ", "SPY", "SMH")),
-        "random_same_freq": lambda r: rng.random() < 0.0,  # set below
+        "risk_off_score>=thr": lambda r: risk_off_score(_feat(r)) >= score_thr,
+        "BTC-only(past_ret_1h<0)": lambda r: _feat(r).get("feature_BTC-USD_past_ret_1h", 0.0) < 0,
+        "BTC-only(past_ret_4h<0)": lambda r: _feat(r).get("feature_BTC-USD_past_ret_4h", 0.0) < 0,
+        "QQQ-only(ret1<-0.7%)": lambda r: _feat(r).get("feature_QQQ_ret_1h", 0.0) <= -0.007,
+        "NVDA-only(ret1<-1%)": lambda r: _feat(r).get("feature_NVDA_ret_1h", 0.0) <= -0.01,
+        "VIX-only(ret1>=2%)": lambda r: _feat(r).get("feature__idx_VIX_ret_1h", 0.0) >= 0.02,
+        "always_riskoff_after_red_eq": lambda r: any(
+            _feat(r).get(f"feature_{s}_ret_1h", 0.0) < 0 for s in ("NVDA", "QQQ", "SPY", "SMH")),
     }
-    # calibrate random to the score's flag frequency on IS
-    is_rows, oos_rows = rows[:cut], rows[cut:]
     base_is = (sum(1 for r in is_rows if label(r)) / len(is_rows)) if is_rows else 0.0
     base_oos = (sum(1 for r in oos_rows if label(r)) / len(oos_rows)) if oos_rows else 0.0
-    score_freq = (sum(1 for r in rows if risk_off_score(r) >= score_thr) / n) if n else 0.0
-    rng2 = random.Random(seed + 1)
-    preds["random_same_freq"] = lambda r, _rng=rng2, _f=score_freq: _rng.random() < _f
-    out = {"n": n, "is_n": len(is_rows), "oos_n": len(oos_rows),
+    out = {"n": n, "split_type": "chronological_70_30_with_embargo", "embargo_bars": embargo,
+           "is_n": len(is_rows), "oos_n": len(oos_rows),
+           "oos_events": sum(1 for r in oos_rows if label(r)),
+           "purge_embargo_warning": True,
            "label": f"BTC-USD drawdown<= {label_thr*100:.0f}% next {label_h}h",
            "base_rate_is": round(base_is, 4), "base_rate_oos": round(base_oos, 4),
            "predictors": {}}
@@ -368,6 +419,18 @@ def evaluate(rows: list[dict[str, Any]], label_h: int = 4, label_thr: float = -0
         pis["lift"] = round(pis["precision"] / base_is, 3) if base_is else 0.0
         pos["lift"] = round(pos["precision"] / base_oos, 3) if base_oos else 0.0
         out["predictors"][name] = {"IS": pis, "OOS": pos}
+    # random baseline: frequency calibrated on IS ONLY; FIXED per-row mask (deterministic)
+    score_freq_is = (sum(1 for r in is_rows if risk_off_score(_feat(r)) >= score_thr) / len(is_rows)) if is_rows else 0.0
+    mask_is = [random.Random(seed * 100003 + i).random() < score_freq_is for i in range(len(is_rows))]
+    mask_oos = [random.Random(seed * 100003 + 7919 + i).random() < score_freq_is for i in range(len(oos_rows))]
+    ris = _prec_recall_mask(is_rows, mask_is, label)
+    ros = _prec_recall_mask(oos_rows, mask_oos, label)
+    ris["lift"] = round(ris["precision"] / base_is, 3) if base_is else 0.0
+    ros["lift"] = round(ros["precision"] / base_oos, 3) if base_oos else 0.0
+    ris["freq"] = round(sum(mask_is) / len(mask_is), 4) if mask_is else 0.0
+    ros["freq"] = round(sum(mask_oos) / len(mask_oos), 4) if mask_oos else 0.0
+    out["random_score_freq_is"] = round(score_freq_is, 4)
+    out["predictors"]["random_fixed_mask(IS-calibrated)"] = {"IS": ris, "OOS": ros}
     return out
 
 
@@ -398,28 +461,45 @@ def load_staged(run_dir: str, tf: str, equities: list[str], cryptos: list[str]) 
     return crypto, equity
 
 
+def _effective_days(crypto: dict[str, dict[int, float]], interval: int) -> int:
+    btc = crypto.get("BTC-USD") or {}
+    if len(btc) < 2:
+        return 0
+    span = (max(btc) - min(btc))
+    return max(0, round(span / 86400))
+
+
 def run_study(crypto: dict[str, dict[int, float]], equity: dict[str, dict[int, float]],
-              interval: int, days: int) -> dict[str, Any]:
+              interval: int, days: int, requested_days: int | None = None) -> dict[str, Any]:
     aligned = align_no_lookahead(crypto, equity, interval)
     rows = aligned["rows"]
+    eff_days = _effective_days(crypto, interval)
+    req_days = int(requested_days if requested_days is not None else days)
+    data_source_limited = eff_days <= 75 and req_days > eff_days + 30
     rep: dict[str, Any] = {"tool_version": TOOL_VERSION, "generated_at": _now_stamp(),
                            "n_decision_rows": aligned["n_rows"],
                            "no_lookahead": {"status": aligned["no_lookahead_status"],
                                             "features_max_ts_le_decision": aligned["features_max_ts_le_decision"],
+                                            "namespace_separated": aligned.get("namespace_separated"),
                                             "equity_bar_close_aligned": aligned["equity_bar_close_aligned"],
                                             "label_start_after_decision": True},
+                           "timezone": "UTC", "equity_session": "regular_only (includePrePost=false)",
+                           "equity_freshness": "closed bar, <=2h stale",
                            "equities": sorted(equity), "cryptos": sorted(crypto),
-                           "interval_seconds": interval, "days": days, **_safety()}
+                           "interval_seconds": interval,
+                           "requested_days": req_days, "effective_days": eff_days,
+                           "data_source_limited_60d": bool(data_source_limited or eff_days <= 75),
+                           **_safety()}
     if aligned["no_lookahead_status"] != "OK" or not rows:
         rep["event_study"] = {}
         rep["evaluation"] = {}
         rep["classification"] = classify({"predictors": {}}, aligned["n_rows"],
-                                         aligned["no_lookahead_status"], days)
+                                         aligned["no_lookahead_status"], eff_days)
         return rep
     rep["event_study"] = event_study(rows)
     rep["evaluation"] = evaluate(rows)
     rep["classification"] = classify(rep["evaluation"], aligned["n_rows"],
-                                     aligned["no_lookahead_status"], days)
+                                     aligned["no_lookahead_status"], eff_days)
     return rep
 
 
@@ -451,12 +531,14 @@ def classify(evald: dict[str, Any], n_rows: int, no_lookahead: str, days: int) -
     if no_lookahead != "OK":
         return {"verdict": C_NO_LOOKAHEAD_FAIL, "reasons": ["alignment failed"], **_safety()}
     score = evald["predictors"].get("risk_off_score>=thr", {})
-    btc = evald["predictors"].get("BTC-only(btc1<0)", {})
+    # corrected BTC-only baseline uses PAST features only (best of the two past lookbacks)
+    btc1 = evald["predictors"].get("BTC-only(past_ret_1h<0)", {}).get("OOS", {})
+    btc4 = evald["predictors"].get("BTC-only(past_ret_4h<0)", {}).get("OOS", {})
     s_oos = score.get("OOS", {})
-    b_oos = btc.get("OOS", {})
+    btc_prec = max(btc1.get("precision", 0.0), btc4.get("precision", 0.0))
     lift = s_oos.get("lift", 0.0)
-    beats_btc = s_oos.get("precision", 0) > b_oos.get("precision", 0)
-    low_sample = days <= 60 or n_rows < 400
+    beats_btc = s_oos.get("precision", 0) > btc_prec
+    low_sample = days <= 75 or n_rows < 400
     if lift > 1.3 and beats_btc and s_oos.get("flags", 0) >= 10:
         verdict = C_CANDIDATE if low_sample else C_WEAK
         reasons.append(f"OOS lift {lift} >1.3 and beats BTC-only")
