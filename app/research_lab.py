@@ -5784,6 +5784,71 @@ class ResearchLab:
                   "final_recommendation: NO LIVE", "CROSS EXCHANGE OHLCV FETCH V10.15 END"]
         return "\n".join(lines)
 
+    # ------------------------------------------------------------------
+    # ResearchOps V10.21 - Forward-Shadow Regime Overlay (read-only, NO ORDERS).
+    # ------------------------------------------------------------------
+    def forward_shadow_regime_plan_v1021_cli(self) -> str:
+        import json as _json
+        from .labs import forward_shadow_regime_v10_21 as R
+        p = R.forward_shadow_regime_plan()
+        lines = ["FORWARD SHADOW REGIME PLAN V10.21 START", "objective: " + p["objective"],
+                 "verdict_vocabulary: " + ",".join(p["verdict_vocabulary"]),
+                 "honesty: " + ",".join(p["honesty"]), "never: " + ",".join(p["never"]),
+                 "descriptive_only: true", "makes_no_trades: true", "edge_validated: false"]
+        lines += ["research_only: true", "shadow_only: true", "paper_ready: false",
+                  "live_ready: false", "can_send_real_orders: false",
+                  "final_recommendation: NO LIVE", "FORWARD SHADOW REGIME PLAN V10.21 END"]
+        return "\n".join(lines)
+
+    def forward_shadow_regime_run_v1021_cli(self, *, sample_dir, symbols, timeframe="1d",
+                                            output_dir="") -> str:
+        from .labs import forward_shadow_regime_v10_21 as R
+        syms = self._v107_csv_arg(symbols) or ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "DOGEUSDT"]
+        rep = R.run_regime(sample_dir, syms, timeframe=timeframe)
+        journal = ""
+        if not rep.get("errors") or rep.get("per_symbol"):
+            journal = R.write_journal(rep, output_dir=(output_dir or None))
+        b = rep.get("basket", {})
+        lines = ["FORWARD SHADOW REGIME RUN V10.21 START", f"sample_dir: {sample_dir}",
+                 f"timeframe: {timeframe}", f"errors: {rep.get('errors')}",
+                 f"basket_verdict: {b.get('basket_verdict')}",
+                 f"basket_breadth: down={b.get('n_downtrend')} up={b.get('n_uptrend')} range={b.get('n_range')} risk_off={b.get('n_risk_off')}/{b.get('n_symbols')}",
+                 "per_symbol (DESCRIPTIVE regime + research action context, NOT trade signals):"]
+        for s in rep.get("per_symbol", []):
+            lines.append(f"- {s['symbol']}: regime={s['regime']} verdict={s['verdict']} "
+                         f"ret20={s.get('ret20')} dd30={s.get('drawdown30')} vol20={s.get('vol20')} "
+                         f"above_sma20={s.get('above_sma20')}")
+        lines.append(f"journal: {journal or 'NONE'}")
+        lines += ["descriptive_only: true", "predicts_nothing: true", "makes_no_trades: true",
+                  "is_trade_signal: false", "edge_validated: false", "research_only: true",
+                  "shadow_only: true", "paper_ready: false", "live_ready: false",
+                  "can_send_real_orders: false", "final_recommendation: NO LIVE",
+                  "FORWARD SHADOW REGIME RUN V10.21 END"]
+        return "\n".join(lines)
+
+    def forward_shadow_regime_report_v1021_cli(self, *, output_dir="") -> str:
+        import json as _json
+        from .labs import forward_shadow_regime_v10_21 as R
+        base = R._safe_output_base(output_dir or None, R.JOURNAL_ROOT)
+        tl = os.path.join(base, "regime_timeline.jsonl")
+        lines = ["FORWARD SHADOW REGIME REPORT V10.21 START", f"journal_dir: {base}"]
+        if os.path.isfile(tl):
+            rows = [l for l in open(tl, encoding="utf-8").read().splitlines() if l.strip()]
+            lines.append(f"snapshots_logged: {len(rows)}")
+            for l in rows[-10:]:
+                try:
+                    d = _json.loads(l)
+                    lines.append(f"- {d.get('ts')}: basket={d.get('basket')} {d.get('per_symbol')}")
+                except Exception:
+                    continue
+        else:
+            lines.append("status: NO_JOURNAL_YET (run forward-shadow-regime-run-v1021 first)")
+        lines += ["descriptive_only: true", "makes_no_trades: true", "edge_validated: false",
+                  "research_only: true", "shadow_only: true", "paper_ready: false",
+                  "live_ready: false", "can_send_real_orders: false",
+                  "final_recommendation: NO LIVE", "FORWARD SHADOW REGIME REPORT V10.21 END"]
+        return "\n".join(lines)
+
     def trader_dashboard_contract_v105_cli(self) -> str:
         from .labs.trader_dashboard_v104 import (
             DISABLED_CONTROLS,
@@ -6968,6 +7033,9 @@ def build_argument_parser() -> argparse.ArgumentParser:
             "intraday-to-shadow-readiness-v1013",
             "cross-exchange-ohlcv-plan-v1015",
             "cross-exchange-ohlcv-fetch-v1015",
+            "forward-shadow-regime-plan-v1021",
+            "forward-shadow-regime-run-v1021",
+            "forward-shadow-regime-report-v1021",
             "ohlcv-replay-loader-smoke-test",
             "ohlcv-replay-loader-audit",
             "duplicate-module-audit-smoke-test",
@@ -8101,6 +8169,14 @@ def main() -> None:
             exchanges=args.exchanges, symbols=args.symbols, timeframe=args.timeframe,
             days=args.days, max_requests=args.max_requests, apply=args.apply,
             output_dir=args.output_dir))
+    elif args.command == "forward-shadow-regime-plan-v1021":
+        print(lab.forward_shadow_regime_plan_v1021_cli())
+    elif args.command == "forward-shadow-regime-run-v1021":
+        print(lab.forward_shadow_regime_run_v1021_cli(
+            sample_dir=args.sample_dir, symbols=args.symbols,
+            timeframe=args.timeframe, output_dir=args.output_dir))
+    elif args.command == "forward-shadow-regime-report-v1021":
+        print(lab.forward_shadow_regime_report_v1021_cli(output_dir=args.output_dir))
     elif args.command == "ohlcv-replay-loader-smoke-test":
         print(lab.ohlcv_replay_loader_smoke_test())
     elif args.command == "ohlcv-replay-loader-audit":
