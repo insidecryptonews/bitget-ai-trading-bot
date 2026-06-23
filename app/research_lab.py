@@ -6000,6 +6000,69 @@ class ResearchLab:
                 "final_recommendation: NO LIVE", "INTRADAY LEADLAG REPORT V10.23 END"]
         return "\n".join(out)
 
+    # ------------------------------------------------------------------
+    # ResearchOps V10.24 - Microstructure Sample Adapter (research only, OFFLINE).
+    # ------------------------------------------------------------------
+    def microstructure_sample_plan_v1024_cli(self) -> str:
+        from .labs import microstructure_sample_adapter_v10_24 as M
+        p = M.microstructure_plan()
+        out = ["MICROSTRUCTURE SAMPLE PLAN V10.24 START", "objective: " + p["objective"],
+               f"default_sample_dir: {p['default_sample_dir']}",
+               f"expected_types: {','.join(p['expected_types'])}",
+               f"verdicts: {','.join(p['verdicts'])}",
+               f"reads_only_local_files: {p['reads_only_local_files']}  uses_network: {p['uses_network']}  uses_db: {p['uses_db']}",
+               "expected_fields:"]
+        for t, fs in p["expected_fields"].items():
+            out.append(f"- {t}: {', '.join(fs)}")
+        out += ["never: " + ",".join(p["never"]), f"writes_on_plan: {p['writes_on_plan']}",
+                "research_only: true", "shadow_only: true", "paper_ready: false",
+                "live_ready: false", "can_send_real_orders: false",
+                "final_recommendation: NO LIVE", "MICROSTRUCTURE SAMPLE PLAN V10.24 END"]
+        return "\n".join(out)
+
+    def microstructure_sample_validate_v1024_cli(self, *, sample_dir="", output_dir="",
+                                                 apply_normalization=False) -> str:
+        from .labs import microstructure_sample_adapter_v10_24 as M
+        sd = sample_dir or M.DEFAULT_SAMPLE_DIR
+        rep = M.validate_sample(sd, apply_normalization=bool(apply_normalization))
+        paths = M.write_reports(rep, output_dir=(output_dir or None))
+        cls = rep.get("classification", {})
+        out = ["MICROSTRUCTURE SAMPLE VALIDATE V10.24 START", f"sample_dir: {sd}",
+               f"files_recognized: {len(rep.get('files', []))}", f"errors: {rep.get('errors')}",
+               f"verdict: {cls.get('verdict')}", f"valid_types: {cls.get('valid_types')}",
+               f"gaps: {cls.get('gaps')}", f"max_coverage_days: {cls.get('max_coverage_days')}",
+               f"future_research_ready_if_sample_passes: {cls.get('future_research_ready_if_sample_passes')}"]
+        for f in rep.get("files", []):
+            out.append(f"- {f['file']}: type={f['detected_type']} rows={f['rows']} valid={f.get('valid')}")
+        nrm = rep.get("normalization", {})
+        out.append(f"normalization_applied: {nrm.get('applied')}  out_dir: {nrm.get('out_dir')}")
+        out.append(f"scorecard: {paths.get('scorecard')}")
+        out += ["uses_network: false", "uses_db: false", "research_only: true", "shadow_only: true",
+                "paper_ready: false", "live_ready: false", "can_send_real_orders: false",
+                "final_recommendation: NO LIVE", "MICROSTRUCTURE SAMPLE VALIDATE V10.24 END"]
+        return "\n".join(out)
+
+    def microstructure_sample_report_v1024_cli(self, *, output_dir="") -> str:
+        import json as _json
+        import os
+        from .labs import microstructure_sample_adapter_v10_24 as M
+        base = M._safe_output_base(output_dir or None)
+        sc = os.path.join(base, "microstructure_sample_scorecard.json")
+        out = ["MICROSTRUCTURE SAMPLE REPORT V10.24 START", f"output_dir: {base}"]
+        if os.path.isfile(sc):
+            rep = _json.loads(open(sc, encoding="utf-8").read())
+            cls = rep.get("classification", {})
+            out += [f"generated_at: {rep.get('generated_at')}",
+                    f"verdict: {cls.get('verdict')}", f"valid_types: {cls.get('valid_types')}",
+                    f"gaps: {cls.get('gaps')}",
+                    f"future_research_ready_if_sample_passes: {cls.get('future_research_ready_if_sample_passes')}"]
+        else:
+            out.append("status: NO_SCORECARD_YET (run microstructure-sample-validate-v1024 first)")
+        out += ["uses_network: false", "research_only: true", "shadow_only: true",
+                "paper_ready: false", "live_ready: false", "can_send_real_orders: false",
+                "final_recommendation: NO LIVE", "MICROSTRUCTURE SAMPLE REPORT V10.24 END"]
+        return "\n".join(out)
+
     def trader_dashboard_contract_v105_cli(self) -> str:
         from .labs.trader_dashboard_v104 import (
             DISABLED_CONTROLS,
@@ -7191,6 +7254,9 @@ def build_argument_parser() -> argparse.ArgumentParser:
             "intraday-leadlag-fetch-v1023",
             "intraday-leadlag-study-v1023",
             "intraday-leadlag-report-v1023",
+            "microstructure-sample-plan-v1024",
+            "microstructure-sample-validate-v1024",
+            "microstructure-sample-report-v1024",
             "ohlcv-replay-loader-smoke-test",
             "ohlcv-replay-loader-audit",
             "duplicate-module-audit-smoke-test",
@@ -7333,6 +7399,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--last-n", type=int, default=10, help="V10.21 forward-shadow report: number of recent snapshots to show.")
     parser.add_argument("--equities", default="NVDA,QQQ,SPY,SMH,COIN,MSTR,TSLA,^VIX", help="V10.23 equity/risk symbols (CSV).")
     parser.add_argument("--cryptos", default="BTC-USD,ETH-USD,SOL-USD,XRP-USD,DOGE-USD", help="V10.23 crypto symbols (CSV).")
+    parser.add_argument("--apply-normalization", action="store_true", help="V10.24: write normalized microstructure CSVs into the v10_24 staging marker (default off).")
     parser.add_argument("--max-grid-combos", type=int, default=500, help="V10.8 cap on evaluated parameter combos.")
     parser.add_argument("--seed", type=int, default=7, help="V10.8 deterministic seed for grid sampling.")
     parser.add_argument("--walk-forward-mode", default="", help="V10.8.1 none|chronological_split|rolling (default rolling). Empty falls back to --walk-forward mapping.")
@@ -7379,6 +7446,9 @@ PUBLIC_RESEARCH_ONLY_COMMANDS = frozenset({
     "intraday-leadlag-fetch-v1023",
     "intraday-leadlag-study-v1023",
     "intraday-leadlag-report-v1023",
+    "microstructure-sample-plan-v1024",
+    "microstructure-sample-validate-v1024",
+    "microstructure-sample-report-v1024",
 })
 
 
@@ -7407,6 +7477,14 @@ def _dispatch_public_research_only(args) -> None:
             days_explicit=days_explicit, tf_explicit=tf_explicit))
     elif args.command == "intraday-leadlag-report-v1023":
         print(lab.intraday_leadlag_report_v1023_cli(output_dir=args.output_dir))
+    elif args.command == "microstructure-sample-plan-v1024":
+        print(lab.microstructure_sample_plan_v1024_cli())
+    elif args.command == "microstructure-sample-validate-v1024":
+        print(lab.microstructure_sample_validate_v1024_cli(
+            sample_dir=args.sample_dir, output_dir=args.output_dir,
+            apply_normalization=args.apply_normalization))
+    elif args.command == "microstructure-sample-report-v1024":
+        print(lab.microstructure_sample_report_v1024_cli(output_dir=args.output_dir))
 
 
 def main() -> None:
