@@ -4760,6 +4760,8 @@ class ResearchLab:
                                    wf_anchored: bool = False,
                                    gap_policy: str = "adverse_open",
                                    max_grid_combos: int = 500, seed: int = 7,
+                                   entry_sampling_policy: str = "uniform_time",
+                                   max_entries: int = 40,
                                    output_dir: str = "",
                                    aggressive: bool = True) -> str:
         from .labs.adaptive_trailing_exit_v10_8 import (
@@ -4784,6 +4786,7 @@ class ResearchLab:
             wf_test_frac=wf_test_frac, wf_step_frac=wf_step_frac,
             wf_min_folds=wf_min_folds, wf_anchored=wf_anchored, gap_policy=gap_policy,
             max_grid_combos=max_grid_combos, seed=seed,
+            entry_sampling_policy=entry_sampling_policy, max_entries=max_entries,
             data_classification=classification, aggressive=aggressive)
         run_dir = ""
         if not report.get("errors"):
@@ -4816,6 +4819,10 @@ class ResearchLab:
         lines.append(f"n_combos_tested: {report.get('n_combos_tested')}")
         lines.append(f"n_candidates_after_gates: {report.get('n_candidates_after_gates')}")
         lines.append(f"false_discovery_risk: {report.get('false_discovery_risk')}")
+        lines.append(f"entry_sampling_policy: {report.get('entry_sampling_policy')}")
+        lines.append(f"dataset_coverage_days: {report.get('dataset_coverage_days')}")
+        lines.append(f"temporal_coverage_status: {report.get('temporal_coverage_status')}")
+        lines.append(f"n_rejected_temporal_undercoverage: {report.get('n_rejected_temporal_undercoverage')}")
         g = report.get("metrics_by", {}).get("global", {})
         lines.append(f"global_policy_comparison_net_EV: {g.get('net_EV')}")
         lines.append(f"global_policy_comparison_net_PF: {g.get('profit_factor_net')}")
@@ -7127,6 +7134,8 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--min-profit-factor", type=float, default=1.2, help="V10.12 minimum required profit factor.")
     parser.add_argument("--min-closed-green-rate", type=float, default=0.5, help="V10.12 minimum closed-green rate.")
     parser.add_argument("--max-candidates-per-run", type=int, default=400, help="V10.12 cap on evaluated candidate setups.")
+    parser.add_argument("--entry-sampling-policy", default="uniform_time", help="V10.17 V10.8 entry sampling: uniform_time (default, full-period) / per_window / all_if_feasible / first_n_legacy.")
+    parser.add_argument("--max-entries", type=int, default=40, help="V10.17 max entries per (symbol,tf,side,family) combo in V10.8 (sampled across time).")
     parser.add_argument("--exchanges", default="binance_futures,bybit_linear", help="V10.15 cross-exchange public collectors: binance_futures,bybit_linear.")
     parser.add_argument("--mode", default="offline-replay", help="V10.12 shadow runner mode: offline-replay/latest-snapshot/forward-shadow.")
     parser.add_argument("--offline-replay", action="store_true", help="V10.12 shadow runner: replay history bar-by-bar.")
@@ -7966,6 +7975,7 @@ def main() -> None:
             wf_anchored=str(args.wf_anchored).strip().lower() in ("true", "1", "yes"),
             gap_policy=args.gap_policy,
             max_grid_combos=args.max_grid_combos, seed=args.seed,
+            entry_sampling_policy=args.entry_sampling_policy, max_entries=args.max_entries,
             output_dir=args.output_dir))
     elif args.command == "trailing-exit-report-v108":
         print(lab.trailing_exit_report_v108_cli(output_dir=args.output_dir))

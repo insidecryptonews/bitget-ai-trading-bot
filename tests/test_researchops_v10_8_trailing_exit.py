@@ -583,3 +583,80 @@ def test_no_approved_for_paper_or_live_anywhere(tmp_path):
     assert "APPROVED_FOR_LIVE" not in blob
     for c in rep["research_candidates"] + rep["rejected_candidates"]:
         assert c["candidate_status"] in (L.CAND_REJECTED, L.CAND_WEAK, L.CAND_RESEARCH_ONLY)
+
+
+# ==========================================================================
+# V10.17 - full-period evaluation fix (entry sampling + temporal coverage gate)
+# ==========================================================================
+DAY = L.DAY_MS
+
+
+def test_sample_entries_uniform_vs_legacy():
+    ents = [{"entry_ts": i, "signal_idx": i} for i in range(100)]
+    uni = L._sample_entries(ents, 10, L.ENTRY_SAMPLING_UNIFORM)
+    leg = L._sample_entries(ents, 10, L.ENTRY_SAMPLING_LEGACY)
+    assert len(uni) <= 10 and uni[0]["entry_ts"] == 0 and uni[-1]["entry_ts"] == 99
+    assert leg == ents[:10] and leg[-1]["entry_ts"] == 9    # legacy clusters at the start
+    # uniform spans far more of the timeline than legacy
+    assert (uni[-1]["entry_ts"] - uni[0]["entry_ts"]) > (leg[-1]["entry_ts"] - leg[0]["entry_ts"])
+
+
+def test_generate_entries_uniform_spans_dataset():
+    bars = _trend_bars(n=800, drift=0.0, vol=0.02, seed=3)   # many signals across time
+    uni = L.generate_entries(symbol="BTCUSDT", timeframe="1h", side="LONG",
+                             family="trend_pullback", bars=bars, funding=[],
+                             max_entries=20, entry_sampling_policy=L.ENTRY_SAMPLING_UNIFORM)
+    leg = L.generate_entries(symbol="BTCUSDT", timeframe="1h", side="LONG",
+                             family="trend_pullback", bars=bars, funding=[],
+                             max_entries=20, entry_sampling_policy=L.ENTRY_SAMPLING_LEGACY)
+    if len(uni) >= 3 and len(leg) >= 3:
+        uni_span = uni[-1]["entry_ts"] - uni[0]["entry_ts"]
+        leg_span = leg[-1]["entry_ts"] - leg[0]["entry_ts"]
+        assert uni_span >= leg_span      # uniform covers >= the opening-window span
+        assert uni[-1]["entry_ts"] >= bars[len(bars) // 2]["ts"]   # reaches into 2nd half
+
+
+def _spread_trades(n, first_ts, last_ts, net=0.01):
+    step = (last_ts - first_ts) // max(1, n - 1)
+    return [_mk_trade(net, first_ts + i * step) for i in range(n)]
+
+
+def test_temporal_gate_rejects_opening_window():
+    T0 = 1700000000000
+    dlast = T0 + 365 * DAY
+    # 40 trades crammed into the first 18 days of a 365-day dataset (the V10.16 bug)
+    clustered = _spread_trades(40, T0, T0 + 18 * DAY)
+    ev = L.evaluate_candidate(clustered, costs=COSTS, min_trades=10,
+                              wf_mode=L.WF_NONE, dataset_first_ts=T0, dataset_last_ts=dlast)
+    assert ev["temporal_coverage"]["temporal_coverage_status"] == "TEMPORAL_COVERAGE_FAIL"
+    assert ev["candidate_status"] == L.CAND_REJECTED_TEMPORAL      # never WEAK
+    assert ev["candidate_status"] not in (L.CAND_WEAK, L.CAND_RESEARCH_ONLY)
+    assert ev["temporal_coverage"]["entry_coverage_ratio"] < 0.5
+
+
+def test_temporal_gate_ok_when_spread():
+    T0 = 1700000000000
+    dlast = T0 + 365 * DAY
+    spread = _spread_trades(60, T0, T0 + 360 * DAY)
+    ev = L.evaluate_candidate(spread, costs=COSTS, min_trades=10,
+                              wf_mode=L.WF_NONE, dataset_first_ts=T0, dataset_last_ts=dlast)
+    tc = ev["temporal_coverage"]
+    assert tc["temporal_coverage_status"] == "TEMPORAL_COVERAGE_OK"
+    assert ev["candidate_status"] != L.CAND_REJECTED_TEMPORAL
+    assert tc["entry_coverage_ratio"] >= 0.9
+    assert tc["entries_by_month"] and tc["entries_used"] == 60
+
+
+def test_temporal_coverage_fields_and_safety():
+    T0 = 1700000000000
+    ev = L.evaluate_candidate(_spread_trades(30, T0, T0 + 300 * DAY), costs=COSTS,
+                              min_trades=10, wf_mode=L.WF_NONE,
+                              dataset_first_ts=T0, dataset_last_ts=T0 + 365 * DAY)
+    tc = ev["temporal_coverage"]
+    for k in ("entries_used", "entry_first_ts", "entry_last_ts", "entry_coverage_days",
+              "dataset_coverage_days", "entry_coverage_ratio", "entries_by_month",
+              "folds_with_entries", "folds_without_entries", "temporal_coverage_status",
+              "entry_sampling_policy"):
+        assert k in tc, k
+    assert ev["approved_for_paper"] is False and ev["approved_for_live"] is False
+    assert ev["final_recommendation"] == "NO LIVE"

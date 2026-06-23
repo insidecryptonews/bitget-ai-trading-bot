@@ -47,8 +47,25 @@ DANGEROUS_LEVERAGE = 20
 
 # Candidate verdicts - never APPROVED_FOR_PAPER/LIVE.
 CAND_REJECTED = "REJECTED"
+CAND_REJECTED_TEMPORAL = "REJECTED_TEMPORAL_UNDERCOVERAGE"   # V10.17 fail-closed
 CAND_WEAK = "WEAK_RESEARCH_HYPOTHESIS"
 CAND_RESEARCH_ONLY = "RESEARCH_CANDIDATE_ONLY"
+
+# V10.17 - entry sampling policies (default avoids the opening-window bias that
+# V10.16 found: first_n_legacy took the EARLIEST max_entries signals, so a 365d
+# file was really evaluated over its first ~18 days).
+ENTRY_SAMPLING_UNIFORM = "uniform_time"     # default: spread entries across time
+ENTRY_SAMPLING_PER_WINDOW = "per_window"    # alias -> uniform_time here (folds re-sample)
+ENTRY_SAMPLING_ALL = "all_if_feasible"      # keep all up to a feasibility ceiling
+ENTRY_SAMPLING_LEGACY = "first_n_legacy"    # OLD biased behavior (kept, not default)
+ENTRY_SAMPLING_POLICIES = (ENTRY_SAMPLING_UNIFORM, ENTRY_SAMPLING_PER_WINDOW,
+                           ENTRY_SAMPLING_ALL, ENTRY_SAMPLING_LEGACY)
+_ALL_FEASIBLE_CEILING = 4000                # cap for all_if_feasible (compute bound)
+DAY_MS = 86_400_000
+# temporal-coverage gate: long dataset with thinly-covered entries is rejected.
+TEMPORAL_LONG_DATASET_DAYS = 180
+TEMPORAL_MIN_COVERAGE_RATIO = 0.5
+TEMPORAL_WARN_COVERAGE_RATIO = 0.7
 
 # V10.8.1 - walk-forward modes (the old simple split is NOT a walk-forward).
 WF_NONE = "none"
@@ -255,13 +272,39 @@ def _regime_tags(emaf: float | None, emas: float | None, close: float,
     return tags
 
 
+def _sample_entries(entries: list[dict[str, Any]], max_entries: int,
+                    policy: str) -> list[dict[str, Any]]:
+    """Choose <= max_entries from the time-ordered signal list WITHOUT the
+    opening-window bias. uniform_time picks evenly-spaced signals across the
+    whole timeline (first + last always kept); first_n_legacy keeps the old
+    earliest-N behavior (NOT default)."""
+    n = len(entries)
+    if max_entries <= 0 or n <= max_entries:
+        return entries
+    if policy == ENTRY_SAMPLING_LEGACY:
+        return entries[:max_entries]
+    if policy == ENTRY_SAMPLING_ALL and n <= _ALL_FEASIBLE_CEILING:
+        return entries
+    # uniform_time (default, and the fallback for per_window / oversized all):
+    # evenly-spaced indices across [0, n-1], inclusive of both ends, in order.
+    if max_entries == 1:
+        return [entries[0]]
+    idx = sorted({round(k * (n - 1) / (max_entries - 1)) for k in range(max_entries)})
+    return [entries[i] for i in idx]
+
+
 def generate_entries(*, symbol: str, timeframe: str, side: str, family: str,
                      bars: list[dict[str, Any]], funding: list[dict[str, Any]],
                      cooldown: int = _DEFAULT_COOLDOWN,
                      max_entries: int = _DEFAULT_MAX_ENTRIES,
                      breakout_n: int = 20, expansion_mult: float = 1.4,
-                     pullback_lookback: int = 6) -> list[dict[str, Any]]:
-    """Return no-lookahead entry signals. Each uses only bars[:i+1]."""
+                     pullback_lookback: int = 6,
+                     entry_sampling_policy: str = ENTRY_SAMPLING_UNIFORM) -> list[dict[str, Any]]:
+    """Return no-lookahead entry signals. Each uses only bars[:i+1].
+
+    V10.17: ALL signals are collected first, then sampled per
+    ``entry_sampling_policy`` so the evaluated entries span the WHOLE dataset
+    (not just the opening window). cooldown still spaces signals."""
     if len(bars) < _WARMUP + 2:
         return []
     atr = atr_series(bars)
@@ -330,9 +373,8 @@ def generate_entries(*, symbol: str, timeframe: str, side: str, family: str,
             "regimes": _regime_tags(ef, es, c, a, atr_med, fr),
             "funding_snapshot": fr, "no_lookahead": True})
         last_entry_i = i
-        if len(out) >= max_entries:
-            break
-    return out
+    # V10.17: sample across the FULL timeline instead of breaking at the first N.
+    return _sample_entries(out, max_entries, entry_sampling_policy)
 
 
 # --------------------------------------------------------------------------
@@ -779,6 +821,43 @@ def _base_rejections(full: dict[str, Any], trades: list[dict[str, Any]],
     return rej
 
 
+def _temporal_coverage(trades: list[dict[str, Any]], dataset_first_ts, dataset_last_ts,
+                       wf: dict[str, Any] | None) -> dict[str, Any]:
+    """V10.17 - measure how much of the dataset timeline the evaluated entries
+    actually span. Fail-closed on long datasets covered only at one end."""
+    ts = [t.get("entry_ts") for t in trades if t.get("entry_ts") is not None]
+    out: dict[str, Any] = {
+        "entries_used": len(trades), "entry_first_ts": None, "entry_last_ts": None,
+        "entry_coverage_days": 0.0, "dataset_coverage_days": 0.0,
+        "entry_coverage_ratio": 0.0, "entries_by_month": {},
+        "folds_with_entries": 0, "folds_without_entries": 0,
+        "temporal_coverage_status": "TEMPORAL_COVERAGE_FAIL"}
+    if not ts:
+        return out
+    first, last = min(ts), max(ts)
+    ecov = (last - first) / DAY_MS
+    dcov = ((dataset_last_ts - dataset_first_ts) / DAY_MS
+            if (dataset_first_ts and dataset_last_ts and dataset_last_ts > dataset_first_ts) else ecov)
+    ratio = (ecov / dcov) if dcov > 0 else 0.0
+    bym: dict[str, int] = {}
+    for t in ts:
+        m = datetime.fromtimestamp(t / 1000, timezone.utc).strftime("%Y-%m")
+        bym[m] = bym.get(m, 0) + 1
+    folds = (wf or {}).get("folds", []) or []
+    with_e = sum(1 for f in folds if (f.get("trades_test") or f.get("trades_test_count") or 0) > 0)
+    status = "TEMPORAL_COVERAGE_OK"
+    if dcov > TEMPORAL_LONG_DATASET_DAYS and ratio < TEMPORAL_MIN_COVERAGE_RATIO:
+        status = "TEMPORAL_COVERAGE_FAIL"
+    elif ratio < TEMPORAL_WARN_COVERAGE_RATIO:
+        status = "TEMPORAL_COVERAGE_WARN"
+    out.update({"entry_first_ts": first, "entry_last_ts": last,
+                "entry_coverage_days": round(ecov, 2), "dataset_coverage_days": round(dcov, 2),
+                "entry_coverage_ratio": round(ratio, 4), "entries_by_month": dict(sorted(bym.items())),
+                "folds_with_entries": with_e, "folds_without_entries": len(folds) - with_e,
+                "temporal_coverage_status": status})
+    return out
+
+
 def evaluate_candidate(trades: list[dict[str, Any]], *, costs: Costs,
                        min_trades: int, train_ratio: float = 0.6,
                        data_classification: str = CLS_INTERMEDIATE,
@@ -787,7 +866,12 @@ def evaluate_candidate(trades: list[dict[str, Any]], *, costs: Costs,
                        wf_test_frac: float = WF_TEST_FRAC,
                        wf_step_frac: float = WF_STEP_FRAC,
                        wf_min_folds: int = WF_MIN_FOLDS,
-                       wf_anchored: bool = False) -> dict[str, Any]:
+                       wf_anchored: bool = False,
+                       dataset_first_ts: int | None = None,
+                       dataset_last_ts: int | None = None,
+                       entry_sampling_policy: str = ENTRY_SAMPLING_UNIFORM,
+                       max_entries_requested: int = _DEFAULT_MAX_ENTRIES,
+                       entries_available: int | None = None) -> dict[str, Any]:
     """Tiered, fail-closed candidate evaluation. Tiers: REJECTED <
     WEAK_RESEARCH_HYPOTHESIS < RESEARCH_CANDIDATE_ONLY. NEVER approved."""
     full = compute_metrics(trades, costs)
@@ -831,7 +915,24 @@ def evaluate_candidate(trades: list[dict[str, Any]], *, costs: Costs,
         wf["walk_forward_status"] = WF_STATUS_NONE
         tier_ceiling = CAND_WEAK
 
-    if rejection:
+    # V10.17 - temporal-coverage gate (fail-closed). A long dataset evaluated over
+    # only a thin opening window cannot be a research hypothesis (the V10.16 bug).
+    temporal = _temporal_coverage(trades, dataset_first_ts, dataset_last_ts, wf)
+    temporal["entry_sampling_policy"] = entry_sampling_policy
+    temporal["max_entries_requested"] = max_entries_requested
+    if entries_available is not None:
+        temporal["entries_available"] = entries_available
+    temporal_fail = temporal["temporal_coverage_status"] == "TEMPORAL_COVERAGE_FAIL"
+    if temporal_fail:
+        rejection.append(
+            f"temporal_undercoverage:ratio={temporal['entry_coverage_ratio']}"
+            f"_over_{temporal['dataset_coverage_days']}d")
+    elif temporal["temporal_coverage_status"] == "TEMPORAL_COVERAGE_WARN":
+        warnings.append(f"temporal_coverage_warn:ratio={temporal['entry_coverage_ratio']}")
+
+    if temporal_fail:
+        tier = CAND_REJECTED_TEMPORAL          # cannot be WEAK with bad coverage
+    elif rejection:
         tier = CAND_REJECTED
     else:
         tier = tier_ceiling
@@ -848,6 +949,7 @@ def evaluate_candidate(trades: list[dict[str, Any]], *, costs: Costs,
         "metrics_full": full,
         "metrics_oos": oos_metrics,
         "walk_forward": wf,
+        "temporal_coverage": temporal,
         "approved_for_paper": False,
         "approved_for_live": False,
         **_safety_block(),
@@ -905,8 +1007,12 @@ def run_trailing_exit_lab(*, sample_dir: str, symbols: list[str],
                           gap_policy: str = "adverse_open",
                           max_grid_combos: int = 500, seed: int = 7,
                           data_classification: str = CLS_INTERMEDIATE,
+                          entry_sampling_policy: str = ENTRY_SAMPLING_UNIFORM,
+                          max_entries: int = _DEFAULT_MAX_ENTRIES,
                           aggressive: bool = True) -> dict[str, Any]:
     costs = Costs(cost_bps=cost_bps, slippage_bps=slippage_bps, funding_mode=funding_mode)
+    if entry_sampling_policy not in ENTRY_SAMPLING_POLICIES:
+        entry_sampling_policy = ENTRY_SAMPLING_UNIFORM
     families = [f for f in entry_families if f in ENTRY_FAMILIES]
     policies = [p for p in exit_policies if p in EXIT_POLICIES]
     sides = [s.upper() for s in sides if s.upper() in SIDES]
@@ -927,6 +1033,7 @@ def run_trailing_exit_lab(*, sample_dir: str, symbols: list[str],
         "wf_step_frac": wf_step_frac, "wf_min_folds": wf_min_folds,
         "wf_anchored": wf_anchored, "seed": seed,
         "data_classification": data_classification,
+        "entry_sampling_policy": entry_sampling_policy, "max_entries": max_entries,
         "oi_regime_available": False, "liquidations_available": False,
         "strategy_ready": False, "edge_validated": False,
         "evaluation_type": "exit_policy_research_on_baseline_entries",
@@ -958,6 +1065,9 @@ def run_trailing_exit_lab(*, sample_dir: str, symbols: list[str],
     atr_cache: dict[tuple, list[float | None]] = {}
     funding_cache: dict[str, list[dict[str, Any]]] = {}
     total_entries = 0
+    raw_signal_count: dict[tuple, int] = {}
+    dataset_first_ts: int | None = None
+    dataset_last_ts: int | None = None
     for sym in symbols:
         fpath = os.path.join(sample_dir, f"{sym}_funding.csv")
         funding_cache[sym] = load_funding(fpath) if os.path.isfile(fpath) else []
@@ -972,14 +1082,24 @@ def run_trailing_exit_lab(*, sample_dir: str, symbols: list[str],
                 continue
             bars_cache[(sym, tf)] = bars
             atr_cache[(sym, tf)] = atr_series(bars)
+            b0, b1 = bars[0]["ts"], bars[-1]["ts"]
+            dataset_first_ts = b0 if dataset_first_ts is None else min(dataset_first_ts, b0)
+            dataset_last_ts = b1 if dataset_last_ts is None else max(dataset_last_ts, b1)
             for side in sides:
                 for fam in families:
                     ents = generate_entries(symbol=sym, timeframe=tf, side=side,
                                             family=fam, bars=bars,
-                                            funding=funding_cache[sym])
+                                            funding=funding_cache[sym],
+                                            max_entries=max_entries,
+                                            entry_sampling_policy=entry_sampling_policy)
                     entries_by_key[(sym, tf, side, fam)] = ents
+                    raw_signal_count[(tf, side, fam)] = raw_signal_count.get((tf, side, fam), 0) + len(ents)
                     total_entries += len(ents)
     report["total_baseline_entries"] = total_entries
+    report["dataset_first_ts"] = dataset_first_ts
+    report["dataset_last_ts"] = dataset_last_ts
+    report["dataset_coverage_days"] = (round((dataset_last_ts - dataset_first_ts) / DAY_MS, 2)
+                                       if (dataset_first_ts and dataset_last_ts) else 0.0)
 
     # Evaluate each candidate (tf, side, family, policy, params) across symbols.
     combos = _build_combos(families, policies, timeframes, sides, max_grid_combos, seed)
@@ -1008,9 +1128,13 @@ def run_trailing_exit_lab(*, sample_dir: str, symbols: list[str],
             ctrades, costs=costs, min_trades=min_trades, train_ratio=train_ratio,
             data_classification=data_classification, wf_mode=walk_forward_mode,
             wf_train_frac=wf_train_frac, wf_test_frac=wf_test_frac,
-            wf_step_frac=wf_step_frac, wf_min_folds=wf_min_folds, wf_anchored=wf_anchored)
+            wf_step_frac=wf_step_frac, wf_min_folds=wf_min_folds, wf_anchored=wf_anchored,
+            dataset_first_ts=dataset_first_ts, dataset_last_ts=dataset_last_ts,
+            entry_sampling_policy=entry_sampling_policy, max_entries_requested=max_entries,
+            entries_available=raw_signal_count.get((tf, side, fam)))
         m = evaluation["metrics_full"]
         wf = evaluation["walk_forward"]
+        tcov = evaluation.get("temporal_coverage", {})
         candidates.append({
             "timeframe": tf, "side": side, "entry_family": fam, "exit_policy": pol,
             "params": params, "candidate_status": evaluation["candidate_status"],
@@ -1033,13 +1157,34 @@ def run_trailing_exit_lab(*, sample_dir: str, symbols: list[str],
             "walk_forward_status": wf.get("walk_forward_status"),
             "wf_folds": wf.get("folds", []),
             "exit_reason_distribution": m.get("exit_reason_distribution"),
+            "entry_sampling_policy": entry_sampling_policy,
+            "entries_available": tcov.get("entries_available"),
+            "entries_used": tcov.get("entries_used"),
+            "entry_first_ts": tcov.get("entry_first_ts"),
+            "entry_last_ts": tcov.get("entry_last_ts"),
+            "entry_coverage_days": tcov.get("entry_coverage_days"),
+            "dataset_coverage_days": tcov.get("dataset_coverage_days"),
+            "entry_coverage_ratio": tcov.get("entry_coverage_ratio"),
+            "entries_by_month": tcov.get("entries_by_month"),
+            "folds_with_entries": tcov.get("folds_with_entries"),
+            "folds_without_entries": tcov.get("folds_without_entries"),
+            "temporal_coverage_status": tcov.get("temporal_coverage_status"),
             "metrics_full": m,
         })
 
     report["trades_simulated"] = len(all_trades)
-    # accepted = any non-REJECTED tier (WEAK or RESEARCH_CANDIDATE_ONLY)
-    accepted = [c for c in candidates if c["candidate_status"] != CAND_REJECTED]
-    rejected = [c for c in candidates if c["candidate_status"] == CAND_REJECTED]
+    # accepted = WEAK or RESEARCH_CANDIDATE_ONLY only; both REJECTED tiers are out
+    _rejected_tiers = (CAND_REJECTED, CAND_REJECTED_TEMPORAL)
+    accepted = [c for c in candidates if c["candidate_status"] not in _rejected_tiers]
+    rejected = [c for c in candidates if c["candidate_status"] in _rejected_tiers]
+    report["n_rejected_temporal_undercoverage"] = sum(
+        1 for c in candidates if c["candidate_status"] == CAND_REJECTED_TEMPORAL)
+    report["temporal_coverage_status"] = (
+        "TEMPORAL_COVERAGE_FAIL" if report.get("n_rejected_temporal_undercoverage", 0) > 0
+        and not accepted else
+        ("TEMPORAL_COVERAGE_WARN" if any(
+            c.get("temporal_coverage_status") == "TEMPORAL_COVERAGE_WARN" for c in candidates)
+         else "TEMPORAL_COVERAGE_OK"))
     tier_rank = {CAND_RESEARCH_ONLY: 2, CAND_WEAK: 1}
     accepted.sort(key=lambda c: (tier_rank.get(c["candidate_status"], 0),
                                  c.get("net_EV") or -9, c.get("wf_pass_rate") or 0),
@@ -1180,12 +1325,20 @@ def write_reports(report: dict[str, Any], output_dir: str | None = None) -> str:
                  "wf_pass_rate": c.get("wf_pass_rate"),
                  "walk_forward_status": c.get("walk_forward_status"),
                  "oos_net_EV": c.get("oos_net_EV"),
+                 "entry_sampling_policy": c.get("entry_sampling_policy"),
+                 "entries_used": c.get("entries_used"),
+                 "entry_coverage_days": c.get("entry_coverage_days"),
+                 "dataset_coverage_days": c.get("dataset_coverage_days"),
+                 "entry_coverage_ratio": c.get("entry_coverage_ratio"),
+                 "temporal_coverage_status": c.get("temporal_coverage_status"),
                  "rejection_reasons": ";".join(c["rejection_reasons"])} for c in items]
     ccols = ["timeframe", "side", "entry_family", "exit_policy", "candidate_status",
              "candidate_quality_tier", "trades", "net_EV", "net_PF", "win_rate",
              "max_drawdown", "profit_capture_ratio", "gap_adverse_count", "wf_mode",
              "wf_folds_total", "wf_folds_passed", "wf_pass_rate", "walk_forward_status",
-             "oos_net_EV", "rejection_reasons"]
+             "oos_net_EV", "entry_sampling_policy", "entries_used", "entry_coverage_days",
+             "dataset_coverage_days", "entry_coverage_ratio", "temporal_coverage_status",
+             "rejection_reasons"]
     _write_csv(os.path.join(run_dir, "candidate_ranking.csv"),
                _cand_rows(report.get("research_candidates", [])), ccols)
     _write_csv(os.path.join(run_dir, "rejected_candidates.csv"),
