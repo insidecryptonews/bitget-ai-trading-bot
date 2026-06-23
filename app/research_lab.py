@@ -5869,6 +5869,107 @@ class ResearchLab:
                   "final_recommendation: NO LIVE", "FORWARD SHADOW REGIME REPORT V10.21 END"]
         return "\n".join(lines)
 
+    # ------------------------------------------------------------------
+    # ResearchOps V10.23 - Intraday Equity->Crypto Lead-Lag Study (research only).
+    # ------------------------------------------------------------------
+    def intraday_leadlag_plan_v1023_cli(self, *, equities, cryptos, timeframes, days=60) -> str:
+        import json as _json
+        from .labs import intraday_equity_crypto_leadlag_v10_23 as L
+        tfs = self._v107_csv_arg(timeframes) or ["15m", "1h"]
+        p = L.intraday_leadlag_plan(self._v107_csv_arg(equities), self._v107_csv_arg(cryptos),
+                                    tfs, int(days))
+        out = ["INTRADAY LEADLAG PLAN V10.23 START", "objective: " + p["objective"],
+               f"equities: {','.join(p['equities'])}", f"cryptos: {','.join(p['cryptos'])}",
+               f"timeframes: {','.join(p['timeframes'])}", f"days: {p['days']}",
+               f"source: {p['source']}", f"limits: {p['limits']}",
+               "no_lookahead_rules: " + " | ".join(p["no_lookahead_rules"]),
+               f"writes_network_on_plan: {p['writes_network_on_plan']}",
+               "research_only: true", "shadow_only: true", "paper_ready: false",
+               "live_ready: false", "can_send_real_orders: false",
+               "final_recommendation: NO LIVE", "INTRADAY LEADLAG PLAN V10.23 END"]
+        return "\n".join(out)
+
+    def intraday_leadlag_fetch_v1023_cli(self, *, equities, cryptos, timeframes, days=60, apply=False) -> str:
+        from .labs import intraday_equity_crypto_leadlag_v10_23 as L
+        tfs = self._v107_csv_arg(timeframes) or ["15m", "1h"]
+        rep = L.intraday_leadlag_fetch(self._v107_csv_arg(equities), self._v107_csv_arg(cryptos),
+                                       tfs, int(days), apply=bool(apply))
+        out = ["INTRADAY LEADLAG FETCH V10.23 START", f"mode: {rep['mode']}",
+               f"run_id: {rep['run_id']}"]
+        if rep["mode"] == "APPLY":
+            out.append(f"staging_dir: {rep.get('staging_dir')}")
+            out.append(f"downloaded: {len(rep['downloaded'])} series")
+            for d in rep["downloaded"]:
+                out.append(f"- {d['symbol']}:{d['tf']} ({d['kind']}) rows={d['rows']} "
+                           f"first={d['first_ts']} last={d['last_ts']}")
+            out.append(f"failed: {rep['failed']}")
+        else:
+            out.append(f"would_fetch: {len(rep['would_fetch'])} series (no network, no writes)")
+        out += ["research_only: true", "shadow_only: true", "paper_ready: false",
+                "live_ready: false", "can_send_real_orders: false",
+                "final_recommendation: NO LIVE", "INTRADAY LEADLAG FETCH V10.23 END"]
+        return "\n".join(out)
+
+    def intraday_leadlag_study_v1023_cli(self, *, equities, cryptos, timeframe="1h",
+                                         sample_dir="", days=60, output_dir="") -> str:
+        from .labs import intraday_equity_crypto_leadlag_v10_23 as L
+        eqs = self._v107_csv_arg(equities)
+        crs = self._v107_csv_arg(cryptos)
+        interval = 3600 if timeframe == "1h" else (900 if timeframe == "15m" else 3600)
+        if sample_dir:
+            crypto, equity = L.load_staged(sample_dir, timeframe, eqs, crs)
+        else:
+            # fetch live in-memory (staging-only writes are reserved for the fetch CLI)
+            crypto = {s: {r["ts"]: r["close"] for r in L.fetch_series(s, timeframe, int(days))} for s in crs}
+            equity = {s.replace("^", "_idx_"): {r["ts"]: r["close"] for r in L.fetch_series(s, timeframe, int(days))} for s in eqs}
+        rep = L.run_study(crypto, equity, interval, int(days))
+        paths = L.write_reports(rep, output_dir=(output_dir or None))
+        cls = rep["classification"]
+        es = rep.get("event_study", {}).get("horizons", {})
+        ev = rep.get("evaluation", {})
+        out = ["INTRADAY LEADLAG STUDY V10.23 START",
+               f"decision_rows: {rep['n_decision_rows']}",
+               f"no_lookahead_status: {rep['no_lookahead']['status']}",
+               f"equities: {','.join(rep['equities'])}  cryptos: {','.join(rep['cryptos'])}",
+               "event_study (BTC mean future return after equity shock vs no-shock):"]
+        for h, d in es.items():
+            out.append(f"- {h}: BTC shock={d['btc_after_shock']} no_shock={d['btc_no_shock']}")
+        if ev:
+            out.append(f"label: {ev.get('label')}  base_rate IS={ev.get('base_rate_is')} OOS={ev.get('base_rate_oos')}")
+            out.append("predictors (OOS precision / lift):")
+            for name, d in ev.get("predictors", {}).items():
+                o = d["OOS"]
+                out.append(f"- {name}: prec={o['precision']} lift={o['lift']} flags={o['flags']}")
+        out.append(f"classification: {cls['verdict']}  secondary={cls.get('secondary')}")
+        out.append(f"reasons: {cls['reasons']}")
+        out.append(f"scorecard: {paths.get('scorecard')}")
+        out += ["makes_no_trades: true", "research_only: true", "shadow_only: true",
+                "paper_ready: false", "live_ready: false", "can_send_real_orders: false",
+                "final_recommendation: NO LIVE", "INTRADAY LEADLAG STUDY V10.23 END"]
+        return "\n".join(out)
+
+    def intraday_leadlag_report_v1023_cli(self, *, output_dir="") -> str:
+        import json as _json
+        import os
+        from .labs import intraday_equity_crypto_leadlag_v10_23 as L
+        base = L._safe_output_base(output_dir or None)
+        sc = os.path.join(base, "intraday_leadlag_scorecard.json")
+        out = ["INTRADAY LEADLAG REPORT V10.23 START", f"output_dir: {base}"]
+        if os.path.isfile(sc):
+            rep = _json.loads(open(sc, encoding="utf-8").read())
+            cls = rep.get("classification", {})
+            out += [f"generated_at: {rep.get('generated_at')}",
+                    f"decision_rows: {rep.get('n_decision_rows')}",
+                    f"no_lookahead: {rep.get('no_lookahead', {}).get('status')}",
+                    f"classification: {cls.get('verdict')}",
+                    f"reasons: {cls.get('reasons')}"]
+        else:
+            out.append("status: NO_SCORECARD_YET (run intraday-leadlag-study-v1023 first)")
+        out += ["research_only: true", "shadow_only: true", "paper_ready: false",
+                "live_ready: false", "can_send_real_orders: false",
+                "final_recommendation: NO LIVE", "INTRADAY LEADLAG REPORT V10.23 END"]
+        return "\n".join(out)
+
     def trader_dashboard_contract_v105_cli(self) -> str:
         from .labs.trader_dashboard_v104 import (
             DISABLED_CONTROLS,
@@ -7056,6 +7157,10 @@ def build_argument_parser() -> argparse.ArgumentParser:
             "forward-shadow-regime-plan-v1021",
             "forward-shadow-regime-run-v1021",
             "forward-shadow-regime-report-v1021",
+            "intraday-leadlag-plan-v1023",
+            "intraday-leadlag-fetch-v1023",
+            "intraday-leadlag-study-v1023",
+            "intraday-leadlag-report-v1023",
             "ohlcv-replay-loader-smoke-test",
             "ohlcv-replay-loader-audit",
             "duplicate-module-audit-smoke-test",
@@ -7196,6 +7301,8 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--walk-forward", default="true", help="V10.8 enable walk-forward OOS gating (true/false).")
     parser.add_argument("--output-dir", default="", help="V10.8 research report output dir (default reports/research/v10_8). Never raw/DB/.env.")
     parser.add_argument("--last-n", type=int, default=10, help="V10.21 forward-shadow report: number of recent snapshots to show.")
+    parser.add_argument("--equities", default="NVDA,QQQ,SPY,SMH,COIN,MSTR,TSLA,^VIX", help="V10.23 equity/risk symbols (CSV).")
+    parser.add_argument("--cryptos", default="BTC-USD,ETH-USD,SOL-USD,XRP-USD,DOGE-USD", help="V10.23 crypto symbols (CSV).")
     parser.add_argument("--max-grid-combos", type=int, default=500, help="V10.8 cap on evaluated parameter combos.")
     parser.add_argument("--seed", type=int, default=7, help="V10.8 deterministic seed for grid sampling.")
     parser.add_argument("--walk-forward-mode", default="", help="V10.8.1 none|chronological_split|rolling (default rolling). Empty falls back to --walk-forward mapping.")
@@ -8198,6 +8305,19 @@ def main() -> None:
             timeframe=args.timeframe, output_dir=args.output_dir))
     elif args.command == "forward-shadow-regime-report-v1021":
         print(lab.forward_shadow_regime_report_v1021_cli(output_dir=args.output_dir, last_n=args.last_n))
+    elif args.command == "intraday-leadlag-plan-v1023":
+        print(lab.intraday_leadlag_plan_v1023_cli(
+            equities=args.equities, cryptos=args.cryptos, timeframes=args.timeframes, days=args.days))
+    elif args.command == "intraday-leadlag-fetch-v1023":
+        print(lab.intraday_leadlag_fetch_v1023_cli(
+            equities=args.equities, cryptos=args.cryptos, timeframes=args.timeframes,
+            days=args.days, apply=args.apply))
+    elif args.command == "intraday-leadlag-study-v1023":
+        print(lab.intraday_leadlag_study_v1023_cli(
+            equities=args.equities, cryptos=args.cryptos, timeframe=args.timeframe,
+            sample_dir=args.sample_dir, days=args.days, output_dir=args.output_dir))
+    elif args.command == "intraday-leadlag-report-v1023":
+        print(lab.intraday_leadlag_report_v1023_cli(output_dir=args.output_dir))
     elif args.command == "ohlcv-replay-loader-smoke-test":
         print(lab.ohlcv_replay_loader_smoke_test())
     elif args.command == "ohlcv-replay-loader-audit":
