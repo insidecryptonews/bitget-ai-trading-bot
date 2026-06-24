@@ -142,14 +142,19 @@ def safe_normalized_dir(run_id: str, base: str | None = None) -> str:
 
 
 def _safe_output_base(output_dir: str | None) -> str:
-    base = output_dir or OUTPUT_ROOT
-    segs = [s for s in base.replace("\\", "/").split("/") if s]
-    if ".." in segs:
+    """Reports may ONLY be written under reports/research/v10_24. Anything that
+    resolves outside (incl. via symlink/traversal) falls back to OUTPUT_ROOT."""
+    if not output_dir:
         return OUTPUT_ROOT
-    for s in (x.lower() for x in segs):
-        if s in _FORBIDDEN_SEG or s.endswith(_FORBIDDEN_SUF) or ".env" in s:
-            return OUTPUT_ROOT
-    return base
+    try:
+        _assert_no_forbidden_path(output_dir, "output")
+    except ValueError:
+        return OUTPUT_ROOT
+    expected = _resolved(OUTPUT_ROOT, relative_to_repo=True)
+    resolved = _resolved(output_dir, relative_to_repo=True)
+    if resolved == expected or _is_relative_to(resolved, expected):
+        return output_dir
+    return OUTPUT_ROOT
 
 
 # --------------------------------------------------------------------------
@@ -377,7 +382,10 @@ def validate_trades(rows: list[dict[str, str]]) -> dict[str, Any]:
         critical.append("trade_price_not_strictly_positive")
     if missing_size or nonpositive_size:
         critical.append("trade_size_not_strictly_positive")
-    valid = bool(rows) and not critical and len(prices) == len(rows) and len(sizes) == len(rows) and has_aggr
+    # structural validity (corrupt rows). Aggressor-side availability is a
+    # SEPARATE readiness gate (has_aggressor_side) -> a clean trades file without
+    # aggressor side is a NEEDS_AGGRESSOR gap, not an INVALID/corrupt file.
+    valid = bool(rows) and not critical and len(prices) == len(rows) and len(sizes) == len(rows)
     return {"type": "trades", "valid": valid, "has_aggressor_side": has_aggr,
             "symbols": sorted(syms), "coverage": cov,
             "buy_sell_imbalance": round((buys - sells) / (buys + sells), 4) if (buys + sells) else None,
@@ -488,13 +496,27 @@ def validate_orderbook(rows: list[dict[str, str]]) -> dict[str, Any]:
         critical.append("crossed_orderbook")
     if invalid_size:
         critical.append("orderbook_size_not_strictly_positive")
+    l1_med = _median(l1_imbalance)
+    l5_med = _median(l5_imbalance)
+    l1_available = l1_med is not None          # L1 imbalance needs bid_size_1 & ask_size_1
+    l5_available = l5_med is not None
+    l5_optional_reason = None
+    if depth_levels < 5:
+        l5_optional_reason = f"only {depth_levels} level(s) present; L5 imbalance optional (L1 required)"
+    # structurally valid (no corrupt rows). L1-size availability is a SEPARATE
+    # readiness gate handled in classify_sample, not a corruption error.
     valid = bool(rows) and bool(spreads) and not critical
     return {"type": "orderbook", "valid": valid, "symbols": sorted(syms), "coverage": cov,
-            "depth_levels": depth_levels, "crossed_book_rows": crossed,
+            "depth_levels": depth_levels, "depth_levels_available": depth_levels,
+            "crossed_book_rows": crossed,
             "spread_median": _median(spreads),
             "spread_p95": _p95(spreads),
-            "l1_imbalance_median": _median(l1_imbalance),
-            "l5_imbalance_median": _median(l5_imbalance),
+            "l1_imbalance_median": l1_med,
+            "l5_imbalance_median": l5_med,
+            "l1_imbalance_available": l1_available,
+            "l1_sizes_available": l1_available,
+            "l5_imbalance_available": l5_available,
+            "l5_optional_reason": l5_optional_reason,
             "invalid_price_rows": invalid_price,
             "invalid_size_rows": invalid_size,
             "critical_errors": critical,
@@ -689,78 +711,110 @@ def _future_research_ready(present: dict[str, dict]) -> dict[str, bool]:
         "microstructure_aware_exit_simulation": bool(ob and tr_aggr)}
 
 
-def classify_sample(present: dict[str, dict], files_seen: int) -> dict[str, Any]:
-    gaps: list[str] = []
+def classify_sample(file_results: list[dict], by_type: dict[str, dict],
+                    recognized_count: int) -> dict[str, Any]:
+    """Fail-closed multi-file readiness. Looks at EVERY recognized file (not just
+    one survivor per type): any invalid recognized file blocks READY and surfaces
+    in critical_errors + type_summary, so a later valid file can never silently
+    overwrite an earlier invalid one."""
+    recognized = [fr for fr in file_results if fr.get("detected_type") in _VALIDATORS]
+    base = {"verdict": C_NO_SAMPLE, "readiness_verdict": C_NO_SAMPLE,
+            "gaps": [], "active_gaps": [], "valid_types": [],
+            "critical_errors": [], "critical_errors_global": [], "critical_errors_by_file": {},
+            "warnings": [], "invalid_recognized_files": 0, "valid_recognized_files": 0,
+            "file_results": file_results, "type_summary": {},
+            "can_research_microstructure": False,
+            "future_research_ready_if_sample_passes": False,
+            "future_labs_ready": _future_research_ready({}),
+            "funding_optional_reason": None, "max_coverage_days": 0,
+            "min_required_coverage_days": 0, "why_not_ready": ["no recognized sample files"]}
+    if recognized_count == 0 or not recognized:
+        return base
+
+    # ---- per-file aggregation (fail-closed) ----
+    invalid_files = [fr for fr in recognized if not fr.get("valid")]
+    valid_files = [fr for fr in recognized if fr.get("valid")]
     critical_errors: list[str] = []
+    critical_by_file: dict[str, list[str]] = {}
     warnings: list[str] = []
-    valid_types = {k for k, v in present.items() if v.get("valid")}
-    if files_seen == 0 or not present:
-        return {"verdict": C_NO_SAMPLE, "gaps": [], "active_gaps": [],
-                "valid_types": [], "critical_errors": [],
-                "warnings": [], "can_research_microstructure": False,
-                "future_research_ready_if_sample_passes": False,
-                "why_not_ready": ["no sample files"]}
-    max_cov = max((v.get("coverage", {}).get("coverage_days", 0) or 0) for v in present.values())
-    required_types = ("trades", "orderbook", "oi", "liquidations")
-    required_covs = [
-        present[t].get("coverage", {}).get("coverage_days", 0) or 0
-        for t in required_types
-        if present.get(t, {}).get("valid")
-    ]
-    min_required_cov = min(required_covs) if required_covs else 0
+    type_summary: dict[str, dict] = {}
+    for fr in recognized:
+        dtype = fr["detected_type"]
+        ts = type_summary.setdefault(dtype, {"valid_files": 0, "invalid_files": 0, "files": []})
+        ts["files"].append(fr["file"])
+        ts["valid_files" if fr.get("valid") else "invalid_files"] += 1
+        errs = list(fr.get("critical_errors") or [])
+        if not fr.get("valid") and not errs:
+            errs = [fr.get("reason_if_invalid") or "invalid_recognized_file"]
+        if errs:
+            critical_by_file[fr["file"]] = errs
+        for e in errs:
+            critical_errors.append(f"{dtype}:{e}")               # type-level (stable)
+            critical_errors.append(f"{dtype}:{fr['file']}:{e}")   # file-level (mentions file)
+        for w in (fr.get("warnings") or []):
+            warnings.append(f"{dtype}:{w}")
+
+    # valid metrics survivor per type (for readiness components + future labs)
+    present = {t: v for t, v in by_type.items() if v.get("valid")}
+    valid_types = set(present)
     tr = present.get("trades", {})
-    for dtype, metrics in sorted(present.items()):
-        for err in metrics.get("critical_errors", []):
-            if dtype == "trades" and err in ("missing_or_invalid_aggressor_side",):
-                continue
-            critical_errors.append(f"{dtype}:{err}")
-        for warn in metrics.get("warnings", []):
-            warnings.append(f"{dtype}:{warn}")
-        cov = metrics.get("coverage", {})
-        if cov.get("gap_count"):
-            gaps.append(C_NEEDS_HISTORY)
-    if tr and not tr.get("has_aggressor_side"):
+    ob = present.get("orderbook", {})
+    ob_l1_ready = bool(ob.get("valid")) and ob.get("l1_imbalance_median") is not None
+
+    covs = [v.get("coverage", {}).get("coverage_days", 0) or 0 for v in present.values()]
+    max_cov = max(covs) if covs else 0
+    required_types = ("trades", "orderbook", "oi", "liquidations")
+    required_covs = [present[t]["coverage"]["coverage_days"] or 0
+                     for t in required_types if present.get(t, {}).get("valid")]
+    min_required_cov = min(required_covs) if required_covs else 0
+
+    gaps: list[str] = []
+    if not tr.get("valid") or not tr.get("has_aggressor_side"):
         gaps.append(C_NEEDS_AGGRESSOR)
-    if "trades" not in valid_types:
-        gaps.append(C_NEEDS_AGGRESSOR)
-    if "orderbook" not in valid_types:
+    if "orderbook" not in valid_types or not ob_l1_ready:
         gaps.append(C_NEEDS_ORDERBOOK)
     if "oi" not in valid_types:
         gaps.append(C_NEEDS_OI)
     if "liquidations" not in valid_types:
         gaps.append(C_NEEDS_LIQ)
     if max_cov < MIN_HISTORY_DAYS or any(
-        present.get(t, {}).get("valid")
-        and (present[t].get("coverage", {}).get("coverage_days", 0) or 0) < MIN_HISTORY_DAYS
-        for t in required_types
-    ):
+            (present[t]["coverage"].get("coverage_days", 0) or 0) < MIN_HISTORY_DAYS
+            for t in required_types if present.get(t, {}).get("valid")):
         gaps.append(C_NEEDS_HISTORY)
+    if any(v.get("coverage", {}).get("gap_count") for v in present.values()):
+        gaps.append(C_NEEDS_HISTORY)
+
     funding_optional_reason = None
-    if "funding" not in present and "oi" in valid_types:
+    if "funding" not in {fr["detected_type"] for fr in recognized} and "oi" in valid_types:
         funding_optional_reason = "funding is optional for V10.24 readiness when OI is present and valid"
-    if "funding" in present and "funding" not in valid_types:
-        critical_errors.append("funding:present_but_invalid")
+
+    if "orderbook" in valid_types and not ob_l1_ready:
+        critical_or_gap_note = "orderbook:l1_imbalance_unavailable_needs_bid_ask_sizes"
+    else:
+        critical_or_gap_note = None
+
     active_gaps = sorted(set(gaps))
     critical_errors = sorted(set(critical_errors))
+
     ready = (
-        tr.get("valid")
-        and tr.get("has_aggressor_side")
-        and "orderbook" in valid_types
+        len(invalid_files) == 0
+        and not critical_errors
+        and tr.get("valid") and tr.get("has_aggressor_side")
+        and "orderbook" in valid_types and ob_l1_ready
         and "oi" in valid_types
         and "liquidations" in valid_types
         and min_required_cov >= MIN_HISTORY_DAYS
         and not active_gaps
-        and not critical_errors
     )
     if ready:
         verdict = C_READY
-    elif critical_errors:
+    elif critical_errors or invalid_files:
         verdict = C_INVALID
-    elif C_NEEDS_HISTORY in active_gaps and valid_types:
+    elif C_NEEDS_HISTORY in active_gaps:
         verdict = C_NEEDS_HISTORY
-    elif tr and not tr.get("has_aggressor_side"):
+    elif not tr.get("valid") or not tr.get("has_aggressor_side"):
         verdict = C_NEEDS_AGGRESSOR
-    elif "orderbook" not in valid_types:
+    elif "orderbook" not in valid_types or not ob_l1_ready:
         verdict = C_NEEDS_ORDERBOOK
     elif "liquidations" not in valid_types:
         verdict = C_NEEDS_LIQ
@@ -768,15 +822,26 @@ def classify_sample(present: dict[str, dict], files_seen: int) -> dict[str, Any]
         verdict = C_NEEDS_OI
     else:
         verdict = C_PARTIAL
-    why_not_ready = critical_errors + active_gaps
+
+    why_not_ready = list(critical_errors) + list(active_gaps)
+    if critical_or_gap_note:
+        why_not_ready.append(critical_or_gap_note)
+    why_not_ready = sorted(set(why_not_ready))
     return {"verdict": verdict, "readiness_verdict": verdict,
             "gaps": active_gaps, "active_gaps": active_gaps,
             "critical_errors": critical_errors,
+            "critical_errors_global": critical_errors,
+            "critical_errors_by_file": critical_by_file,
             "warnings": sorted(set(warnings)),
             "why_not_ready": why_not_ready,
             "valid_types": sorted(valid_types),
+            "invalid_recognized_files": len(invalid_files),
+            "valid_recognized_files": len(valid_files),
+            "file_results": file_results,
+            "type_summary": type_summary,
             "max_coverage_days": max_cov,
             "min_required_coverage_days": min_required_cov,
+            "orderbook_l1_ready": ob_l1_ready,
             "can_research_microstructure": bool(ready),
             "future_research_ready_if_sample_passes": bool(ready),
             "funding_optional_reason": funding_optional_reason,
@@ -807,36 +872,52 @@ def validate_sample(sample_dir: str, apply_normalization: bool = False) -> dict[
                                  "future_research_ready_if_sample_passes": False,
                                  "why_not_ready": ["sample dir missing"]}
         return rep
-    present: dict[str, dict] = {}
-    files_seen = 0
+    by_type: dict[str, dict] = {}          # best-per-type metrics (valid preferred)
+    file_results: list[dict] = []
+    recognized_count = 0
     for name in sorted(os.listdir(sample_dir)):
         path = os.path.join(sample_dir, name)
         if not os.path.isfile(path) or not name.lower().endswith((".csv", ".tsv")):
             continue
-        files_seen += 1
         try:
             assert_safe_sample_file(sample_dir, path)
         except ValueError as e:
             rep["errors"].append(f"unsafe_sample_file:{name}:{e}")
-            rep["files"].append({"file": name, "detected_type": "unknown", "rows": 0,
-                                 "truncated": False, "columns": [], "valid": False,
-                                 "error": f"unsafe_sample_file:{e}"})
+            fr = {"file": name, "detected_type": "unknown", "rows": 0, "truncated": False,
+                  "columns": [], "valid": False, "critical_errors": [], "warnings": [],
+                  "coverage": {}, "reason_if_invalid": f"unsafe_sample_file:{e}"}
+            file_results.append(fr)
+            rep["files"].append(fr)
             continue
         header, rows, truncated = _read_csv(path)
         dtype = detect_type(name, header)
-        info = {"file": name, "detected_type": dtype, "rows": len(rows),
-                "truncated": truncated, "columns": header}
-        if dtype in _VALIDATORS and rows:
-            res = _VALIDATORS[dtype](rows)
-            info.update({"valid": res["valid"], "metrics": res})
-            # keep the richest validation per type
-            if dtype not in present or (res["valid"] and not present[dtype].get("valid")):
-                present[dtype] = res
-        else:
-            info["valid"] = False
-        rep["files"].append(info)
-    rep["by_type"] = {k: v for k, v in present.items()}
-    rep["classification"] = classify_sample(present, files_seen)
+        fr = {"file": name, "detected_type": dtype, "rows": len(rows), "truncated": truncated,
+              "columns": header, "valid": False, "critical_errors": [], "warnings": [],
+              "coverage": {}, "reason_if_invalid": None, "schema": header}
+        if dtype in _VALIDATORS:
+            recognized_count += 1
+            if not rows:
+                # recognized schema but ZERO rows -> INVALID, not NO_SAMPLE
+                fr["critical_errors"] = ["empty_recognized_csv"]
+                fr["reason_if_invalid"] = "empty_recognized_csv"
+            else:
+                res = _VALIDATORS[dtype](rows)
+                fr["valid"] = bool(res["valid"])
+                fr["critical_errors"] = list(res.get("critical_errors") or [])
+                fr["warnings"] = list(res.get("warnings") or [])
+                fr["coverage"] = res.get("coverage", {})
+                fr["metrics"] = res
+                if not res["valid"]:
+                    fr["reason_if_invalid"] = ";".join(fr["critical_errors"]) or "invalid"
+                # keep richest metrics per type for by_type (valid preferred)
+                if dtype not in by_type or (res["valid"] and not by_type[dtype].get("valid")):
+                    by_type[dtype] = res
+        file_results.append(fr)
+        rep["files"].append(fr)
+    rep["by_type"] = {k: v for k, v in by_type.items()}
+    rep["classification"] = classify_sample(file_results, by_type, recognized_count)
+    rep["file_results"] = file_results
+    rep["type_summary"] = rep["classification"].get("type_summary", {})
     rep["critical_errors"] = rep["classification"].get("critical_errors", [])
     rep["warnings"] = rep["classification"].get("warnings", [])
     if (apply_normalization and rep["classification"].get("valid_types")

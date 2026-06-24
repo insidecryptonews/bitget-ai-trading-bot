@@ -115,12 +115,26 @@ def test_oi_and_funding_schema_detected(tmp_path):
     assert rep["by_type"]["funding"]["valid"] is True
 
 
+def _orderbook_l5_rows(n=40, span_days=40):
+    """5-level orderbook WITH sizes so L1 and L5 imbalance are computable."""
+    h = ["timestamp", "symbol"]
+    for lv in range(1, 6):
+        h += [f"bid_price_{lv}", f"bid_size_{lv}", f"ask_price_{lv}", f"ask_size_{lv}"]
+    rows = []
+    for i in range(n):
+        ts = B + int(i * span_days * DAY / n)
+        row = [ts, "BTCUSDT"]
+        for lv in range(1, 6):
+            row += [49995 - lv, 1.0, 50005 + lv, 1.0]
+        rows.append(row)
+    return h, rows
+
+
 def test_full_sample_research_ready(tmp_path):
     h, r = _trades(side=True, span_days=40)
     _write(tmp_path / "trades.csv", h, r)
-    _write(tmp_path / "orderbook_l2.csv",
-           ["timestamp", "symbol", "bid_price_1", "ask_price_1"],
-           [[B + int(i * 40 * DAY / 40), "BTCUSDT", 49995, 50005] for i in range(40)])
+    obh, obr = _orderbook_l5_rows()
+    _write(tmp_path / "orderbook_l2.csv", obh, obr)
     _write(tmp_path / "open_interest.csv", ["timestamp", "symbol", "open_interest"],
            [[B + i * DAY, "BTCUSDT", 1000 + i] for i in range(40)])
     _write(tmp_path / "liquidations.csv", ["timestamp", "symbol", "side", "price", "size", "notional"],
@@ -130,6 +144,10 @@ def test_full_sample_research_ready(tmp_path):
     cls = rep["classification"]
     assert cls["verdict"] == M.C_READY
     assert cls["active_gaps"] == []
+    assert cls["invalid_recognized_files"] == 0
+    assert cls["orderbook_l1_ready"] is True
+    assert rep["by_type"]["orderbook"]["l1_imbalance_median"] is not None
+    assert rep["by_type"]["orderbook"]["l5_imbalance_median"] is not None
     assert cls["can_research_microstructure"] is True
     assert cls["funding_optional_reason"]
     assert cls["future_research_ready_if_sample_passes"] is True
@@ -139,15 +157,112 @@ def test_full_sample_research_ready(tmp_path):
 def test_ready_not_emitted_when_liquidations_missing(tmp_path):
     h, r = _trades(side=True, span_days=40)
     _write(tmp_path / "trades.csv", h, r)
-    _write(tmp_path / "orderbook_l2.csv",
-           ["timestamp", "symbol", "bid_price_1", "ask_price_1"],
-           [[B + i * DAY, "BTCUSDT", 49995, 50005] for i in range(40)])
+    obh, obr = _orderbook_l5_rows()
+    _write(tmp_path / "orderbook_l2.csv", obh, obr)
     _write(tmp_path / "open_interest.csv", ["timestamp", "symbol", "open_interest"],
            [[B + i * DAY, "BTCUSDT", 1000 + i] for i in range(40)])
     rep = M.validate_sample(str(tmp_path))
     assert rep["classification"]["verdict"] != M.C_READY
     assert M.C_NEEDS_LIQ in rep["classification"]["active_gaps"]
     assert rep["classification"]["can_research_microstructure"] is False
+
+
+# ---- V10.24.2 multi-file fail-closed + L1/L5 sizes ------------------------
+
+def test_invalid_file_blocks_ready_even_with_valid_sibling(tmp_path):
+    # adversarial: one crossed (invalid) orderbook + one good orderbook + the rest valid
+    h, r = _trades(side=True, span_days=40)
+    _write(tmp_path / "trades.csv", h, r)
+    obh, obr = _orderbook_l5_rows()
+    _write(tmp_path / "orderbook_good.csv", obh, obr)
+    _write(tmp_path / "orderbook_bad.csv",
+           ["timestamp", "symbol", "bid_price_1", "bid_size_1", "ask_price_1", "ask_size_1"],
+           [[B + i * DAY, "BTCUSDT", 50010, 1, 50000, 1] for i in range(40)])  # crossed
+    _write(tmp_path / "open_interest.csv", ["timestamp", "symbol", "open_interest"],
+           [[B + i * DAY, "BTCUSDT", 1000 + i] for i in range(40)])
+    _write(tmp_path / "liquidations.csv", ["timestamp", "symbol", "side", "price", "size", "notional"],
+           [[B + i * DAY, "BTCUSDT", "sell", 50000, 2, 100000] for i in range(40)])
+    rep = M.validate_sample(str(tmp_path))
+    cls = rep["classification"]
+    assert cls["verdict"] != M.C_READY
+    assert cls["invalid_recognized_files"] >= 1
+    assert any("orderbook_bad.csv" in e for e in cls["critical_errors"])
+    files = {fr["file"] for fr in cls["file_results"]}
+    assert {"orderbook_good.csv", "orderbook_bad.csv"} <= files
+    ob_sum = cls["type_summary"]["orderbook"]
+    assert ob_sum["valid_files"] >= 1 and ob_sum["invalid_files"] >= 1
+
+
+def test_empty_recognized_csv_is_invalid_not_no_sample(tmp_path):
+    _write(tmp_path / "trades.csv", ["timestamp", "symbol", "price", "size", "aggressor_side"], [])
+    rep = M.validate_sample(str(tmp_path))
+    cls = rep["classification"]
+    assert cls["verdict"] == M.C_INVALID
+    assert cls["verdict"] != M.C_NO_SAMPLE
+    assert any("empty_recognized_csv" in e for e in cls["critical_errors"])
+    assert cls["critical_errors_by_file"].get("trades.csv")
+
+
+def test_orderbook_without_sizes_not_ready_and_l1_none(tmp_path):
+    _write(tmp_path / "trades.csv", *_trades(side=True, span_days=40))
+    _write(tmp_path / "orderbook_l2.csv",
+           ["timestamp", "symbol", "bid_price_1", "ask_price_1"],
+           [[B + i * DAY, "BTCUSDT", 49995, 50005] for i in range(40)])
+    _write(tmp_path / "open_interest.csv", ["timestamp", "symbol", "open_interest"],
+           [[B + i * DAY, "BTCUSDT", 1000 + i] for i in range(40)])
+    _write(tmp_path / "liquidations.csv", ["timestamp", "symbol", "side", "price", "size", "notional"],
+           [[B + i * DAY, "BTCUSDT", "sell", 50000, 2, 100000] for i in range(40)])
+    rep = M.validate_sample(str(tmp_path))
+    cls = rep["classification"]
+    assert cls["verdict"] != M.C_READY
+    assert rep["by_type"]["orderbook"]["l1_imbalance_median"] is None
+    assert cls["orderbook_l1_ready"] is False
+    assert M.C_NEEDS_ORDERBOOK in cls["active_gaps"]
+
+
+def test_orderbook_l1_only_computes_l1_not_l5(tmp_path):
+    _write(tmp_path / "orderbook_l2.csv",
+           ["timestamp", "symbol", "bid_price_1", "bid_size_1", "ask_price_1", "ask_size_1"],
+           [[B + i * 1000, "BTCUSDT", 49995, 2, 50005, 1] for i in range(20)])
+    rep = M.validate_sample(str(tmp_path))
+    ob = rep["by_type"]["orderbook"]
+    assert ob["l1_imbalance_available"] is True and ob["l1_imbalance_median"] is not None
+    assert ob["depth_levels_available"] == 1
+    assert ob["l5_optional_reason"]
+
+
+def test_orderbook_five_levels_computes_l5(tmp_path):
+    obh, obr = _orderbook_l5_rows(n=20)
+    _write(tmp_path / "orderbook_l2.csv", obh, obr)
+    rep = M.validate_sample(str(tmp_path))
+    ob = rep["by_type"]["orderbook"]
+    assert ob["depth_levels_available"] == 5
+    assert ob["l5_imbalance_available"] is True and ob["l5_imbalance_median"] is not None
+
+
+@pytest.mark.parametrize("kind,header,row", [
+    ("trades", ["symbol", "price", "size", "aggressor_side"], ["BTCUSDT", 50000, 1, "buy"]),
+    ("orderbook_l2", ["symbol", "bid_price_1", "bid_size_1", "ask_price_1", "ask_size_1"],
+     ["BTCUSDT", 49995, 1, 50005, 1]),
+    ("open_interest", ["symbol", "open_interest"], ["BTCUSDT", 1000]),
+    ("funding", ["symbol", "funding_rate"], ["BTCUSDT", 0.0001]),
+    ("liquidations", ["symbol", "side", "price", "size", "notional"], ["BTCUSDT", "sell", 50000, 1, 50000]),
+])
+def test_missing_timestamp_by_type_invalid(tmp_path, kind, header, row):
+    _write(tmp_path / f"{kind}.csv", header, [row for _ in range(20)])
+    rep = M.validate_sample(str(tmp_path))
+    cls = rep["classification"]
+    assert cls["verdict"] == M.C_INVALID
+    assert any("invalid_timestamps" in e for e in cls["critical_errors"])
+    assert cls["invalid_recognized_files"] >= 1
+
+
+def test_output_base_outside_v10_24_falls_back(tmp_path):
+    assert M._safe_output_base("reports/research/v10_24") == "reports/research/v10_24"
+    assert M._safe_output_base("reports/research/v10_24/sub") == "reports/research/v10_24/sub"
+    assert M._safe_output_base(str(tmp_path / "evil")) == M.OUTPUT_ROOT
+    assert M._safe_output_base("reports/research/v10_8") == M.OUTPUT_ROOT
+    assert M._safe_output_base("external_data/raw/x") == M.OUTPUT_ROOT
 
 
 def test_trade_zero_price_or_negative_size_invalidates(tmp_path):
