@@ -19,6 +19,7 @@ import math
 import os
 import re
 import statistics as st
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -66,7 +67,33 @@ def _safety() -> dict[str, Any]:
 
 
 def _now_stamp() -> str:
-    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    # microsecond precision + short uuid so two normalizations never collide
+    return (datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+            + "_" + uuid.uuid4().hex[:8])
+
+
+# Suspicious tokens: a recognized OR unknown file matching these (by name or
+# header) is a credential/secret/raw-data leak risk and must block readiness.
+_SECRET_HEADER_TOKENS = ("api_key", "apikey", "api-key", "secret", "token",
+                         "private_key", "password", "passwd", "passphrase",
+                         "access_key", "credential", "auth")
+_SUSPICIOUS_NAME_TOKENS = _SECRET_HEADER_TOKENS + (
+    "env", "db", "database", "raw", "prod", "production", "live", "real",
+    "vault", "backup", "zip")
+# benign unknown files that never block (read for completeness, not validated)
+_BENIGN_UNKNOWN = ("readme", "notes", ".gitkeep", "manifest", "metadata")
+
+# Conservative density floors required for MICROSTRUCTURE_RESEARCH_READY.
+_MIN_ROWS = {"trades": 1000, "orderbook": 100, "oi": 24, "liquidations": 20}
+_MIN_ROWS_PER_DAY = {"trades": 5.0, "orderbook": 1.0, "oi": 0.5, "liquidations": 0.5}
+
+
+def _is_suspicious_file(name: str, header: list[str]) -> bool:
+    low_name = name.lower()
+    if any(tok in low_name for tok in _SUSPICIOUS_NAME_TOKENS):
+        return True
+    cols = " ".join(c.lower() for c in (header or []))
+    return any(tok in cols for tok in _SECRET_HEADER_TOKENS)
 
 
 # --------------------------------------------------------------------------
@@ -106,14 +133,23 @@ def _assert_no_forbidden_path(path: str | os.PathLike[str], what: str) -> None:
 
 
 def assert_safe_sample_dir(path: str) -> str:
-    """Reject reading from dangerous locations (.env/db/raw/prod/backups/vault)."""
+    """Reject reading from dangerous locations (.env/db/raw/prod/backups/vault),
+    the dir being a symlink, OR any ANCESTOR component being a symlink (an
+    ancestor symlink could resolve the whole tree outside the allowed area)."""
     if not isinstance(path, str) or not path.strip():
         raise ValueError("empty sample dir")
     _assert_no_forbidden_path(path, "sample")
     resolved = _resolved(path)
     _assert_no_forbidden_path(resolved, "sample")
-    if Path(path).exists() and Path(path).is_symlink():
+    p = Path(path)
+    if p.exists() and p.is_symlink():
         raise ValueError("sample dir symlink blocked")
+    for anc in p.parents:
+        try:
+            if anc.is_symlink():
+                raise ValueError(f"symlinked ancestor blocked: {anc}")
+        except OSError:
+            break
     return path
 
 
@@ -203,7 +239,10 @@ def _norm_side(v: Any) -> str | None:
     return None
 
 
-def _read_csv(path: str) -> tuple[list[str], list[dict[str, str]], bool]:
+def _read_csv(path: str) -> tuple[list[str], list[dict[str, str]], bool, bool]:
+    """Returns (header, rows, truncated, parse_error). parse_error=True means the
+    file could not be read/parsed -> caller must treat a RECOGNIZED file as INVALID
+    (never silently degrade corruption to 'unknown/no rows')."""
     rows: list[dict[str, str]] = []
     header: list[str] = []
     truncated = False
@@ -217,8 +256,8 @@ def _read_csv(path: str) -> tuple[list[str], list[dict[str, str]], bool]:
                     break
                 rows.append(r)
     except Exception:
-        return [], [], False
-    return header, rows, truncated
+        return [], [], False, True
+    return header, rows, truncated, False
 
 
 # --------------------------------------------------------------------------
@@ -382,6 +421,10 @@ def validate_trades(rows: list[dict[str, str]]) -> dict[str, Any]:
         critical.append("trade_price_not_strictly_positive")
     if missing_size or nonpositive_size:
         critical.append("trade_size_not_strictly_positive")
+    if invalid_side:
+        # a present-but-unrecognized side (e.g. "hold") is corruption -> INVALID.
+        # missing side (no column) is only a NEEDS_AGGRESSOR gap, not corruption.
+        critical.append("trade_side_invalid")
     # structural validity (corrupt rows). Aggressor-side availability is a
     # SEPARATE readiness gate (has_aggressor_side) -> a clean trades file without
     # aggressor side is a NEEDS_AGGRESSOR gap, not an INVALID/corrupt file.
@@ -697,41 +740,76 @@ def microstructure_plan() -> dict[str, Any]:
         "writes_on_plan": False, **_safety()}
 
 
-def _future_research_ready(present: dict[str, dict]) -> dict[str, bool]:
-    ob = present.get("orderbook", {}).get("valid", False)
+def _future_research_ready(present: dict[str, dict], density_ok: dict[str, bool] | None = None) -> dict[str, bool]:
+    """Each future lab flag reflects the REAL readiness of its component (not just
+    valid=True): orderbook needs L1 sizes + no gaps, flow needs aggressor side,
+    cluster/OI need density."""
+    density_ok = density_ok or {}
+    ob_m = present.get("orderbook", {})
+    ob_clean = bool(ob_m.get("valid")) and not ob_m.get("coverage", {}).get("gap_count")
+    ob_l1 = ob_clean and ob_m.get("l1_imbalance_median") is not None
+    spread_ok = ob_clean and ob_m.get("spread_median") is not None
     tr = present.get("trades", {})
-    tr_aggr = tr.get("valid", False) and tr.get("has_aggressor_side", False)
+    tr_aggr = bool(tr.get("valid")) and bool(tr.get("has_aggressor_side"))
+    liq_ok = bool(present.get("liquidations", {}).get("valid")) and density_ok.get("liquidations", False)
+    oi_ok = bool(present.get("oi", {}).get("valid")) and density_ok.get("oi", False)
     return {
-        "orderbook_pressure": ob,
-        "spread_slippage_estimator": ob,
-        "liquidation_cluster_detector": present.get("liquidations", {}).get("valid", False),
+        "orderbook_pressure": ob_l1,
+        "spread_slippage_estimator": spread_ok,
+        "liquidation_cluster_detector": liq_ok,
         "aggressive_flow_imbalance": tr_aggr,
-        "oi_expansion_contraction": present.get("oi", {}).get("valid", False),
-        "funding_crowding": present.get("funding", {}).get("valid", False),
-        "microstructure_aware_exit_simulation": bool(ob and tr_aggr)}
+        "oi_expansion_contraction": oi_ok,
+        "funding_crowding": bool(present.get("funding", {}).get("valid")),
+        "microstructure_aware_exit_simulation": bool(ob_l1 and tr_aggr)}
 
 
 def classify_sample(file_results: list[dict], by_type: dict[str, dict],
-                    recognized_count: int) -> dict[str, Any]:
-    """Fail-closed multi-file readiness. Looks at EVERY recognized file (not just
-    one survivor per type): any invalid recognized file blocks READY and surfaces
-    in critical_errors + type_summary, so a later valid file can never silently
-    overwrite an earlier invalid one."""
+                    recognized_count: int, *, rep_errors: list[str] | None = None,
+                    suspicious_files: list[str] | None = None) -> dict[str, Any]:
+    """Fail-closed multi-file readiness. Inspects EVERY recognized file, blocks on
+    any rep_errors (unsafe files), suspicious/secret-like files, symbol
+    misalignment and absurd density -- so READY can only ever be emitted for a
+    fully clean, aligned, dense, secret-free sample."""
+    rep_errors = list(rep_errors or [])
+    suspicious_files = list(suspicious_files or [])
     recognized = [fr for fr in file_results if fr.get("detected_type") in _VALIDATORS]
-    base = {"verdict": C_NO_SAMPLE, "readiness_verdict": C_NO_SAMPLE,
-            "gaps": [], "active_gaps": [], "valid_types": [],
-            "critical_errors": [], "critical_errors_global": [], "critical_errors_by_file": {},
-            "warnings": [], "invalid_recognized_files": 0, "valid_recognized_files": 0,
-            "file_results": file_results, "type_summary": {},
-            "can_research_microstructure": False,
-            "future_research_ready_if_sample_passes": False,
-            "future_labs_ready": _future_research_ready({}),
-            "funding_optional_reason": None, "max_coverage_days": 0,
-            "min_required_coverage_days": 0, "why_not_ready": ["no recognized sample files"]}
+    required_types = ("trades", "orderbook", "oi", "liquidations")
     if recognized_count == 0 or not recognized:
-        return base
+        # still surface unsafe/suspicious so a dir of only-bad files is not NO_SAMPLE
+        if rep_errors or suspicious_files:
+            ce = [f"unsafe_or_suspicious:{e}" for e in (rep_errors + suspicious_files)]
+            return {"verdict": C_INVALID, "readiness_verdict": C_INVALID, "gaps": [],
+                    "active_gaps": [], "valid_types": [], "critical_errors": sorted(set(ce)),
+                    "critical_errors_global": sorted(set(ce)),
+                    "critical_errors_by_file": {"_sample": ce}, "warnings": [],
+                    "why_not_ready": sorted(set(ce)), "invalid_recognized_files": 0,
+                    "valid_recognized_files": 0, "file_results": file_results,
+                    "type_summary": {}, "unsafe_file_count": len(rep_errors),
+                    "unsafe_blocked_files": rep_errors, "unknown_suspicious_files": suspicious_files,
+                    "blocked_file_count": len(rep_errors) + len(suspicious_files),
+                    "symbol_alignment_ok": False, "density_ok": False,
+                    "common_symbols_required": [], "symbols_by_type": {},
+                    "orderbook_l1_ready": False, "normalization_allowed": False,
+                    "normalization_blockers": sorted(set(ce)),
+                    "can_research_microstructure": False,
+                    "future_research_ready_if_sample_passes": False,
+                    "future_labs_ready": _future_research_ready({}), "funding_optional_reason": None,
+                    "max_coverage_days": 0, "min_required_coverage_days": 0}
+        return {"verdict": C_NO_SAMPLE, "readiness_verdict": C_NO_SAMPLE, "gaps": [],
+                "active_gaps": [], "valid_types": [], "critical_errors": [],
+                "critical_errors_global": [], "critical_errors_by_file": {}, "warnings": [],
+                "invalid_recognized_files": 0, "valid_recognized_files": 0,
+                "file_results": file_results, "type_summary": {}, "unsafe_file_count": 0,
+                "unsafe_blocked_files": [], "unknown_suspicious_files": [], "blocked_file_count": 0,
+                "symbol_alignment_ok": False, "density_ok": False, "common_symbols_required": [],
+                "symbols_by_type": {}, "orderbook_l1_ready": False,
+                "normalization_allowed": False, "normalization_blockers": ["no recognized files"],
+                "can_research_microstructure": False,
+                "future_research_ready_if_sample_passes": False,
+                "future_labs_ready": _future_research_ready({}), "funding_optional_reason": None,
+                "max_coverage_days": 0, "min_required_coverage_days": 0,
+                "why_not_ready": ["no recognized sample files"]}
 
-    # ---- per-file aggregation (fail-closed) ----
     invalid_files = [fr for fr in recognized if not fr.get("valid")]
     valid_files = [fr for fr in recognized if fr.get("valid")]
     critical_errors: list[str] = []
@@ -740,21 +818,27 @@ def classify_sample(file_results: list[dict], by_type: dict[str, dict],
     type_summary: dict[str, dict] = {}
     for fr in recognized:
         dtype = fr["detected_type"]
-        ts = type_summary.setdefault(dtype, {"valid_files": 0, "invalid_files": 0, "files": []})
-        ts["files"].append(fr["file"])
-        ts["valid_files" if fr.get("valid") else "invalid_files"] += 1
+        tsum = type_summary.setdefault(dtype, {"valid_files": 0, "invalid_files": 0, "files": []})
+        tsum["files"].append(fr["file"])
+        tsum["valid_files" if fr.get("valid") else "invalid_files"] += 1
         errs = list(fr.get("critical_errors") or [])
         if not fr.get("valid") and not errs:
             errs = [fr.get("reason_if_invalid") or "invalid_recognized_file"]
         if errs:
             critical_by_file[fr["file"]] = errs
         for e in errs:
-            critical_errors.append(f"{dtype}:{e}")               # type-level (stable)
-            critical_errors.append(f"{dtype}:{fr['file']}:{e}")   # file-level (mentions file)
+            critical_errors.append(f"{dtype}:{e}")
+            critical_errors.append(f"{dtype}:{fr['file']}:{e}")
         for w in (fr.get("warnings") or []):
             warnings.append(f"{dtype}:{w}")
+    # rep.errors (unsafe files) + suspicious files -> hard blockers
+    for e in rep_errors:
+        critical_errors.append(e)
+        critical_by_file.setdefault("_sample", []).append(e)
+    for s in suspicious_files:
+        critical_errors.append(f"unknown_suspicious_file:{s}")
+        critical_by_file.setdefault(s, []).append("unknown_suspicious_file")
 
-    # valid metrics survivor per type (for readiness components + future labs)
     present = {t: v for t, v in by_type.items() if v.get("valid")}
     valid_types = set(present)
     tr = present.get("trades", {})
@@ -763,10 +847,40 @@ def classify_sample(file_results: list[dict], by_type: dict[str, dict],
 
     covs = [v.get("coverage", {}).get("coverage_days", 0) or 0 for v in present.values()]
     max_cov = max(covs) if covs else 0
-    required_types = ("trades", "orderbook", "oi", "liquidations")
     required_covs = [present[t]["coverage"]["coverage_days"] or 0
                      for t in required_types if present.get(t, {}).get("valid")]
     min_required_cov = min(required_covs) if required_covs else 0
+
+    # ---- symbol presence + alignment across required present types ----
+    symbols_by_type = {t: sorted(set(present[t].get("symbols") or [])) for t in present}
+    required_present = [t for t in required_types if t in valid_types]
+    missing_symbol_types = [t for t in required_present if not symbols_by_type.get(t)]
+    if required_present and not missing_symbol_types:
+        common = set(symbols_by_type[required_present[0]])
+        for t in required_present[1:]:
+            common &= set(symbols_by_type[t])
+    else:
+        common = set()
+    common_symbols_required = sorted(common)
+    all_required_present = all(t in valid_types for t in required_types)
+    symbol_alignment_ok = (all_required_present and not missing_symbol_types
+                           and bool(common_symbols_required))
+
+    # ---- density per required present type ----
+    density_ok_by_type: dict[str, bool] = {}
+    for t in required_types:
+        m = present.get(t)
+        if not (m and m.get("valid")):
+            density_ok_by_type[t] = False
+            continue
+        cov = m.get("coverage", {})
+        rows = int(cov.get("rows") or 0)
+        cdays = cov.get("coverage_days", 0) or 0
+        rpd = (rows / cdays) if cdays > 0 else float(rows)
+        density_ok_by_type[t] = rows >= _MIN_ROWS[t] and rpd >= _MIN_ROWS_PER_DAY[t]
+    density_ok = all_required_present and all(density_ok_by_type[t] for t in required_types)
+    sparse_present = [t for t in required_types
+                      if present.get(t, {}).get("valid") and not density_ok_by_type[t]]
 
     gaps: list[str] = []
     if not tr.get("valid") or not tr.get("has_aggressor_side"):
@@ -777,33 +891,39 @@ def classify_sample(file_results: list[dict], by_type: dict[str, dict],
         gaps.append(C_NEEDS_OI)
     if "liquidations" not in valid_types:
         gaps.append(C_NEEDS_LIQ)
-    if max_cov < MIN_HISTORY_DAYS or any(
-            (present[t]["coverage"].get("coverage_days", 0) or 0) < MIN_HISTORY_DAYS
-            for t in required_types if present.get(t, {}).get("valid")):
+    if (max_cov < MIN_HISTORY_DAYS
+            or any((present[t]["coverage"].get("coverage_days", 0) or 0) < MIN_HISTORY_DAYS
+                   for t in required_types if present.get(t, {}).get("valid"))
+            or sparse_present
+            or any(v.get("coverage", {}).get("gap_count") for v in present.values())):
         gaps.append(C_NEEDS_HISTORY)
-    if any(v.get("coverage", {}).get("gap_count") for v in present.values()):
-        gaps.append(C_NEEDS_HISTORY)
+
+    symbol_why: list[str] = []
+    for t in missing_symbol_types:
+        symbol_why.append(f"MISSING_SYMBOL_{t.upper()}")
+    if all_required_present and not missing_symbol_types and not common_symbols_required:
+        symbol_why.append("SYMBOL_ALIGNMENT_FAIL")
 
     funding_optional_reason = None
     if "funding" not in {fr["detected_type"] for fr in recognized} and "oi" in valid_types:
         funding_optional_reason = "funding is optional for V10.24 readiness when OI is present and valid"
 
-    if "orderbook" in valid_types and not ob_l1_ready:
-        critical_or_gap_note = "orderbook:l1_imbalance_unavailable_needs_bid_ask_sizes"
-    else:
-        critical_or_gap_note = None
-
     active_gaps = sorted(set(gaps))
     critical_errors = sorted(set(critical_errors))
+    unsafe_file_count = len(rep_errors)
 
     ready = (
-        len(invalid_files) == 0
+        unsafe_file_count == 0
+        and not suspicious_files
+        and len(invalid_files) == 0
         and not critical_errors
         and tr.get("valid") and tr.get("has_aggressor_side")
         and "orderbook" in valid_types and ob_l1_ready
         and "oi" in valid_types
         and "liquidations" in valid_types
         and min_required_cov >= MIN_HISTORY_DAYS
+        and symbol_alignment_ok
+        and density_ok
         and not active_gaps
     )
     if ready:
@@ -820,32 +940,56 @@ def classify_sample(file_results: list[dict], by_type: dict[str, dict],
         verdict = C_NEEDS_LIQ
     elif "oi" not in valid_types:
         verdict = C_NEEDS_OI
+    elif not symbol_alignment_ok:
+        verdict = C_PARTIAL
     else:
         verdict = C_PARTIAL
 
-    why_not_ready = list(critical_errors) + list(active_gaps)
-    if critical_or_gap_note:
-        why_not_ready.append(critical_or_gap_note)
-    why_not_ready = sorted(set(why_not_ready))
+    why_not_ready = sorted(set(list(critical_errors) + list(active_gaps) + symbol_why
+                               + (["DENSITY_FAIL"] if not density_ok else [])
+                               + (["SYMBOL_ALIGNMENT_FAIL"] if not symbol_alignment_ok and all_required_present else [])))
+    normalization_blockers = []
+    if verdict != C_READY:
+        normalization_blockers.append("verdict_not_ready")
+    if rep_errors:
+        normalization_blockers.append("rep_errors")
+    if critical_errors:
+        normalization_blockers.append("critical_errors")
+    if active_gaps:
+        normalization_blockers.append("active_gaps")
+    if invalid_files:
+        normalization_blockers.append("invalid_recognized_files")
+    if suspicious_files:
+        normalization_blockers.append("unknown_suspicious_files")
+    if not symbol_alignment_ok:
+        normalization_blockers.append("symbol_alignment_fail")
+    if not density_ok:
+        normalization_blockers.append("density_fail")
+    normalization_blockers = sorted(set(normalization_blockers))
+    normalization_allowed = bool(ready) and not normalization_blockers
     return {"verdict": verdict, "readiness_verdict": verdict,
             "gaps": active_gaps, "active_gaps": active_gaps,
-            "critical_errors": critical_errors,
-            "critical_errors_global": critical_errors,
+            "critical_errors": critical_errors, "critical_errors_global": critical_errors,
             "critical_errors_by_file": critical_by_file,
-            "warnings": sorted(set(warnings)),
-            "why_not_ready": why_not_ready,
+            "warnings": sorted(set(warnings)), "why_not_ready": why_not_ready,
             "valid_types": sorted(valid_types),
             "invalid_recognized_files": len(invalid_files),
             "valid_recognized_files": len(valid_files),
-            "file_results": file_results,
-            "type_summary": type_summary,
-            "max_coverage_days": max_cov,
-            "min_required_coverage_days": min_required_cov,
+            "file_results": file_results, "type_summary": type_summary,
+            "unsafe_file_count": unsafe_file_count, "unsafe_blocked_files": rep_errors,
+            "unknown_suspicious_files": suspicious_files,
+            "blocked_file_count": unsafe_file_count + len(suspicious_files),
+            "symbols_by_type": symbols_by_type, "common_symbols_required": common_symbols_required,
+            "symbol_alignment_ok": symbol_alignment_ok, "density_ok": density_ok,
+            "density_ok_by_type": density_ok_by_type,
+            "max_coverage_days": max_cov, "min_required_coverage_days": min_required_cov,
             "orderbook_l1_ready": ob_l1_ready,
+            "normalization_allowed": normalization_allowed,
+            "normalization_blockers": normalization_blockers,
             "can_research_microstructure": bool(ready),
             "future_research_ready_if_sample_passes": bool(ready),
             "funding_optional_reason": funding_optional_reason,
-            "future_labs_ready": _future_research_ready(present)}
+            "future_labs_ready": _future_research_ready(present, density_ok_by_type)}
 
 
 def validate_sample(sample_dir: str, apply_normalization: bool = False) -> dict[str, Any]:
@@ -874,6 +1018,7 @@ def validate_sample(sample_dir: str, apply_normalization: bool = False) -> dict[
         return rep
     by_type: dict[str, dict] = {}          # best-per-type metrics (valid preferred)
     file_results: list[dict] = []
+    suspicious_files: list[str] = []
     recognized_count = 0
     for name in sorted(os.listdir(sample_dir)):
         path = os.path.join(sample_dir, name)
@@ -884,20 +1029,36 @@ def validate_sample(sample_dir: str, apply_normalization: bool = False) -> dict[
         except ValueError as e:
             rep["errors"].append(f"unsafe_sample_file:{name}:{e}")
             fr = {"file": name, "detected_type": "unknown", "rows": 0, "truncated": False,
-                  "columns": [], "valid": False, "critical_errors": [], "warnings": [],
-                  "coverage": {}, "reason_if_invalid": f"unsafe_sample_file:{e}"}
+                  "columns": [], "valid": False, "critical_errors": ["unsafe_sample_file"],
+                  "warnings": [], "coverage": {}, "reason_if_invalid": f"unsafe_sample_file:{e}"}
             file_results.append(fr)
             rep["files"].append(fr)
             continue
-        header, rows, truncated = _read_csv(path)
+        header, rows, truncated, parse_error = _read_csv(path)
         dtype = detect_type(name, header)
+        suspicious = _is_suspicious_file(name, header)
+        try:
+            hardlinked = os.stat(path).st_nlink > 1
+        except OSError:
+            hardlinked = False
         fr = {"file": name, "detected_type": dtype, "rows": len(rows), "truncated": truncated,
               "columns": header, "valid": False, "critical_errors": [], "warnings": [],
-              "coverage": {}, "reason_if_invalid": None, "schema": header}
+              "coverage": {}, "reason_if_invalid": None, "schema": header,
+              "suspicious": suspicious, "hardlinked": hardlinked, "parse_error": parse_error}
+        if suspicious or (hardlinked and (suspicious or dtype == "unknown")):
+            # credential/secret-like file (name or headers), or suspicious hardlink
+            suspicious_files.append(name)
+            fr["critical_errors"] = ["unknown_suspicious_file"]
+            fr["reason_if_invalid"] = "suspicious_secret_like_file"
+            file_results.append(fr)
+            rep["files"].append(fr)
+            continue
         if dtype in _VALIDATORS:
             recognized_count += 1
-            if not rows:
-                # recognized schema but ZERO rows -> INVALID, not NO_SAMPLE
+            if parse_error:
+                fr["critical_errors"] = ["csv_parse_error"]
+                fr["reason_if_invalid"] = "csv_parse_error"
+            elif not rows:
                 fr["critical_errors"] = ["empty_recognized_csv"]
                 fr["reason_if_invalid"] = "empty_recognized_csv"
             else:
@@ -909,25 +1070,31 @@ def validate_sample(sample_dir: str, apply_normalization: bool = False) -> dict[
                 fr["metrics"] = res
                 if not res["valid"]:
                     fr["reason_if_invalid"] = ";".join(fr["critical_errors"]) or "invalid"
-                # keep richest metrics per type for by_type (valid preferred)
                 if dtype not in by_type or (res["valid"] and not by_type[dtype].get("valid")):
                     by_type[dtype] = res
+        else:
+            # benign unknown .csv (not suspicious) -> recorded, never blocks readiness
+            fr["warnings"] = ["benign_unknown_file_ignored"]
         file_results.append(fr)
         rep["files"].append(fr)
     rep["by_type"] = {k: v for k, v in by_type.items()}
-    rep["classification"] = classify_sample(file_results, by_type, recognized_count)
+    rep["classification"] = classify_sample(file_results, by_type, recognized_count,
+                                            rep_errors=list(rep["errors"]),
+                                            suspicious_files=suspicious_files)
     rep["file_results"] = file_results
     rep["type_summary"] = rep["classification"].get("type_summary", {})
     rep["critical_errors"] = rep["classification"].get("critical_errors", [])
     rep["warnings"] = rep["classification"].get("warnings", [])
-    if (apply_normalization and rep["classification"].get("valid_types")
-            and not rep["classification"].get("critical_errors")):
+    # NORMALIZATION GATE: only when the classifier explicitly allows it.
+    if apply_normalization and rep["classification"].get("normalization_allowed"):
         rep["normalization"] = _write_normalized(sample_dir, rep)
     else:
-        reason = "flag off or no valid types"
-        if apply_normalization and rep["classification"].get("critical_errors"):
-            reason = "blocked by critical validation errors"
-        rep["normalization"] = {"applied": False, "reason": reason}
+        blockers = rep["classification"].get("normalization_blockers", ["flag_off"])
+        if not apply_normalization:
+            blockers = ["flag_off"]
+        rep["normalization"] = {"applied": False, "normalization_allowed": False,
+                                "normalization_blockers": blockers,
+                                "reason": "normalization blocked: " + ",".join(blockers)}
     return rep
 
 
@@ -948,7 +1115,7 @@ def _write_normalized(sample_dir: str, rep: dict[str, Any]) -> dict[str, Any]:
             continue
         src_path = os.path.join(sample_dir, finfo["file"])
         assert_safe_sample_file(sample_dir, src_path)
-        header, rows, _ = _read_csv(src_path)
+        header, rows, _truncated, _parse_error = _read_csv(src_path)
         out_path = os.path.join(out_dir, f"{dtype}_normalized.csv").replace("\\", "/")
         new_file = not os.path.exists(out_path)
         with open(out_path, "a", newline="", encoding="utf-8") as f:
@@ -959,8 +1126,11 @@ def _write_normalized(sample_dir: str, rep: dict[str, Any]) -> dict[str, Any]:
                 w.writerow(_normalize_row(dtype, r))
         if out_path not in written:
             written.append(out_path)
-    return {"applied": True, "out_dir": out_dir, "files": written,
-            "wrote_only_staging_marker": STAGING_MARKER in out_dir}
+    marker_root = _resolved(DEFAULT_SAMPLE_DIR, relative_to_repo=True)
+    contained = _is_relative_to(_resolved(out_dir, relative_to_repo=True), marker_root)
+    return {"applied": True, "normalization_allowed": True, "out_dir": out_dir,
+            "files": written, "run_id": run_id,
+            "wrote_only_staging_marker": bool(contained and STAGING_MARKER in out_dir)}
 
 
 def _normalize_row(dtype: str, r: dict[str, str]) -> list[Any]:
