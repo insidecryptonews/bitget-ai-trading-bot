@@ -6063,6 +6063,66 @@ class ResearchLab:
                 "final_recommendation: NO LIVE", "MICROSTRUCTURE SAMPLE REPORT V10.24 END"]
         return "\n".join(out)
 
+    # ------------------------------------------------------------------
+    # ResearchOps V10.25 - Free Public Microstructure Collector (research only).
+    # ------------------------------------------------------------------
+    def free_microstructure_sources_plan_v1025_cli(self) -> str:
+        from .labs import free_public_microstructure_collector_v10_25 as F
+        p = F.free_microstructure_plan()
+        out = ["FREE MICROSTRUCTURE SOURCES PLAN V10.25 START", "objective: " + p["objective"],
+               "honest_summary: " + p["honest_summary"], "best_free_route:"]
+        out += [f"  {step}" for step in p["best_free_route"]]
+        out.append("sources (verdicts probed live):")
+        for s in p["sources"]:
+            out.append(f"- {s['source']}: {','.join(s['data'])} | free={s['free']} "
+                       f"account={s['account']} api_key={s['api_key']} -> {s['verdict']}")
+        out += ["never: " + ",".join(p["never"]), f"writes_on_plan: {p['writes_on_plan']}",
+                "uses_api_keys: false", "uses_db: false", "research_only: true",
+                "shadow_only: true", "paper_ready: false", "live_ready: false",
+                "can_send_real_orders: false", "final_recommendation: NO LIVE",
+                "FREE MICROSTRUCTURE SOURCES PLAN V10.25 END"]
+        return "\n".join(out)
+
+    def free_microstructure_collector_dry_run_v1025_cli(self, *, symbols, timeframes="") -> str:
+        from .labs import free_public_microstructure_collector_v10_25 as F
+        syms = self._v107_csv_arg(symbols) or ["BTCUSDT"]
+        kinds = self._v107_csv_arg(timeframes) or ["trades", "orderbook", "oi", "funding"]
+        out = ["FREE MICROSTRUCTURE COLLECTOR DRY-RUN V10.25 START"]
+        for s in syms:
+            rep = F.forward_collect(s, kinds, apply=False)
+            out.append(f"symbol={s} mode={rep['mode']} writes={rep['writes']}")
+            for k, u in rep["planned_urls"].items():
+                out.append(f"  would_GET {k}: {u}")
+        out += ["note: dry-run performs NO network and NO writes",
+                "uses_api_keys: false", "uses_db: false", "research_only: true",
+                "shadow_only: true", "paper_ready: false", "live_ready: false",
+                "can_send_real_orders: false", "final_recommendation: NO LIVE",
+                "FREE MICROSTRUCTURE COLLECTOR DRY-RUN V10.25 END"]
+        return "\n".join(out)
+
+    def free_microstructure_forward_collect_v1025_cli(self, *, symbols, timeframes="",
+                                                      apply=False, output_dir="") -> str:
+        from .labs import free_public_microstructure_collector_v10_25 as F
+        syms = self._v107_csv_arg(symbols) or ["BTCUSDT"]
+        kinds = self._v107_csv_arg(timeframes) or ["trades", "orderbook", "oi", "funding"]
+        out = ["FREE MICROSTRUCTURE FORWARD COLLECT V10.25 START", f"apply: {bool(apply)}"]
+        for s in syms:
+            rep = F.forward_collect(s, kinds, apply=bool(apply), output_dir=(output_dir or None))
+            out.append(f"symbol={s} mode={rep['mode']}")
+            if rep.get("mode") == "APPLY":
+                out.append(f"  staging_dir: {rep.get('staging_dir')}")
+                for w in rep.get("written", []):
+                    out.append(f"  wrote {w['kind']}: rows={w['rows']} file={w['file']}")
+                out.append(f"  errors: {rep.get('errors')}")
+            else:
+                out.append(f"  planned: {list(rep['planned_urls'].keys())} (no network, no writes)")
+        out += ["note: L1 orderbook only; liquidations need websocket (not collected here)",
+                "uses_api_keys: false", "uses_db: false", "research_only: true",
+                "shadow_only: true", "paper_ready: false", "live_ready: false",
+                "can_send_real_orders: false", "final_recommendation: NO LIVE",
+                "FREE MICROSTRUCTURE FORWARD COLLECT V10.25 END"]
+        return "\n".join(out)
+
     def trader_dashboard_contract_v105_cli(self) -> str:
         from .labs.trader_dashboard_v104 import (
             DISABLED_CONTROLS,
@@ -7257,6 +7317,9 @@ def build_argument_parser() -> argparse.ArgumentParser:
             "microstructure-sample-plan-v1024",
             "microstructure-sample-validate-v1024",
             "microstructure-sample-report-v1024",
+            "free-microstructure-sources-plan-v1025",
+            "free-microstructure-collector-dry-run-v1025",
+            "free-microstructure-forward-collect-v1025",
             "ohlcv-replay-loader-smoke-test",
             "ohlcv-replay-loader-audit",
             "duplicate-module-audit-smoke-test",
@@ -7449,6 +7512,9 @@ PUBLIC_RESEARCH_ONLY_COMMANDS = frozenset({
     "microstructure-sample-plan-v1024",
     "microstructure-sample-validate-v1024",
     "microstructure-sample-report-v1024",
+    "free-microstructure-sources-plan-v1025",
+    "free-microstructure-collector-dry-run-v1025",
+    "free-microstructure-forward-collect-v1025",
 })
 
 
@@ -7485,6 +7551,15 @@ def _dispatch_public_research_only(args) -> None:
             apply_normalization=args.apply_normalization))
     elif args.command == "microstructure-sample-report-v1024":
         print(lab.microstructure_sample_report_v1024_cli(output_dir=args.output_dir))
+    elif args.command == "free-microstructure-sources-plan-v1025":
+        print(lab.free_microstructure_sources_plan_v1025_cli())
+    elif args.command == "free-microstructure-collector-dry-run-v1025":
+        print(lab.free_microstructure_collector_dry_run_v1025_cli(
+            symbols=args.symbols, timeframes=args.timeframes))
+    elif args.command == "free-microstructure-forward-collect-v1025":
+        print(lab.free_microstructure_forward_collect_v1025_cli(
+            symbols=args.symbols, timeframes=args.timeframes,
+            apply=args.apply, output_dir=args.output_dir))
 
 
 def main() -> None:
