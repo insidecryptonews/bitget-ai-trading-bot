@@ -6123,6 +6123,64 @@ class ResearchLab:
                 "FREE MICROSTRUCTURE FORWARD COLLECT V10.25 END"]
         return "\n".join(out)
 
+    # ------------------------------------------------------------------
+    # ResearchOps V10.26 - Free Public Liquidations WebSocket Forward Collector.
+    # ------------------------------------------------------------------
+    def free_liquidations_ws_plan_v1026_cli(self) -> str:
+        from .labs import free_public_liquidations_ws_collector_v10_26 as L
+        p = L.liquidations_ws_plan()
+        out = ["FREE LIQUIDATIONS WS PLAN V10.26 START", "objective: " + p["objective"],
+               "default_mode: " + p["default_mode"], "honest_summary: " + p["honest_summary"],
+               f"implemented_exchanges: {','.join(p['implemented_exchanges'])}",
+               "canonical_header: " + ",".join(p["canonical_header"]), "streams:"]
+        for s in p["streams"]:
+            out.append(f"- {s['exchange']}: {s['ws_url']} requires_key={s['requires_key']} -> {s['verdict']}")
+        out += ["never: " + ",".join(p["never"]), f"writes_on_plan: {p['writes_on_plan']}",
+                "uses_api_keys: false", "subscribes_private_channels: false",
+                "research_only: true", "shadow_only: true", "paper_ready: false",
+                "live_ready: false", "can_send_real_orders: false",
+                "final_recommendation: NO LIVE", "FREE LIQUIDATIONS WS PLAN V10.26 END"]
+        return "\n".join(out)
+
+    def free_liquidations_ws_dry_run_v1026_cli(self, *, symbols, exchange="binance_usdm") -> str:
+        from .labs import free_public_liquidations_ws_collector_v10_26 as L
+        syms = self._v107_csv_arg(symbols) or ["BTCUSDT"]
+        rep = L.collect(exchange, syms, apply=False)
+        out = ["FREE LIQUIDATIONS WS DRY-RUN V10.26 START",
+               f"exchange: {rep['exchange']}  symbols: {','.join(syms)}",
+               f"mode: {rep['mode']}  writes: {rep['writes']}", f"would_connect_ws: {rep['ws_url']}",
+               "note: dry-run does NO websocket connection and NO writes",
+               "uses_api_keys: false", "research_only: true", "shadow_only: true",
+               "paper_ready: false", "live_ready: false", "can_send_real_orders: false",
+               "final_recommendation: NO LIVE", "FREE LIQUIDATIONS WS DRY-RUN V10.26 END"]
+        return "\n".join(out)
+
+    def free_liquidations_ws_collect_v1026_cli(self, *, symbols, exchange="binance_usdm",
+                                               apply=False, output_dir="",
+                                               max_runtime_seconds=5.0, max_events=5) -> str:
+        from .labs import free_public_liquidations_ws_collector_v10_26 as L
+        syms = self._v107_csv_arg(symbols) or ["BTCUSDT"]
+        rep = L.collect(exchange, syms, apply=bool(apply), output_dir=(output_dir or None),
+                        max_runtime_seconds=float(max_runtime_seconds), max_events=int(max_events))
+        out = ["FREE LIQUIDATIONS WS COLLECT V10.26 START",
+               f"exchange: {rep['exchange']}  symbols: {','.join(syms)}  mode: {rep['mode']}",
+               f"max_runtime_seconds: {rep['max_runtime_seconds']}  max_events: {rep['max_events']}"]
+        if rep.get("mode") == "APPLY":
+            out.append(f"writes: {rep.get('writes')}  event_count: {rep.get('event_count')}")
+            out.append(f"staging_dir: {rep.get('staging_dir')}")
+            out.append(f"output_file: {rep.get('output_file')}")
+            out.append(f"manifest: {rep.get('manifest')}")
+            out.append(f"duplicates: {rep.get('duplicates')}  rejected: {len(rep.get('rejected', []))}  errors: {rep.get('errors')}")
+        else:
+            out.append(f"writes: {rep['writes']} (no --apply -> no websocket, no writes)")
+            out.append(f"would_connect_ws: {rep['ws_url']}")
+        out += ["note: forward-only; run for days/weeks for density; validate with V10.24.3",
+                "uses_api_keys: false", "subscribes_private_channels: false",
+                "research_only: true", "shadow_only: true", "paper_ready: false",
+                "live_ready: false", "can_send_real_orders: false",
+                "final_recommendation: NO LIVE", "FREE LIQUIDATIONS WS COLLECT V10.26 END"]
+        return "\n".join(out)
+
     def trader_dashboard_contract_v105_cli(self) -> str:
         from .labs.trader_dashboard_v104 import (
             DISABLED_CONTROLS,
@@ -7320,6 +7378,9 @@ def build_argument_parser() -> argparse.ArgumentParser:
             "free-microstructure-sources-plan-v1025",
             "free-microstructure-collector-dry-run-v1025",
             "free-microstructure-forward-collect-v1025",
+            "free-liquidations-ws-plan-v1026",
+            "free-liquidations-ws-dry-run-v1026",
+            "free-liquidations-ws-collect-v1026",
             "ohlcv-replay-loader-smoke-test",
             "ohlcv-replay-loader-audit",
             "duplicate-module-audit-smoke-test",
@@ -7463,6 +7524,9 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--equities", default="NVDA,QQQ,SPY,SMH,COIN,MSTR,TSLA,^VIX", help="V10.23 equity/risk symbols (CSV).")
     parser.add_argument("--cryptos", default="BTC-USD,ETH-USD,SOL-USD,XRP-USD,DOGE-USD", help="V10.23 crypto symbols (CSV).")
     parser.add_argument("--apply-normalization", action="store_true", help="V10.24: write normalized microstructure CSVs into the v10_24 staging marker (default off).")
+    parser.add_argument("--exchange", default="binance_usdm", help="V10.26 liquidations websocket exchange (binance_usdm).")
+    parser.add_argument("--max-runtime-seconds", type=float, default=5.0, help="V10.26 liquidations collector max wall-clock seconds (conservative default).")
+    parser.add_argument("--max-events", type=int, default=5, help="V10.26 liquidations collector max events to collect (conservative default).")
     parser.add_argument("--max-grid-combos", type=int, default=500, help="V10.8 cap on evaluated parameter combos.")
     parser.add_argument("--seed", type=int, default=7, help="V10.8 deterministic seed for grid sampling.")
     parser.add_argument("--walk-forward-mode", default="", help="V10.8.1 none|chronological_split|rolling (default rolling). Empty falls back to --walk-forward mapping.")
@@ -7515,6 +7579,9 @@ PUBLIC_RESEARCH_ONLY_COMMANDS = frozenset({
     "free-microstructure-sources-plan-v1025",
     "free-microstructure-collector-dry-run-v1025",
     "free-microstructure-forward-collect-v1025",
+    "free-liquidations-ws-plan-v1026",
+    "free-liquidations-ws-dry-run-v1026",
+    "free-liquidations-ws-collect-v1026",
 })
 
 
@@ -7560,6 +7627,16 @@ def _dispatch_public_research_only(args) -> None:
         print(lab.free_microstructure_forward_collect_v1025_cli(
             symbols=args.symbols, timeframes=args.timeframes,
             apply=args.apply, output_dir=args.output_dir))
+    elif args.command == "free-liquidations-ws-plan-v1026":
+        print(lab.free_liquidations_ws_plan_v1026_cli())
+    elif args.command == "free-liquidations-ws-dry-run-v1026":
+        print(lab.free_liquidations_ws_dry_run_v1026_cli(
+            symbols=args.symbols, exchange=args.exchange))
+    elif args.command == "free-liquidations-ws-collect-v1026":
+        print(lab.free_liquidations_ws_collect_v1026_cli(
+            symbols=args.symbols, exchange=args.exchange, apply=args.apply,
+            output_dir=args.output_dir, max_runtime_seconds=args.max_runtime_seconds,
+            max_events=args.max_events))
 
 
 def main() -> None:
