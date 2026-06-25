@@ -29,6 +29,7 @@ import time
 import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Callable
 
 from . import FINAL_RECOMMENDATION_NO_LIVE
@@ -37,9 +38,29 @@ TOOL_VERSION = "v10.25"
 STAGING_MARKER = "free_microstructure_v10_25"
 DEFAULT_STAGING_DIR = f"external_data/staging/{STAGING_MARKER}"
 
-_ALLOWED_HOSTS = ("fapi.binance.com", "data.binance.vision",
-                  "api.bybit.com", "public.bybit.com")
-_ALLOWED_PATH_PREFIXES = ("/fapi/v1/", "/futures/data/", "/data/", "/v5/market/", "/trading/")
+# EXACT runtime allowlist: only the public, no-auth GET endpoints this module
+# actually calls. Hosts/paths that only appear in the documentation registry
+# (Bybit, OKX, Kaggle) are NOT runtime-allowlisted -- the helper must never be
+# reusable to reach a private/account/order endpoint.
+_ALLOWED_EXACT = {
+    "fapi.binance.com": frozenset({
+        "/fapi/v1/aggTrades",
+        "/fapi/v1/ticker/bookTicker",
+        "/fapi/v1/fundingRate",
+        "/fapi/v1/depth",
+        "/futures/data/openInterestHist",
+    }),
+}
+# data.binance.vision serves only static public dump FILES (no private API exists
+# on that host), so a GET-only path prefix is the right scoping for bulk dumps.
+_ALLOWED_PREFIX = {
+    "data.binance.vision": ("/data/",),
+}
+# Defense-in-depth: never reach anything that smells private/account/order even
+# if an allowlist entry were ever loosened.
+_DENY_PATH_SUBSTR = ("/account", "/order", "/leverage", "/margintype", "/margin/",
+                     "/positionrisk", "/position", "/userdatastream", "/listenkey",
+                     "/apikey", "/withdraw", "/balance", "/transfer", "/adlquantile")
 _AUTH_HEADER_KEYS = ("authorization", "cookie", "x-api-key", "apikey", "api-key",
                      "x-mbx-apikey", "token", "signature")
 
@@ -74,21 +95,32 @@ def _now_stamp() -> str:
 # Network safety (public GET only, no auth)
 # --------------------------------------------------------------------------
 
-def assert_safe_request(url: str, headers: dict[str, str] | None) -> None:
+def assert_safe_request(url: str, headers: dict[str, str] | None, method: str = "GET") -> None:
+    if str(method).upper() != "GET":
+        raise ValueError(f"only GET allowed, got {method}")
     p = urllib.parse.urlparse(url)
     if p.scheme != "https":
         raise ValueError(f"non-https blocked: {url}")
-    if p.hostname not in _ALLOWED_HOSTS:
-        raise ValueError(f"host not allowlisted: {p.hostname}")
-    if not any(p.path.startswith(pre) for pre in _ALLOWED_PATH_PREFIXES):
-        raise ValueError(f"path not allowlisted: {p.path}")
+    host = p.hostname
+    path = p.path
+    low_path = path.lower()
+    if any(tok in low_path for tok in _DENY_PATH_SUBSTR):
+        raise ValueError(f"private/account-like endpoint blocked: {path}")
+    if host in _ALLOWED_EXACT:
+        if path not in _ALLOWED_EXACT[host]:
+            raise ValueError(f"path not in exact allowlist for {host}: {path}")
+    elif host in _ALLOWED_PREFIX:
+        if not any(path.startswith(pre) for pre in _ALLOWED_PREFIX[host]):
+            raise ValueError(f"path prefix not allowlisted for {host}: {path}")
+    else:
+        raise ValueError(f"host not allowlisted: {host}")
     for k in (headers or {}):
         if k.lower() in _AUTH_HEADER_KEYS:
             raise ValueError(f"auth header blocked: {k}")
 
 
 def default_transport(url: str, headers: dict[str, str]) -> bytes:
-    assert_safe_request(url, headers)
+    assert_safe_request(url, headers, method="GET")
     req = urllib.request.Request(url, headers=headers, method="GET")
     with urllib.request.urlopen(req, timeout=25) as r:
         return r.read()
@@ -98,16 +130,50 @@ def default_transport(url: str, headers: dict[str, str]) -> bytes:
 # Staging safety
 # --------------------------------------------------------------------------
 
+def _repo_root() -> Path:
+    return Path(__file__).resolve().parents[2]
+
+
+def _resolved(path: str) -> Path:
+    p = Path(path)
+    if not p.is_absolute():
+        p = _repo_root() / p
+    return p.resolve(strict=False)
+
+
+def _is_within(child: Path, parent: Path) -> bool:
+    try:
+        child.relative_to(parent)
+        return True
+    except ValueError:
+        return False
+
+
 def safe_staging_dir(base: str | None = None) -> str:
+    """Writes are allowed ONLY inside the EXACT resolved staging root
+    repo/external_data/staging/free_microstructure_v10_25. Merely containing the
+    marker string elsewhere (reports/.., tmp/.., ../) or a symlink that resolves
+    outside is REJECTED. This validates only -- it never creates dirs."""
     root = base or DEFAULT_STAGING_DIR
-    segs = [s for s in root.replace("\\", "/").split("/") if s]
-    if ".." in segs or (segs and (segs[0].endswith(":") or root.startswith("/"))):
-        raise ValueError("unsafe staging path")
+    segs = [s for s in str(root).replace("\\", "/").split("/") if s]
+    if ".." in segs:
+        raise ValueError("staging traversal blocked")
     for s in (x.lower() for x in segs):
         if s in _FORBIDDEN_SEG or s.endswith(_FORBIDDEN_SUF) or ".env" in s:
             raise ValueError(f"forbidden staging segment: {s}")
-    if STAGING_MARKER not in segs:
-        raise ValueError("staging dir must live under the free_microstructure_v10_25 marker")
+    allowed_root = _resolved(DEFAULT_STAGING_DIR)
+    target = _resolved(root)
+    if target != allowed_root and not _is_within(target, allowed_root):
+        raise ValueError("staging dir must resolve inside external_data/staging/"
+                         f"{STAGING_MARKER} (got {target})")
+    # block a symlinked component that escapes the allowed root
+    p = Path(root)
+    for anc in [p, *p.parents]:
+        try:
+            if anc.exists() and anc.is_symlink() and not _is_within(anc.resolve(), allowed_root):
+                raise ValueError(f"symlinked staging component escapes root: {anc}")
+        except OSError:
+            break
     return root
 
 
@@ -197,6 +263,15 @@ def free_microstructure_plan() -> dict[str, Any]:
             "orderbook is free but L1-only and forward; liquidations are forward-only. "
             "A fully MICROSTRUCTURE_RESEARCH_READY free sample needs ~30d of forward "
             "orderbook-L1 + liquidations collection on top of the historical trades/OI/funding."),
+        "limitations": [
+            "V10.25 is a PLAN + a partial FORWARD collector, NOT a full historical pipeline.",
+            "There is NO end-to-end CLI that downloads+unzips Binance ZIP dumps yet; "
+            "the collector exposes only in-process row converters + a bounded REST forward fetch.",
+            "REST aggTrades returns only recent trades; it does NOT replace 180/365d dumps.",
+            "orderbook_l2.csv produced from bookTicker is L1 (depth_level=L1_BOOKTICKER), "
+            "NOT real historical L2 depth.",
+            "Free historical liquidations do not exist (forward websocket only).",
+            "This does NOT promise an instant MICROSTRUCTURE_RESEARCH_READY sample."],
         "v1024_canonical_targets": {
             "trades": ["timestamp", "symbol", "price", "size", "aggressor_side"],
             "orderbook": ["timestamp", "symbol", "bid_price_1", "bid_size_1", "ask_price_1", "ask_size_1"],
@@ -242,7 +317,8 @@ def bookticker_to_canonical(rows: list[dict], symbol: str) -> list[dict[str, Any
         if None in (ts, bp, bq, ap, aq):
             continue
         out.append({"timestamp": int(float(ts)), "symbol": symbol,
-                    "bid_price_1": bp, "bid_size_1": bq, "ask_price_1": ap, "ask_size_1": aq})
+                    "bid_price_1": bp, "bid_size_1": bq, "ask_price_1": ap, "ask_size_1": aq,
+                    "depth_level": "L1_BOOKTICKER"})  # honest: this is L1, not real L2
     return out
 
 
@@ -264,15 +340,18 @@ def funding_to_canonical(rows: list[dict], symbol: str) -> list[dict[str, Any]]:
         fr = r.get("fundingRate", r.get("funding_rate"))
         if ts is None or fr is None:
             continue
-        out.append({"timestamp": int(float(ts)), "symbol": r.get("symbol", symbol),
-                    "funding_rate": fr})
+        row_sym = r.get("symbol")
+        if row_sym is not None and str(row_sym) != str(symbol):
+            # fail-closed: never silently relabel a different instrument's funding
+            raise ValueError(f"SYMBOL_MISMATCH: requested {symbol} but row has {row_sym}")
+        out.append({"timestamp": int(float(ts)), "symbol": str(symbol), "funding_rate": fr})
     return out
 
 
 _CANON = {
     "trades": ("trades.csv", ["timestamp", "symbol", "price", "size", "aggressor_side"]),
     "orderbook": ("orderbook_l2.csv", ["timestamp", "symbol", "bid_price_1", "bid_size_1",
-                                       "ask_price_1", "ask_size_1"]),
+                                       "ask_price_1", "ask_size_1", "depth_level"]),
     "oi": ("open_interest.csv", ["timestamp", "symbol", "open_interest"]),
     "funding": ("funding.csv", ["timestamp", "symbol", "funding_rate"]),
 }
@@ -325,9 +404,14 @@ def forward_collect(symbol: str, kinds: list[str], apply: bool = False,
         rep["writes"] = False
         return rep
     rep["mode"] = "APPLY"
+    try:
+        staging = safe_staging_dir(output_dir)   # validate BEFORE any network/writes
+    except ValueError as e:
+        rep["errors"].append(f"unsafe_output_dir:{e}")
+        rep["writes"] = False
+        return rep
     tr = transport or default_transport
     hdr = {"User-Agent": "researchops/1.0", "Accept": "application/json"}
-    staging = safe_staging_dir(output_dir)
     out_dir = os.path.join(staging, rep["run_id"]).replace("\\", "/")
     os.makedirs(out_dir, exist_ok=True)
     rep["staging_dir"] = out_dir

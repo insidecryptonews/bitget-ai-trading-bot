@@ -3,6 +3,18 @@
 Goal: get usable microstructure data for FREE (no Tardis/CoinGlass/Kaiko, no API
 keys, no account) and validate it with the V10.24.3 adapter. RESEARCH ONLY. NO LIVE.
 
+## What V10.25 is (and is NOT) — read this first
+- It is a **plan + a partial FORWARD collector**, NOT a full historical pipeline.
+- There is **no end-to-end CLI** that downloads and unzips Binance ZIP dumps yet —
+  the module exposes only in-process row converters + a bounded REST forward fetch.
+  You download the historical dumps manually; conversion of those dump rows is via
+  the converters (no one-command "give me 365 days" exists in V10.25).
+- REST `aggTrades` returns only **recent** trades; it does **not** replace 180/365d dumps.
+- `orderbook_l2.csv` produced from `bookTicker` is **L1** (it carries
+  `depth_level=L1_BOOKTICKER`), **not** real historical L2 depth.
+- Free historical **liquidations do not exist** (forward websocket only).
+- This does **not** promise an instant `MICROSTRUCTURE_RESEARCH_READY` sample.
+
 ## Honest verdict first
 - **trades + open interest + funding**: FREE and historical right now (Binance).
 - **orderbook**: FREE but only **L1** (best bid/ask) and effectively **forward**

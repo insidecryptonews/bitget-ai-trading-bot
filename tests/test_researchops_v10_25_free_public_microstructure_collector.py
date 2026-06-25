@@ -157,6 +157,93 @@ def test_cli_allowlisted_and_isolated(monkeypatch, capsys):
     assert "DRY_RUN" in out and "NO LIVE" in out
 
 
+# ---- V10.25.1 endpoint allowlist + staging containment hardening ----------
+
+def test_exact_endpoint_allowlist_blocks_private_and_methods():
+    ok = ["https://fapi.binance.com/fapi/v1/aggTrades",
+          "https://fapi.binance.com/fapi/v1/ticker/bookTicker",
+          "https://fapi.binance.com/fapi/v1/fundingRate",
+          "https://fapi.binance.com/futures/data/openInterestHist",
+          "https://data.binance.vision/data/futures/um/daily/x.zip"]
+    for u in ok:
+        F.assert_safe_request(u, {})            # exact public GET endpoints pass
+    blocked = ["https://fapi.binance.com/fapi/v1/account",
+               "https://fapi.binance.com/fapi/v1/order",
+               "https://fapi.binance.com/fapi/v1/leverage",
+               "https://fapi.binance.com/fapi/v1/marginType",
+               "https://fapi.binance.com/fapi/v1/positionRisk",
+               "https://fapi.binance.com/fapi/v1/userDataStream",
+               "https://fapi.binance.com/fapi/v1/klines",        # not in exact allowlist
+               "https://api.bybit.com/v5/market/kline",          # bybit removed from runtime
+               "https://evil.example.com/fapi/v1/aggTrades"]
+    for u in blocked:
+        with pytest.raises(ValueError):
+            F.assert_safe_request(u, {})
+
+
+def test_method_must_be_get():
+    with pytest.raises(ValueError):
+        F.assert_safe_request("https://fapi.binance.com/fapi/v1/aggTrades", {}, method="POST")
+    with pytest.raises(ValueError):
+        F.assert_safe_request("https://fapi.binance.com/fapi/v1/aggTrades", {}, method="DELETE")
+
+
+def test_auth_or_apikey_headers_blocked():
+    for h in ({"Authorization": "Bearer x"}, {"X-MBX-APIKEY": "k"}, {"signature": "s"}):
+        with pytest.raises(ValueError):
+            F.assert_safe_request("https://fapi.binance.com/fapi/v1/aggTrades", h)
+
+
+def test_staging_must_resolve_inside_exact_root():
+    F.safe_staging_dir(f"external_data/staging/{F.STAGING_MARKER}")
+    for bad in (f"reports/{F.STAGING_MARKER}",
+                f"tmp/{F.STAGING_MARKER}",
+                f"../{F.STAGING_MARKER}",
+                f"external_data/staging/{F.STAGING_MARKER}/../../{F.STAGING_MARKER}",
+                "external_data/staging/free_microstructure_v10_25_evil"):
+        with pytest.raises(ValueError):
+            F.safe_staging_dir(bad)
+
+
+def test_apply_with_unsafe_output_dir_no_network_no_write(monkeypatch):
+    monkeypatch.setattr(F, "default_transport",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("no network on unsafe dir")))
+    rep = F.forward_collect("BTCUSDT", ["funding"], apply=True,
+                            output_dir=f"reports/{F.STAGING_MARKER}", transport=None)
+    assert rep["mode"] == "APPLY" and rep["writes"] is False
+    assert any("unsafe_output_dir" in e for e in rep["errors"])
+    assert "staging_dir" not in rep
+
+
+def test_staging_symlink_escape_blocked(tmp_path):
+    # a staging path whose component is a symlink pointing outside the root is rejected
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    link = tmp_path / F.STAGING_MARKER
+    try:
+        link.symlink_to(outside, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlink creation unavailable")
+    with pytest.raises(ValueError):
+        F.safe_staging_dir(str(link))
+
+
+def test_funding_symbol_mismatch_fail_closed():
+    with pytest.raises(ValueError):
+        F.funding_to_canonical([{"symbol": "ETHUSDT", "fundingRate": "0.0001", "fundingTime": 1}],
+                               "BTCUSDT")
+    # no symbol in row but explicit param -> forced to the requested symbol
+    out = F.funding_to_canonical([{"fundingRate": "0.0001", "fundingTime": 1}], "BTCUSDT")
+    assert out and out[0]["symbol"] == "BTCUSDT"
+
+
+def test_orderbook_canonical_marks_l1():
+    ob = F.bookticker_to_canonical([{"time": 1, "bidPrice": "1", "bidQty": "2",
+                                     "askPrice": "3", "askQty": "4"}], "BTCUSDT")
+    assert ob[0]["depth_level"] == "L1_BOOKTICKER"
+    assert "limitations" in F.free_microstructure_plan()
+
+
 def test_module_no_dangerous_primitives():
     import re
     src = Path(MODULE_PATH).read_text(encoding="utf-8")
