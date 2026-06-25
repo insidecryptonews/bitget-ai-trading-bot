@@ -244,6 +244,79 @@ def test_orderbook_canonical_marks_l1():
     assert "limitations" in F.free_microstructure_plan()
 
 
+# ---- V10.25.2 root-symlink + sensitive query hardening --------------------
+
+def _fake_repo_with_symlinked_marker(tmp_path):
+    repo = tmp_path / "repo"
+    (repo / "external_data" / "staging").mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    marker = repo / "external_data" / "staging" / F.STAGING_MARKER
+    marker.symlink_to(outside, target_is_directory=True)
+    return repo
+
+
+def test_staging_root_symlink_to_outside_blocked(tmp_path, monkeypatch):
+    try:
+        repo = _fake_repo_with_symlinked_marker(tmp_path)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlink creation unavailable")
+    monkeypatch.setattr(F, "_repo_root", lambda: repo)
+    with pytest.raises(ValueError):
+        F.safe_staging_dir(f"external_data/staging/{F.STAGING_MARKER}")
+    with pytest.raises(ValueError):           # child under a symlinked root also blocked
+        F.safe_staging_dir(f"external_data/staging/{F.STAGING_MARKER}/run1")
+
+
+def test_apply_with_symlinked_staging_root_no_network(tmp_path, monkeypatch):
+    try:
+        repo = _fake_repo_with_symlinked_marker(tmp_path)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlink creation unavailable")
+    monkeypatch.setattr(F, "_repo_root", lambda: repo)
+    monkeypatch.setattr(F, "default_transport",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("no network on symlinked root")))
+    rep = F.forward_collect("BTCUSDT", ["funding"], apply=True)   # default -> symlinked root
+    assert rep["mode"] == "APPLY" and rep["writes"] is False
+    assert any("unsafe_output_dir" in e for e in rep["errors"])
+    assert "staging_dir" not in rep
+
+
+def test_sensitive_query_params_blocked():
+    base = "https://fapi.binance.com/fapi/v1/aggTrades"
+    F.assert_safe_request(base + "?symbol=BTCUSDT&limit=1000", {})   # clean public params pass
+    for q in ("signature=abc", "apiKey=abc", "api_key=abc", "X-MBX-APIKEY=k",
+              "timestamp=123&recvWindow=5000", "secret=x", "token=y", "access_key=z"):
+        with pytest.raises(ValueError):
+            F.assert_safe_request(base + "?" + q, {})
+    # private endpoint + POST + auth header still blocked
+    with pytest.raises(ValueError):
+        F.assert_safe_request("https://fapi.binance.com/fapi/v1/order?symbol=BTCUSDT", {})
+    with pytest.raises(ValueError):
+        F.assert_safe_request(base, {}, method="POST")
+    with pytest.raises(ValueError):
+        F.assert_safe_request(base, {"X-MBX-APIKEY": "k"})
+
+
+def test_depth_level_l1_compatible_with_v1024(tmp_path):
+    import csv as _csv
+    ob = F.bookticker_to_canonical(
+        [{"time": 1700000000000 + i * 1000, "bidPrice": "100", "bidQty": "2",
+          "askPrice": "101", "askQty": "1"} for i in range(20)], "BTCUSDT")
+    assert ob[0]["depth_level"] == "L1_BOOKTICKER"
+    p = tmp_path / "orderbook_l2.csv"
+    with open(p, "w", newline="", encoding="utf-8") as f:
+        w = _csv.DictWriter(f, fieldnames=list(F._CANON["orderbook"][1]))
+        w.writeheader()
+        for r in ob:
+            w.writerow({k: r.get(k, "") for k in F._CANON["orderbook"][1]})
+    assert "depth_level" in p.read_text(encoding="utf-8").splitlines()[0]
+    ob_m = M.validate_sample(str(tmp_path))["by_type"]["orderbook"]
+    assert ob_m["valid"] is True and ob_m["l1_imbalance_median"] is not None  # L1 column ok in V10.24.3
+    plan = F.free_microstructure_plan()
+    assert any("L1" in lim and "L2" in lim for lim in plan["limitations"])    # honest: L1 not L2
+
+
 def test_module_no_dangerous_primitives():
     import re
     src = Path(MODULE_PATH).read_text(encoding="utf-8")

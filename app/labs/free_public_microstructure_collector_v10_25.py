@@ -63,6 +63,10 @@ _DENY_PATH_SUBSTR = ("/account", "/order", "/leverage", "/margintype", "/margin/
                      "/apikey", "/withdraw", "/balance", "/transfer", "/adlquantile")
 _AUTH_HEADER_KEYS = ("authorization", "cookie", "x-api-key", "apikey", "api-key",
                      "x-mbx-apikey", "token", "signature")
+# signed/auth query params must never appear, even on a public allowlisted endpoint
+_SENSITIVE_QUERY_KEYS = frozenset({"signature", "apikey", "api_key", "api-key",
+                                   "timestamp", "recvwindow", "secret", "token",
+                                   "x-mbx-apikey", "accesskey", "access_key"})
 
 _FORBIDDEN_SEG = ("raw", "backup", "backups", "vault", "vaults", "prod", "production",
                   "live", "real", "private", "secret", "secrets", "credential",
@@ -114,6 +118,11 @@ def assert_safe_request(url: str, headers: dict[str, str] | None, method: str = 
             raise ValueError(f"path prefix not allowlisted for {host}: {path}")
     else:
         raise ValueError(f"host not allowlisted: {host}")
+    # defense in depth: no signed/auth query params even on a public endpoint
+    qkeys = {k.lower() for k in urllib.parse.parse_qs(p.query, keep_blank_values=True)}
+    bad_q = qkeys & _SENSITIVE_QUERY_KEYS
+    if bad_q:
+        raise ValueError(f"sensitive query param blocked: {sorted(bad_q)}")
     for k in (headers or {}):
         if k.lower() in _AUTH_HEADER_KEYS:
             raise ValueError(f"auth header blocked: {k}")
@@ -161,19 +170,38 @@ def safe_staging_dir(base: str | None = None) -> str:
     for s in (x.lower() for x in segs):
         if s in _FORBIDDEN_SEG or s.endswith(_FORBIDDEN_SUF) or ".env" in s:
             raise ValueError(f"forbidden staging segment: {s}")
-    allowed_root = _resolved(DEFAULT_STAGING_DIR)
-    target = _resolved(root)
-    if target != allowed_root and not _is_within(target, allowed_root):
-        raise ValueError("staging dir must resolve inside external_data/staging/"
-                         f"{STAGING_MARKER} (got {target})")
-    # block a symlinked component that escapes the allowed root
-    p = Path(root)
-    for anc in [p, *p.parents]:
+    repo = _repo_root()                       # already the resolved real repo path
+    # LOGICAL allowed root (do NOT resolve symlinks -- a symlinked marker that
+    # resolves elsewhere must be rejected, not silently accepted as the new root).
+    logical_root = repo / "external_data" / "staging" / STAGING_MARKER
+    # 1) no symlink anywhere in repo -> external_data -> staging -> marker chain
+    for comp in (repo / "external_data", repo / "external_data" / "staging", logical_root):
         try:
-            if anc.exists() and anc.is_symlink() and not _is_within(anc.resolve(), allowed_root):
-                raise ValueError(f"symlinked staging component escapes root: {anc}")
+            if comp.exists() and comp.is_symlink():
+                raise ValueError(f"symlinked staging root component blocked: {comp}")
         except OSError:
             break
+    # 2) logical target (lexical normalize; .. already rejected)
+    target = Path(root)
+    if not target.is_absolute():
+        target = repo / target
+    target = Path(os.path.normpath(str(target)))
+    # 3) target must be exactly the logical root or lexically inside it
+    if target != logical_root and logical_root not in target.parents:
+        raise ValueError("staging dir must be inside external_data/staging/"
+                         f"{STAGING_MARKER} (got {target})")
+    # 4) no symlink among existing ancestors from target up to (not incl.) repo
+    for anc in [target, *target.parents]:
+        if anc == repo or anc in repo.parents:
+            break
+        try:
+            if anc.exists() and anc.is_symlink():
+                raise ValueError(f"symlinked staging component blocked: {anc}")
+        except OSError:
+            break
+    # 5) defense: the real resolved target must still live inside the real repo
+    if not (target.resolve(strict=False) == repo or _is_within(target.resolve(strict=False), repo)):
+        raise ValueError("staging dir resolves outside the repo")
     return root
 
 
