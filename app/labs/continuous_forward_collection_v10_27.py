@@ -148,22 +148,27 @@ def _save_seen(dataset_dir: str, kind: str, seen: set[str]) -> None:
 def _append_rows(dataset_dir: str, kind: str, rows: list[dict], seen: set[str]) -> int:
     if kind not in _HEADERS:
         return 0
+    # filter to genuinely NEW rows first; never create a header-only (empty) file
+    # for a type with no data yet -- an empty recognized CSV is INVALID in V10.24.3.
+    new_rows = []
+    for r in rows:
+        k = _dedup_key(kind, r)
+        if k in seen:
+            continue
+        seen.add(k)
+        new_rows.append(r)
+    if not new_rows:
+        return 0
     header = _HEADERS[kind]
     path = os.path.join(dataset_dir, _FILES[kind]).replace("\\", "/")
     new_file = not os.path.exists(path)
-    added = 0
     with open(path, "a", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=header)
         if new_file:
             w.writeheader()
-        for r in rows:
-            k = _dedup_key(kind, r)
-            if k in seen:
-                continue
-            seen.add(k)
+        for r in new_rows:
             w.writerow({c: r.get(c, "") for c in header})
-            added += 1
-    return added
+    return len(new_rows)
 
 
 # --------------------------------------------------------------------------
