@@ -6181,6 +6181,65 @@ class ResearchLab:
                 "final_recommendation: NO LIVE", "FREE LIQUIDATIONS WS COLLECT V10.26 END"]
         return "\n".join(out)
 
+    # ------------------------------------------------------------------
+    # ResearchOps V10.27 - Continuous Forward Collection Runner (research only).
+    # ------------------------------------------------------------------
+    def continuous_collection_plan_v1027_cli(self) -> str:
+        from .labs import continuous_forward_collection_v10_27 as C
+        p = C.plan()
+        out = ["CONTINUOUS COLLECTION PLAN V10.27 START", "objective: " + p["objective"],
+               "default_mode: " + p["default_mode"], "dataset_dir: " + p["dataset_dir"],
+               "kinds: " + ",".join(p["kinds"]), "honest_summary: " + p["honest_summary"],
+               "how_to_run_for_weeks:"]
+        out += [f"  {s}" for s in p["how_to_run_for_weeks"]]
+        out += ["reuses: " + " | ".join(p["reuses"]), "never: " + ",".join(p["never"]),
+                f"writes_on_plan: {p['writes_on_plan']}", "uses_api_keys: false",
+                "research_only: true", "shadow_only: true", "paper_ready: false",
+                "live_ready: false", "can_send_real_orders: false",
+                "final_recommendation: NO LIVE", "CONTINUOUS COLLECTION PLAN V10.27 END"]
+        return "\n".join(out)
+
+    def continuous_collection_run_cycle_v1027_cli(self, *, symbols, exchange="binance_usdm",
+                                                  kinds="", apply=False, output_dir="",
+                                                  max_runtime_seconds=60.0, max_events=10000) -> str:
+        from .labs import continuous_forward_collection_v10_27 as C
+        syms = self._v107_csv_arg(symbols) or ["BTCUSDT"]
+        kinds_l = self._v107_csv_arg(kinds) or list(C.KINDS)
+        rep = C.run_cycle(exchange, syms, kinds_l, apply=bool(apply), output_dir=(output_dir or None),
+                          max_runtime_seconds=float(max_runtime_seconds), max_events=int(max_events))
+        out = ["CONTINUOUS COLLECTION RUN-CYCLE V10.27 START",
+               f"exchange: {rep['exchange']}  symbols: {','.join(syms)}  kinds: {','.join(rep['kinds'])}",
+               f"mode: {rep['mode']}  max_runtime_seconds: {rep['max_runtime_seconds']}  max_events: {rep['max_events']}"]
+        if rep.get("mode") == "APPLY":
+            out.append(f"writes: {rep.get('writes')}  dataset_dir: {rep.get('dataset_dir')}")
+            out.append(f"added_this_cycle: {rep.get('added')}")
+            out.append(f"manifest: {rep.get('manifest')}")
+            out.append(f"errors: {rep.get('errors')}")
+        else:
+            out.append(f"writes: {rep['writes']} (no --apply -> no network, no writes)")
+        out += ["note: forward-only; run repeatedly for weeks to build density",
+                "uses_api_keys: false", "subscribes_private_channels: false",
+                "research_only: true", "shadow_only: true", "paper_ready: false",
+                "live_ready: false", "can_send_real_orders: false",
+                "final_recommendation: NO LIVE", "CONTINUOUS COLLECTION RUN-CYCLE V10.27 END"]
+        return "\n".join(out)
+
+    def continuous_collection_status_v1027_cli(self, *, output_dir="") -> str:
+        from .labs import continuous_forward_collection_v10_27 as C
+        rep = C.status(output_dir=(output_dir or None))
+        out = ["CONTINUOUS COLLECTION STATUS V10.27 START",
+               f"dataset_dir: {rep.get('dataset_dir')}",
+               f"cycles: {rep.get('cycles')}  first_cycle: {rep.get('first_cycle')}  last_cycle: {rep.get('last_cycle')}",
+               f"cumulative_added: {rep.get('cumulative_added')}",
+               f"readiness_verdict: {rep.get('readiness_verdict')}",
+               f"valid_types: {rep.get('valid_types')}  density_ok: {rep.get('density_ok')}",
+               f"active_gaps: {rep.get('active_gaps')}",
+               f"can_research_microstructure: {rep.get('can_research_microstructure')}"]
+        out += ["research_only: true", "shadow_only: true", "paper_ready: false",
+                "live_ready: false", "can_send_real_orders: false",
+                "final_recommendation: NO LIVE", "CONTINUOUS COLLECTION STATUS V10.27 END"]
+        return "\n".join(out)
+
     def trader_dashboard_contract_v105_cli(self) -> str:
         from .labs.trader_dashboard_v104 import (
             DISABLED_CONTROLS,
@@ -7381,6 +7440,9 @@ def build_argument_parser() -> argparse.ArgumentParser:
             "free-liquidations-ws-plan-v1026",
             "free-liquidations-ws-dry-run-v1026",
             "free-liquidations-ws-collect-v1026",
+            "continuous-collection-plan-v1027",
+            "continuous-collection-run-cycle-v1027",
+            "continuous-collection-status-v1027",
             "ohlcv-replay-loader-smoke-test",
             "ohlcv-replay-loader-audit",
             "duplicate-module-audit-smoke-test",
@@ -7582,6 +7644,9 @@ PUBLIC_RESEARCH_ONLY_COMMANDS = frozenset({
     "free-liquidations-ws-plan-v1026",
     "free-liquidations-ws-dry-run-v1026",
     "free-liquidations-ws-collect-v1026",
+    "continuous-collection-plan-v1027",
+    "continuous-collection-run-cycle-v1027",
+    "continuous-collection-status-v1027",
 })
 
 
@@ -7637,6 +7702,15 @@ def _dispatch_public_research_only(args) -> None:
             symbols=args.symbols, exchange=args.exchange, apply=args.apply,
             output_dir=args.output_dir, max_runtime_seconds=args.max_runtime_seconds,
             max_events=args.max_events))
+    elif args.command == "continuous-collection-plan-v1027":
+        print(lab.continuous_collection_plan_v1027_cli())
+    elif args.command == "continuous-collection-run-cycle-v1027":
+        print(lab.continuous_collection_run_cycle_v1027_cli(
+            symbols=args.symbols, exchange=args.exchange, kinds=args.timeframes,
+            apply=args.apply, output_dir=args.output_dir,
+            max_runtime_seconds=args.max_runtime_seconds, max_events=args.max_events))
+    elif args.command == "continuous-collection-status-v1027":
+        print(lab.continuous_collection_status_v1027_cli(output_dir=args.output_dir))
 
 
 def main() -> None:
