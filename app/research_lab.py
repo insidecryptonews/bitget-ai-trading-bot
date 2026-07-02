@@ -6240,6 +6240,93 @@ class ResearchLab:
                 "final_recommendation: NO LIVE", "CONTINUOUS COLLECTION STATUS V10.27 END"]
         return "\n".join(out)
 
+    def opportunity_scanner_plan_v1028_cli(self, *, universe="") -> str:
+        from .labs import multi_symbol_opportunity_scanner_v10_28 as S
+        uni = self._v107_csv_arg(universe) or None
+        p = S.plan(universe=uni)
+        out = ["OPPORTUNITY SCANNER PLAN V10.28 START", "what: " + p["what"],
+               f"universe_size: {p['universe_size']}", "universe: " + ",".join(p["universe"]),
+               "quality_gates: " + ",".join(p["quality_gates"]), "discipline_rules:"]
+        out += [f"  - {r}" for r in p["discipline_rules"]]
+        out += ["honesty: " + p["honesty"],
+                f"writes_on_plan: {p['writes_on_plan']}  uses_network: {p['uses_network']}  "
+                f"uses_api_keys: {p['uses_api_keys']}",
+                "research_only: true", "shadow_only: true", "paper_ready: false",
+                "live_ready: false", "can_send_real_orders: false",
+                "LIVE_TRADING: false", "DRY_RUN: true", "PAPER_TRADING: true",
+                "final_recommendation: NO LIVE", "OPPORTUNITY SCANNER PLAN V10.28 END"]
+        return "\n".join(out)
+
+    def opportunity_scanner_run_v1028_cli(self, *, universe="", timeframe="15m", days=5,
+                                          interval_seconds=60.0, max_scans=1, request_budget=6,
+                                          output_dir="", bars_provider=None, sleep_fn=None,
+                                          should_stop=None, emit=None) -> str:
+        """Live multi-symbol shadow scanner. Fetches PUBLIC OHLCV (GET-only, no keys),
+        ranks candidate setups, autosaves every scan, and shuts down cleanly on Ctrl+C
+        or a typed q/quit/exit/stop. Makes NO real/paper orders (DRY_RUN shadow only)."""
+        from .labs import multi_symbol_opportunity_scanner_v10_28 as S
+        uni = self._v107_csv_arg(universe) or list(S.DEFAULT_UNIVERSE)
+        out_dir = output_dir or S.OUTPUT_ROOT
+
+        if bars_provider is None:
+            from .labs import cross_exchange_public_ohlcv_v10_15 as X
+
+            def _provider(sym, _tf=timeframe, _days=days, _budget=request_budget):
+                rep = {"errors": []}
+                bars, _used = X.fetch_series(X.default_transport, "binance_futures", sym, _tf,
+                                             days=int(_days), request_budget=int(_budget),
+                                             rate_per_s=X.DEFAULT_RATE_PER_S, rep=rep)
+                return bars
+
+            bars_provider = _provider
+
+        if should_stop is None:
+            should_stop = self._make_console_stop()
+
+        summary = S.run_loop(universe=uni, bars_provider=bars_provider, max_scans=int(max_scans),
+                             interval_seconds=float(interval_seconds), output_dir=out_dir,
+                             sleep_fn=sleep_fn, should_stop=should_stop, emit=emit)
+        return ("OPPORTUNITY SCANNER RUN V10.28 END  "
+                f"scans={summary['scans_completed']} candidates={summary['shadow_candidates_total']} "
+                f"stay_out_scans={summary['stay_out_scans']} stop_reason={summary['stop_reason']} "
+                "clean_shutdown=True can_send_real_orders=false final_recommendation=NO LIVE")
+
+    @staticmethod
+    def _make_console_stop():
+        """Windows console stop-poller: lone 'q'/'Q' quits instantly; a typed line of
+        quit/exit/stop + Enter also quits. Ctrl+C is handled as KeyboardInterrupt."""
+        try:
+            import msvcrt
+        except ImportError:
+            msvcrt = None
+        state = {"stopped": False, "buf": ""}
+
+        def _stop():
+            if state["stopped"]:
+                return True
+            if msvcrt is None:
+                return False
+            try:
+                while msvcrt.kbhit():
+                    ch = msvcrt.getwch()
+                    if ch in ("\x03",):            # Ctrl+C delivered as a char
+                        state["stopped"] = True
+                    elif ch and ch.lower() == "q":  # instant-quit key
+                        state["stopped"] = True
+                    elif ch in ("\r", "\n"):
+                        if state["buf"].strip().lower() in ("quit", "exit", "stop"):
+                            state["stopped"] = True
+                        state["buf"] = ""
+                    elif ch == "\x08":              # backspace
+                        state["buf"] = state["buf"][:-1]
+                    else:
+                        state["buf"] += ch
+            except Exception:
+                return state["stopped"]
+            return state["stopped"]
+
+        return _stop
+
     def trader_dashboard_contract_v105_cli(self) -> str:
         from .labs.trader_dashboard_v104 import (
             DISABLED_CONTROLS,
@@ -7443,6 +7530,8 @@ def build_argument_parser() -> argparse.ArgumentParser:
             "continuous-collection-plan-v1027",
             "continuous-collection-run-cycle-v1027",
             "continuous-collection-status-v1027",
+            "opportunity-scanner-plan-v1028",
+            "opportunity-scanner-run-v1028",
             "ohlcv-replay-loader-smoke-test",
             "ohlcv-replay-loader-audit",
             "duplicate-module-audit-smoke-test",
@@ -7623,6 +7712,10 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--offline-replay", action="store_true", help="V10.12 shadow runner: replay history bar-by-bar.")
     parser.add_argument("--latest-snapshot", action="store_true", help="V10.12 shadow runner: evaluate only the latest point.")
     parser.add_argument("--forward-shadow", action="store_true", help="V10.12 shadow runner: forward shadow (no orders, no live, no paper).")
+    parser.add_argument("--universe", default="", help="V10.28 comma-separated symbol universe to scan (default: 19 liquid USDT-perps). Public OHLCV only.")
+    parser.add_argument("--interval-seconds", type=float, default=60.0, help="V10.28 seconds between scan cycles in the live shadow scanner.")
+    parser.add_argument("--max-scans", type=int, default=1, help="V10.28 number of scan cycles (<=0 = run until Ctrl+C or q/quit/exit/stop).")
+    parser.add_argument("--request-budget", type=int, default=6, help="V10.28 bounded GET requests per symbol per scan (public klines).")
     return parser
 
 
@@ -7647,6 +7740,8 @@ PUBLIC_RESEARCH_ONLY_COMMANDS = frozenset({
     "continuous-collection-plan-v1027",
     "continuous-collection-run-cycle-v1027",
     "continuous-collection-status-v1027",
+    "opportunity-scanner-plan-v1028",
+    "opportunity-scanner-run-v1028",
 })
 
 
@@ -7711,6 +7806,13 @@ def _dispatch_public_research_only(args) -> None:
             max_runtime_seconds=args.max_runtime_seconds, max_events=args.max_events))
     elif args.command == "continuous-collection-status-v1027":
         print(lab.continuous_collection_status_v1027_cli(output_dir=args.output_dir))
+    elif args.command == "opportunity-scanner-plan-v1028":
+        print(lab.opportunity_scanner_plan_v1028_cli(universe=args.universe))
+    elif args.command == "opportunity-scanner-run-v1028":
+        print(lab.opportunity_scanner_run_v1028_cli(
+            universe=args.universe, timeframe=args.timeframe, days=args.days,
+            interval_seconds=args.interval_seconds, max_scans=args.max_scans,
+            request_budget=args.request_budget, output_dir=args.output_dir))
 
 
 def main() -> None:
