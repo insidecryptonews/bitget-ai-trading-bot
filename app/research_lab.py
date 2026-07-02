@@ -6326,6 +6326,17 @@ class ResearchLab:
                 "FREE MICROSTRUCTURE GAP REPORT V10.29 END"]
         return "\n".join(out)
 
+    def free_microstructure_status_page_v1029_cli(self) -> str:
+        from .labs import free_microstructure_dataset_assembler_v10_29 as A
+        uri = A.write_status_page()
+        return ("FREE MICROSTRUCTURE STATUS PAGE V10.29 START\n"
+                "wrote read-only local status page (no server, no network)\n"
+                f"DASHBOARD: {uri}\n"
+                "open it in your browser; it self-refreshes every 60s\n"
+                "research_only: true\nshadow_only: true\ncan_send_real_orders: false\n"
+                "final_recommendation: NO LIVE\n"
+                "FREE MICROSTRUCTURE STATUS PAGE V10.29 END")
+
     def opportunity_scanner_plan_v1028_cli(self, *, universe="") -> str:
         from .labs import multi_symbol_opportunity_scanner_v10_28 as S
         uni = self._v107_csv_arg(universe) or None
@@ -7622,6 +7633,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
             "free-microstructure-assemble-sample-v1029",
             "free-microstructure-readiness-status-v1029",
             "free-microstructure-gap-report-v1029",
+            "free-microstructure-status-page-v1029",
             "ohlcv-replay-loader-smoke-test",
             "ohlcv-replay-loader-audit",
             "duplicate-module-audit-smoke-test",
@@ -7836,6 +7848,7 @@ PUBLIC_RESEARCH_ONLY_COMMANDS = frozenset({
     "free-microstructure-assemble-sample-v1029",
     "free-microstructure-readiness-status-v1029",
     "free-microstructure-gap-report-v1029",
+    "free-microstructure-status-page-v1029",
 })
 
 
@@ -7916,6 +7929,8 @@ def _dispatch_public_research_only(args) -> None:
         print(lab.free_microstructure_readiness_status_v1029_cli(sample_dir=args.sample_dir))
     elif args.command == "free-microstructure-gap-report-v1029":
         print(lab.free_microstructure_gap_report_v1029_cli(sample_dir=args.sample_dir))
+    elif args.command == "free-microstructure-status-page-v1029":
+        print(lab.free_microstructure_status_page_v1029_cli())
 
 
 def main() -> None:

@@ -322,11 +322,34 @@ def _run_main(argv):
         sys.argv = old
 
 
+def test_status_page_written_under_reports_and_honest(_repo):
+    small_source(_repo)
+    uri = A.write_status_page()
+    assert uri.startswith("file:///")
+    page = _repo / "reports" / "research" / "v10_29" / "status.html"
+    assert page.is_file()
+    html = page.read_text(encoding="utf-8")
+    assert "NO LIVE" in html and "NEEDS_MORE_HISTORY" in html
+    assert "MODO SEGURO" in html and "heuristicos" in html    # honest banners
+    assert "/api/" not in html                                 # static: no endpoints
+
+
+def test_status_page_cli_prints_dashboard_link(_repo, monkeypatch, capsys):
+    assert "free-microstructure-status-page-v1029" in research_lab.PUBLIC_RESEARCH_ONLY_COMMANDS
+    monkeypatch.setattr(research_lab, "load_config",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("no config")))
+    small_source(_repo)
+    _run_main(["free-microstructure-status-page-v1029"])
+    out = capsys.readouterr().out
+    assert "DASHBOARD: file:///" in out and "NO LIVE" in out
+
+
 def test_cli_allowlisted_and_isolated(_repo, monkeypatch, capsys):
     for c in ("free-microstructure-assembler-plan-v1029",
               "free-microstructure-assemble-sample-v1029",
               "free-microstructure-readiness-status-v1029",
-              "free-microstructure-gap-report-v1029"):
+              "free-microstructure-gap-report-v1029",
+              "free-microstructure-status-page-v1029"):
         assert c in research_lab.PUBLIC_RESEARCH_ONLY_COMMANDS
     monkeypatch.setattr(research_lab, "load_config",
                         lambda *a, **k: (_ for _ in ()).throw(AssertionError("no config")))

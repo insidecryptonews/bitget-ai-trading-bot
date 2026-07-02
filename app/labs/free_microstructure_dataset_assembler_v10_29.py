@@ -470,3 +470,93 @@ def gap_report(sample_dir: str | None = None) -> dict[str, Any]:
     rep["honesty"] = ("READY means enough clean DATA to start microstructure research; "
                       "it does NOT mean an edge exists")
     return rep
+
+
+# --------------------------------------------------------------------------
+# Static read-only status page (local file, no server, no network)
+# --------------------------------------------------------------------------
+
+STATUS_PAGE_SUBDIR = ("reports", "research", "v10_29")   # gitignored (reports/)
+
+
+def _esc(v: Any) -> str:
+    return (str(v).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
+
+
+def _bar(pct: float) -> str:
+    pct = max(0.0, min(100.0, pct))
+    color = "#2e7d32" if pct >= 100 else ("#f9a825" if pct >= 40 else "#c62828")
+    return (f'<div style="background:#263238;border-radius:6px;height:14px;width:260px;display:inline-block;'
+            f'vertical-align:middle"><div style="background:{color};height:14px;border-radius:6px;'
+            f'width:{pct:.0f}%"></div></div> <span>{pct:.0f}%</span>')
+
+
+def write_status_page() -> str:
+    """Write a static, read-only HTML status page under reports/research/v10_29
+    (gitignored). Fixed path, no user input, symlink-checked. Returns file URI."""
+    repo = _repo_root()
+    out_dir = repo
+    for part in STATUS_PAGE_SUBDIR:
+        out_dir = out_dir / part
+        if out_dir.exists() and out_dir.is_symlink():
+            raise ValueError(f"symlinked status-page component blocked: {out_dir}")
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    st = readiness_status()
+    gr = gap_report()
+    scanner: dict[str, Any] = {}
+    sp = repo / "reports" / "research" / "v10_28" / "scanner_state.json"
+    if sp.is_file() and not sp.is_symlink():
+        try:
+            scanner = json.loads(sp.read_text(encoding="utf-8"))
+        except Exception:
+            scanner = {}
+
+    rows_html = []
+    for kind, d in (st.get("per_kind") or {}).items():
+        pr = 100.0 * d["rows"] / d["min_rows"] if d.get("min_rows") else 100.0
+        pc = (100.0 * d["coverage_days"] / d["min_coverage_days"]
+              if d.get("min_coverage_days") else 100.0)
+        eta = d.get("estimated_days_remaining")
+        rows_html.append(
+            f"<tr><td><b>{_esc(kind)}</b>{'' if d['required_for_ready'] else ' <i>(opcional)</i>'}</td>"
+            f"<td>{d['rows']}/{d['min_rows'] or '-'}<br>{_bar(pr)}</td>"
+            f"<td>{d['coverage_days']}d/{d['min_coverage_days'] or '-'}d<br>{_bar(pc)}</td>"
+            f"<td>{_esc(eta) if eta is not None else 'sin tasa aun'}</td></tr>")
+
+    board_html = []
+    for s in (scanner.get("opportunity_board") or [])[:8]:
+        board_html.append(f"<tr><td>{_esc(s.get('symbol'))}</td><td>{_esc(s.get('edge_score'))}</td>"
+                          f"<td>{_esc(s.get('side') or '-')}</td><td>{_esc(s.get('regime') or '-')}</td></tr>")
+    gaps_html = "".join(f"<li>{_esc(g)}</li>" for g in (gr.get("gaps") or []))
+
+    html = f"""<!doctype html><html lang="es"><head><meta charset="utf-8">
+<meta http-equiv="refresh" content="60">
+<title>BitgetBot - Estado (RESEARCH ONLY / NO LIVE)</title></head>
+<body style="background:#0d1117;color:#e6edf3;font-family:Segoe UI,Arial,sans-serif;padding:24px;max-width:960px;margin:auto">
+<h1 style="margin:0">BitgetBot &mdash; Estado del research</h1>
+<p style="background:#3d1d1d;border:1px solid #c62828;border-radius:8px;padding:10px">
+<b>MODO SEGURO:</b> research-only / shadow-only. Sin ordenes reales, sin paper, sin claves.
+<b>FINAL_RECOMMENDATION: NO LIVE.</b> Un edge validado NO existe todavia.</p>
+<p>Actualizado: {_esc(st.get('checked_at'))} (la pagina se recarga sola cada 60s;
+los datos se regeneran con cada ciclo del colector)</p>
+<h2>1) Datos de microestructura (camino a MICROSTRUCTURE_RESEARCH_READY)</h2>
+<p>Veredicto del validador V10.24.3: <b style="font-size:1.2em">{_esc(st.get('readiness_verdict'))}</b></p>
+<table cellpadding="8" style="border-collapse:collapse;background:#161b22;border-radius:8px">
+<tr style="text-align:left"><th>tipo</th><th>filas</th><th>cobertura</th><th>ETA dias (aprox)</th></tr>
+{''.join(rows_html)}</table>
+<h3>Que falta exactamente</h3><ul>{gaps_html}</ul>
+<h2>2) Scanner de oportunidades (V10.28, SHADOW)</h2>
+<p>Ultimo scan: {_esc(scanner.get('written_at', 'sin datos aun'))} &mdash; veredicto:
+<b>{_esc(scanner.get('verdict', '-'))}</b> (candidatos shadow: {_esc(scanner.get('n_shadow_candidates', 0))})</p>
+<table cellpadding="8" style="border-collapse:collapse;background:#161b22">
+<tr style="text-align:left"><th>simbolo</th><th>score</th><th>lado</th><th>regimen</th></tr>
+{''.join(board_html) or '<tr><td colspan="4">sin scans todavia</td></tr>'}</table>
+<p style="color:#8b949e">Honestidad: los scores son heuristicos, NO un edge validado. READY significa
+datos suficientes para INVESTIGAR; no significa que exista ventaja. Nada aqui envia ordenes.</p>
+</body></html>"""
+    path = out_dir / "status.html"
+    tmp = out_dir / "status.html.tmp"
+    tmp.write_text(html, encoding="utf-8")
+    os.replace(tmp, path)
+    return path.as_uri()

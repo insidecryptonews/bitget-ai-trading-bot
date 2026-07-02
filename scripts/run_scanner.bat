@@ -10,6 +10,9 @@ echo  BitgetBot V10.28 Multi-Symbol Shadow Opportunity Scanner
 echo  RESEARCH ONLY. Public data. NO keys, NO orders, NO live.
 echo  Close cleanly: press Ctrl+C, or type  q / quit / exit / stop
 echo ============================================================
+echo  DASHBOARD (pegalo en el navegador; se refresca solo):
+echo  file:///C:/Users/Adrian/Documents/New%%20project/bitget-ai-trading-bot/reports/research/v10_29/status.html
+echo ============================================================
 echo.
 python -m app.research_lab opportunity-scanner-run-v1028 ^
   --universe BTCUSDT,ETHUSDT,SOLUSDT,BNBUSDT,XRPUSDT,ADAUSDT,AVAXUSDT,LINKUSDT,DOGEUSDT,LTCUSDT,BCHUSDT,DOTUSDT,NEARUSDT,APTUSDT,ARBUSDT,OPUSDT,SUIUSDT,INJUSDT,ATOMUSDT ^
