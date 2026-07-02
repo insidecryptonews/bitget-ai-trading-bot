@@ -2,6 +2,7 @@
 
 Leave this running for days/weeks to ACCUMULATE free forward microstructure into
 one growing, deduplicated, V10.24.3-compatible dataset:
+  - trades        (Binance aggTrades REST, via V10.25) [V10.27.2: required for READY]
   - liquidations  (Binance forceOrder websocket, via V10.26)
   - orderbook L1  (Binance bookTicker REST snapshot, via V10.25)
   - open interest (Binance metrics REST, via V10.25)
@@ -35,7 +36,9 @@ TOOL_VERSION = "v10.27"
 STAGING_MARKER = "continuous_forward_v10_27"
 DEFAULT_STAGING_DIR = f"external_data/staging/{STAGING_MARKER}"
 DATASET_SUBDIR = "dataset"          # single growing dataset (NOT per-run)
-KINDS = ("liquidations", "orderbook", "oi", "funding")
+# V10.27.2: trades added -- V10.24.3 requires trades>=1000 for READY, so a
+# runner without trades could NEVER reach MICROSTRUCTURE_RESEARCH_READY.
+KINDS = ("trades", "liquidations", "orderbook", "oi", "funding")
 _SEEN_CAP = 250_000                  # bound persisted dedup memory
 
 _FORBIDDEN_SEG = V26._FORBIDDEN_SEG
@@ -43,12 +46,14 @@ _FORBIDDEN_SUF = V26._FORBIDDEN_SUF
 
 # canonical headers (reuse the exact V10.24.3-compatible schemas)
 _HEADERS = {
+    "trades": V25._CANON["trades"][1],
     "liquidations": V26.CANON_HEADER,
     "orderbook": V25._CANON["orderbook"][1],
     "oi": V25._CANON["oi"][1],
     "funding": V25._CANON["funding"][1],
 }
 _FILES = {
+    "trades": "trades.csv",
     "liquidations": "liquidations.csv",
     "orderbook": "orderbook_l2.csv",
     "oi": "open_interest.csv",
@@ -128,6 +133,11 @@ def safe_staging_dir(base: str | None = None) -> str:
 def _dedup_key(kind: str, row: dict) -> str:
     if kind == "liquidations":
         return str(row.get("raw_event_id"))
+    if kind == "trades":
+        # canonical trades carry no unique id; same-ms trades at different
+        # price/size/side are legitimate distinct events -- key on all of them.
+        return (f"{row.get('symbol')}:{row.get('timestamp')}:{row.get('price')}:"
+                f"{row.get('size')}:{row.get('aggressor_side')}")
     return f"{row.get('symbol')}:{row.get('timestamp')}"
 
 
@@ -193,7 +203,8 @@ def plan() -> dict[str, Any]:
             "Forward-only accumulation. Liquidations/orderbook-L1 are sparse-to-moderate; "
             "expect weeks before density gates pass. This builds DATA, not an edge, and "
             "never reaches READY instantly."),
-        "reuses": ["V10.26 forceOrder ws (liquidations)", "V10.25 REST bookTicker/oi/funding",
+        "reuses": ["V10.26 forceOrder ws (liquidations)",
+                   "V10.25 REST aggTrades/bookTicker/oi/funding",
                    "V10.25/26 exact allowlists + hardened staging", "V10.24.3 validator"],
         "never": ["api_keys", "auth_headers", "private_channels", "orders", "db_write",
                   "raw_write", "paid_provider", "paper_or_live_promotion"],
@@ -209,6 +220,8 @@ def _rest_batch(symbol: str, kind: str, transport: Callable) -> list[dict]:
     hdr = {"User-Agent": "researchops/1.0", "Accept": "application/json"}
     raw = transport(urls[kind], hdr)
     data = json.loads(raw)
+    if kind == "trades":
+        return V25.aggtrades_to_canonical(data, symbol)
     if kind == "orderbook":
         return V25.bookticker_to_canonical(data if isinstance(data, list) else [data], symbol)
     if kind == "oi":
@@ -273,8 +286,8 @@ def run_cycle(exchange: str, symbols: list[str], kinds: list[str], apply: bool =
         except Exception as e:
             rep["errors"].append(f"liquidations:{type(e).__name__}:{str(e)[:80]}")
 
-    # orderbook L1 / oi / funding (REST snapshots/history) -- one batch per symbol
-    for kind in ("orderbook", "oi", "funding"):
+    # trades / orderbook L1 / oi / funding (REST snapshots/history) -- one batch per symbol
+    for kind in ("trades", "orderbook", "oi", "funding"):
         if kind not in kinds:
             continue
         seen = _load_seen(dataset_dir, kind)

@@ -19,6 +19,19 @@ from app import research_lab
 from app.labs import continuous_forward_collection_v10_27 as C
 
 
+@pytest.fixture(autouse=True)
+def _isolated_repo(tmp_path, monkeypatch):
+    """NEVER touch the real repo dataset: point _repo_root at a fake repo AND
+    chdir there so relative staging paths resolve inside tmp. Without this a
+    full-suite run destroys the real armed collector dataset and flakes when
+    the background collector is running."""
+    repo = tmp_path / "repo"
+    (repo / "external_data" / "staging").mkdir(parents=True)
+    monkeypatch.setattr(C, "_repo_root", lambda: repo)
+    monkeypatch.chdir(repo)
+    yield repo
+
+
 def _liq(symbol="BTCUSDT", side="SELL", price="50000", qty="1", T=1700000000000):
     return {"e": "forceOrder", "E": T,
             "o": {"s": symbol, "S": side, "p": price, "ap": price, "q": qty, "z": qty,
@@ -29,6 +42,13 @@ def _rest_transport(url, headers):
     # enforce the V10.25 exact allowlist even for the mock
     from app.labs import free_public_microstructure_collector_v10_25 as V25
     V25.assert_safe_request(url, headers)
+    if "aggTrades" in url:
+        # 3 trades; two share the same ms with different price/size (both legit)
+        return json.dumps([
+            {"p": "100.0", "q": "1", "T": 1700000000000, "m": True},
+            {"p": "100.5", "q": "2", "T": 1700000000000, "m": False},
+            {"p": "101.0", "q": "1", "T": 1700000060000, "m": False},
+        ]).encode()
     if "bookTicker" in url:
         return json.dumps({"symbol": "BTCUSDT", "bidPrice": "100", "bidQty": "2",
                            "askPrice": "101", "askQty": "1", "time": 1700000000000}).encode()
@@ -96,6 +116,18 @@ def test_cycle_appends_and_dedups_across_restarts():
         _cleanup(r1["dataset_dir"])
 
 
+def test_trades_kind_accumulates_and_dedups():
+    # V10.27.2: without trades the V10.24.3 floor (trades>=1000) could NEVER pass
+    assert "trades" in C.KINDS
+    r1 = _run(kinds=("trades",), liq=[])
+    assert r1["added"]["trades"] == 3        # same-ms distinct trades both kept
+    r2 = _run(kinds=("trades",), liq=[])
+    assert r2["added"]["trades"] == 0        # dedup persisted across "restart"
+    csv_path = Path(r1["dataset_dir"]) / "trades.csv"
+    lines = [l for l in csv_path.read_text(encoding="utf-8").splitlines() if l.strip()]
+    assert len(lines) == 1 + 3               # header + 3 rows, no duplicates
+
+
 def test_status_runs_v1024_and_not_ready_when_sparse():
     r1 = _run()
     try:
@@ -137,7 +169,7 @@ def test_apply_unsafe_output_dir_no_network_no_write():
 
 
 def test_root_symlink_blocked(tmp_path, monkeypatch):
-    repo = tmp_path / "repo"
+    repo = tmp_path / "symrepo"   # distinct from the autouse _isolated_repo root
     (repo / "external_data" / "staging").mkdir(parents=True)
     outside = tmp_path / "outside"
     outside.mkdir()
@@ -181,7 +213,7 @@ def test_cli_allowlisted_and_isolated(monkeypatch, capsys):
 
 def test_module_no_dangerous_primitives():
     import re
-    src = Path("app/labs/continuous_forward_collection_v10_27.py").read_text(encoding="utf-8")
+    src = Path(C.__file__).read_text(encoding="utf-8")   # absolute: survives chdir
     scan = re.sub(r'"never":\s*\[.*?\],', '"never": [],', src, flags=re.DOTALL)
     for tok in ["load_dotenv", "os.environ", "private_get", "private_post", "db.execute",
                 "INSERT INTO", "import torch", "import tensorflow", "X-MBX-APIKEY", "listenKey"]:

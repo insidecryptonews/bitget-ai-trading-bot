@@ -381,6 +381,39 @@ def test_duplicate_timestamps_severe_invalidates(tmp_path):
     assert "trades:duplicate_timestamps" in rep["classification"]["critical_errors"]
 
 
+def test_same_ms_distinct_trades_are_valid_market_data(tmp_path):
+    # V10.24.4: bursts of DISTINCT trades sharing a millisecond are real
+    # (Binance aggTrades) -- must NOT invalidate the file (<50% collisions,
+    # zero exact duplicate rows).
+    rows = []
+    for i in range(100):
+        t = B + i * 60_000
+        rows.append([t, "BTCUSDT", 50000 + i, 1, "buy" if i % 2 else "sell"])
+        if i % 4 == 0:   # 25 same-ms distinct trades -> 25% collision ratio
+            rows.append([t, "BTCUSDT", 50000 + i + 0.5, 2, "sell"])
+    _write(tmp_path / "trades.csv",
+           ["timestamp", "symbol", "price", "size", "aggressor_side"], rows)
+    rep = M.validate_sample(str(tmp_path))
+    tr = rep["by_type"]["trades"]
+    assert tr["valid"] is True
+    assert tr["coverage"]["ts_collision_count"] == 25
+    assert tr["coverage"]["exact_duplicate_rows"] == 0
+    assert "trades:duplicate_timestamps" not in rep["classification"]["critical_errors"]
+
+
+def test_exact_duplicate_trade_rows_still_invalidate(tmp_path):
+    # 10 exact copies (same ts+price+size+side) in 60 rows -> corruption.
+    base = [[B + i * 60_000, "BTCUSDT", 50000, 1, "buy"] for i in range(50)]
+    _write(tmp_path / "trades.csv",
+           ["timestamp", "symbol", "price", "size", "aggressor_side"],
+           base + base[:10])
+    rep = M.validate_sample(str(tmp_path))
+    tr = rep["by_type"]["trades"]
+    assert tr["valid"] is False
+    assert tr["coverage"]["exact_duplicate_rows"] == 10
+    assert "trades:duplicate_timestamps" in rep["classification"]["critical_errors"]
+
+
 def test_orderbook_negative_bid_or_ask_invalid(tmp_path):
     h = ["timestamp", "symbol", "bid_price_1", "bid_size_1", "ask_price_1", "ask_size_1"]
     rows = [[B + i * DAY, "BTCUSDT", -1, 1, 50005, 1] for i in range(40)]

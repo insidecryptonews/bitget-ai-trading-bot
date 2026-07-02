@@ -413,6 +413,20 @@ def validate_trades(rows: list[dict[str, str]]) -> dict[str, Any]:
         if sym:
             syms.add(str(sym))
     cov = _coverage(ts, invalid_ts)
+    # V10.24.4 correction: same-millisecond DISTINCT trades are genuine market
+    # data (Binance aggTrades share ms under bursts), so a plain ts-collision
+    # count falsely invalidated real tick data. For trades only, corruption is:
+    # exact duplicate rows (ts+price+size+side) above the 1% limit, OR an
+    # extreme ts-collision ratio (>50% of rows). Anything else is clean.
+    exact_dups = len(rows) - len({(str(_first(r, _TS_FIELDS)), str(_first(r, ("price",))),
+                                   str(_first(r, _SIZE_FIELDS)), str(_first(r, _SIDE_FIELDS)))
+                                  for r in rows})
+    ts_collisions = int(cov.get("duplicate_count") or 0)
+    cov["ts_collision_count"] = ts_collisions
+    cov["exact_duplicate_rows"] = exact_dups
+    if not (exact_dups > _duplicate_limit(cov) or ts_collisions > len(rows) * 0.5):
+        cov["duplicate_count"] = 0
+        cov["duplicates"] = 0
     has_aggr = bool(rows) and len(sides) == len(rows)
     buys = sides.count("buy")
     sells = sides.count("sell")

@@ -6240,6 +6240,92 @@ class ResearchLab:
                 "final_recommendation: NO LIVE", "CONTINUOUS COLLECTION STATUS V10.27 END"]
         return "\n".join(out)
 
+    def free_microstructure_assembler_plan_v1029_cli(self) -> str:
+        from .labs import free_microstructure_dataset_assembler_v10_29 as A
+        p = A.plan()
+        out = ["FREE MICROSTRUCTURE ASSEMBLER PLAN V10.29 START",
+               "objective: " + p["objective"], "default_mode: " + p["default_mode"],
+               "kinds: " + ",".join(p["kinds"]), "output: " + p["output"], "sources:"]
+        out += [f"  {k}: {v}" for k, v in p["sources"].items()]
+        out += ["rules:"] + [f"  - {r}" for r in p["rules"]]
+        out += ["never: " + ",".join(p["never"]), f"writes_on_plan: {p['writes_on_plan']}",
+                "research_only: true", "shadow_only: true", "paper_ready: false",
+                "live_ready: false", "can_send_real_orders: false",
+                "final_recommendation: NO LIVE",
+                "FREE MICROSTRUCTURE ASSEMBLER PLAN V10.29 END"]
+        return "\n".join(out)
+
+    def free_microstructure_assemble_sample_v1029_cli(self, *, symbols="", apply=False,
+                                                      output_dir="") -> str:
+        from .labs import free_microstructure_dataset_assembler_v10_29 as A
+        syms = self._v107_csv_arg(symbols)
+        sym = syms[0] if syms else "BTCUSDT"
+        rep = A.assemble(sym, apply=bool(apply), output_dir=(output_dir or None))
+        out = ["FREE MICROSTRUCTURE ASSEMBLE SAMPLE V10.29 START",
+               f"symbol: {rep['symbol']}  mode: {rep['mode']}  writes: {rep.get('writes')}"]
+        if len(syms) > 1:
+            out.append(f"note: one symbol per sample -- using {sym}, ignored {','.join(syms[1:])}")
+        for kind, d in rep.get("per_kind", {}).items():
+            out.append(f"  {kind}: unique={d['unique_rows']} raw={d['raw_rows']} "
+                       f"dup={d['duplicates_dropped']} other_sym={d['other_symbol_dropped']} "
+                       f"bad_ts={d['bad_timestamp_dropped']} files={d['source_files']}")
+        if rep.get("sample_dir"):
+            out.append(f"sample_dir: {rep['sample_dir']}")
+        if rep.get("gaps"):
+            out.append("gaps: " + ",".join(rep["gaps"]))
+        if rep.get("errors"):
+            out.append("errors: " + " | ".join(str(e) for e in rep["errors"][:6]))
+        if "readiness_verdict" in rep:
+            out.append(f"readiness_verdict: {rep['readiness_verdict']} (from V10.24.3, not invented)")
+        out += ["research_only: true", "shadow_only: true", "paper_ready: false",
+                "live_ready: false", "can_send_real_orders: false",
+                "final_recommendation: NO LIVE",
+                "FREE MICROSTRUCTURE ASSEMBLE SAMPLE V10.29 END"]
+        return "\n".join(out)
+
+    def free_microstructure_readiness_status_v1029_cli(self, *, sample_dir="") -> str:
+        from .labs import free_microstructure_dataset_assembler_v10_29 as A
+        rep = A.readiness_status(sample_dir or None)
+        out = ["FREE MICROSTRUCTURE READINESS STATUS V10.29 START",
+               f"target_selection: {rep.get('target_selection')}",
+               f"sample_dir: {rep.get('sample_dir')}",
+               f"readiness_verdict: {rep.get('readiness_verdict')}",
+               f"valid_types: {rep.get('valid_types')}  density_ok: {rep.get('density_ok')}",
+               f"active_gaps: {rep.get('active_gaps')}",
+               f"can_research_microstructure: {rep.get('can_research_microstructure')}"]
+        for kind, d in (rep.get("per_kind") or {}).items():
+            out.append(f"  {kind}: rows={d['rows']}/{d['min_rows'] or '-'} "
+                       f"coverage={d['coverage_days']}d/{d['min_coverage_days'] or '-'} "
+                       f"rate={d['rows_per_day_observed']}/d "
+                       f"eta_days={d['estimated_days_remaining']} (rough)")
+        if rep.get("estimated_days_to_ready") is not None:
+            out.append(f"estimated_days_to_ready: {rep['estimated_days_to_ready']} (rough)")
+        if rep.get("estimate_unknown_for"):
+            out.append(f"estimate_unknown_for: {rep['estimate_unknown_for']}")
+        if rep.get("error"):
+            out.append(f"error: {rep['error']}")
+        out += ["research_only: true", "shadow_only: true", "paper_ready: false",
+                "live_ready: false", "can_send_real_orders: false",
+                "final_recommendation: NO LIVE",
+                "FREE MICROSTRUCTURE READINESS STATUS V10.29 END"]
+        return "\n".join(out)
+
+    def free_microstructure_gap_report_v1029_cli(self, *, sample_dir="") -> str:
+        from .labs import free_microstructure_dataset_assembler_v10_29 as A
+        rep = A.gap_report(sample_dir or None)
+        out = ["FREE MICROSTRUCTURE GAP REPORT V10.29 START",
+               f"sample_dir: {rep.get('sample_dir')}",
+               f"readiness_verdict: {rep.get('readiness_verdict')}", "gaps:"]
+        out += [f"  - {g}" for g in rep.get("gaps", [])]
+        out += ["actions:"] + [f"  - {a}" for a in rep.get("actions", [])]
+        if rep.get("honesty"):
+            out.append("honesty: " + rep["honesty"])
+        out += ["research_only: true", "shadow_only: true", "paper_ready: false",
+                "live_ready: false", "can_send_real_orders: false",
+                "final_recommendation: NO LIVE",
+                "FREE MICROSTRUCTURE GAP REPORT V10.29 END"]
+        return "\n".join(out)
+
     def opportunity_scanner_plan_v1028_cli(self, *, universe="") -> str:
         from .labs import multi_symbol_opportunity_scanner_v10_28 as S
         uni = self._v107_csv_arg(universe) or None
@@ -7532,6 +7618,10 @@ def build_argument_parser() -> argparse.ArgumentParser:
             "continuous-collection-status-v1027",
             "opportunity-scanner-plan-v1028",
             "opportunity-scanner-run-v1028",
+            "free-microstructure-assembler-plan-v1029",
+            "free-microstructure-assemble-sample-v1029",
+            "free-microstructure-readiness-status-v1029",
+            "free-microstructure-gap-report-v1029",
             "ohlcv-replay-loader-smoke-test",
             "ohlcv-replay-loader-audit",
             "duplicate-module-audit-smoke-test",
@@ -7742,6 +7832,10 @@ PUBLIC_RESEARCH_ONLY_COMMANDS = frozenset({
     "continuous-collection-status-v1027",
     "opportunity-scanner-plan-v1028",
     "opportunity-scanner-run-v1028",
+    "free-microstructure-assembler-plan-v1029",
+    "free-microstructure-assemble-sample-v1029",
+    "free-microstructure-readiness-status-v1029",
+    "free-microstructure-gap-report-v1029",
 })
 
 
@@ -7813,6 +7907,15 @@ def _dispatch_public_research_only(args) -> None:
             universe=args.universe, timeframe=args.timeframe, days=args.days,
             interval_seconds=args.interval_seconds, max_scans=args.max_scans,
             request_budget=args.request_budget, output_dir=args.output_dir))
+    elif args.command == "free-microstructure-assembler-plan-v1029":
+        print(lab.free_microstructure_assembler_plan_v1029_cli())
+    elif args.command == "free-microstructure-assemble-sample-v1029":
+        print(lab.free_microstructure_assemble_sample_v1029_cli(
+            symbols=args.symbols, apply=args.apply, output_dir=args.output_dir))
+    elif args.command == "free-microstructure-readiness-status-v1029":
+        print(lab.free_microstructure_readiness_status_v1029_cli(sample_dir=args.sample_dir))
+    elif args.command == "free-microstructure-gap-report-v1029":
+        print(lab.free_microstructure_gap_report_v1029_cli(sample_dir=args.sample_dir))
 
 
 def main() -> None:
