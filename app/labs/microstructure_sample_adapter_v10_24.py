@@ -413,18 +413,29 @@ def validate_trades(rows: list[dict[str, str]]) -> dict[str, Any]:
         if sym:
             syms.add(str(sym))
     cov = _coverage(ts, invalid_ts)
-    # V10.24.4 correction: same-millisecond DISTINCT trades are genuine market
-    # data (Binance aggTrades share ms under bursts), so a plain ts-collision
-    # count falsely invalidated real tick data. For trades only, corruption is:
-    # exact duplicate rows (ts+price+size+side) above the 1% limit, OR an
-    # extreme ts-collision ratio (>50% of rows). Anything else is clean.
+    # V10.24.4/.5 correction: same-millisecond DISTINCT trades are genuine
+    # market data (real Binance aggTrades reach >55% same-ms collision under
+    # bursts), so NO collision-ratio threshold may invalidate trades. For
+    # trades, corruption is: exact duplicate rows (ts+price+size+side) above
+    # the 1% limit, or duplicated trade ids when an id column exists. Same-ms
+    # collisions alone are surfaced as a WARNING, never INVALID.
     exact_dups = len(rows) - len({(str(_first(r, _TS_FIELDS)), str(_first(r, ("price",))),
                                    str(_first(r, _SIZE_FIELDS)), str(_first(r, _SIDE_FIELDS)))
                                   for r in rows})
     ts_collisions = int(cov.get("duplicate_count") or 0)
+    trade_ids = [v for v in (_first(r, ("agg_trade_id", "trade_id", "raw_event_id", "id"))
+                             for r in rows) if v not in (None, "")]
+    id_dups = (len(trade_ids) - len(set(trade_ids))) if trade_ids else 0
     cov["ts_collision_count"] = ts_collisions
     cov["exact_duplicate_rows"] = exact_dups
-    if not (exact_dups > _duplicate_limit(cov) or ts_collisions > len(rows) * 0.5):
+    cov["id_duplicate_rows"] = id_dups
+    severe = max(exact_dups, id_dups)
+    if severe > _duplicate_limit(cov):
+        # true corruption: make the flag fire even when the duplicated rows
+        # carry distinct timestamps (id dups without ts collisions)
+        cov["duplicate_count"] = max(ts_collisions, severe)
+        cov["duplicates"] = cov["duplicate_count"]
+    else:
         cov["duplicate_count"] = 0
         cov["duplicates"] = 0
     has_aggr = bool(rows) and len(sides) == len(rows)
@@ -462,7 +473,9 @@ def validate_trades(rows: list[dict[str, str]]) -> dict[str, Any]:
             "missing_side_count": missing_side,
             "invalid_side_count": invalid_side,
             "critical_errors": critical,
-            "warnings": _quality_flags(cov, require_no_gaps=True, warning_mode=True)}
+            "warnings": _quality_flags(cov, require_no_gaps=True, warning_mode=True)
+            + ([f"same_ms_collision_warning(ratio={round(ts_collisions / len(rows), 3)})"]
+               if ts_collisions and rows else [])}
 
 
 def validate_orderbook(rows: list[dict[str, str]]) -> dict[str, Any]:

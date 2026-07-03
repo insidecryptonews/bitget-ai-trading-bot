@@ -322,6 +322,104 @@ def _run_main(argv):
         sys.argv = old
 
 
+def _write_cont_manifest(repo, last_cycle, rows=100):
+    ds = repo / "external_data" / "staging" / V27.STAGING_MARKER / "dataset"
+    ds.mkdir(parents=True, exist_ok=True)
+    (ds / "manifest.json").write_text(json.dumps({
+        "last_cycle": last_cycle, "cycles": 3,
+        "cumulative_added": {"trades": rows, "oi": 10}}), encoding="utf-8")
+
+
+def test_freshness_stale_warning_true_when_collector_is_newer(_repo):
+    small_source(_repo)
+    _write_cont_manifest(_repo, "2026-01-01T00:00:00+00:00")
+    rep = A.assemble("BTCUSDT", apply=True, run_label="latest")
+    assert rep["writes"] is True
+    # collector moved on AFTER the assemble -> the sample is stale
+    _write_cont_manifest(_repo, "2099-01-01T00:00:00+00:00")
+    st = A.readiness_status()
+    assert st["status_source"] == "latest_assembled_v10_29"
+    assert st["assembled_at"] is not None
+    assert st["continuous_last_cycle"] == "2099-01-01T00:00:00+00:00"
+    assert st["continuous_dataset_rows"] == 110
+    assert st["latest_assembled_rows"] > 0
+    assert st["stale_assembled_warning"] is True
+    gr = A.gap_report()
+    assert any("stale" in g for g in gr["gaps"])
+    uri = A.write_status_page()
+    html = (_repo / "reports" / "research" / "v10_29" / "status.html").read_text(encoding="utf-8")
+    assert "WARNING: assembled sample is stale" in html
+    assert "continuous_last_cycle=" in html and "assembled_at=" in html
+    assert "continuous_dataset_rows=" in html and "latest_assembled_rows=" in html
+
+
+def test_freshness_no_warning_when_just_assembled(_repo):
+    small_source(_repo)
+    _write_cont_manifest(_repo, "2026-01-01T00:00:00+00:00")
+    A.assemble("BTCUSDT", apply=True, run_label="latest")
+    st = A.readiness_status()
+    assert st["stale_assembled_warning"] is False
+    A.write_status_page()
+    html = (_repo / "reports" / "research" / "v10_29" / "status.html").read_text(encoding="utf-8")
+    assert "WARNING: assembled sample is stale" not in html
+    assert "stale_assembled_warning=false" in html
+
+
+def test_fixed_run_label_overwrites_and_wins_latest(_repo):
+    small_source(_repo)
+    r1 = A.assemble("BTCUSDT", apply=True, run_label="latest")
+    r2 = A.assemble("BTCUSDT", apply=True, run_label="latest")
+    assert r1["sample_dir"] == r2["sample_dir"]           # same dir, overwritten
+    root = _repo / "external_data" / "staging" / A.STAGING_MARKER
+    assert [d.name for d in root.iterdir() if d.is_dir()] == ["latest"]
+    for bad in ("../x", "a/b", "lat est", ".hidden", "x" * 41):
+        rep = A.assemble("BTCUSDT", apply=True, run_label=bad)
+        assert rep["writes"] is False and any("unsafe_run_label" in e for e in rep["errors"])
+
+
+def test_run_id_unique_back_to_back():
+    assert A._run_id() != A._run_id()
+
+
+def test_collector_script_assembles_before_status_page_and_is_safe():
+    repo = Path(research_lab.__file__).resolve().parents[1]
+    src = (repo / "scripts" / "collect_forever.ps1").read_text(encoding="utf-8")
+    i_run = src.index("continuous-collection-run-cycle-v1027")
+    i_asm = src.index("free-microstructure-assemble-sample-v1029")
+    i_stat = src.index("free-microstructure-readiness-status-v1029")
+    i_page = src.index("free-microstructure-status-page-v1029")
+    assert i_run < i_asm < i_stat < i_page                 # Codex V10.29.2 flow
+    assert "--run-label latest" in src and "--apply" in src
+    for tok in ("place_order", "create_order", "set_leverage", "set_margin_mode",
+                "private_get", "private_post", "X-MBX-APIKEY", "listenKey",
+                ".env", "api_key", "apikey", "LIVE_TRADING", "PaperTrader",
+                "ExecutionEngine", "Invoke-WebRequest", "Invoke-RestMethod"):
+        assert tok not in src, tok
+    assert "Local\\BitgetBotCollectorV1027" in src          # mutex kept
+    assert "Ctrl+C" in src                                  # safe-stop help kept
+
+
+def test_status_page_scanner_ranking_not_actionable(_repo):
+    small_source(_repo)
+    scanner_dir = _repo / "reports" / "research" / "v10_28"
+    scanner_dir.mkdir(parents=True)
+    (scanner_dir / "scanner_state.json").write_text(json.dumps({
+        "written_at": "2026-07-02T00:00:00Z",
+        "verdict": "SHADOW_OBSERVATION_CANDIDATES_NOT_ACTIONABLE",
+        "n_shadow_candidates": 1,
+        "opportunity_board": [{"symbol": "BTCUSDT", "edge_score": 85,
+                               "side": "long", "regime": "RISK_ON"}]}), encoding="utf-8")
+    A.write_status_page()
+    html = (_repo / "reports" / "research" / "v10_29" / "status.html").read_text(encoding="utf-8")
+    assert "NOT_ACTIONABLE" in html
+    assert "edge_validated=false" in html and "not_actionable=true" in html
+    assert "no_orders=true" in html
+    # the flags sit NEXT TO the ranking table, before the board rows
+    assert html.index("edge_validated=false") < html.index("BTCUSDT</td>")
+    for banned in ("buy now", "signal executable", "http://", "https://", "<script"):
+        assert banned not in html
+
+
 def test_status_page_written_under_reports_and_honest(_repo):
     small_source(_repo)
     uri = A.write_status_page()

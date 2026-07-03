@@ -256,21 +256,25 @@ def scan(bars_by_symbol: dict[str, list[dict]], config: dict | None = None) -> d
             stayed_out.append({"symbol": sym, "edge_score": s["edge_score"], "reasons": why_out})
             continue
         decisions.append({
-            "symbol": sym, "action": "SHADOW_ENTRY_CANDIDATE", "side": s["side"],
+            "symbol": sym, "action": "SHADOW_OBSERVATION_CANDIDATE_NOT_ACTIONABLE",
+            "side": s["side"],
             "edge_score": s["edge_score"], "entry": s["entry"], "stop": s["stop"],
             "take_profit": s["take_profit"], "rr": s["rr"], "size_hint_units": s["size_hint_units"],
             "risk_per_trade_pct": cfg["risk_per_trade_pct"], "confirmations": s["confirmations"],
             "regime": s.get("regime"), "reason": "top-ranked setup clearing all discipline gates",
-            "executed": False, "would_send_real_order": False, "edge_validated": False})
+            "executed": False, "would_send_real_order": False, "edge_validated": False,
+            "not_actionable": True, "no_orders": True})
         chosen_symbols.add(sym)
         chosen_returns.append(_returns(bars_by_symbol[sym]))
 
-    verdict = "SHADOW_CANDIDATES" if decisions else "STAY_OUT_NO_EDGE"
+    verdict = ("SHADOW_OBSERVATION_CANDIDATES_NOT_ACTIONABLE" if decisions
+               else "STAY_OUT_NO_EDGE")
     return {"tool_version": TOOL_VERSION, "universe_size": len(bars_by_symbol),
             "analyzed": analyzed, "discarded": discarded,
             "opportunity_board": board, "regimes": regimes,
             "decisions": decisions, "stayed_out": stayed_out,
             "n_shadow_candidates": len(decisions), "verdict": verdict,
+            "not_actionable": True, "no_orders": True,
             "config": cfg, **_safety()}
 
 
@@ -377,7 +381,8 @@ def compact_scan(report: dict, scan_no: int = 0) -> dict[str, Any]:
                        for s in report.get("stayed_out", [])],
         "verdict": report.get("verdict"),
         "n_shadow_candidates": report.get("n_shadow_candidates", 0),
-        "edge_validated": False, "executed": False, "final_recommendation": FINAL_RECOMMENDATION_NO_LIVE,
+        "edge_validated": False, "executed": False, "not_actionable": True,
+        "final_recommendation": FINAL_RECOMMENDATION_NO_LIVE,
     }
 
 
@@ -410,7 +415,7 @@ def render_board(report: dict, scan_no: int, elapsed_s: float = 0.0) -> str:
              f"scored={len(board)}  discarded={len(report.get('discarded', []))}  "
              f"candidates={report.get('n_shadow_candidates', 0)}")
     if board:
-        L.append(" RANKING (best first):")
+        L.append(" RANKING (best first)  [edge_validated=False | NOT_ACTIONABLE | no_orders=True]:")
         L.append("   {:<10} {:>5} {:>6} {:>10} {:>12}".format("SYMBOL", "SCORE", "SIDE", "REGIME", "ATR%"))
         for s in board[:10]:
             L.append("   {:<10} {:>5} {:>6} {:>10} {:>11.2f}%".format(
@@ -421,7 +426,8 @@ def render_board(report: dict, scan_no: int, elapsed_s: float = 0.0) -> str:
         L.append(" DISCARDED: " + ", ".join(f"{d['symbol']}({';'.join(d['reasons'])})" for d in disc[:8]))
     dec = report.get("decisions", [])
     if dec:
-        L.append(" >>> SHADOW ENTRY CANDIDATES (simulated, NO real/paper order):")
+        L.append(" >>> SHADOW OBSERVATION CANDIDATES -- NOT ACTIONABLE (simulated only, "
+                 "NO real/paper order, edge_validated=False):")
         for d in dec:
             L.append(f"   {d['symbol']} {d['side'].upper()} score={d['edge_score']} "
                      f"entry={d['entry']} stop={d['stop']} tp={d['take_profit']} rr={d['rr']} "

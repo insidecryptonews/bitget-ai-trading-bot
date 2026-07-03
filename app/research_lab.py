@@ -6256,11 +6256,12 @@ class ResearchLab:
         return "\n".join(out)
 
     def free_microstructure_assemble_sample_v1029_cli(self, *, symbols="", apply=False,
-                                                      output_dir="") -> str:
+                                                      output_dir="", run_label="") -> str:
         from .labs import free_microstructure_dataset_assembler_v10_29 as A
         syms = self._v107_csv_arg(symbols)
         sym = syms[0] if syms else "BTCUSDT"
-        rep = A.assemble(sym, apply=bool(apply), output_dir=(output_dir or None))
+        rep = A.assemble(sym, apply=bool(apply), output_dir=(output_dir or None),
+                         run_label=(run_label or None))
         out = ["FREE MICROSTRUCTURE ASSEMBLE SAMPLE V10.29 START",
                f"symbol: {rep['symbol']}  mode: {rep['mode']}  writes: {rep.get('writes')}"]
         if len(syms) > 1:
@@ -6289,7 +6290,16 @@ class ResearchLab:
         out = ["FREE MICROSTRUCTURE READINESS STATUS V10.29 START",
                f"target_selection: {rep.get('target_selection')}",
                f"sample_dir: {rep.get('sample_dir')}",
-               f"readiness_verdict: {rep.get('readiness_verdict')}",
+               f"status_source: {rep.get('status_source')}",
+               f"continuous_last_cycle: {rep.get('continuous_last_cycle')}  "
+               f"continuous_dataset_rows: {rep.get('continuous_dataset_rows')}",
+               f"assembled_at: {rep.get('assembled_at')}  "
+               f"latest_assembled_rows: {rep.get('latest_assembled_rows')}",
+               f"stale_assembled_warning: {str(bool(rep.get('stale_assembled_warning'))).lower()}"]
+        if rep.get("stale_assembled_warning"):
+            out.append("WARNING: assembled sample is stale; dashboard may not include "
+                       "latest collected rows")
+        out += [f"readiness_verdict: {rep.get('readiness_verdict')}",
                f"valid_types: {rep.get('valid_types')}  density_ok: {rep.get('density_ok')}",
                f"active_gaps: {rep.get('active_gaps')}",
                f"can_research_microstructure: {rep.get('can_research_microstructure')}"]
@@ -7818,6 +7828,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--interval-seconds", type=float, default=60.0, help="V10.28 seconds between scan cycles in the live shadow scanner.")
     parser.add_argument("--max-scans", type=int, default=1, help="V10.28 number of scan cycles (<=0 = run until Ctrl+C or q/quit/exit/stop).")
     parser.add_argument("--request-budget", type=int, default=6, help="V10.28 bounded GET requests per symbol per scan (public klines).")
+    parser.add_argument("--run-label", default="", help="V10.29 fixed assembled-run dir name (e.g. 'latest'), safely overwritten each assemble; empty = unique timestamped run id.")
     return parser
 
 
@@ -7924,7 +7935,8 @@ def _dispatch_public_research_only(args) -> None:
         print(lab.free_microstructure_assembler_plan_v1029_cli())
     elif args.command == "free-microstructure-assemble-sample-v1029":
         print(lab.free_microstructure_assemble_sample_v1029_cli(
-            symbols=args.symbols, apply=args.apply, output_dir=args.output_dir))
+            symbols=args.symbols, apply=args.apply, output_dir=args.output_dir,
+            run_label=args.run_label))
     elif args.command == "free-microstructure-readiness-status-v1029":
         print(lab.free_microstructure_readiness_status_v1029_cli(sample_dir=args.sample_dir))
     elif args.command == "free-microstructure-gap-report-v1029":

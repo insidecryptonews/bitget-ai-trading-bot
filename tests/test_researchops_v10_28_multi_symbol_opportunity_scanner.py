@@ -171,12 +171,23 @@ def test_long_blocked_in_risk_off(monkeypatch):
     assert any("long_blocked_risk_off" in s["reasons"] for s in rep["stayed_out"])
 
 
-def test_decisions_are_shadow_only():
+def test_decisions_are_shadow_only_and_not_actionable():
     rep = S.scan({"BTCUSDT": ramp(step=0.006, seed=1)})
+    assert rep["decisions"], "expected at least one observation candidate"
+    # V10.29.2 UX: the verdict itself must scream NOT ACTIONABLE
+    assert rep["verdict"] == "SHADOW_OBSERVATION_CANDIDATES_NOT_ACTIONABLE"
+    assert rep["not_actionable"] is True and rep["no_orders"] is True
     for d in rep["decisions"]:
-        assert d["action"] == "SHADOW_ENTRY_CANDIDATE"
+        assert d["action"] == "SHADOW_OBSERVATION_CANDIDATE_NOT_ACTIONABLE"
         assert d["executed"] is False and d["would_send_real_order"] is False
         assert d["edge_validated"] is False and d["stop"] is not None
+        assert d["not_actionable"] is True and d["no_orders"] is True
+    # the live board shows the flags NEXT TO the ranking, not only at the foot
+    txt = S.render_board(rep, 1, 0.0)
+    assert "NOT_ACTIONABLE" in txt and "edge_validated=False" in txt
+    assert "NOT ACTIONABLE" in txt        # candidates section header
+    for banned in ("buy now", "BUY NOW", "signal executable", "EXECUTE"):
+        assert banned not in txt
 
 
 # ---- journal + autosave ----------------------------------------------------

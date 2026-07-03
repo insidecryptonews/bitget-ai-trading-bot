@@ -20,6 +20,8 @@ from __future__ import annotations
 import csv
 import json
 import os
+import re
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -62,8 +64,13 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+_RUN_LABEL_RE = re.compile(r"^[A-Za-z0-9_\-]{1,40}$")
+
+
 def _run_id() -> str:
-    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    # microseconds + short uuid: collision-proof even for back-to-back runs
+    return (datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S_%f")
+            + "Z_" + uuid.uuid4().hex[:6])
 
 
 # --------------------------------------------------------------------------
@@ -213,7 +220,11 @@ def plan() -> dict[str, Any]:
 # Assemble
 # --------------------------------------------------------------------------
 
-def assemble(symbol: str, apply: bool = False, output_dir: str | None = None) -> dict[str, Any]:
+def assemble(symbol: str, apply: bool = False, output_dir: str | None = None,
+             run_label: str | None = None) -> dict[str, Any]:
+    """run_label: optional FIXED run dir name (e.g. 'latest') that is safely
+    overwritten on each assemble -- used by the continuous console so the
+    dashboard always reflects the live dataset without piling up run dirs."""
     symbol = str(symbol or "").strip().upper()
     rep: dict[str, Any] = {"tool_version": TOOL_VERSION, "symbol": symbol,
                            "apply": bool(apply), "assembled_at": _now_iso(),
@@ -222,6 +233,11 @@ def assemble(symbol: str, apply: bool = False, output_dir: str | None = None) ->
         rep["mode"] = "DRY_RUN" if not apply else "APPLY"
         rep["writes"] = False
         rep["errors"].append("symbol_required(one symbol per assembled sample)")
+        return rep
+    if run_label is not None and not _RUN_LABEL_RE.match(str(run_label)):
+        rep["mode"] = "DRY_RUN" if not apply else "APPLY"
+        rep["writes"] = False
+        rep["errors"].append(f"unsafe_run_label:{run_label!r}")
         return rep
 
     # APPLY: validate the write target BEFORE reading anything
@@ -284,9 +300,16 @@ def assemble(symbol: str, apply: bool = False, output_dir: str | None = None) ->
         rep["note"] = "dry-run: counts only; use --apply to write the assembled sample"
         return rep
 
-    run_id = _run_id()
+    run_id = run_label or _run_id()
     out_dir = out_base / run_id
     os.makedirs(out_dir, exist_ok=True)
+    if run_label:
+        # fixed label is OVERWRITTEN: clear known files so a kind that (in
+        # theory) shrank to 0 rows can never leave a stale CSV behind
+        for fname in list(_FILES.values()) + ["manifest.json"]:
+            p = out_dir / fname
+            if p.is_file() and not p.is_symlink():
+                p.unlink()
     rep["sample_dir"] = str(out_dir).replace("\\", "/")
     rep["run_id"] = run_id
     written = {}
@@ -332,11 +355,54 @@ def _latest_assembled_dir() -> str | None:
     root = _repo_root() / "external_data" / "staging" / STAGING_MARKER
     if not root.is_dir():
         return None
+    # most recently WRITTEN run (mtime), not lexicographic -- a fixed label
+    # like "latest" must win over older timestamp-named runs
     runs = sorted((d for d in root.iterdir() if d.is_dir() and not d.is_symlink()),
-                  key=lambda d: d.name)
+                  key=lambda d: d.stat().st_mtime)
     if not runs:
         return None
     return str(runs[-1].relative_to(_repo_root())).replace("\\", "/")
+
+
+def _parse_iso(v: Any):
+    try:
+        return datetime.fromisoformat(str(v))
+    except (TypeError, ValueError):
+        return None
+
+
+def _freshness(target_dir: Path | None, target_selection: str) -> dict[str, Any]:
+    """Compare the LIVE continuous dataset against the assembled sample the
+    dashboard reads, and refuse to hide staleness."""
+    repo = _repo_root()
+    out: dict[str, Any] = {"continuous_last_cycle": None, "continuous_dataset_rows": None,
+                           "assembled_at": None, "latest_assembled_rows": None,
+                           "stale_assembled_warning": False}
+    cman = repo / "external_data" / "staging" / V27.STAGING_MARKER / V27.DATASET_SUBDIR / "manifest.json"
+    if cman.is_file() and not cman.is_symlink():
+        try:
+            m = json.loads(cman.read_text(encoding="utf-8"))
+            out["continuous_last_cycle"] = m.get("last_cycle")
+            cum = m.get("cumulative_added") or {}
+            out["continuous_dataset_rows"] = int(sum(int(v or 0) for v in cum.values()))
+        except Exception:
+            pass
+    if target_dir is not None and target_selection != "v10_27_continuous_dataset_fallback":
+        aman = target_dir / "manifest.json"
+        if aman.is_file() and not aman.is_symlink():
+            try:
+                m = json.loads(aman.read_text(encoding="utf-8"))
+                out["assembled_at"] = m.get("assembled_at")
+                pk = m.get("per_kind") or {}
+                out["latest_assembled_rows"] = int(sum(
+                    int((d or {}).get("unique_rows") or 0) for d in pk.values()))
+            except Exception:
+                pass
+        last = _parse_iso(out["continuous_last_cycle"])
+        asm = _parse_iso(out["assembled_at"])
+        if last is not None and (asm is None or last > asm):
+            out["stale_assembled_warning"] = True
+    return out
 
 
 def _pick_target(sample_dir: str | None) -> tuple[str | None, str]:
@@ -365,6 +431,8 @@ def readiness_status(sample_dir: str | None = None) -> dict[str, Any]:
         rep["error"] = f"unsafe_sample_dir:{e}"
         return rep
     rep["sample_dir"] = str(target).replace("\\", "/")
+    rep["status_source"] = how
+    rep.update(_freshness(tdir, how))
     vr = V24.validate_sample(str(tdir))
     cls = vr.get("classification", {})
     rep["readiness_verdict"] = cls.get("verdict")
@@ -430,6 +498,10 @@ def gap_report(sample_dir: str | None = None) -> dict[str, Any]:
     if "error" in st:
         rep["error"] = st["error"]
         return rep
+    rep["stale_assembled_warning"] = bool(st.get("stale_assembled_warning"))
+    if rep["stale_assembled_warning"]:
+        rep["gaps"].append("WARNING: assembled sample is stale; dashboard may not "
+                           "include latest collected rows (re-assemble with --apply)")
     if st.get("readiness_verdict") == V24.C_NO_SAMPLE:
         rep["gaps"].append("no data at all: run the V10.27 collector with --apply first")
         rep["actions"].append("python -m app.research_lab continuous-collection-run-cycle-v1027 "
@@ -540,17 +612,31 @@ def write_status_page() -> str:
 <b>FINAL_RECOMMENDATION: NO LIVE.</b> Un edge validado NO existe todavia.</p>
 <p>Actualizado: {_esc(st.get('checked_at'))} (la pagina se recarga sola cada 60s;
 los datos se regeneran con cada ciclo del colector)</p>
+{('<p style="background:#4a3200;border:1px solid #f9a825;border-radius:8px;padding:10px">'
+  '<b>WARNING: assembled sample is stale; dashboard may not include latest collected rows.</b> '
+  'El colector tiene datos mas nuevos que el ultimo sample ensamblado.</p>')
+ if st.get('stale_assembled_warning') else ''}
+<p style="color:#8b949e">status_source={_esc(st.get('status_source'))} &middot;
+continuous_last_cycle={_esc(st.get('continuous_last_cycle'))} &middot;
+continuous_dataset_rows={_esc(st.get('continuous_dataset_rows'))} &middot;
+assembled_at={_esc(st.get('assembled_at'))} &middot;
+latest_assembled_rows={_esc(st.get('latest_assembled_rows'))} &middot;
+stale_assembled_warning={_esc(str(bool(st.get('stale_assembled_warning'))).lower())}</p>
 <h2>1) Datos de microestructura (camino a MICROSTRUCTURE_RESEARCH_READY)</h2>
 <p>Veredicto del validador V10.24.3: <b style="font-size:1.2em">{_esc(st.get('readiness_verdict'))}</b></p>
 <table cellpadding="8" style="border-collapse:collapse;background:#161b22;border-radius:8px">
 <tr style="text-align:left"><th>tipo</th><th>filas</th><th>cobertura</th><th>ETA dias (aprox)</th></tr>
 {''.join(rows_html)}</table>
 <h3>Que falta exactamente</h3><ul>{gaps_html}</ul>
-<h2>2) Scanner de oportunidades (V10.28, SHADOW)</h2>
+<h2>2) Scanner de oportunidades (V10.28, SHADOW &mdash; NOT_ACTIONABLE)</h2>
 <p>Ultimo scan: {_esc(scanner.get('written_at', 'sin datos aun'))} &mdash; veredicto:
-<b>{_esc(scanner.get('verdict', '-'))}</b> (candidatos shadow: {_esc(scanner.get('n_shadow_candidates', 0))})</p>
+<b>{_esc(scanner.get('verdict', '-'))}</b> (candidatos observados: {_esc(scanner.get('n_shadow_candidates', 0))})</p>
+<p style="background:#3d1d1d;border:1px solid #c62828;border-radius:8px;padding:8px">
+<b>edge_validated=false &middot; not_actionable=true &middot; no_orders=true</b> &mdash;
+un score alto NO es una entrada: es solo OBSERVACION. Sin edge validado, sin paper,
+sin live, sin sizing real, sin leverage.</p>
 <table cellpadding="8" style="border-collapse:collapse;background:#161b22">
-<tr style="text-align:left"><th>simbolo</th><th>score</th><th>lado</th><th>regimen</th></tr>
+<tr style="text-align:left"><th>simbolo</th><th>score (NO accionable)</th><th>lado</th><th>regimen</th></tr>
 {''.join(board_html) or '<tr><td colspan="4">sin scans todavia</td></tr>'}</table>
 <p style="color:#8b949e">Honestidad: los scores son heuristicos, NO un edge validado. READY significa
 datos suficientes para INVESTIGAR; no significa que exista ventaja. Nada aqui envia ordenes.</p>

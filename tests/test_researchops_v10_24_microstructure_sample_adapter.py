@@ -370,21 +370,25 @@ def test_huge_timestamp_gap_blocks_ready(tmp_path):
     assert M.C_NEEDS_HISTORY in rep["classification"]["active_gaps"]
 
 
-def test_duplicate_timestamps_severe_invalidates(tmp_path):
+def test_extreme_same_ms_collisions_warn_but_never_invalidate(tmp_path):
+    # V10.24.5: real Binance aggTrades exceed 55% same-ms collisions in bursts
+    # (Codex reproduced 57.3% on live data with ZERO exact duplicates). A high
+    # collision ratio alone must be a WARNING, never INVALID -- even at 97.5%.
     _write(tmp_path / "trades.csv",
            ["timestamp", "symbol", "price", "size", "aggressor_side"],
            [[B, "BTCUSDT", 50000 + i, 1, "buy"] for i in range(40)])
     rep = M.validate_sample(str(tmp_path))
     tr = rep["by_type"]["trades"]
-    assert tr["duplicate_count"] == 39
-    assert tr["valid"] is False
-    assert "trades:duplicate_timestamps" in rep["classification"]["critical_errors"]
+    assert tr["coverage"]["ts_collision_count"] == 39
+    assert tr["coverage"]["exact_duplicate_rows"] == 0
+    assert tr["valid"] is True
+    assert "trades:duplicate_timestamps" not in rep["classification"]["critical_errors"]
+    assert any("same_ms_collision_warning" in w for w in tr["warnings"])
 
 
 def test_same_ms_distinct_trades_are_valid_market_data(tmp_path):
     # V10.24.4: bursts of DISTINCT trades sharing a millisecond are real
-    # (Binance aggTrades) -- must NOT invalidate the file (<50% collisions,
-    # zero exact duplicate rows).
+    # (Binance aggTrades) -- must NOT invalidate the file (zero exact dups).
     rows = []
     for i in range(100):
         t = B + i * 60_000
@@ -399,6 +403,20 @@ def test_same_ms_distinct_trades_are_valid_market_data(tmp_path):
     assert tr["coverage"]["ts_collision_count"] == 25
     assert tr["coverage"]["exact_duplicate_rows"] == 0
     assert "trades:duplicate_timestamps" not in rep["classification"]["critical_errors"]
+    assert any("same_ms_collision_warning" in w for w in tr["warnings"])
+
+
+def test_duplicate_trade_ids_still_invalidate(tmp_path):
+    # V10.24.5: when an id column exists it is used for corruption detection --
+    # 10 repeated agg_trade_ids in 60 rows (distinct ts) -> INVALID.
+    rows = [[B + i * 60_000, "BTCUSDT", 50000 + i, 1, "buy", (i % 50)] for i in range(60)]
+    _write(tmp_path / "trades.csv",
+           ["timestamp", "symbol", "price", "size", "aggressor_side", "agg_trade_id"], rows)
+    rep = M.validate_sample(str(tmp_path))
+    tr = rep["by_type"]["trades"]
+    assert tr["coverage"]["id_duplicate_rows"] == 10
+    assert tr["valid"] is False
+    assert "trades:duplicate_timestamps" in rep["classification"]["critical_errors"]
 
 
 def test_exact_duplicate_trade_rows_still_invalidate(tmp_path):
