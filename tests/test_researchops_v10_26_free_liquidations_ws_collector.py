@@ -231,3 +231,23 @@ def test_module_no_dangerous_primitives():
     for name in ["place_order", "create_order", "set_leverage", "set_margin_mode", "open_position"]:
         assert f"{name}(" not in scan and f".{name}" not in scan, name
     assert "ExecutionEngine(" not in scan and "PaperTrader(" not in scan
+
+
+def test_websocket_client_dependency_is_declared_for_liquidations_collector():
+    """Reproducibility guard (V10.29.4): the repo .venv once lacked
+    websocket-client, so the liquidations websocket failed SILENTLY for 40+
+    collector cycles. Any versioned module that imports `websocket` must have
+    `websocket-client` declared (uncommented) in requirements.txt, or a clean
+    install / VPS would reproduce that data loss."""
+    reqs = Path("requirements.txt").read_text(encoding="utf-8")
+    declared = any(line.strip().startswith("websocket-client")
+                   for line in reqs.splitlines())
+    importers = []
+    for mod in sorted(Path("app").rglob("*.py")):
+        src = mod.read_text(encoding="utf-8")
+        if "import websocket" in src:
+            importers.append(str(mod))
+    assert str(Path(MODULE_PATH)) in importers    # V10.26 really uses it
+    assert declared, (
+        "modules import `websocket` but requirements.txt does not declare "
+        f"websocket-client: {importers}")

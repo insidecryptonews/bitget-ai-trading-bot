@@ -6,6 +6,9 @@ pydantic>=2.7.0
 tenacity>=8.2.3
 psycopg[binary]>=3.1.18
 boto3>=1.34.0
+# Requerido por el collector de liquidaciones V10.26/V10.27 (websocket publico
+# forceOrder de Binance). Sin el, las liquidaciones fallan en silencio.
+websocket-client>=1.9.0
 
 # Opcional para app/meta_model.py; si no esta instalado, se usa fallback estadistico.
 # scikit-learn>=1.4.0
