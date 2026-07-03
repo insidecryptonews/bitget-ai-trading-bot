@@ -235,7 +235,8 @@ def run_cycle(exchange: str, symbols: list[str], kinds: list[str], apply: bool =
               max_runtime_seconds: float = 60.0, max_events: int = 10_000,
               output_dir: str | None = None,
               liq_event_source: Iterable[Any] | None = None,
-              rest_transport: Callable | None = None) -> dict[str, Any]:
+              rest_transport: Callable | None = None,
+              orderbook_polls: int = 3, poll_spacing_seconds: float = 1.0) -> dict[str, Any]:
     exchange = (exchange or "binance_usdm").lower()
     kinds = [k for k in (kinds or list(KINDS)) if k in KINDS]
     rep: dict[str, Any] = {"tool_version": TOOL_VERSION, "exchange": exchange,
@@ -292,13 +293,18 @@ def run_cycle(exchange: str, symbols: list[str], kinds: list[str], apply: bool =
             continue
         seen = _load_seen(dataset_dir, kind)
         total = 0
-        for sym in symbols:
-            try:
-                rows = _rest_batch(sym, kind, transport)
-                total += _append_rows(dataset_dir, kind, rows, seen)
-                time.sleep(0.0)
-            except Exception as e:
-                rep["errors"].append(f"{kind}:{sym}:{type(e).__name__}:{str(e)[:60]}")
+        # L1 snapshots are a point-in-time series: a few spaced polls per cycle
+        # grow density safely (bookTicker is one tiny public GET per poll)
+        repeats = max(1, int(orderbook_polls)) if kind == "orderbook" else 1
+        for poll in range(repeats):
+            for sym in symbols:
+                try:
+                    rows = _rest_batch(sym, kind, transport)
+                    total += _append_rows(dataset_dir, kind, rows, seen)
+                except Exception as e:
+                    rep["errors"].append(f"{kind}:{sym}:{type(e).__name__}:{str(e)[:60]}")
+            if repeats > 1 and poll < repeats - 1 and poll_spacing_seconds > 0:
+                time.sleep(float(poll_spacing_seconds))
         _save_seen(dataset_dir, kind, seen)
         rep["added"][kind] = total
 

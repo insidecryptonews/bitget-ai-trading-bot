@@ -184,10 +184,16 @@ def test_decisions_are_shadow_only_and_not_actionable():
         assert d["not_actionable"] is True and d["no_orders"] is True
     # the live board shows the flags NEXT TO the ranking, not only at the foot
     txt = S.render_board(rep, 1, 0.0)
+    assert "SHADOW OBSERVATION ONLY - NOT ACTIONABLE - NO EDGE VALIDATED" in txt
     assert "NOT_ACTIONABLE" in txt and "edge_validated=False" in txt
     assert "NOT ACTIONABLE" in txt        # candidates section header
-    for banned in ("buy now", "BUY NOW", "signal executable", "EXECUTE"):
+    for banned in ("buy now", "BUY NOW", "signal executable", "EXECUTE",
+                   "SHADOW_ENTRY_CANDIDATE", "entry="):
         assert banned not in txt
+    # shadow sizing is explicitly shadow-named (V10.29.3), alias kept for compat
+    for d in rep["decisions"]:
+        assert d["shadow_size_hint_units"] == d["size_hint_units"]
+    assert "shadow_size~" in txt and "size~" not in txt.replace("shadow_size~", "")
 
 
 # ---- journal + autosave ----------------------------------------------------

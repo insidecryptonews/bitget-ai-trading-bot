@@ -66,7 +66,26 @@ def _run(symbols=("BTCUSDT",), kinds=("liquidations", "orderbook", "oi", "fundin
     liq = liq if liq is not None else [_liq(T=T0 + i * 60000) for i in range(4)]
     return C.run_cycle("binance_usdm", list(symbols), list(kinds), apply=True,
                        max_runtime_seconds=30, max_events=1000,
-                       liq_event_source=liq, rest_transport=_rest_transport)
+                       liq_event_source=liq, rest_transport=_rest_transport,
+                       poll_spacing_seconds=0)
+
+
+def test_orderbook_multi_poll_grows_density():
+    calls = {"n": 0}
+
+    def tx(url, headers):
+        from app.labs import free_public_microstructure_collector_v10_25 as V25
+        V25.assert_safe_request(url, headers)
+        assert "bookTicker" in url
+        calls["n"] += 1
+        return json.dumps({"symbol": "BTCUSDT", "bidPrice": "100", "bidQty": "2",
+                           "askPrice": "101", "askQty": "1",
+                           "time": 1700000000000 + calls["n"] * 500}).encode()
+
+    rep = C.run_cycle("binance_usdm", ["BTCUSDT"], ["orderbook"], apply=True,
+                      max_runtime_seconds=30, max_events=10, liq_event_source=[],
+                      rest_transport=tx, orderbook_polls=3, poll_spacing_seconds=0)
+    assert calls["n"] == 3 and rep["added"]["orderbook"] == 3   # 3 distinct snapshots
 
 
 def _cleanup(dataset_dir):

@@ -6312,6 +6312,11 @@ class ResearchLab:
             out.append(f"estimated_days_to_ready: {rep['estimated_days_to_ready']} (rough)")
         if rep.get("estimate_unknown_for"):
             out.append(f"estimate_unknown_for: {rep['estimate_unknown_for']}")
+        if rep.get("bottleneck"):
+            out.append(f"bottleneck: {rep['bottleneck']}")
+        if rep.get("collector_errors_last_cycle"):
+            out.append("COLLECTOR ERROR (last cycle): "
+                       + "; ".join(rep["collector_errors_last_cycle"]))
         if rep.get("error"):
             out.append(f"error: {rep['error']}")
         out += ["research_only: true", "shadow_only: true", "paper_ready: false",

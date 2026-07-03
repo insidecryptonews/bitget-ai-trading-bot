@@ -322,12 +322,53 @@ def _run_main(argv):
         sys.argv = old
 
 
-def _write_cont_manifest(repo, last_cycle, rows=100):
+def _write_cont_manifest(repo, last_cycle, rows=100, errors=None):
     ds = repo / "external_data" / "staging" / V27.STAGING_MARKER / "dataset"
     ds.mkdir(parents=True, exist_ok=True)
     (ds / "manifest.json").write_text(json.dumps({
         "last_cycle": last_cycle, "cycles": 3,
+        "errors_last_cycle": errors or [],
         "cumulative_added": {"trades": rows, "oi": 10}}), encoding="utf-8")
+
+
+def test_collector_errors_surface_in_status_gaps_and_page(_repo):
+    """A silent per-cycle collector failure (e.g. websocket module missing)
+    once cost 40+ cycles of liquidations -- it must be LOUD everywhere now."""
+    small_source(_repo)
+    err = "liquidations:RuntimeError:websocket_client_unavailable:ModuleNotFoundError"
+    _write_cont_manifest(_repo, "2026-01-01T00:00:00+00:00", errors=[err])
+    st = A.readiness_status()
+    assert st["collector_errors_last_cycle"] == [err]
+    gr = A.gap_report()
+    assert any("COLLECTOR ERROR" in g for g in gr["gaps"])
+    A.write_status_page()
+    html = (_repo / "reports" / "research" / "v10_29" / "status.html").read_text(encoding="utf-8")
+    assert "COLLECTOR ERROR" in html and "websocket_client_unavailable" in html
+
+
+def test_bottleneck_reported(_repo):
+    small_source(_repo)
+    st = A.readiness_status(f"external_data/staging/{V27.STAGING_MARKER}/dataset")
+    # trades/liquidations have no observed rate -> they are the bottleneck
+    assert st["bottleneck"] in ("trades", "liquidations")
+    gr = A.gap_report(f"external_data/staging/{V27.STAGING_MARKER}/dataset")
+    assert any("bottleneck" in g for g in gr["gaps"])
+
+
+def test_status_page_never_contains_old_actionable_labels(_repo):
+    small_source(_repo)
+    scanner_dir = _repo / "reports" / "research" / "v10_28"
+    scanner_dir.mkdir(parents=True)
+    (scanner_dir / "scanner_state.json").write_text(json.dumps({
+        "written_at": "2026-07-03T00:00:00Z",
+        "verdict": "SHADOW_OBSERVATION_CANDIDATES_NOT_ACTIONABLE",
+        "n_shadow_candidates": 0, "opportunity_board": []}), encoding="utf-8")
+    A.write_status_page()
+    html = (_repo / "reports" / "research" / "v10_29" / "status.html").read_text(encoding="utf-8")
+    for banned in ("SHADOW_ENTRY_CANDIDATE", "BUY NOW", "EXECUTABLE SIGNAL",
+                   "buy now", "signal executable"):
+        assert banned not in html, banned
+    assert "edge_validated=false" in html and "not_actionable=true" in html
 
 
 def test_freshness_stale_warning_true_when_collector_is_newer(_repo):

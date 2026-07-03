@@ -379,12 +379,17 @@ def _freshness(target_dir: Path | None, target_selection: str) -> dict[str, Any]
                            "assembled_at": None, "latest_assembled_rows": None,
                            "stale_assembled_warning": False}
     cman = repo / "external_data" / "staging" / V27.STAGING_MARKER / V27.DATASET_SUBDIR / "manifest.json"
+    out["collector_errors_last_cycle"] = []
     if cman.is_file() and not cman.is_symlink():
         try:
             m = json.loads(cman.read_text(encoding="utf-8"))
             out["continuous_last_cycle"] = m.get("last_cycle")
             cum = m.get("cumulative_added") or {}
             out["continuous_dataset_rows"] = int(sum(int(v or 0) for v in cum.values()))
+            # surface collector failures LOUDLY: a silent per-cycle error (a
+            # missing ws-client dependency) once cost 40+ cycles of liquidations
+            out["collector_errors_last_cycle"] = [str(e) for e in
+                                                  (m.get("errors_last_cycle") or [])][:5]
         except Exception:
             pass
     if target_dir is not None and target_selection != "v10_27_continuous_dataset_fallback":
@@ -484,6 +489,17 @@ def readiness_status(sample_dir: str | None = None) -> dict[str, Any]:
                if d["required_for_ready"] and d["estimated_days_remaining"] is None]
     rep["estimated_days_to_ready"] = (max(ests) if ests and not unknown else None)
     rep["estimate_unknown_for"] = unknown
+    # current bottleneck: the required kind that is furthest from its gates
+    # (unknown-rate kinds first -- they cannot even be estimated yet)
+    if unknown:
+        rep["bottleneck"] = unknown[0]
+    elif ests:
+        rep["bottleneck"] = max(
+            (k for k, d in detail.items()
+             if d["required_for_ready"] and d["estimated_days_remaining"] is not None),
+            key=lambda k: detail[k]["estimated_days_remaining"])
+    else:
+        rep["bottleneck"] = None
     rep["estimate_note"] = ("rough forward extrapolation of the observed accumulation "
                             "rate; NOT a promise and NOT an edge")
     return rep
@@ -499,9 +515,15 @@ def gap_report(sample_dir: str | None = None) -> dict[str, Any]:
         rep["error"] = st["error"]
         return rep
     rep["stale_assembled_warning"] = bool(st.get("stale_assembled_warning"))
+    rep["bottleneck"] = st.get("bottleneck")
     if rep["stale_assembled_warning"]:
         rep["gaps"].append("WARNING: assembled sample is stale; dashboard may not "
                            "include latest collected rows (re-assemble with --apply)")
+    if st.get("collector_errors_last_cycle"):
+        rep["gaps"].append("COLLECTOR ERROR last cycle: "
+                           + "; ".join(st["collector_errors_last_cycle"]))
+    if rep["bottleneck"]:
+        rep["gaps"].append(f"current bottleneck: {rep['bottleneck']}")
     if st.get("readiness_verdict") == V24.C_NO_SAMPLE:
         rep["gaps"].append("no data at all: run the V10.27 collector with --apply first")
         rep["actions"].append("python -m app.research_lab continuous-collection-run-cycle-v1027 "
@@ -616,6 +638,10 @@ los datos se regeneran con cada ciclo del colector)</p>
   '<b>WARNING: assembled sample is stale; dashboard may not include latest collected rows.</b> '
   'El colector tiene datos mas nuevos que el ultimo sample ensamblado.</p>')
  if st.get('stale_assembled_warning') else ''}
+{('<p style="background:#3d1d1d;border:1px solid #c62828;border-radius:8px;padding:10px">'
+  '<b>COLLECTOR ERROR (ultimo ciclo):</b> ' + _esc('; '.join(st.get('collector_errors_last_cycle') or []))
+  + ' &mdash; revisa la ventana del colector.</p>')
+ if st.get('collector_errors_last_cycle') else ''}
 <p style="color:#8b949e">status_source={_esc(st.get('status_source'))} &middot;
 continuous_last_cycle={_esc(st.get('continuous_last_cycle'))} &middot;
 continuous_dataset_rows={_esc(st.get('continuous_dataset_rows'))} &middot;

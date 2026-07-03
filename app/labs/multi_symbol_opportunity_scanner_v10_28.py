@@ -183,7 +183,10 @@ def score_opportunity(symbol: str, bars: list[dict], cfg: dict) -> dict[str, Any
         size_hint = round((cfg["risk_per_trade_pct"] / 100.0) / stop_dist, 6) if stop_dist > 0 else None
     return {"symbol": symbol, "edge_score": int(score), "side": side,
             "entry": round(c, 8), "stop": stop, "take_profit": tp, "rr": rr,
-            "size_hint_units": size_hint, "atr_pct": round(atr_pct, 5),
+            # shadow_* is the canonical name (V10.29.3: avoid any real-sizing
+            # confusion); size_hint_units kept as a compatibility alias
+            "shadow_size_hint_units": size_hint, "size_hint_units": size_hint,
+            "atr_pct": round(atr_pct, 5),
             "ret5": round(ret5, 4), "ret20": round(ret20, 4),
             "confirmations": conf,
             "edge_validated": False, "note": "heuristic setup score, NOT a validated edge"}
@@ -259,7 +262,9 @@ def scan(bars_by_symbol: dict[str, list[dict]], config: dict | None = None) -> d
             "symbol": sym, "action": "SHADOW_OBSERVATION_CANDIDATE_NOT_ACTIONABLE",
             "side": s["side"],
             "edge_score": s["edge_score"], "entry": s["entry"], "stop": s["stop"],
-            "take_profit": s["take_profit"], "rr": s["rr"], "size_hint_units": s["size_hint_units"],
+            "take_profit": s["take_profit"], "rr": s["rr"],
+            "shadow_size_hint_units": s["shadow_size_hint_units"],
+            "size_hint_units": s["size_hint_units"],
             "risk_per_trade_pct": cfg["risk_per_trade_pct"], "confirmations": s["confirmations"],
             "regime": s.get("regime"), "reason": "top-ranked setup clearing all discipline gates",
             "executed": False, "would_send_real_order": False, "edge_validated": False,
@@ -375,7 +380,7 @@ def compact_scan(report: dict, scan_no: int = 0) -> dict[str, Any]:
                  "side": s["side"], "regime": s.get("regime")} for s in board[:5]],
         "decisions": [{"symbol": d["symbol"], "side": d["side"], "edge_score": d["edge_score"],
                        "entry": d["entry"], "stop": d["stop"], "take_profit": d["take_profit"],
-                       "rr": d["rr"], "size_hint_units": d["size_hint_units"]}
+                       "rr": d["rr"], "shadow_size_hint_units": d["shadow_size_hint_units"]}
                       for d in report.get("decisions", [])],
         "stayed_out": [{"symbol": s["symbol"], "reasons": s["reasons"]}
                        for s in report.get("stayed_out", [])],
@@ -415,7 +420,8 @@ def render_board(report: dict, scan_no: int, elapsed_s: float = 0.0) -> str:
              f"scored={len(board)}  discarded={len(report.get('discarded', []))}  "
              f"candidates={report.get('n_shadow_candidates', 0)}")
     if board:
-        L.append(" RANKING (best first)  [edge_validated=False | NOT_ACTIONABLE | no_orders=True]:")
+        L.append(" SHADOW OBSERVATION ONLY - NOT ACTIONABLE - NO EDGE VALIDATED")
+        L.append(" RANKING (best first)  [edge_validated=False | not_actionable=True | no_orders=True]:")
         L.append("   {:<10} {:>5} {:>6} {:>10} {:>12}".format("SYMBOL", "SCORE", "SIDE", "REGIME", "ATR%"))
         for s in board[:10]:
             L.append("   {:<10} {:>5} {:>6} {:>10} {:>11.2f}%".format(
@@ -430,8 +436,8 @@ def render_board(report: dict, scan_no: int, elapsed_s: float = 0.0) -> str:
                  "NO real/paper order, edge_validated=False):")
         for d in dec:
             L.append(f"   {d['symbol']} {d['side'].upper()} score={d['edge_score']} "
-                     f"entry={d['entry']} stop={d['stop']} tp={d['take_profit']} rr={d['rr']} "
-                     f"size~{d['size_hint_units']}u  [{'/'.join(d['confirmations'][:3])}]")
+                     f"ref={d['entry']} stop={d['stop']} tp={d['take_profit']} rr={d['rr']} "
+                     f"shadow_size~{d['shadow_size_hint_units']}u  [{'/'.join(d['confirmations'][:3])}]")
     else:
         L.append(" >>> DECISION: STAY OUT (no setup cleared the discipline gates)")
     L.append(f" verdict={report.get('verdict')}   edge_validated=False   would_send_real_order=False")
