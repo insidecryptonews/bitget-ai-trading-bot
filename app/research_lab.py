@@ -6380,10 +6380,20 @@ class ResearchLab:
                f"exchange: {rep['exchange']}  symbols: {','.join(rep['symbols'])}  mode: {rep['mode']}",
                f"max_runtime_seconds: {rep['max_runtime_seconds']}  max_events: {rep['max_events']}"]
         if rep["mode"] == "APPLY":
-            out.append(f"writes: {rep.get('writes')}  added: {rep.get('added')}  "
-                       f"cumulative_rows: {rep.get('cumulative_rows')}")
+            out.append(f"data_rows_written: {rep.get('data_rows_written')}  "
+                       f"cumulative_rows: {rep.get('cumulative_rows')}  "
+                       f"manifest_written: {rep.get('manifest_written')}  "
+                       f"checkpoint_written: {rep.get('checkpoint_written')}")
+            m = rep.get("metrics") or {}
+            out.append(f"metrics: frames_seen={m.get('frames_seen')} ack={m.get('ack_frames')} "
+                       f"pong={m.get('pong_frames')} control={m.get('control_frames')} "
+                       f"liq_frames={m.get('liquidation_frames')} "
+                       f"events_seen={m.get('liquidation_events_seen')} "
+                       f"events_written={m.get('liquidation_events_written')}")
             out.append(f"diagnostics: {rep.get('diagnostics')}")
             out.append(f"rejected: {rep.get('rejected')}  errors: {rep.get('errors')}")
+            if rep.get("note_no_events"):
+                out.append(f"note: {rep['note_no_events']}")
             if rep.get("manifest"):
                 out.append(f"manifest: {rep['manifest']}")
         else:

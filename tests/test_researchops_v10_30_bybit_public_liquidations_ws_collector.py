@@ -248,6 +248,87 @@ def test_alt_status_informative_but_never_ready(_isolated_repo):
     assert any("NOT used for READY" in g for g in gr["gaps"])
 
 
+# ---- V10.30.1: event counting (max_events = real liquidation events only) ----
+
+_ACK = json.dumps({"success": True, "ret_msg": "", "op": "subscribe", "conn_id": "x"})
+_PONG = json.dumps({"op": "pong", "ret_msg": "pong", "conn_id": "x"})
+
+
+def test_control_frames_do_not_consume_max_events(_isolated_repo):
+    # max_events=1: several acks/pongs BEFORE the first real event must not
+    # starve the budget -- the real liquidation still gets captured.
+    events = [_ACK, _PONG, _PONG, _ACK, _frame([_entry()])]
+    rep = _collect(events, max_events=1)
+    assert rep["added"] == 1
+    m = rep["metrics"]
+    assert m["frames_seen"] == 5 and m["ack_frames"] == 2 and m["pong_frames"] == 2
+    assert m["liquidation_frames"] == 1
+    assert m["liquidation_events_seen"] == 1 and m["liquidation_events_written"] == 1
+
+
+def test_multi_event_frame_counts_events_not_frames(_isolated_repo):
+    # ONE frame carrying 3 events with max_events=2 -> exactly 2 written
+    frame = _frame([_entry(T=1783123000001), _entry(T=1783123000002),
+                    _entry(T=1783123000003)])
+    rep = _collect([frame], max_events=2)
+    m = rep["metrics"]
+    assert m["liquidation_frames"] == 1
+    assert m["liquidation_events_seen"] >= 2
+    assert m["liquidation_events_written"] == 2 and rep["added"] == 2
+
+
+def test_manifest_reports_frame_metrics(_isolated_repo):
+    rep = _collect([_ACK, _PONG, _frame([_entry()])])
+    man = json.loads((Path(rep["dataset_dir"]) / "manifest.json").read_text(encoding="utf-8"))
+    mm = man["metrics_last_cycle"]
+    for k in ("frames_seen", "ack_frames", "pong_frames", "control_frames",
+              "liquidation_frames", "liquidation_events_seen",
+              "liquidation_events_written", "rejected_frames", "parse_errors"):
+        assert k in mm, k
+    assert mm["frames_seen"] == 3 and mm["liquidation_events_written"] == 1
+
+
+def test_zero_events_apply_write_semantics_not_misleading(_isolated_repo):
+    # acks/pongs only: manifest+checkpoint ARE written; the report must say so
+    # explicitly instead of a bare misleading writes=False
+    rep = _collect([_ACK, _PONG])
+    assert rep["data_rows_written"] == 0 and rep["rows_written"] is False
+    assert rep["writes_requested"] is True
+    assert rep["manifest_written"] is True and rep["checkpoint_written"] is True
+    assert (Path(rep["dataset_dir"]) / "manifest.json").is_file()
+    assert (Path(rep["dataset_dir"]) / "checkpoint.json").is_file()
+    assert not (Path(rep["dataset_dir"]) / "liquidations.csv").exists()
+
+
+def test_alive_stream_with_zero_events_is_note_not_error(_isolated_repo):
+    # control frames flowing => connection alive => NOT a fatal error
+    rep = _collect([_ACK, _PONG, _PONG])
+    assert rep["errors"] == []
+    assert rep["note_no_events"] == "no_liquidation_events_in_window(stream_alive)"
+
+
+def test_totally_silent_connected_socket_still_loud(_isolated_repo, monkeypatch):
+    def fake_source(url, topics, max_rt, max_frames, diagnostics):
+        diagnostics["connected"] = True
+        return iter([])
+
+    monkeypatch.setattr(B, "_default_event_source", fake_source)
+    rep = B.collect(["BTCUSDT"], apply=True, max_runtime_seconds=1, max_events=5)
+    assert any("connected_but_zero_frames" in e for e in rep["errors"])
+
+
+def test_internal_max_frames_guard_bounds_control_loops(_isolated_repo):
+    # pathological infinite pong stream: the internal frame guard stops it
+    def pong_forever():
+        while True:
+            yield _PONG
+
+    rep = B.collect(["BTCUSDT"], apply=True, max_runtime_seconds=9999,
+                    max_events=5, event_source=pong_forever())
+    assert rep["metrics"]["frames_seen"] == max(1000, 5 * 50)
+    assert rep["added"] == 0
+
+
 # ---- CLI wiring + isolation --------------------------------------------------
 
 def _run_main(argv):

@@ -226,7 +226,11 @@ def parse_bybit_all_liquidation(msg: Any, received_at: int | None = None
 # --------------------------------------------------------------------------
 
 def _default_event_source(url: str, topics: list[str], max_runtime_seconds: float,
-                          max_events: int, diagnostics: dict) -> Iterable[str]:
+                          max_frames: int, diagnostics: dict) -> Iterable[str]:
+    """V10.30.1: bounded by RUNTIME (primary safety limit) and by a conservative
+    MAX_FRAMES guard against pathological control-frame loops. It deliberately
+    does NOT know about max_events -- only the consumer can tell a real
+    liquidation event apart from an ack/pong, so the consumer enforces that."""
     assert_safe_ws(url, {})
     topics = assert_safe_topics(topics)
     try:
@@ -241,7 +245,7 @@ def _default_event_source(url: str, topics: list[str], max_runtime_seconds: floa
     consec_errors = 0
     try:
         ws.settimeout(2)
-        while time.time() - start < max_runtime_seconds and n < max_events:
+        while time.time() - start < max_runtime_seconds and n < max_frames:
             if time.time() - last_ping > _PING_EVERY_S:      # Bybit keepalive
                 try:
                     ws.send(json.dumps({"op": "ping"}))
@@ -273,6 +277,24 @@ def _default_event_source(url: str, topics: list[str], max_runtime_seconds: floa
             ws.close()
         except Exception:
             pass
+
+
+def _classify_frame(raw: Any) -> str:
+    """ack | pong | liquidation | control | invalid (json). Never raises."""
+    try:
+        obj = raw if isinstance(raw, dict) else json.loads(raw)
+    except Exception:
+        return "invalid"
+    if not isinstance(obj, dict):
+        return "invalid"
+    op = str(obj.get("op") or "")
+    if op == "pong" or str(obj.get("ret_msg") or "") == "pong":
+        return "pong"
+    if op == "subscribe" or "success" in obj:
+        return "ack"
+    if str(obj.get("topic") or "").startswith("allLiquidation."):
+        return "liquidation"
+    return "control"
 
 
 # --------------------------------------------------------------------------
@@ -340,31 +362,63 @@ def collect(symbols: list[str], apply: bool = False, max_runtime_seconds: float 
     rep["dataset_dir"] = dataset_dir
 
     diagnostics: dict[str, Any] = {"connected": False, "frames": 0}
+    # V10.30.1: max_events limits WRITTEN LIQUIDATION EVENTS only (documented
+    # design choice: the cap applies to liquidation_events_written -- deduped
+    # rows that will land in the CSV -- so acks/pongs/control frames can never
+    # starve the collection budget). Frames get their own conservative guard.
+    max_frames = max(1000, int(max_events) * 50)
+    metrics = {"frames_seen": 0, "ack_frames": 0, "pong_frames": 0,
+               "control_frames": 0, "liquidation_frames": 0, "invalid_frames": 0,
+               "liquidation_events_seen": 0, "liquidation_events_written": 0,
+               "rejected_frames": 0, "parse_errors": 0}
     rows_new: list[dict] = []
     seen = _load_seen(dataset_dir)
     start = time.time()
     try:
         src = event_source if event_source is not None else _default_event_source(
-            WS_URL, topics, max_runtime_seconds, max_events, diagnostics)
+            WS_URL, topics, max_runtime_seconds, max_frames, diagnostics)
         for raw in src:
             if (time.time() - start) > max_runtime_seconds:
                 break
+            if metrics["frames_seen"] >= max_frames:
+                break
+            metrics["frames_seen"] += 1
+            kind = _classify_frame(raw)
+            if kind == "invalid":
+                metrics["invalid_frames"] += 1
+                metrics["parse_errors"] += 1
+                continue
+            if kind in ("ack", "pong", "control"):
+                metrics[f"{kind}_frames"] += 1        # never consumes max_events
+                continue
+            metrics["liquidation_frames"] += 1
             rows, rejects = parse_bybit_all_liquidation(raw, received_at=_now_ms())
             rep["rejected"] += len(rejects)
+            if rejects:
+                metrics["rejected_frames"] += 1
+            metrics["liquidation_events_seen"] += len(rows)
             for r in rows:
                 if r["raw_event_id"] in seen:
                     continue
                 seen.add(r["raw_event_id"])
                 rows_new.append(r)
-                if len(rows_new) >= max_events:
+                metrics["liquidation_events_written"] += 1
+                if metrics["liquidation_events_written"] >= max_events:
                     break
-            if len(rows_new) >= max_events:
+            if metrics["liquidation_events_written"] >= max_events:
                 break
     except Exception as e:
         rep["errors"].append(f"liquidations:{type(e).__name__}:{str(e)[:80]}")
     rep["diagnostics"] = diagnostics
-    if diagnostics.get("connected") and diagnostics.get("frames", 0) == 0 and not rep["errors"]:
+    rep["metrics"] = metrics
+    if diagnostics.get("connected") and metrics["frames_seen"] == 0 \
+            and diagnostics.get("frames", 0) == 0 and not rep["errors"]:
+        # truly silent socket: loud (Incident-2 lesson)
         rep["errors"].append("connected_but_zero_frames:verify_stream_or_quiet_market")
+    elif metrics["frames_seen"] > 0 and metrics["liquidation_events_seen"] == 0:
+        # connection demonstrably alive (acks/pongs flowing), just no
+        # liquidations in the window -- informative note, NOT an error
+        rep["note_no_events"] = "no_liquidation_events_in_window(stream_alive)"
 
     # append rows (never write an empty file for a 0-row cycle)
     added = 0
@@ -381,7 +435,12 @@ def collect(symbols: list[str], apply: bool = False, max_runtime_seconds: float 
         keep = list(seen)[-_SEEN_CAP:]
         (Path(dataset_dir) / "_seen.json").write_text(json.dumps(keep), encoding="utf-8")
     rep["added"] = added
-    rep["writes"] = added > 0
+    # V10.30.1 explicit write semantics: manifest/checkpoint are ALWAYS written
+    # on a safe apply (state persistence), independent of data rows.
+    rep["writes_requested"] = True
+    rep["data_rows_written"] = added
+    rep["rows_written"] = added > 0
+    rep["writes"] = added > 0          # legacy alias for rows_written
 
     # cumulative manifest + checkpoint (state saved every cycle)
     man_path = Path(dataset_dir) / "manifest.json"
@@ -396,6 +455,7 @@ def collect(symbols: list[str], apply: bool = False, max_runtime_seconds: float 
                 "last_cycle": rep["cycle_time"], "cycles": int(prev.get("cycles", 0)) + 1,
                 "symbols": syms, "cumulative_rows": cumulative,
                 "last_event_ts": last_event_ts,
+                "metrics_last_cycle": metrics,
                 "errors_last_cycle": rep["errors"],
                 "side_mapping_verified": SIDE_MAPPING_VERIFIED,
                 "cross_exchange_liquidations_used_for_ready": CROSS_EXCHANGE_USED_FOR_READY,
@@ -410,6 +470,8 @@ def collect(symbols: list[str], apply: bool = False, max_runtime_seconds: float 
         "seen_count": len(seen), "last_event_ts": last_event_ts}, default=str),
         encoding="utf-8")
     rep["manifest"] = str(man_path).replace("\\", "/")
+    rep["manifest_written"] = True
+    rep["checkpoint_written"] = True
     rep["cumulative_rows"] = cumulative
     return rep
 
