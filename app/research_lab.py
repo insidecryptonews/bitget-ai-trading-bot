@@ -6317,6 +6317,14 @@ class ResearchLab:
         if rep.get("collector_errors_last_cycle"):
             out.append("COLLECTOR ERROR (last cycle): "
                        + "; ".join(rep["collector_errors_last_cycle"]))
+        alt = rep.get("bybit_alt") or {}
+        if alt:
+            out.append(f"bybit_alt: rows={alt.get('bybit_liquidations_rows')} "
+                       f"last_event={alt.get('bybit_liquidations_last_event')} "
+                       f"available={alt.get('cross_exchange_liquidations_available')} "
+                       f"used_for_ready={alt.get('cross_exchange_liquidations_used_for_ready')}")
+            if alt.get("bybit_liquidations_errors"):
+                out.append("bybit_alt_errors: " + "; ".join(alt["bybit_liquidations_errors"]))
         if rep.get("error"):
             out.append(f"error: {rep['error']}")
         out += ["research_only: true", "shadow_only: true", "paper_ready: false",
@@ -6339,6 +6347,55 @@ class ResearchLab:
                 "live_ready: false", "can_send_real_orders: false",
                 "final_recommendation: NO LIVE",
                 "FREE MICROSTRUCTURE GAP REPORT V10.29 END"]
+        return "\n".join(out)
+
+    def bybit_liquidations_ws_plan_v1030_cli(self) -> str:
+        from .labs import bybit_public_liquidations_ws_collector_v10_30 as B
+        p = B.plan()
+        out = ["BYBIT LIQUIDATIONS WS PLAN V10.30 START",
+               "objective: " + p["objective"], "why: " + p["why"],
+               f"ws_url: {p['ws_url']}  topic_format: {p['topic_format']}",
+               "side_semantics: " + p["side_semantics"],
+               "price_semantics: " + p["price_semantics"],
+               "dataset_dir: " + p["dataset_dir"], "default_mode: " + p["default_mode"],
+               "never: " + ",".join(p["never"]),
+               f"side_mapping_verified: {p['side_mapping_verified']}",
+               f"cross_exchange_liquidations_used_for_ready: "
+               f"{p['cross_exchange_liquidations_used_for_ready']}",
+               "research_only: true", "shadow_only: true", "paper_ready: false",
+               "live_ready: false", "can_send_real_orders: false",
+               "final_recommendation: NO LIVE",
+               "BYBIT LIQUIDATIONS WS PLAN V10.30 END"]
+        return "\n".join(out)
+
+    def bybit_liquidations_ws_collect_v1030_cli(self, *, symbols="", apply=False,
+                                                max_runtime_seconds=5.0, max_events=5,
+                                                output_dir="") -> str:
+        from .labs import bybit_public_liquidations_ws_collector_v10_30 as B
+        syms = self._v107_csv_arg(symbols) or ["BTCUSDT"]
+        rep = B.collect(syms, apply=bool(apply),
+                        max_runtime_seconds=float(max_runtime_seconds),
+                        max_events=int(max_events), output_dir=(output_dir or None))
+        out = ["BYBIT LIQUIDATIONS WS COLLECT V10.30 START",
+               f"exchange: {rep['exchange']}  symbols: {','.join(rep['symbols'])}  mode: {rep['mode']}",
+               f"max_runtime_seconds: {rep['max_runtime_seconds']}  max_events: {rep['max_events']}"]
+        if rep["mode"] == "APPLY":
+            out.append(f"writes: {rep.get('writes')}  added: {rep.get('added')}  "
+                       f"cumulative_rows: {rep.get('cumulative_rows')}")
+            out.append(f"diagnostics: {rep.get('diagnostics')}")
+            out.append(f"rejected: {rep.get('rejected')}  errors: {rep.get('errors')}")
+            if rep.get("manifest"):
+                out.append(f"manifest: {rep['manifest']}")
+        else:
+            out.append(f"writes: {rep['writes']} ({rep.get('note')})")
+        out += ["note: SEPARATE cross-exchange source (OPTION A); never merged into "
+                "the Binance sample; never produces READY",
+                f"side_mapping_verified: {rep['side_mapping_verified']}",
+                "uses_api_keys: false", "subscribes_private_channels: false",
+                "research_only: true", "shadow_only: true", "paper_ready: false",
+                "live_ready: false", "can_send_real_orders: false",
+                "final_recommendation: NO LIVE",
+                "BYBIT LIQUIDATIONS WS COLLECT V10.30 END"]
         return "\n".join(out)
 
     def free_microstructure_status_page_v1029_cli(self) -> str:
@@ -7649,6 +7706,9 @@ def build_argument_parser() -> argparse.ArgumentParser:
             "free-microstructure-readiness-status-v1029",
             "free-microstructure-gap-report-v1029",
             "free-microstructure-status-page-v1029",
+            "bybit-liquidations-ws-plan-v1030",
+            "bybit-liquidations-ws-dry-run-v1030",
+            "bybit-liquidations-ws-collect-v1030",
             "ohlcv-replay-loader-smoke-test",
             "ohlcv-replay-loader-audit",
             "duplicate-module-audit-smoke-test",
@@ -7865,6 +7925,9 @@ PUBLIC_RESEARCH_ONLY_COMMANDS = frozenset({
     "free-microstructure-readiness-status-v1029",
     "free-microstructure-gap-report-v1029",
     "free-microstructure-status-page-v1029",
+    "bybit-liquidations-ws-plan-v1030",
+    "bybit-liquidations-ws-dry-run-v1030",
+    "bybit-liquidations-ws-collect-v1030",
 })
 
 
@@ -7948,6 +8011,17 @@ def _dispatch_public_research_only(args) -> None:
         print(lab.free_microstructure_gap_report_v1029_cli(sample_dir=args.sample_dir))
     elif args.command == "free-microstructure-status-page-v1029":
         print(lab.free_microstructure_status_page_v1029_cli())
+    elif args.command == "bybit-liquidations-ws-plan-v1030":
+        print(lab.bybit_liquidations_ws_plan_v1030_cli())
+    elif args.command == "bybit-liquidations-ws-dry-run-v1030":
+        print(lab.bybit_liquidations_ws_collect_v1030_cli(
+            symbols=args.symbols, apply=False,
+            max_runtime_seconds=args.max_runtime_seconds, max_events=args.max_events))
+    elif args.command == "bybit-liquidations-ws-collect-v1030":
+        print(lab.bybit_liquidations_ws_collect_v1030_cli(
+            symbols=args.symbols, apply=args.apply,
+            max_runtime_seconds=args.max_runtime_seconds, max_events=args.max_events,
+            output_dir=args.output_dir))
 
 
 def main() -> None:

@@ -424,6 +424,14 @@ def _pick_target(sample_dir: str | None) -> tuple[str | None, str]:
 
 def readiness_status(sample_dir: str | None = None) -> dict[str, Any]:
     rep: dict[str, Any] = {"tool_version": TOOL_VERSION, "checked_at": _now_iso(), **_safety()}
+    # OPTION A (V10.30): the Bybit alternative source is shown for information
+    # only -- it NEVER feeds the verdict (which stays V10.24-only). Computed
+    # up-front so even a NO_SAMPLE status reports the alternative honestly.
+    try:
+        from . import bybit_public_liquidations_ws_collector_v10_30 as _B
+        rep["bybit_alt"] = _B.alt_liquidations_status()
+    except Exception:
+        rep["bybit_alt"] = None
     target, how = _pick_target(sample_dir)
     rep["target_selection"] = how
     if target is None:
@@ -524,6 +532,26 @@ def gap_report(sample_dir: str | None = None) -> dict[str, Any]:
                            + "; ".join(st["collector_errors_last_cycle"]))
     if rep["bottleneck"]:
         rep["gaps"].append(f"current bottleneck: {rep['bottleneck']}")
+    # OPTION A (V10.30) alternative-source reporting -- BEFORE the NO_SAMPLE
+    # early return so it is always visible, and NEVER touches the verdict.
+    alt = st.get("bybit_alt") or {}
+    rep["cross_exchange_liquidations_available"] = bool(
+        alt.get("cross_exchange_liquidations_available"))
+    rep["cross_exchange_liquidations_used_for_ready"] = False
+    liq_missing = (st.get("per_kind") or {}).get("liquidations", {}).get("rows", 0) == 0
+    if liq_missing:
+        rep["gaps"].append("binance futures liquidations: unavailable from this "
+                           "network (ws handshake ok, zero frames)")
+        if alt.get("bybit_liquidations_rows", 0) > 0:
+            rep["gaps"].append(f"alternative source available: bybit_linear "
+                               f"({alt['bybit_liquidations_rows']} rows collected; "
+                               "NOT used for READY -- cross-exchange observations only)")
+        else:
+            rep["actions"].append("collect the Bybit alternative: "
+                                  "bybit-liquidations-ws-collect-v1030 --symbols BTCUSDT "
+                                  "--apply --max-runtime-seconds 300 --max-events 5000")
+    if alt.get("warning"):
+        rep["gaps"].append("note: " + alt["warning"])
     if st.get("readiness_verdict") == V24.C_NO_SAMPLE:
         rep["gaps"].append("no data at all: run the V10.27 collector with --apply first")
         rep["actions"].append("python -m app.research_lab continuous-collection-run-cycle-v1027 "
@@ -654,6 +682,16 @@ stale_assembled_warning={_esc(str(bool(st.get('stale_assembled_warning'))).lower
 <tr style="text-align:left"><th>tipo</th><th>filas</th><th>cobertura</th><th>ETA dias (aprox)</th></tr>
 {''.join(rows_html)}</table>
 <h3>Que falta exactamente</h3><ul>{gaps_html}</ul>
+{(lambda a: (
+  '<h3>Liquidaciones: fuente alternativa Bybit (V10.30, OPCION A)</h3>'
+  '<p style="background:#1b2a3a;border:1px solid #58a6ff;border-radius:8px;padding:10px">'
+  'Binance futures ws no entrega frames desde esta red (verificado con sondas). '
+  f'Alternativa: <b>{_esc(a.get("alternative_liquidations_source"))}</b> &middot; '
+  f'filas={_esc(a.get("bybit_liquidations_rows"))} &middot; '
+  f'ultimo_evento={_esc(a.get("bybit_liquidations_last_event"))} &middot; '
+  f'cross_exchange_liquidations_available={_esc(str(bool(a.get("cross_exchange_liquidations_available"))).lower())} &middot; '
+  '<b>cross_exchange_liquidations_used_for_ready=false</b><br>'
+  + _esc(a.get("warning", "")) + '</p>') if a else '')(st.get('bybit_alt'))}
 <h2>2) Scanner de oportunidades (V10.28, SHADOW &mdash; NOT_ACTIONABLE)</h2>
 <p>Ultimo scan: {_esc(scanner.get('written_at', 'sin datos aun'))} &mdash; veredicto:
 <b>{_esc(scanner.get('verdict', '-'))}</b> (candidatos observados: {_esc(scanner.get('n_shadow_candidates', 0))})</p>
