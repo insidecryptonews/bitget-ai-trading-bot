@@ -73,14 +73,21 @@ def readiness_audit(evidence: dict[str, bool] | None = None) -> dict[str, Any]:
     live_ready = not unmet
     rep = {"tool_version": TOOL_VERSION, "checked_at": _now_iso(),
            "gates": gates, "unmet_gates": unmet,
-           "LIVE_READY": live_ready,
+           # V10.36 semantics fix (Codex): NEVER an ambiguous LIVE_READY=True.
+           # checklist_complete = the synthetic checklist verdict only;
+           # actual_live_ready = the real system state, hardcoded False.
+           "checklist_complete": live_ready,
+           "simulated_live_readiness": live_ready,
+           "actual_live_ready": False,
+           "ACTUAL_LIVE_READY": False,
+           "note": ("human promotion required, real live remains blocked -- a "
+                    "complete checklist NEVER enables anything"),
            "promotion_ladder": list(PROMOTION_LADDER),
            "promotion_rule": ("each step requires ALL gates for that stage plus "
                               "explicit human approval; NEVER automatic with real money"),
            **_safety()}
-    # fail-closed belt-and-braces: even a fully-met audit reports the CHECKLIST
-    # verdict only -- the module safety flags can never flip; promotion with
-    # real money is a human decision outside code
+    # fail-closed belt-and-braces: the module safety flags can never flip;
+    # promotion with real money is a human decision outside code
     rep["live_ready"] = False
     rep["can_send_real_orders"] = False
     return rep
@@ -101,7 +108,7 @@ def preflight_dry_run() -> dict[str, Any]:
         checks.append({"check": name, "ok": bool(ok), "detail": str(detail)[:120]})
 
     aud = readiness_audit()
-    add("hard_gates_all_met", len(aud["unmet_gates"]) == 0,
+    add("hard_gates_all_met", aud["checklist_complete"],
         f"{len(aud['unmet_gates'])} unmet: {aud['unmet_gates'][:3]}")
     add("can_send_real_orders_is_false", aud["can_send_real_orders"] is False,
         "module safety flags")

@@ -175,6 +175,54 @@ def test_rate_limited_visible_and_non_corrupting(_repo, monkeypatch):
     assert man["cycles"] == 1
 
 
+def test_rate_limit_backoff_events_recorded(_repo, monkeypatch):
+    sleeps = []
+    monkeypatch.setattr(B32.time, "sleep", lambda s: sleeps.append(s))
+
+    def tx429(url, headers):
+        B32.assert_safe_request(url, headers)
+        raise RuntimeError("HTTP Error 429: Too Many Requests")
+
+    rep = B32.run_cycle("BTCUSDT", apply=True, transport=tx429,
+                        poll_spacing_seconds=0, liq_source_dir=str(_liq_src(_repo)))
+    ev = rep["rate_limit_events"]
+    assert ev and all(e["status"] == "RATE_LIMITED" for e in ev)
+    assert all("backoff_seconds" in e and "attempt" in e and "endpoint" in e for e in ev)
+    assert max(e["backoff_seconds"] for e in ev) <= 30.0        # conservative cap
+    assert max(e["attempt"] for e in ev) <= 3                   # bounded, no hammering
+    man = json.loads((Path(rep["dataset_dir"]) / "manifest.json").read_text(encoding="utf-8"))
+    assert man["rate_limit_events_last_cycle"]                  # persisted in manifest
+
+
+def test_source_exchange_stamped_and_legacy_migrated(_repo):
+    rep = _run(_repo)
+    ds = Path(rep["dataset_dir"])
+    with open(ds / "trades.csv", newline="", encoding="utf-8") as f:
+        rows = list(csv.DictReader(f))
+    assert all(r["source_exchange"] == "bybit_linear" for r in rows)
+    # simulate LEGACY file without the column -> next cycle migrates in place
+    (ds / "open_interest.csv").write_text(
+        "timestamp,symbol,open_interest\n1700000000000,BTCUSDT,999\n", encoding="utf-8")
+    rep2 = _run(_repo)
+    assert "open_interest.csv" in rep2.get("migrated_source_exchange_column", [])
+    with open(ds / "open_interest.csv", newline="", encoding="utf-8") as f:
+        rows2 = list(csv.DictReader(f))
+    assert all(r.get("source_exchange") == "bybit_linear" for r in rows2)
+
+
+def test_source_mismatch_invalidates_readiness(_repo):
+    rep = _run(_repo)
+    ds = Path(rep["dataset_dir"])
+    # poison one row with a foreign exchange stamp
+    with open(ds / "funding.csv", "a", newline="", encoding="utf-8") as f:
+        f.write("1800000000000,BTCUSDT,0.0001,binance_usdm\n")
+    st = B32.status()
+    assert st["source_consistency"]["source_consistency_ok"] is False
+    assert st["source_consistency"]["mismatched"].get("funding") == 1
+    assert st["readiness_verdict"] == V24.C_INVALID             # fail-closed
+    assert st["can_research_microstructure"] is False
+
+
 def test_bybit_retcode_error_visible(_repo):
     def tx_err(url, headers):
         B32.assert_safe_request(url, headers)
@@ -256,7 +304,8 @@ def test_dense_bybit_sample_genuinely_reaches_ready(_repo):
     seen = B32._load_seen(str(ds), "orderbook")
     ob_rows = [{"timestamp": T0 + i * (days * DAY // 320), "symbol": "BTCUSDT",
                 "bid_price_1": "100", "bid_size_1": "2", "ask_price_1": "100.1",
-                "ask_size_1": "1", "depth_level": "L1_TICKER"} for i in range(320)]
+                "ask_size_1": "1", "depth_level": "L1_TICKER",
+                "source_exchange": "bybit_linear"} for i in range(320)]
     B32._append_rows(str(ds), "orderbook", ob_rows, seen)
     st = B32.status()
     assert st["readiness_verdict"] == V24.C_READY, st.get("why_not_ready")

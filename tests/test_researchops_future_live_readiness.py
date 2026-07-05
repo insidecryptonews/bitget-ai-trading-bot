@@ -18,7 +18,8 @@ from app.labs import future_live_readiness_v10_33 as FL
 
 def test_live_readiness_false_by_default():
     rep = FL.readiness_audit()
-    assert rep["LIVE_READY"] is False and len(rep["unmet_gates"]) == len(FL.HARD_GATES)
+    assert rep["checklist_complete"] is False and len(rep["unmet_gates"]) == len(FL.HARD_GATES)
+    assert rep["actual_live_ready"] is False and rep["ACTUAL_LIVE_READY"] is False
     assert rep["live_ready"] is False and rep["can_send_real_orders"] is False
     assert rep["edge_validated"] is False
     assert rep["final_recommendation"] == "NO LIVE"
@@ -29,7 +30,7 @@ def test_live_readiness_false_when_any_single_gate_missing():
         ev = {name: True for name, _ in FL.HARD_GATES}
         ev[missing] = False
         rep = FL.readiness_audit(ev)
-        assert rep["LIVE_READY"] is False, missing
+        assert rep["checklist_complete"] is False, missing
         assert missing in rep["unmet_gates"]
 
 
@@ -37,7 +38,10 @@ def test_even_full_evidence_never_flips_safety_flags():
     # the CHECKLIST can be satisfied, but the module safety flags cannot flip:
     # promotion with real money is a human decision outside code
     rep = FL.readiness_audit({name: True for name, _ in FL.HARD_GATES})
-    assert rep["LIVE_READY"] is True                # checklist verdict only
+    assert rep["checklist_complete"] is True        # checklist verdict only
+    assert rep["actual_live_ready"] is False        # real state, never flips
+    assert rep["ACTUAL_LIVE_READY"] is False
+    assert "human promotion required" in rep["note"]
     assert rep["live_ready"] is False               # hard safety, never flips
     assert rep["can_send_real_orders"] is False
     assert rep["final_recommendation"] == "NO LIVE"
@@ -140,7 +144,9 @@ def test_cli_allowlisted_isolated_and_no_live(monkeypatch, capsys):
                         lambda *a, **k: (_ for _ in ()).throw(AssertionError("no config")))
     _run_main(["future-live-readiness-audit"])
     out = capsys.readouterr().out
-    assert "LIVE_READY: False" in out and "NO LIVE" in out
+    assert "checklist_complete: False" in out and "ACTUAL_LIVE_READY: false" in out
+    assert "LIVE_READY: True" not in out            # no ambiguous label ever
+    assert "NO LIVE" in out
     _run_main(["future-live-preflight-dry-run"])
     out = capsys.readouterr().out
     assert "preflight_would_allow_live: False" in out and "NO LIVE" in out

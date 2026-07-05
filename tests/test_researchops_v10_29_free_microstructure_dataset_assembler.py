@@ -369,14 +369,23 @@ def test_no_frames_diagnostic_clears_when_conditions_absent(_repo):
 
 def test_local_loop_scripts_are_safe_and_separated():
     repo = Path(research_lab.__file__).resolve().parents[1]
-    bybit = (repo / "scripts" / "collect_bybit_liquidations_forever.ps1").read_text(encoding="utf-8")
+    # V10.36: renamed to reflect that it collects the FULL microstructure now
+    bybit = (repo / "scripts" / "collect_bybit_microstructure_forever.ps1").read_text(encoding="utf-8")
     assert "bybit-liquidations-ws-collect-v1030" in bybit
+    assert "bybit-microstructure-run-cycle-v1032" in bybit
     assert "collect_forever.ps1" not in bybit.replace("collect_bybit", "")  # independent loop
     assert "BitgetBotBybitLiqV1030" in bybit                                # own mutex
     assert "NUNCA produce READY" in bybit and "Ctrl+C" in bybit
     for tok in ("place_order", "set_leverage", "private", "api_key", ".env",
                 "LIVE_TRADING", "PaperTrader", "Start Menu", "Startup"):
         assert tok not in bybit, tok                                        # no autostart, no danger
+    # legacy wrapper: warns and delegates, contains no loop logic of its own
+    wrapper = (repo / "scripts" / "collect_bybit_liquidations_forever.ps1").read_text(encoding="utf-8")
+    assert "LEGACY WRAPPER" in wrapper
+    assert "collect_bybit_microstructure_forever.ps1" in wrapper
+    assert "mutex" not in wrapper.lower()          # no duplicate loop machinery
+    for tok in ("place_order", "api_key", ".env", "LIVE_TRADING", "Startup"):
+        assert tok not in wrapper, tok
     scanner = (repo / "scripts" / "run_scanner.bat").read_text(encoding="utf-8")
     assert ".venv\\Scripts\\python.exe" in scanner                          # venv preferred
     assert '"%PY%" -m app.research_lab opportunity-scanner-run-v1028' in scanner

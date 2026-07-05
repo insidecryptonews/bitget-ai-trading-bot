@@ -59,11 +59,12 @@ _FILES = {"trades": "trades.csv", "orderbook": "orderbook_l2.csv",
           "oi": "open_interest.csv", "funding": "funding.csv",
           "liquidations": "liquidations.csv"}
 _HEADERS = {
-    "trades": ["timestamp", "symbol", "price", "size", "aggressor_side", "trade_id"],
+    "trades": ["timestamp", "symbol", "price", "size", "aggressor_side", "trade_id",
+               "source_exchange"],
     "orderbook": ["timestamp", "symbol", "bid_price_1", "bid_size_1",
-                  "ask_price_1", "ask_size_1", "depth_level"],
-    "oi": ["timestamp", "symbol", "open_interest"],
-    "funding": ["timestamp", "symbol", "funding_rate"],
+                  "ask_price_1", "ask_size_1", "depth_level", "source_exchange"],
+    "oi": ["timestamp", "symbol", "open_interest", "source_exchange"],
+    "funding": ["timestamp", "symbol", "funding_rate", "source_exchange"],
     "liquidations": list(V26.CANON_HEADER),
 }
 
@@ -192,7 +193,8 @@ def trades_to_canonical(payload: Any, symbol: str) -> list[dict]:
                 continue
             out.append({"timestamp": int(float(ts)), "symbol": symbol, "price": p,
                         "size": sz, "aggressor_side": side,
-                        "trade_id": str(r.get("execId") or "")})
+                        "trade_id": str(r.get("execId") or ""),
+                        "source_exchange": SOURCE_EXCHANGE})
         except (TypeError, ValueError):
             continue
     return out
@@ -211,7 +213,8 @@ def ticker_to_canonical(payload: Any, symbol: str) -> list[dict]:
             out.append({"timestamp": int(float(ts)), "symbol": symbol,
                         "bid_price_1": bp, "bid_size_1": bs,
                         "ask_price_1": ap, "ask_size_1": asz,
-                        "depth_level": "L1_TICKER"})
+                        "depth_level": "L1_TICKER",
+                        "source_exchange": SOURCE_EXCHANGE})
         except (TypeError, ValueError):
             continue
     return out
@@ -224,7 +227,8 @@ def oi_to_canonical(payload: Any, symbol: str) -> list[dict]:
             ts, oi = r.get("timestamp"), r.get("openInterest")
             if ts is None or oi is None:
                 continue
-            out.append({"timestamp": int(float(ts)), "symbol": symbol, "open_interest": oi})
+            out.append({"timestamp": int(float(ts)), "symbol": symbol,
+                        "open_interest": oi, "source_exchange": SOURCE_EXCHANGE})
         except (TypeError, ValueError):
             continue
     return out
@@ -239,7 +243,8 @@ def funding_to_canonical(payload: Any, symbol: str) -> list[dict]:
             ts, fr = r.get("fundingRateTimestamp"), r.get("fundingRate")
             if ts is None or fr is None:
                 continue
-            out.append({"timestamp": int(float(ts)), "symbol": symbol, "funding_rate": fr})
+            out.append({"timestamp": int(float(ts)), "symbol": symbol,
+                        "funding_rate": fr, "source_exchange": SOURCE_EXCHANGE})
         except (TypeError, ValueError):
             continue
     return out
@@ -288,6 +293,60 @@ def _load_seen(dataset_dir: str, kind: str) -> set[str]:
 def _save_seen(dataset_dir: str, kind: str, seen: set[str]) -> None:
     Path(dataset_dir, f"_seen_{kind}.json").write_text(
         json.dumps(list(seen)[-_SEEN_CAP:]), encoding="utf-8")
+
+
+def _migrate_add_source_exchange(dataset_dir: str) -> list[str]:
+    """V10.36: legacy CSVs written before the source_exchange column existed
+    are migrated IN PLACE (atomic rewrite, column stamped bybit_linear). Loud,
+    one-shot, never hides: returns the list of migrated files."""
+    migrated = []
+    for kind in ("trades", "orderbook", "oi", "funding"):
+        path = Path(dataset_dir) / _FILES[kind]
+        if not path.is_file() or path.is_symlink():
+            continue
+        with open(path, "r", newline="", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            fields = list(reader.fieldnames or [])
+            if "source_exchange" in fields:
+                continue
+            rows = list(reader)
+        tmp = Path(dataset_dir) / (_FILES[kind] + ".tmp")
+        with open(tmp, "w", newline="", encoding="utf-8") as f:
+            w = csv.DictWriter(f, fieldnames=_HEADERS[kind])
+            w.writeheader()
+            for r in rows:
+                r["source_exchange"] = SOURCE_EXCHANGE
+                w.writerow({c: r.get(c, "") for c in _HEADERS[kind]})
+        os.replace(tmp, path)
+        migrated.append(_FILES[kind])
+    return migrated
+
+
+def check_source_consistency(dataset_dir: str) -> dict[str, Any]:
+    """Every row in every CSV must be bybit_linear. Any mismatch or missing
+    stamp is reported; a mismatch INVALIDATES the sample (fail-closed)."""
+    out: dict[str, Any] = {"source_consistency_ok": True, "mismatched": {},
+                           "missing_stamp": {}}
+    for kind in KINDS:
+        path = Path(dataset_dir) / _FILES[kind]
+        if not path.is_file() or path.is_symlink():
+            continue
+        col = "exchange" if kind == "liquidations" else "source_exchange"
+        bad = missing = 0
+        with open(path, "r", newline="", encoding="utf-8") as f:
+            for r in csv.DictReader(f):
+                v = str(r.get(col) or "")
+                if not v:
+                    missing += 1
+                elif v != SOURCE_EXCHANGE:
+                    bad += 1
+        if bad:
+            out["mismatched"][kind] = bad
+            out["source_consistency_ok"] = False
+        if missing:
+            out["missing_stamp"][kind] = missing
+            out["source_consistency_ok"] = False
+    return out
 
 
 def _append_rows(dataset_dir: str, kind: str, rows: list[dict], seen: set[str]) -> int:
@@ -367,32 +426,55 @@ def run_cycle(symbol: str = "BTCUSDT", apply: bool = False,
     dataset_dir = os.path.join(staging, DATASET_SUBDIR).replace("\\", "/")
     os.makedirs(dataset_dir, exist_ok=True)
     rep["dataset_dir"] = dataset_dir
+    migrated = _migrate_add_source_exchange(dataset_dir)
+    if migrated:
+        rep["migrated_source_exchange_column"] = migrated
     tr = transport or default_transport
     hdr = {"User-Agent": "researchops/1.0", "Accept": "application/json"}
     urls = _planned_urls(symbol)
     converters = {"trades": trades_to_canonical, "orderbook": ticker_to_canonical,
                   "oi": oi_to_canonical, "funding": funding_to_canonical}
 
+    rep["rate_limit_events"] = []
     for kind in ("trades", "orderbook", "oi", "funding"):
         seen = _load_seen(dataset_dir, kind)
         total = 0
         repeats = max(1, int(orderbook_polls)) if kind == "orderbook" else 1
+        backoff_attempt = 0
         for poll in range(repeats):
-            try:
-                payload = json.loads(tr(urls[kind], hdr))
-                if str(payload.get("retCode")) not in ("0", "None"):
-                    rep["errors"].append(f"{kind}:BYBIT_RETCODE:{payload.get('retCode')}:"
-                                         f"{str(payload.get('retMsg'))[:40]}")
+            while True:                              # bounded retry (max 2 backoffs)
+                try:
+                    payload = json.loads(tr(urls[kind], hdr))
+                    if str(payload.get("retCode")) not in ("0", "None"):
+                        rep["errors"].append(f"{kind}:BYBIT_RETCODE:{payload.get('retCode')}:"
+                                             f"{str(payload.get('retMsg'))[:40]}")
+                    else:
+                        total += _append_rows(dataset_dir, kind,
+                                              converters[kind](payload, symbol), seen)
                     break
-                total += _append_rows(dataset_dir, kind, converters[kind](payload, symbol), seen)
-            except Exception as e:
-                msg = str(e)
-                if "429" in msg or "rate" in msg.lower():
-                    # visible, non-corrupting, conservative backoff
-                    rep["errors"].append(f"{kind}:RATE_LIMITED:{msg[:50]}")
-                    time.sleep(5.0)
+                except Exception as e:
+                    msg = str(e)
+                    if "429" in msg or "rate" in msg.lower():
+                        # V10.36 backoff: exponential with conservative cap +
+                        # deterministic mini-jitter; LOUD in report + manifest;
+                        # never more than 2 retries per kind (no hammering)
+                        backoff_attempt += 1
+                        backoff_s = min(30.0, 5.0 * (2 ** (backoff_attempt - 1))
+                                        + (backoff_attempt % 2))
+                        rep["rate_limit_events"].append(
+                            {"endpoint": kind, "status": "RATE_LIMITED",
+                             "attempt": backoff_attempt,
+                             "backoff_seconds": backoff_s, "detail": msg[:50]})
+                        rep["errors"].append(f"{kind}:RATE_LIMITED:attempt{backoff_attempt}:"
+                                             f"backoff{backoff_s:.0f}s")
+                        if backoff_attempt > 2:
+                            break                    # give up this kind this cycle
+                        time.sleep(backoff_s)
+                        continue                     # one more try after backoff
+                    rep["errors"].append(f"{kind}:{type(e).__name__}:{msg[:60]}")
                     break
-                rep["errors"].append(f"{kind}:{type(e).__name__}:{msg[:60]}")
+            if backoff_attempt > 2:
+                break
             if repeats > 1 and poll < repeats - 1 and poll_spacing_seconds > 0:
                 time.sleep(float(poll_spacing_seconds))
         _save_seen(dataset_dir, kind, seen)
@@ -435,6 +517,7 @@ def run_cycle(symbol: str = "BTCUSDT", apply: bool = False,
                 "last_cycle": rep["cycle_time"], "cycles": int(prev.get("cycles", 0)) + 1,
                 "symbol": symbol, "this_cycle_added": rep["added"],
                 "cumulative_added": cumulative, "errors_last_cycle": rep["errors"],
+                "rate_limit_events_last_cycle": rep.get("rate_limit_events", []),
                 "single_exchange_sample": True,
                 "note": "bybit_linear full sample; validate with bybit-microstructure-status-v1032",
                 "research_only": True, "shadow_only": True, "live_ready": False,
@@ -475,9 +558,16 @@ def status(output_dir: str | None = None) -> dict[str, Any]:
         rep["readiness_verdict"] = V24.C_NO_SAMPLE
         rep["note"] = "no bybit dataset yet -- run bybit-microstructure-run-cycle-v1032 --apply"
         return rep
+    consistency = check_source_consistency(dataset_dir)
+    rep["source_consistency"] = consistency
     vr = V24.validate_sample(dataset_dir)
     cls = vr.get("classification", {})
     rep["readiness_verdict"] = cls.get("verdict")
+    if not consistency["source_consistency_ok"]:
+        # fail-closed: mixed or unstamped sources can never be READY
+        rep["readiness_verdict"] = V24.C_INVALID
+        rep["why_not_ready"] = ["SOURCE_MISMATCH_OR_MISSING_STAMP"]
+        rep["can_research_microstructure"] = False
     rep["active_gaps"] = cls.get("active_gaps")
     rep["valid_types"] = cls.get("valid_types")
     rep["density_ok"] = cls.get("density_ok")

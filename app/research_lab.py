@@ -6476,11 +6476,14 @@ class ResearchLab:
         from .labs import future_live_readiness_v10_33 as FL
         rep = FL.readiness_audit()
         out = ["FUTURE LIVE READINESS AUDIT V10.33 START",
-               f"LIVE_READY: {rep['LIVE_READY']}",
+               f"checklist_complete: {rep['checklist_complete']}",
+               "ACTUAL_LIVE_READY: false",
+               "CAN_SEND_REAL_ORDERS: false",
                f"unmet_gates ({len(rep['unmet_gates'])}):"]
         for g in rep["gates"]:
             out.append(f"  [{'x' if g['met'] else ' '}] {g['gate']}: {g['requirement']}")
-        out += ["promotion_ladder: " + " -> ".join(rep["promotion_ladder"]),
+        out += ["note: " + rep["note"],
+                "promotion_ladder: " + " -> ".join(rep["promotion_ladder"]),
                 "promotion_rule: " + rep["promotion_rule"],
                 "live_ready: false", "can_send_real_orders: false",
                 "edge_validated: false", "final_recommendation: NO LIVE",
@@ -6498,6 +6501,50 @@ class ResearchLab:
                 "live_ready: false", "can_send_real_orders: false",
                 "final_recommendation: NO LIVE",
                 "FUTURE LIVE PREFLIGHT DRY-RUN V10.33 END"]
+        return "\n".join(out)
+
+    def bybit_backfill_v1036_cli(self, *, command, symbols="", date="", days=30,
+                                 apply=False, output_dir="") -> str:
+        from .labs import bybit_backfill_importer_v10_36 as BF
+        syms = self._v107_csv_arg(symbols)
+        sym = syms[0] if syms else "BTCUSDT"
+        out = [f"BYBIT BACKFILL {command.upper()} V10.36 START"]
+        if command == "plan":
+            p = BF.plan()
+            out += ["objective: " + p["objective"], "staging: " + p["staging"]]
+            out += [f"  {k}: {v}" for k, v in p["classification"].items()]
+            out.append("never: " + ",".join(p["never"]))
+        elif command == "probe":
+            rep = BF.probe_available_days(sym)
+            out += [f"symbol: {sym}", f"available_days: {rep.get('available_days')}",
+                    f"first_day: {rep.get('first_day')}  last_day: {rep.get('last_day')}",
+                    f"error: {rep.get('error')}" if rep.get("error") else "downloads: NONE (listing only)"]
+        elif command in ("download-day", "import-day"):
+            rep = BF.import_day(sym, date, apply=bool(apply),
+                                output_dir=(output_dir or None))
+            out += [f"symbol: {sym}  date: {date}  mode: {rep['mode']}",
+                    f"imported_rows: {rep.get('imported_rows')}  bad_rows: {rep.get('bad_rows')}",
+                    f"non_monotonic_input_pairs: {rep.get('non_monotonic_input_pairs')} (output sorted ascending)",
+                    f"errors: {rep.get('errors')}"]
+            if rep.get("skipped_existing"):
+                out.append("note: already imported (idempotent skip)")
+            if rep.get("manifest"):
+                out.append(f"manifest: {rep['manifest']}")
+            out.append("note: download+import combined (safe gzip streaming, ONE day only)")
+        elif command == "coverage":
+            import time as _t
+            end = int(_t.time() * 1000)
+            start = end - int(days) * 86_400_000
+            for kind in ("funding", "oi"):
+                rep = BF.coverage_probe(kind, sym, start, end)
+                out.append(f"{kind}: verdict={rep.get('coverage_verdict')} rows={rep.get('rows')} "
+                           f"first={rep.get('first_available')} last={rep.get('last_available')} "
+                           f"requests={rep.get('requests_used')}")
+        out += ["backfill_completes_readiness: false",
+                "research_only: true", "shadow_only: true", "paper_ready: false",
+                "live_ready: false", "can_send_real_orders: false",
+                "final_recommendation: NO LIVE",
+                f"BYBIT BACKFILL {command.upper()} V10.36 END"]
         return "\n".join(out)
 
     def free_microstructure_status_page_v1029_cli(self) -> str:
@@ -7816,6 +7863,11 @@ def build_argument_parser() -> argparse.ArgumentParser:
             "bybit-microstructure-status-v1032",
             "future-live-readiness-audit",
             "future-live-preflight-dry-run",
+            "bybit-backfill-plan-v1036",
+            "bybit-backfill-probe-v1036",
+            "bybit-backfill-download-day-v1036",
+            "bybit-backfill-import-day-v1036",
+            "bybit-backfill-coverage-v1036",
             "ohlcv-replay-loader-smoke-test",
             "ohlcv-replay-loader-audit",
             "duplicate-module-audit-smoke-test",
@@ -8000,6 +8052,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--interval-seconds", type=float, default=60.0, help="V10.28 seconds between scan cycles in the live shadow scanner.")
     parser.add_argument("--max-scans", type=int, default=1, help="V10.28 number of scan cycles (<=0 = run until Ctrl+C or q/quit/exit/stop).")
     parser.add_argument("--request-budget", type=int, default=6, help="V10.28 bounded GET requests per symbol per scan (public klines).")
+    parser.add_argument("--date", default="", help="V10.36 backfill day (YYYY-MM-DD).")
     parser.add_argument("--run-label", default="", help="V10.29 fixed assembled-run dir name (e.g. 'latest'), safely overwritten each assemble; empty = unique timestamped run id.")
     return parser
 
@@ -8040,6 +8093,11 @@ PUBLIC_RESEARCH_ONLY_COMMANDS = frozenset({
     "bybit-microstructure-status-v1032",
     "future-live-readiness-audit",
     "future-live-preflight-dry-run",
+    "bybit-backfill-plan-v1036",
+    "bybit-backfill-probe-v1036",
+    "bybit-backfill-download-day-v1036",
+    "bybit-backfill-import-day-v1036",
+    "bybit-backfill-coverage-v1036",
 })
 
 
@@ -8145,6 +8203,11 @@ def _dispatch_public_research_only(args) -> None:
         print(lab.future_live_readiness_audit_cli())
     elif args.command == "future-live-preflight-dry-run":
         print(lab.future_live_preflight_dry_run_cli())
+    elif args.command.startswith("bybit-backfill-"):
+        cmd = args.command.replace("bybit-backfill-", "").replace("-v1036", "")
+        print(lab.bybit_backfill_v1036_cli(
+            command=cmd, symbols=args.symbols, date=args.date, days=args.days,
+            apply=args.apply, output_dir=args.output_dir))
 
 
 def main() -> None:
