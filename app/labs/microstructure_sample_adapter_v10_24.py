@@ -429,7 +429,14 @@ def validate_trades(rows: list[dict[str, str]]) -> dict[str, Any]:
     cov["ts_collision_count"] = ts_collisions
     cov["exact_duplicate_rows"] = exact_dups
     cov["id_duplicate_rows"] = id_dups
-    severe = max(exact_dups, id_dups)
+    # V10.24.6: when EVERY row carries a unique-id column, the id is the truth
+    # source -- real bursts legitimately repeat (ts,price,size,side) with
+    # distinct ids (live Bybit data reproduced this), so exact-tuple dups only
+    # count when no per-row id exists. Duplicated ids always stay corruption.
+    if trade_ids and len(trade_ids) == len(rows):
+        severe = id_dups
+    else:
+        severe = max(exact_dups, id_dups)
     if severe > _duplicate_limit(cov):
         # true corruption: make the flag fire even when the duplicated rows
         # carry distinct timestamps (id dups without ts collisions)

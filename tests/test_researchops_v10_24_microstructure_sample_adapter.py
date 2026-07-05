@@ -406,6 +406,22 @@ def test_same_ms_distinct_trades_are_valid_market_data(tmp_path):
     assert any("same_ms_collision_warning" in w for w in tr["warnings"])
 
 
+def test_exact_tuple_dups_with_unique_ids_are_valid(tmp_path):
+    # V10.24.6: real bursts repeat (ts,price,size,side) with DISTINCT ids
+    # (reproduced on live Bybit recent-trade). With a unique id on every row,
+    # the id is the truth source -> not corruption.
+    rows = [[B + (i // 3) * 60_000, "BTCUSDT", 50000, 1, "buy", f"id{i}"]
+            for i in range(60)]                     # each ts+price+size+side x3
+    _write(tmp_path / "trades.csv",
+           ["timestamp", "symbol", "price", "size", "aggressor_side", "trade_id"], rows)
+    rep = M.validate_sample(str(tmp_path))
+    tr = rep["by_type"]["trades"]
+    assert tr["coverage"]["exact_duplicate_rows"] > 0     # tuples DO repeat
+    assert tr["coverage"]["id_duplicate_rows"] == 0       # but ids are unique
+    assert tr["valid"] is True
+    assert "trades:duplicate_timestamps" not in rep["classification"]["critical_errors"]
+
+
 def test_duplicate_trade_ids_still_invalidate(tmp_path):
     # V10.24.5: when an id column exists it is used for corruption detection --
     # 10 repeated agg_trade_ids in 60 rows (distinct ts) -> INVALID.

@@ -63,6 +63,17 @@ try {
             "$(Get-Date -Format s) ERROR $($_.Exception.Message)" | Add-Content $log
             Start-Sleep -Seconds 15
         }
+        Write-Host ""
+        Write-Host ">>> V10.32: sample completo bybit_linear (trades/OB/OI/funding + sync liq)..." -ForegroundColor Green
+        try {
+            & $py -m app.research_lab bybit-microstructure-run-cycle-v1032 `
+                --symbols BTCUSDT --apply |
+                Select-String -Pattern "added_this_cycle|cumulative_added|errors" |
+                ForEach-Object { Write-Host ("  " + $_.Line) }
+        } catch {
+            Write-Host "ERROR v1032: $($_.Exception.Message)" -ForegroundColor Red
+            "$(Get-Date -Format s) ERROR v1032 $($_.Exception.Message)" | Add-Content $log
+        }
         try {
             $page = & $py -m app.research_lab free-microstructure-status-page-v1029 |
                 Select-String -Pattern "DASHBOARD:"

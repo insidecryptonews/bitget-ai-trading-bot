@@ -6412,6 +6412,94 @@ class ResearchLab:
                 "BYBIT LIQUIDATIONS WS COLLECT V10.30 END"]
         return "\n".join(out)
 
+    def bybit_microstructure_plan_v1032_cli(self) -> str:
+        from .labs import bybit_public_microstructure_collector_v10_32 as B32
+        p = B32.plan()
+        out = ["BYBIT MICROSTRUCTURE PLAN V10.32 START",
+               "objective: " + p["objective"], "why: " + p["why"],
+               "kinds: " + ",".join(p["kinds"]),
+               "liquidations_source: " + p["liquidations_source"],
+               "dataset_dir: " + p["dataset_dir"], "default_mode: " + p["default_mode"],
+               "honesty: " + p["honesty"], "never: " + ",".join(p["never"]),
+               "research_only: true", "shadow_only: true", "paper_ready: false",
+               "live_ready: false", "can_send_real_orders: false",
+               "final_recommendation: NO LIVE",
+               "BYBIT MICROSTRUCTURE PLAN V10.32 END"]
+        return "\n".join(out)
+
+    def bybit_microstructure_run_cycle_v1032_cli(self, *, symbols="", apply=False,
+                                                 output_dir="") -> str:
+        from .labs import bybit_public_microstructure_collector_v10_32 as B32
+        syms = self._v107_csv_arg(symbols)
+        sym = syms[0] if syms else "BTCUSDT"
+        rep = B32.run_cycle(sym, apply=bool(apply), output_dir=(output_dir or None))
+        out = ["BYBIT MICROSTRUCTURE RUN-CYCLE V10.32 START",
+               f"symbol: {rep['symbol']}  mode: {rep['mode']}"]
+        if len(syms) > 1:
+            out.append(f"note: one symbol per dataset -- using {sym}")
+        if rep["mode"] == "APPLY":
+            out.append(f"added_this_cycle: {rep.get('added')}")
+            out.append(f"cumulative_added: {rep.get('cumulative_added')}")
+            out.append(f"errors: {rep.get('errors')}")
+            if rep.get("manifest"):
+                out.append(f"manifest: {rep['manifest']}")
+        else:
+            out.append(f"writes: {rep['writes']} (no --apply -> no network, no writes)")
+        out += ["note: single-exchange bybit_linear sample; liquidations synced from "
+                "V10.30 (same exchange, order-side convention)",
+                "research_only: true", "shadow_only: true", "paper_ready: false",
+                "live_ready: false", "can_send_real_orders: false",
+                "final_recommendation: NO LIVE",
+                "BYBIT MICROSTRUCTURE RUN-CYCLE V10.32 END"]
+        return "\n".join(out)
+
+    def bybit_microstructure_status_v1032_cli(self, *, output_dir="") -> str:
+        from .labs import bybit_public_microstructure_collector_v10_32 as B32
+        rep = B32.status(output_dir=(output_dir or None))
+        out = ["BYBIT MICROSTRUCTURE STATUS V10.32 START",
+               f"dataset_dir: {rep.get('dataset_dir')}",
+               f"cycles: {rep.get('cycles')}  last_cycle: {rep.get('last_cycle')}",
+               f"cumulative_added: {rep.get('cumulative_added')}",
+               f"errors_last_cycle: {rep.get('errors_last_cycle')}",
+               f"readiness_verdict: {rep.get('readiness_verdict')}",
+               f"valid_types: {rep.get('valid_types')}  density_ok: {rep.get('density_ok')}",
+               f"active_gaps: {rep.get('active_gaps')}",
+               f"can_research_microstructure: {rep.get('can_research_microstructure')}",
+               "honesty: " + str(rep.get("honesty")),
+               "research_only: true", "shadow_only: true", "paper_ready: false",
+               "live_ready: false", "can_send_real_orders: false",
+               "final_recommendation: NO LIVE",
+               "BYBIT MICROSTRUCTURE STATUS V10.32 END"]
+        return "\n".join(out)
+
+    def future_live_readiness_audit_cli(self) -> str:
+        from .labs import future_live_readiness_v10_33 as FL
+        rep = FL.readiness_audit()
+        out = ["FUTURE LIVE READINESS AUDIT V10.33 START",
+               f"LIVE_READY: {rep['LIVE_READY']}",
+               f"unmet_gates ({len(rep['unmet_gates'])}):"]
+        for g in rep["gates"]:
+            out.append(f"  [{'x' if g['met'] else ' '}] {g['gate']}: {g['requirement']}")
+        out += ["promotion_ladder: " + " -> ".join(rep["promotion_ladder"]),
+                "promotion_rule: " + rep["promotion_rule"],
+                "live_ready: false", "can_send_real_orders: false",
+                "edge_validated: false", "final_recommendation: NO LIVE",
+                "FUTURE LIVE READINESS AUDIT V10.33 END"]
+        return "\n".join(out)
+
+    def future_live_preflight_dry_run_cli(self) -> str:
+        from .labs import future_live_readiness_v10_33 as FL
+        rep = FL.preflight_dry_run()
+        out = ["FUTURE LIVE PREFLIGHT DRY-RUN V10.33 START"]
+        for c in rep["checks"]:
+            out.append(f"  [{'OK' if c['ok'] else '!!'}] {c['check']}: {c['detail']}")
+        out += [f"preflight_would_allow_live: {rep['preflight_would_allow_live']}",
+                "reason: " + rep["reason"],
+                "live_ready: false", "can_send_real_orders: false",
+                "final_recommendation: NO LIVE",
+                "FUTURE LIVE PREFLIGHT DRY-RUN V10.33 END"]
+        return "\n".join(out)
+
     def free_microstructure_status_page_v1029_cli(self) -> str:
         from .labs import free_microstructure_dataset_assembler_v10_29 as A
         uri = A.write_status_page()
@@ -7723,6 +7811,11 @@ def build_argument_parser() -> argparse.ArgumentParser:
             "bybit-liquidations-ws-plan-v1030",
             "bybit-liquidations-ws-dry-run-v1030",
             "bybit-liquidations-ws-collect-v1030",
+            "bybit-microstructure-plan-v1032",
+            "bybit-microstructure-run-cycle-v1032",
+            "bybit-microstructure-status-v1032",
+            "future-live-readiness-audit",
+            "future-live-preflight-dry-run",
             "ohlcv-replay-loader-smoke-test",
             "ohlcv-replay-loader-audit",
             "duplicate-module-audit-smoke-test",
@@ -7942,6 +8035,11 @@ PUBLIC_RESEARCH_ONLY_COMMANDS = frozenset({
     "bybit-liquidations-ws-plan-v1030",
     "bybit-liquidations-ws-dry-run-v1030",
     "bybit-liquidations-ws-collect-v1030",
+    "bybit-microstructure-plan-v1032",
+    "bybit-microstructure-run-cycle-v1032",
+    "bybit-microstructure-status-v1032",
+    "future-live-readiness-audit",
+    "future-live-preflight-dry-run",
 })
 
 
@@ -8036,6 +8134,17 @@ def _dispatch_public_research_only(args) -> None:
             symbols=args.symbols, apply=args.apply,
             max_runtime_seconds=args.max_runtime_seconds, max_events=args.max_events,
             output_dir=args.output_dir))
+    elif args.command == "bybit-microstructure-plan-v1032":
+        print(lab.bybit_microstructure_plan_v1032_cli())
+    elif args.command == "bybit-microstructure-run-cycle-v1032":
+        print(lab.bybit_microstructure_run_cycle_v1032_cli(
+            symbols=args.symbols, apply=args.apply, output_dir=args.output_dir))
+    elif args.command == "bybit-microstructure-status-v1032":
+        print(lab.bybit_microstructure_status_v1032_cli(output_dir=args.output_dir))
+    elif args.command == "future-live-readiness-audit":
+        print(lab.future_live_readiness_audit_cli())
+    elif args.command == "future-live-preflight-dry-run":
+        print(lab.future_live_preflight_dry_run_cli())
 
 
 def main() -> None:
