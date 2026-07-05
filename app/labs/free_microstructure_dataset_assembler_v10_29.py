@@ -380,6 +380,7 @@ def _freshness(target_dir: Path | None, target_selection: str) -> dict[str, Any]
                            "stale_assembled_warning": False}
     cman = repo / "external_data" / "staging" / V27.STAGING_MARKER / V27.DATASET_SUBDIR / "manifest.json"
     out["collector_errors_last_cycle"] = []
+    out["binance_ws_no_frames_suspected"] = False
     if cman.is_file() and not cman.is_symlink():
         try:
             m = json.loads(cman.read_text(encoding="utf-8"))
@@ -390,6 +391,17 @@ def _freshness(target_dir: Path | None, target_selection: str) -> dict[str, Any]
             # missing ws-client dependency) once cost 40+ cycles of liquidations
             out["collector_errors_last_cycle"] = [str(e) for e in
                                                   (m.get("errors_last_cycle") or [])][:5]
+            # V10.31 diagnostic: many error-free cycles, REST kinds growing,
+            # yet ZERO ws liquidations => the Binance derivatives stream is
+            # almost certainly not delivering frames from this network (live
+            # probes 2026-07-04 confirmed handshake-ok/zero-frames). This is a
+            # diagnosis, NOT an excuse: it never changes the verdict and never
+            # hides NEEDS_LIQUIDATIONS.
+            rest_rows = sum(int(cum.get(k) or 0) for k in ("trades", "oi", "funding", "orderbook"))
+            liq_errored = any("liquidations" in e for e in out["collector_errors_last_cycle"])
+            if (int(cum.get("liquidations") or 0) == 0 and int(m.get("cycles") or 0) >= 20
+                    and rest_rows > 0 and not liq_errored):
+                out["binance_ws_no_frames_suspected"] = True
         except Exception:
             pass
     if target_dir is not None and target_selection != "v10_27_continuous_dataset_fallback":
@@ -538,7 +550,13 @@ def gap_report(sample_dir: str | None = None) -> dict[str, Any]:
     rep["cross_exchange_liquidations_available"] = bool(
         alt.get("cross_exchange_liquidations_available"))
     rep["cross_exchange_liquidations_used_for_ready"] = False
+    rep["binance_ws_no_frames_suspected"] = bool(st.get("binance_ws_no_frames_suspected"))
     liq_missing = (st.get("per_kind") or {}).get("liquidations", {}).get("rows", 0) == 0
+    if rep["binance_ws_no_frames_suspected"]:
+        rep["gaps"].append("BINANCE_DERIVATIVES_WS_NO_FRAMES_SUSPECTED: many error-free "
+                           "cycles with zero ws liquidations while REST kinds grow -- "
+                           "readiness cannot complete because Binance native liquidations "
+                           "are unavailable from this network (NOT a quiet market)")
     if liq_missing:
         rep["gaps"].append("binance futures liquidations: unavailable from this "
                            "network (ws handshake ok, zero frames)")
@@ -676,8 +694,15 @@ continuous_dataset_rows={_esc(st.get('continuous_dataset_rows'))} &middot;
 assembled_at={_esc(st.get('assembled_at'))} &middot;
 latest_assembled_rows={_esc(st.get('latest_assembled_rows'))} &middot;
 stale_assembled_warning={_esc(str(bool(st.get('stale_assembled_warning'))).lower())}</p>
+{('<p style="background:#4a3200;border:1px solid #f9a825;border-radius:8px;padding:10px">'
+  '<b>BINANCE_DERIVATIVES_WS_NO_FRAMES_SUSPECTED</b>: muchos ciclos sin errores y 0 '
+  'liquidaciones ws mientras el resto crece &mdash; el readiness Binance-nativo no puede '
+  'completarse porque las liquidaciones nativas no llegan desde esta red (NO es "mercado '
+  'tranquilo"). La alternativa Bybit es una observacion cross-exchange, nunca READY.</p>')
+ if st.get('binance_ws_no_frames_suspected') else ''}
 <h2>1) Datos de microestructura (camino a MICROSTRUCTURE_RESEARCH_READY)</h2>
-<p>Veredicto del validador V10.24.3: <b style="font-size:1.2em">{_esc(st.get('readiness_verdict'))}</b></p>
+<p>Veredicto del validador V10.24.3: <b style="font-size:1.2em">{_esc(st.get('readiness_verdict'))}</b>
+&middot; can_research_microstructure={_esc(str(bool(st.get('can_research_microstructure'))).lower())}</p>
 <table cellpadding="8" style="border-collapse:collapse;background:#161b22;border-radius:8px">
 <tr style="text-align:left"><th>tipo</th><th>filas</th><th>cobertura</th><th>ETA dias (aprox)</th></tr>
 {''.join(rows_html)}</table>
@@ -686,6 +711,9 @@ stale_assembled_warning={_esc(str(bool(st.get('stale_assembled_warning'))).lower
   '<h3>Liquidaciones: fuente alternativa Bybit (V10.30, OPCION A)</h3>'
   '<p style="background:#1b2a3a;border:1px solid #58a6ff;border-radius:8px;padding:10px">'
   'Binance futures ws no entrega frames desde esta red (verificado con sondas). '
+  f'<b>Binance native liquidations: '
+  f'{_esc((st.get("per_kind") or {}).get("liquidations", {}).get("rows", 0))}</b> &middot; '
+  f'Bybit alternative liquidations: <b>{_esc(a.get("bybit_liquidations_rows"))}</b><br>'
   f'Alternativa: <b>{_esc(a.get("alternative_liquidations_source"))}</b> &middot; '
   f'filas={_esc(a.get("bybit_liquidations_rows"))} &middot; '
   f'ultimo_evento={_esc(a.get("bybit_liquidations_last_event"))} &middot; '

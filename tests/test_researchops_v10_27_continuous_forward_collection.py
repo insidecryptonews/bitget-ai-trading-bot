@@ -147,6 +147,24 @@ def test_trades_kind_accumulates_and_dedups():
     assert len(lines) == 1 + 3               # header + 3 rows, no duplicates
 
 
+def test_checkpoint_written_and_updated_in_staging(_isolated_repo):
+    # V10.31: explicit atomic checkpoint next to the manifest
+    r1 = _run()
+    ck_path = Path(r1["dataset_dir"]) / "checkpoint.json"
+    assert r1["checkpoint"].endswith("checkpoint.json") and ck_path.is_file()
+    ck = json.loads(ck_path.read_text(encoding="utf-8"))
+    assert ck["cycles"] == 1 and ck["exchange"] == "binance_usdm"
+    assert ck["symbols"] == ["BTCUSDT"] and ck["errors_last_cycle"] == []
+    assert ck["rows_by_type"]["liquidations"] == 4
+    assert ck["final_recommendation"] == "NO LIVE" and ck["can_send_real_orders"] is False
+    r2 = _run(liq=[])
+    ck2 = json.loads(ck_path.read_text(encoding="utf-8"))
+    assert ck2["cycles"] == 2 and ck2["last_cycle"] == r2["cycle_time"]
+    # containment: checkpoint lives INSIDE the hardened staging dataset dir
+    assert C.STAGING_MARKER in str(ck_path)
+    assert not (ck_path.parent / "checkpoint.json.tmp").exists()   # atomic replace
+
+
 def test_status_runs_v1024_and_not_ready_when_sparse():
     r1 = _run()
     try:

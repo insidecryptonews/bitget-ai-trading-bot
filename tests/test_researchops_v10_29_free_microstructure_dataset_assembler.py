@@ -322,13 +322,66 @@ def _run_main(argv):
         sys.argv = old
 
 
-def _write_cont_manifest(repo, last_cycle, rows=100, errors=None):
+def _write_cont_manifest(repo, last_cycle, rows=100, errors=None, cycles=3, liq=0):
     ds = repo / "external_data" / "staging" / V27.STAGING_MARKER / "dataset"
     ds.mkdir(parents=True, exist_ok=True)
     (ds / "manifest.json").write_text(json.dumps({
-        "last_cycle": last_cycle, "cycles": 3,
+        "last_cycle": last_cycle, "cycles": cycles,
         "errors_last_cycle": errors or [],
-        "cumulative_added": {"trades": rows, "oi": 10}}), encoding="utf-8")
+        "cumulative_added": {"trades": rows, "oi": 10, "liquidations": liq}}),
+        encoding="utf-8")
+
+
+def test_binance_ws_no_frames_suspected_diagnostic(_repo):
+    """V10.31: 0 ws liquidations across many error-free cycles while REST kinds
+    grow = the Binance derivatives stream is silent from this network. Loud
+    diagnosis everywhere, but the verdict NEVER changes and READY stays out."""
+    small_source(_repo)
+    _write_cont_manifest(_repo, "2026-01-01T00:00:00+00:00", cycles=50, liq=0)
+    st = A.readiness_status(f"external_data/staging/{V27.STAGING_MARKER}/dataset")
+    assert st["binance_ws_no_frames_suspected"] is True
+    assert st["readiness_verdict"] != "MICROSTRUCTURE_RESEARCH_READY"   # diagnosis != READY
+    gr = A.gap_report(f"external_data/staging/{V27.STAGING_MARKER}/dataset")
+    assert gr["binance_ws_no_frames_suspected"] is True
+    assert any("BINANCE_DERIVATIVES_WS_NO_FRAMES_SUSPECTED" in g for g in gr["gaps"])
+    assert any("NEEDS_LIQUIDATIONS" in str(st.get("active_gaps"))
+               for _ in [0])                                            # gap NOT hidden
+    A.write_status_page()
+    html = (_repo / "reports" / "research" / "v10_29" / "status.html").read_text(encoding="utf-8")
+    assert "BINANCE_DERIVATIVES_WS_NO_FRAMES_SUSPECTED" in html
+    assert "can_research_microstructure=false" in html
+    assert "Binance native liquidations" in html and "Bybit alternative liquidations" in html
+
+
+def test_no_frames_diagnostic_clears_when_conditions_absent(_repo):
+    small_source(_repo)
+    # (a) liquidations present -> no suspicion
+    _write_cont_manifest(_repo, "2026-01-01T00:00:00+00:00", cycles=50, liq=7)
+    assert A.readiness_status()["binance_ws_no_frames_suspected"] is False
+    # (b) few cycles -> too early to suspect
+    _write_cont_manifest(_repo, "2026-01-01T00:00:00+00:00", cycles=5, liq=0)
+    assert A.readiness_status()["binance_ws_no_frames_suspected"] is False
+    # (c) liquidations errored last cycle -> that error is the story, not silence
+    _write_cont_manifest(_repo, "2026-01-01T00:00:00+00:00", cycles=50, liq=0,
+                         errors=["liquidations:RuntimeError:x"])
+    assert A.readiness_status()["binance_ws_no_frames_suspected"] is False
+
+
+def test_local_loop_scripts_are_safe_and_separated():
+    repo = Path(research_lab.__file__).resolve().parents[1]
+    bybit = (repo / "scripts" / "collect_bybit_liquidations_forever.ps1").read_text(encoding="utf-8")
+    assert "bybit-liquidations-ws-collect-v1030" in bybit
+    assert "collect_forever.ps1" not in bybit.replace("collect_bybit", "")  # independent loop
+    assert "BitgetBotBybitLiqV1030" in bybit                                # own mutex
+    assert "NUNCA produce READY" in bybit and "Ctrl+C" in bybit
+    for tok in ("place_order", "set_leverage", "private", "api_key", ".env",
+                "LIVE_TRADING", "PaperTrader", "Start Menu", "Startup"):
+        assert tok not in bybit, tok                                        # no autostart, no danger
+    scanner = (repo / "scripts" / "run_scanner.bat").read_text(encoding="utf-8")
+    assert ".venv\\Scripts\\python.exe" in scanner                          # venv preferred
+    assert '"%PY%" -m app.research_lab opportunity-scanner-run-v1028' in scanner
+    for tok in ("place_order", "set_leverage", "private_get", "api_key", "LIVE_TRADING"):
+        assert tok not in scanner, tok
 
 
 def test_collector_errors_surface_in_status_gaps_and_page(_repo):

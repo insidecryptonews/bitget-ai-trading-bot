@@ -6317,6 +6317,10 @@ class ResearchLab:
         if rep.get("collector_errors_last_cycle"):
             out.append("COLLECTOR ERROR (last cycle): "
                        + "; ".join(rep["collector_errors_last_cycle"]))
+        if rep.get("binance_ws_no_frames_suspected"):
+            out.append("BINANCE_DERIVATIVES_WS_NO_FRAMES_SUSPECTED: readiness cannot "
+                       "complete because Binance native liquidations are unavailable "
+                       "from this network (not a quiet market)")
         alt = rep.get("bybit_alt") or {}
         if alt:
             out.append(f"bybit_alt: rows={alt.get('bybit_liquidations_rows')} "

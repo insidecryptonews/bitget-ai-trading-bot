@@ -5,6 +5,9 @@ REM Scans a universe of liquid USDT-perps, ranks candidate setups, and either
 REM proposes SHADOW (simulated) entries or STAYS OUT. Makes NO real/paper trades.
 title BitgetBot Shadow Scanner (RESEARCH ONLY - NO LIVE)
 cd /d "%~dp0.."
+REM V10.31: prefer the repo venv python (same as the collector), PATH fallback
+set "PY=%~dp0..\.venv\Scripts\python.exe"
+if not exist "%PY%" set "PY=python"
 echo ============================================================
 echo  BitgetBot V10.28 Multi-Symbol Shadow Opportunity Scanner
 echo  RESEARCH ONLY. Public data. NO keys, NO orders, NO live.
@@ -14,7 +17,7 @@ echo  DASHBOARD (pegalo en el navegador; se refresca solo):
 echo  file:///C:/Users/Adrian/Documents/New%%20project/bitget-ai-trading-bot/reports/research/v10_29/status.html
 echo ============================================================
 echo.
-python -m app.research_lab opportunity-scanner-run-v1028 ^
+"%PY%" -m app.research_lab opportunity-scanner-run-v1028 ^
   --universe BTCUSDT,ETHUSDT,SOLUSDT,BNBUSDT,XRPUSDT,ADAUSDT,AVAXUSDT,LINKUSDT,DOGEUSDT,LTCUSDT,BCHUSDT,DOTUSDT,NEARUSDT,APTUSDT,ARBUSDT,OPUSDT,SUIUSDT,INJUSDT,ATOMUSDT ^
   --timeframe 15m --days 7 --interval-seconds 60 --max-scans 0 --request-budget 2
 echo.

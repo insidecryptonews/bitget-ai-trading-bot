@@ -310,7 +310,30 @@ def run_cycle(exchange: str, symbols: list[str], kinds: list[str], apply: bool =
 
     rep["writes"] = True
     rep["manifest"] = _write_manifest(dataset_dir, rep)
+    rep["checkpoint"] = _write_checkpoint(dataset_dir, rep)
     return rep
+
+
+def _write_checkpoint(dataset_dir: str, rep: dict[str, Any]) -> str:
+    """V10.31: explicit atomic checkpoint next to the manifest (ops tooling
+    expects one; V10.30 already writes it). Same facts, stable minimal shape."""
+    man = {}
+    try:
+        man = json.loads((Path(dataset_dir) / "manifest.json").read_text(encoding="utf-8"))
+    except Exception:
+        pass
+    ck = {"last_cycle": rep["cycle_time"], "cycles": man.get("cycles"),
+          "symbols": rep["symbols"], "exchange": rep["exchange"],
+          "rows_by_type": man.get("cumulative_added", {}),
+          "errors_last_cycle": rep.get("errors", []),
+          "research_only": True, "shadow_only": True,
+          "can_send_real_orders": False,
+          "final_recommendation": FINAL_RECOMMENDATION_NO_LIVE}
+    path = Path(dataset_dir) / "checkpoint.json"
+    tmp = Path(dataset_dir) / "checkpoint.json.tmp"
+    tmp.write_text(json.dumps(ck, indent=2, default=str), encoding="utf-8")
+    os.replace(tmp, path)
+    return str(path).replace("\\", "/")
 
 
 def _write_manifest(dataset_dir: str, rep: dict[str, Any]) -> str:
