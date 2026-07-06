@@ -6547,6 +6547,75 @@ class ResearchLab:
                 f"BYBIT BACKFILL {command.upper()} V10.36 END"]
         return "\n".join(out)
 
+    def continuous_edge_cycle_v1038_cli(self, *, symbols="") -> str:
+        from .labs import continuous_edge_factory_v10_38 as CE
+        syms = self._v107_csv_arg(symbols)
+        sym = syms[0] if syms else "BTCUSDT"
+        rep = CE.run_cycle(sym)
+        out = ["CONTINUOUS EDGE CYCLE V10.38 START",
+               f"symbol: {sym}  bars: {rep.get('n_bars')}  verdict: {rep.get('verdict')}"]
+        if rep.get("note"):
+            out.append("note: " + rep["note"])
+        if rep.get("candidates_total") is not None:
+            out.append(f"candidates: total={rep['candidates_total']} "
+                       f"promising={rep['promising']} rejected={rep['rejected']} "
+                       f"shadow_eligible={rep['shadow_eligible']}")
+            out.append("top_candidates (RESEARCH_ONLY_NOT_ACTIONABLE):")
+            for c in rep.get("top_candidates", []):
+                out.append(f"  {c['candidate_id']}: {c['setup_name']} {c['side']} "
+                           f"netEV={c['net_EV']} lb={c['net_EV_lower_bound']} "
+                           f"n={c['sample_size']} [{c['verdict']}/{c['status']}]")
+            out.append(f"drift: {rep['drift']}")
+            out.append(f"paper_gate: {rep['paper_gate']}")
+            out.append("blockers: " + ",".join(rep.get("blockers", [])))
+            out.append("next_data_needed: " + str(rep.get("next_data_needed")))
+        if rep.get("reports_dir"):
+            out.append(f"reports_dir: {rep['reports_dir']}")
+        out += ["edge_validated: false", "not_actionable: true", "no_orders: true",
+                "research_only: true", "shadow_only: true", "paper_ready: false",
+                "live_ready: false", "can_send_real_orders: false",
+                "FINAL_RECOMMENDATION=NO LIVE",
+                "CONTINUOUS EDGE CYCLE V10.38 END"]
+        return chr(10).join(out)
+
+    def alpha_discovery_run_v1038_cli(self, *, symbols="") -> str:
+        # discovery-only view: same pipeline, no report writes
+        from .labs import continuous_edge_factory_v10_38 as CE
+        syms = self._v107_csv_arg(symbols)
+        sym = syms[0] if syms else "BTCUSDT"
+        rep = CE.run_cycle(sym, write_reports=False)
+        out = ["ALPHA DISCOVERY RUN V10.38 START",
+               f"symbol: {sym}  bars: {rep.get('n_bars')}  verdict: {rep.get('verdict')}",
+               f"candidates_total: {rep.get('candidates_total')}  "
+               f"promising: {rep.get('promising')}  rejected: {rep.get('rejected')}",
+               "note: feature build, label build, scoring and report steps are "
+               "stages of this same audited pipeline (see continuous-edge-cycle-v1038)",
+               "edge_validated: false", "not_actionable: true",
+               "research_only: true", "can_send_real_orders: false",
+               "FINAL_RECOMMENDATION=NO LIVE",
+               "ALPHA DISCOVERY RUN V10.38 END"]
+        return chr(10).join(out)
+
+    def candidate_incubator_report_v1038_cli(self) -> str:
+        from .labs import continuous_edge_factory_v10_38 as CE
+        import json as _json
+        path = CE._repo_root().joinpath(*CE.OUTPUT_SUBDIR) / "continuous_edge_summary_v1038.json"
+        out = ["CANDIDATE INCUBATOR REPORT V10.38 START"]
+        if path.is_file():
+            s = _json.loads(path.read_text(encoding="utf-8"))
+            out.append(f"last_cycle: {s.get('ran_at')}  verdict: {s.get('verdict')}")
+            for c in s.get("top_candidates", []):
+                out.append(f"  {c['candidate_id']}: netEV_lb={c['net_EV_lower_bound']} "
+                           f"[{c['verdict']}/{c['status']}]")
+            out.append("blockers: " + ",".join(s.get("blockers", [])))
+        else:
+            out.append("no cycle report yet -- run continuous-edge-cycle-v1038 first")
+        out += ["paper_gate: BLOCKED", "edge_validated: false",
+                "not_actionable: true", "can_send_real_orders: false",
+                "FINAL_RECOMMENDATION=NO LIVE",
+                "CANDIDATE INCUBATOR REPORT V10.38 END"]
+        return chr(10).join(out)
+
     def free_microstructure_status_page_v1029_cli(self) -> str:
         from .labs import free_microstructure_dataset_assembler_v10_29 as A
         uri = A.write_status_page()
@@ -7868,6 +7937,9 @@ def build_argument_parser() -> argparse.ArgumentParser:
             "bybit-backfill-download-day-v1036",
             "bybit-backfill-import-day-v1036",
             "bybit-backfill-coverage-v1036",
+            "continuous-edge-cycle-v1038",
+            "alpha-discovery-run-v1038",
+            "candidate-incubator-report-v1038",
             "ohlcv-replay-loader-smoke-test",
             "ohlcv-replay-loader-audit",
             "duplicate-module-audit-smoke-test",
@@ -8098,6 +8170,9 @@ PUBLIC_RESEARCH_ONLY_COMMANDS = frozenset({
     "bybit-backfill-download-day-v1036",
     "bybit-backfill-import-day-v1036",
     "bybit-backfill-coverage-v1036",
+    "continuous-edge-cycle-v1038",
+    "alpha-discovery-run-v1038",
+    "candidate-incubator-report-v1038",
 })
 
 
@@ -8203,6 +8278,12 @@ def _dispatch_public_research_only(args) -> None:
         print(lab.future_live_readiness_audit_cli())
     elif args.command == "future-live-preflight-dry-run":
         print(lab.future_live_preflight_dry_run_cli())
+    elif args.command == "continuous-edge-cycle-v1038":
+        print(lab.continuous_edge_cycle_v1038_cli(symbols=args.symbols))
+    elif args.command == "alpha-discovery-run-v1038":
+        print(lab.alpha_discovery_run_v1038_cli(symbols=args.symbols))
+    elif args.command == "candidate-incubator-report-v1038":
+        print(lab.candidate_incubator_report_v1038_cli())
     elif args.command.startswith("bybit-backfill-"):
         cmd = args.command.replace("bybit-backfill-", "").replace("-v1036", "")
         print(lab.bybit_backfill_v1036_cli(
