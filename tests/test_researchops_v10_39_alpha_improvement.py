@@ -105,3 +105,47 @@ def test_family_and_verdict_constants_have_no_live_states():
     for v in A.FAMILY_VERDICTS:
         assert v not in ("LIVE", "LIVE_READY", "CAN_SEND_REAL_ORDERS")
     assert "BUY_NOW" not in str(A.STRATEGY_FAMILIES)
+
+
+# ---- V10.39.1 parser / CLI contract for alpha-improvement-search-v1039 -------
+
+def test_search_command_registered_in_parser_help():
+    import subprocess
+    import sys
+    import pathlib
+    repo = pathlib.Path(__file__).resolve().parents[1]
+    r = subprocess.run([sys.executable, "-m", "app.research_lab", "--help"],
+                       cwd=repo, capture_output=True, text=True, timeout=90)
+    assert "alpha-improvement-search-v1039" in (r.stdout + r.stderr)
+
+
+def test_search_command_is_public_research_only():
+    import app.research_lab as RL
+    assert "alpha-improvement-search-v1039" in RL.PUBLIC_RESEARCH_ONLY_COMMANDS
+    assert hasattr(RL.ResearchLab, "alpha_improvement_search_v1039_cli")
+
+
+def test_search_cli_smoke_is_research_only(monkeypatch):
+    import app.research_lab as RL
+    fake = {"n_bars": 1500, "verdict": "NO_EDGE_ALL_REJECTED_RESEARCH_ONLY",
+            "families_total": 12, "families_promising": 0, "families_rejected": 9,
+            "cost_aware_rows": 10,
+            "best_family": {"family": "micro_momentum",
+                            "verdict": "REJECTED_COSTS_TOO_HIGH",
+                            "net_EV": -0.0009, "net_EV_lower_bound": -0.0014},
+            "cost_aware_best_cell": {"timeframe_min": 1, "horizon": 15,
+                                     "best_feature": "oi_change", "side": "short",
+                                     "verdict": "REJECTED_COSTS_TOO_HIGH"},
+            "any_timeframe_promising": False, "reports_dir": "x"}
+    monkeypatch.setattr(
+        "app.labs.alpha_improvement_sprint_v10_39.run_sprint",
+        lambda *a, **k: fake)
+    lab = RL.ResearchLab.__new__(RL.ResearchLab)
+    out = lab.alpha_improvement_search_v1039_cli(symbols="BTCUSDT")
+    assert "ALPHA_IMPROVEMENT_SEARCH_V1039" in out
+    assert "RESEARCH_ONLY" in out and "NOT_ACTIONABLE" in out
+    assert "FINAL_RECOMMENDATION=NO LIVE" in out
+    assert "families_evaluated: 12" in out and "cost_aware_rows: 10" in out
+    for banned in ("BUY_NOW", "SELL_NOW", "OPEN_POSITION", "LIVE_SIGNAL",
+                   "LIVE_READY", "CAN_SEND_REAL_ORDERS"):
+        assert banned not in out

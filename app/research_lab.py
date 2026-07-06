@@ -6698,6 +6698,43 @@ class ResearchLab:
                 "ALPHA IMPROVEMENT REPORT V10.39 END"]
         return chr(10).join(out)
 
+    def alpha_improvement_search_v1039_cli(self, *, symbols="") -> str:
+        """Advanced-search view of the V10.39 sprint: runs the cost-aware
+        horizon scan + strategy-family benchmark (via run_sprint, which also
+        writes the reports) and summarises what the search found. Alias of the
+        search stage of alpha-improvement-cycle-v1039 -- same audited pipeline,
+        never actionable."""
+        from .labs import alpha_improvement_sprint_v10_39 as A
+        syms = self._v107_csv_arg(symbols)
+        sym = syms[0] if syms else "BTCUSDT"
+        s = A.run_sprint(sym)
+        bf = s.get("best_family") or {}
+        bc = s.get("cost_aware_best_cell") or {}
+        out = ["ALPHA_IMPROVEMENT_SEARCH_V1039",
+               "alias_of: alpha-improvement-cycle-v1039 (search stage)",
+               f"symbol: {sym}  bars: {s.get('n_bars')}  verdict: {s.get('verdict')}"]
+        if s.get("note"):
+            out.append("note: " + s["note"])
+        if s.get("families_total") is not None:
+            out.append(f"families_evaluated: {s['families_total']}")
+            out.append(f"cost_aware_rows: {s.get('cost_aware_rows')}")
+            out.append(f"promising: {s['families_promising']}")
+            out.append(f"rejected: {s['families_rejected']}")
+            out.append(f"best_family: {bf.get('family')} [{bf.get('verdict')}]")
+            out.append(f"best_net_EV: {bf.get('net_EV')}")
+            out.append(f"best_net_EV_lower_bound: {bf.get('net_EV_lower_bound')}")
+            out.append(f"cost_aware_best_cell: tf={bc.get('timeframe_min')}m "
+                       f"hz={bc.get('horizon')} {bc.get('best_feature')} "
+                       f"{bc.get('side')} [{bc.get('verdict')}]")
+            out.append(f"any_timeframe_promising: {s.get('any_timeframe_promising')}")
+        if s.get("reports_dir"):
+            out.append("reports_dir: " + s["reports_dir"])
+        out += ["RESEARCH_ONLY", "NOT_ACTIONABLE", "no_orders: true",
+                "can_send_real_orders: false", "paper_filter_enabled: false",
+                "edge_validated: false", "FINAL_RECOMMENDATION=NO LIVE",
+                "ALPHA_IMPROVEMENT_SEARCH_V1039 END"]
+        return chr(10).join(out)
+
     def free_microstructure_status_page_v1029_cli(self) -> str:
         from .labs import free_microstructure_dataset_assembler_v10_29 as A
         uri = A.write_status_page()
@@ -8025,6 +8062,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
             "alpha-improvement-cycle-v1039",
             "alpha-improvement-diagnose-v1039",
             "alpha-improvement-report-v1039",
+            "alpha-improvement-search-v1039",
             "ohlcv-replay-loader-smoke-test",
             "ohlcv-replay-loader-audit",
             "duplicate-module-audit-smoke-test",
@@ -8261,6 +8299,7 @@ PUBLIC_RESEARCH_ONLY_COMMANDS = frozenset({
     "alpha-improvement-cycle-v1039",
     "alpha-improvement-diagnose-v1039",
     "alpha-improvement-report-v1039",
+    "alpha-improvement-search-v1039",
 })
 
 
@@ -8378,6 +8417,8 @@ def _dispatch_public_research_only(args) -> None:
         print(lab.alpha_improvement_diagnose_v1039_cli(symbols=args.symbols))
     elif args.command == "alpha-improvement-report-v1039":
         print(lab.alpha_improvement_report_v1039_cli())
+    elif args.command == "alpha-improvement-search-v1039":
+        print(lab.alpha_improvement_search_v1039_cli(symbols=args.symbols))
     elif args.command.startswith("bybit-backfill-"):
         cmd = args.command.replace("bybit-backfill-", "").replace("-v1036", "")
         print(lab.bybit_backfill_v1036_cli(
