@@ -75,34 +75,51 @@ def _repo_root() -> Path:
 # 0) Bars from the real datasets (V10.32 forward + V10.36 backfill days)
 # ==========================================================================
 
-def build_bars_from_trades(trades: list[dict], bar_seconds: int = 60) -> list[dict]:
+def build_bars_from_trades(trades: list[dict], bar_seconds: int = 60,
+                           symbol: str = "BTCUSDT") -> list[dict]:
     """trade rows (timestamp ms, price, size, aggressor_side) -> OHLCV bars
-    with buy/sell volume split. Input may be unsorted; output is sorted."""
+    with buy/sell volume split. Input may be unsorted; output is sorted.
+
+    NO-LOOKAHEAD CONTRACT: a bar aggregates high/low/close of the WHOLE bucket,
+    so it is NOT knowable at bar_start_ts. Each bar therefore carries an explicit
+    bar_start_ts, bar_close_ts and last_trade_ts, and `available_at` is set to
+    bar_close_ts (>= last_trade_ts). `ts` == bar_close_ts for downstream code, so
+    features/labels anchor to when the candle is actually complete, never to its
+    open."""
     rows = []
     for t in trades:
         try:
             rows.append((int(float(t["timestamp"])), float(t["price"]),
-                         float(t["size"]), str(t.get("aggressor_side", ""))))
+                         float(t["size"]), str(t.get("aggressor_side", "")),
+                         str(t.get("symbol", symbol) or symbol)))
         except (KeyError, TypeError, ValueError):
             continue
     rows.sort(key=lambda r: r[0])
     bars: list[dict] = []
     width = bar_seconds * 1000
     cur = None
-    for ts, price, size, side in rows:
+    for ts, price, size, side, sym in rows:
         bucket = (ts // width) * width
-        if cur is None or cur["ts"] != bucket:
+        if cur is None or cur["bar_start_ts"] != bucket:
             if cur is not None:
                 bars.append(cur)
-            cur = {"ts": bucket, "open": price, "high": price, "low": price,
-                   "close": price, "volume": 0.0, "buy_volume": 0.0,
-                   "sell_volume": 0.0, "n_trades": 0, "max_trade": 0.0}
+            cur = {"symbol": sym, "bar_start_ts": bucket,
+                   "bar_close_ts": bucket + width, "ts": bucket + width,
+                   "open": price, "high": price, "low": price, "close": price,
+                   "volume": 0.0, "buy_volume": 0.0, "sell_volume": 0.0,
+                   "n_trades": 0, "trade_count": 0, "max_trade": 0.0,
+                   "first_trade_ts": ts, "last_trade_ts": ts,
+                   "available_at": bucket + width}
         cur["high"] = max(cur["high"], price)
         cur["low"] = min(cur["low"], price)
         cur["close"] = price
         cur["volume"] += size
         cur["n_trades"] += 1
+        cur["trade_count"] += 1
         cur["max_trade"] = max(cur["max_trade"], size)
+        cur["last_trade_ts"] = ts
+        # bar becomes fully known only once the bucket closes; never before
+        cur["available_at"] = max(cur["bar_close_ts"], ts)
         if side == "buy":
             cur["buy_volume"] += size
         elif side == "sell":
@@ -202,7 +219,9 @@ def build_features(bars: list[dict], oi: list[dict] | None = None,
         bs = sum(b["buy_volume"] for b in w)
         ss = sum(b["sell_volume"] for b in w)
         rv = st.pstdev(rets) if len(rets) > 1 else 0.0
-        f: dict[str, Any] = {"ts": ts, "available_at": ts, "close": c}
+        # a feature is available no earlier than its source bar is complete
+        avail = bars[i].get("available_at", ts)
+        f: dict[str, Any] = {"ts": ts, "available_at": avail, "close": c}
         # trades block
         f["trade_intensity"] = _sma([b["n_trades"] for b in w], lookback)
         f["buy_sell_imbalance"] = (bs - ss) / (bs + ss) if (bs + ss) > 0 else 0.0
@@ -279,51 +298,77 @@ def build_features(bars: list[dict], oi: list[dict] | None = None,
 # 2) LABELS -- strictly future-only, cost-adjusted, multi-horizon
 # ==========================================================================
 
-def build_labels(bars: list[dict], horizons: tuple[int, ...] = (5, 15, 60),
+def build_labels(bars: list[dict], side: str = "long",
+                 horizons: tuple[int, ...] = (5, 15, 60),
                  tp_pct: float = 0.004, sl_pct: float = 0.002,
                  time_bars: int = 60, costs: dict | None = None) -> list[dict]:
-    """One label row per bar i, computed ONLY from bars[i+1:]. Missing labels
-    (end of data) are explicit, never silently dropped."""
+    """One label row per bar i, computed ONLY from bars[i+1:], with a REAL
+    side-aware triple barrier -- NOT a costed inversion of the long outcome.
+
+      long : TP when high >= entry*(1+tp), SL when low  <= entry*(1-sl)
+      short: TP when low  <= entry*(1-tp), SL when high >= entry*(1+sl)
+
+    MAE/MFE, gross/net return and cost_adjusted_outcome are all expressed in the
+    side's own PnL space. Missing labels (end of data) are explicit, never
+    silently dropped."""
+    if side not in ("long", "short"):
+        raise ValueError(f"side must be 'long' or 'short': {side}")
     c = {**DEFAULT_COSTS, **(costs or {})}
     round_trip_cost = 2 * (c["fee_bps"] + c["slippage_bps"]) / 10_000 \
         + c["spread_bps"] / 10_000
     labels: list[dict] = []
     for i, bar in enumerate(bars):
         entry = bar["close"]
-        lab: dict[str, Any] = {"ts": bar["ts"], "label_available_at": None,
-                               "missing": False}
+        lab: dict[str, Any] = {"ts": bar["ts"], "side": side,
+                               "side_label_method": "real_side_aware",
+                               "label_available_at": None, "missing": False}
         if i + 1 >= len(bars) or entry <= 0:
             lab["missing"] = True
             labels.append(lab)
             continue
         future = bars[i + 1:i + 1 + time_bars]
-        # forward returns per horizon
+        # forward returns per horizon, in the SIDE's PnL direction
         for h in horizons:
             if i + h < len(bars):
-                lab[f"forward_return_{h}"] = bars[i + h]["close"] / entry - 1
+                r = bars[i + h]["close"] / entry - 1
+                lab[f"forward_return_{h}"] = r if side == "long" else -r
             else:
                 lab[f"forward_return_{h}"] = None
-        # triple barrier (long side; short = mirrored downstream)
-        tp = entry * (1 + tp_pct)
-        sl = entry * (1 - sl_pct)
+        if side == "long":
+            tp, sl = entry * (1 + tp_pct), entry * (1 - sl_pct)
+        else:
+            tp, sl = entry * (1 - tp_pct), entry * (1 + sl_pct)
         outcome, hit_i = "TIME", len(future) - 1
         mae = mfe = 0.0
         for j, fb in enumerate(future):
-            mae = min(mae, fb["low"] / entry - 1)
-            mfe = max(mfe, fb["high"] / entry - 1)
-            if fb["low"] <= sl:                        # conservative: SL first
+            up, dn = fb["high"] / entry - 1, fb["low"] / entry - 1
+            if side == "long":
+                mfe, mae = max(mfe, up), min(mae, dn)
+                hit_sl, hit_tp = fb["low"] <= sl, fb["high"] >= tp
+            else:                                  # short: favorable = price down
+                mfe, mae = max(mfe, -dn), min(mae, -up)
+                hit_sl, hit_tp = fb["high"] >= sl, fb["low"] <= tp
+            if hit_sl:                             # conservative: SL wins ties
                 outcome, hit_i = "SL", j
                 break
-            if fb["high"] >= tp:
+            if hit_tp:
                 outcome, hit_i = "TP", j
                 break
-        raw = tp_pct if outcome == "TP" else (-sl_pct if outcome == "SL"
-                                              else future[hit_i]["close"] / entry - 1)
+        if outcome == "TP":
+            gross = tp_pct
+        elif outcome == "SL":
+            gross = -sl_pct
+        else:
+            close_ret = future[hit_i]["close"] / entry - 1
+            gross = close_ret if side == "long" else -close_ret
         lab["triple_barrier"] = outcome
         lab["MAE"] = mae
         lab["MFE"] = mfe
         lab["time_to_hit"] = hit_i + 1
-        lab["cost_adjusted_outcome"] = raw - round_trip_cost
+        lab["gross_return"] = gross
+        lab["cost_estimate"] = round_trip_cost
+        lab["net_return"] = gross - round_trip_cost
+        lab["cost_adjusted_outcome"] = gross - round_trip_cost
         lab["stay_out_label"] = 1 if lab["cost_adjusted_outcome"] <= 0 else 0
         rv = st.pstdev([b["close"] for b in future[:15]]) / entry \
             if len(future) >= 2 else 0.0
@@ -334,12 +379,20 @@ def build_labels(bars: list[dict], horizons: tuple[int, ...] = (5, 15, 60),
     return labels
 
 
-def assert_no_lookahead(features: list[dict], labels: list[dict]) -> bool:
-    """Structural guard: every feature is available at bar close; every label
-    only becomes available strictly AFTER the bar it belongs to."""
-    for f in features:
-        if f["available_at"] != f["ts"]:
+def assert_no_lookahead(features: list[dict], labels: list[dict],
+                        bars: list[dict] | None = None) -> bool:
+    """Structural guard: every feature is available no earlier than its source
+    bar is complete (never at bar open); every label only becomes available
+    strictly AFTER the bar it belongs to. When `bars` is supplied, the feature's
+    available_at must match the bar's own available_at exactly."""
+    for idx, f in enumerate(features):
+        av = f.get("available_at")
+        if av is None or av < f["ts"]:
             raise ValueError(f"feature availability violates point-in-time at {f['ts']}")
+        if bars is not None:
+            src = bars[idx].get("available_at", bars[idx].get("ts"))
+            if src is not None and av != src:
+                raise ValueError(f"feature availability != source bar at {f['ts']}")
     for l in labels:
         if not l.get("missing") and l["label_available_at"] is not None \
                 and l["label_available_at"] <= l["ts"]:
@@ -401,9 +454,12 @@ DISCOVERY_FEATURES = ("buy_sell_imbalance", "burst_score", "oi_change",
                       "cascade_score", "trend_score", "book_pressure")
 
 
-def _entries_for_rule(features, labels, feat, side, thr):
+def _entries_for_rule(features, labels_side, feat, side, thr):
+    """Collect the side's OWN cost-adjusted outcomes for the bars where the rule
+    fires. `labels_side` must already be the side-aware label set (long labels
+    for long rules, real short labels for short rules) -- no inversion here."""
     outs = []
-    for f, l in zip(features, labels):
+    for f, l in zip(features, labels_side):
         if l.get("missing") or l.get("cost_adjusted_outcome") is None:
             continue
         v = f.get(feat)
@@ -411,48 +467,78 @@ def _entries_for_rule(features, labels, feat, side, thr):
             continue
         fired = v > thr if side == "long" else v < -thr
         if fired:
-            # raw long-side outcome; SHORT inversion (with its own cost load)
-            # is applied by the callers so this helper stays single-purpose
             outs.append(l["cost_adjusted_outcome"])
     return outs
 
 
+def _approx_short_invert(long_outs):
+    """Blocked fallback ONLY: approximate short outcomes by inverting costed long
+    ones. Never promotable -- callers must tag SHORT_APPROXIMATE_LABELS."""
+    load = 2 * (DEFAULT_COSTS["fee_bps"] + DEFAULT_COSTS["slippage_bps"]) / 10_000
+    return [-o - load for o in long_outs]
+
+
 def discover_candidates(features: list[dict], labels: list[dict],
-                        symbol: str = "BTCUSDT") -> list[dict]:
-    """Grid of transparent one-feature threshold rules. Long-side outcomes use
-    the long labels; short-side approximates by inverting the raw move (same
-    cost load). Verdicts are honest and never actionable."""
+                        symbol: str = "BTCUSDT", bars: list[dict] | None = None,
+                        labels_short: list[dict] | None = None) -> list[dict]:
+    """Grid of transparent one-feature threshold rules.
+
+    P1 (no data snooping): the chronological split comes FIRST and every
+    threshold is a quantile of the TRAIN features ONLY. OOS features never
+    influence the threshold (only the evaluation). Each candidate records
+    threshold_source='train_only'.
+
+    P3 (real short): long rules use the long labels; short rules use REAL
+    side-aware short labels (built from `bars` or passed in `labels_short`).
+    If neither is available, short falls back to an approximate inversion that
+    is flagged and can NEVER be PROMISING."""
     assert_no_lookahead(features, labels)
     n = len(features)
-    split = int(n * 0.6)
+    split = int(n * 0.6)                          # chronological split FIRST
+    train_feats = features[:split]
+    train_ok = split >= MIN_SAMPLE
+    approx_short = False
+    if labels_short is None:
+        labels_short = build_labels(bars, side="short") if bars is not None else None
+        approx_short = labels_short is None
+    labels_by_side = {"long": labels, "short": labels_short}
     candidates: list[dict] = []
     cid = 0
     for feat in DISCOVERY_FEATURES:
-        vals = sorted(f[feat] for f in features
-                      if isinstance(f.get(feat), (int, float)))
-        if len(vals) < MIN_SAMPLE:
-            continue
+        # threshold derived from TRAIN ONLY -- OOS distribution is never seen here
+        train_vals = sorted(f[feat] for f in train_feats
+                            if isinstance(f.get(feat), (int, float)))
+        insufficient_train = len(train_vals) < MIN_SAMPLE
         for q in (0.66, 0.9):
-            thr = vals[int(len(vals) * q)] if vals else 0
+            thr = (train_vals[min(int(len(train_vals) * q), len(train_vals) - 1)]
+                   if train_vals else 0.0)
             for side in ("long", "short"):
                 cid += 1
-                train_out = _entries_for_rule(features[:split], labels[:split],
-                                              feat, side, thr)
-                oos_out = _entries_for_rule(features[split:], labels[split:],
-                                            feat, side, thr)
-                if side == "short":
-                    train_out = [-o - 2 * (DEFAULT_COSTS["fee_bps"]
-                                           + DEFAULT_COSTS["slippage_bps"]) / 10_000
-                                 for o in train_out]
-                    oos_out = [-o - 2 * (DEFAULT_COSTS["fee_bps"]
-                                         + DEFAULT_COSTS["slippage_bps"]) / 10_000
-                               for o in oos_out]
+                side_is_approx = side == "short" and approx_short
+                side_labels = labels_by_side.get(side)
+                if side_labels is None:            # blocked approximate short path
+                    train_out = _approx_short_invert(
+                        _entries_for_rule(features[:split], labels[:split], feat, side, thr))
+                    oos_out = _approx_short_invert(
+                        _entries_for_rule(features[split:], labels[split:], feat, side, thr))
+                    side_method = "approx_inverse_long"
+                else:
+                    train_out = _entries_for_rule(features[:split], side_labels[:split],
+                                                  feat, side, thr)
+                    oos_out = _entries_for_rule(features[split:], side_labels[split:],
+                                                feat, side, thr)
+                    side_method = "real_side_aware"
                 ev_tr = evaluate_net_ev(train_out)
                 ev_oos = evaluate_net_ev(oos_out)
+                blockers = ["SHORT_APPROXIMATE_LABELS"] if side_is_approx else []
                 cand = {"candidate_id": f"{symbol}_{feat}_{side}_q{int(q*100)}_{cid}",
                         "symbol": symbol, "side": side,
                         "setup_name": f"{feat}>{'+' if side=='long' else '-'}p{int(q*100)}",
                         "regime": "all", "threshold": thr,
+                        "threshold_source": "train_only",
+                        "side_label_method": side_method,
+                        "approximate_short_labels": bool(side_is_approx),
+                        "promotion_blockers_extra": blockers,
                         "sample_size": ev_oos["sample_size"],
                         "win_rate": ev_oos.get("win_rate"),
                         "payoff_ratio": ev_oos.get("payoff_ratio"),
@@ -464,8 +550,11 @@ def discover_candidates(features: list[dict], labels: list[dict],
                         "turnover": round(len(oos_out) / max(1, n - split), 4),
                         "confidence": ev_oos.get("win_rate") or 0.0,
                         "data_quality": "ok" if n >= 200 else "thin",
+                        "train_sample_size": ev_tr["sample_size"],
                         "train_net_EV": ev_tr.get("net_EV"), **_safety()}
-                if ev_oos["sample_size"] < MIN_OOS_SAMPLE:
+                if insufficient_train or not train_ok:
+                    cand["verdict"] = "REJECTED_DATA_QUALITY"
+                elif ev_oos["sample_size"] < MIN_OOS_SAMPLE:
                     cand["verdict"] = "NEEDS_MORE_DATA"
                 elif n < 200:
                     cand["verdict"] = "REJECTED_DATA_QUALITY"
@@ -475,7 +564,9 @@ def discover_candidates(features: list[dict], labels: list[dict],
                         (ev_oos.get("net_EV") or 0) < 0.3 * (ev_tr.get("net_EV") or 1):
                     cand["verdict"] = "REJECTED_OVERFIT_RISK"
                 elif ev_oos["decision"] == "TRADE_IN_SIMULATION_RESEARCH_ONLY":
-                    cand["verdict"] = "PROMISING_RESEARCH_ONLY"
+                    # approximate short can never be promoted to PROMISING
+                    cand["verdict"] = ("NOT_ACTIONABLE" if side_is_approx
+                                       else "PROMISING_RESEARCH_ONLY")
                 else:
                     cand["verdict"] = "NOT_ACTIONABLE"
                 candidates.append(cand)
@@ -499,10 +590,23 @@ def _cum_dd(outcomes: list[float]) -> float:
 
 def walk_forward(features: list[dict], labels: list[dict], feat: str,
                  side: str, thr: float, n_windows: int = 4,
-                 embargo: int = 5, seed: int = 7) -> dict[str, Any]:
+                 embargo: int = 5, seed: int = 7,
+                 labels_short: list[dict] | None = None,
+                 bars: list[dict] | None = None) -> dict[str, Any]:
     assert_no_lookahead(features, labels)
     n = len(features)
+    # short walk-forward uses REAL side-aware labels (never a costed inversion)
+    approx_short = False
+    if side == "short":
+        if labels_short is None and bars is not None:
+            labels_short = build_labels(bars, side="short")
+        side_labels = labels_short
+        approx_short = side_labels is None
+    else:
+        side_labels = labels
     rep: dict[str, Any] = {"feature": feat, "side": side, "threshold": thr,
+                           "side_label_method": ("approx_inverse_long" if approx_short
+                                                 else "real_side_aware"),
                            "windows": [], **_safety()}
     if n < (n_windows + 1) * MIN_SAMPLE:
         rep["verdict"] = "NEEDS_MORE_DATA"
@@ -515,11 +619,14 @@ def walk_forward(features: list[dict], labels: list[dict], feat: str,
         te_hi = min((k + 2) * win, n)
         if te_hi - te_lo < MIN_OOS_SAMPLE:
             continue
-        f_te, l_te = features[te_lo:te_hi], labels[te_lo:te_hi]
-        outs = _entries_for_rule(f_te, l_te, feat, side, thr)
-        if side == "short":
-            outs = [-o - 2 * (DEFAULT_COSTS["fee_bps"]
-                              + DEFAULT_COSTS["slippage_bps"]) / 10_000 for o in outs]
+        f_te = features[te_lo:te_hi]
+        if side_labels is None:                    # blocked approximate fallback
+            outs = _approx_short_invert(
+                _entries_for_rule(f_te, labels[te_lo:te_hi], feat, side, thr))
+            l_te = labels[te_lo:te_hi]
+        else:
+            l_te = side_labels[te_lo:te_hi]
+            outs = _entries_for_rule(f_te, l_te, feat, side, thr)
         ev = evaluate_net_ev(outs)
         # random baseline: same n entries, random bars in window
         pool = [l["cost_adjusted_outcome"] for l in l_te
@@ -792,11 +899,13 @@ def run_cycle(symbol: str = "BTCUSDT", bars: list[dict] | None = None,
         return summary
     features = build_features(bars_, data.get("oi"), data.get("funding"),
                               data.get("orderbook"), data.get("liquidations"))
-    labels = build_labels(bars_)
-    assert_no_lookahead(features, labels)
+    labels = build_labels(bars_, side="long")
+    labels_short = build_labels(bars_, side="short")      # REAL side-aware short
+    assert_no_lookahead(features, labels, bars_)
     missing = sum(1 for l in labels if l.get("missing"))
     summary["data_quality"] = {"bars": len(bars_), "missing_labels": missing}
-    candidates = discover_candidates(features, labels, symbol)
+    candidates = discover_candidates(features, labels, symbol, bars=bars_,
+                                     labels_short=labels_short)
     inc = CandidateIncubator()
     wf_reports = {}
     shadow_log = []
@@ -804,7 +913,8 @@ def run_cycle(symbol: str = "BTCUSDT", bars: list[dict] | None = None,
         status = "DISCOVERED"
         if cand["verdict"] == "PROMISING_RESEARCH_ONLY":
             feat = cand["setup_name"].split(">")[0]
-            wf = walk_forward(features, labels, feat, cand["side"], cand["threshold"])
+            wf = walk_forward(features, labels, feat, cand["side"], cand["threshold"],
+                              labels_short=labels_short)
             wf_reports[cand["candidate_id"]] = wf
             status = ("SHADOW_ELIGIBLE" if wf.get("verdict") == "OOS_PASS_RESEARCH_ONLY"
                       else "INCUBATING")
@@ -833,6 +943,13 @@ def run_cycle(symbol: str = "BTCUSDT", bars: list[dict] | None = None,
         "drift": {"signals": drift["signals"], "action": drift["action"]},
         "paper_gate": "BLOCKED (human approval not encodable)",
         "future_micro_live": future_micro_live_scaffold()["scaffold"],
+        "methodology": {
+            "threshold_source": "train_only",
+            "bar_time_semantics": "bar_close_available",
+            "feature_available_at_contract": "after_source_available",
+            "short_label_method": "real_side_aware",
+            "guards_active": ["DATA_SNOOPING_GUARD_ACTIVE",
+                              "BAR_AVAILABLE_AT_GUARD_ACTIVE"]},
         "blockers": ["edge_validated=false", "paper_filter_enabled=false",
                      "human_approval_required"],
         "next_data_needed": "more forward coverage (orderbook/liquidations days)",

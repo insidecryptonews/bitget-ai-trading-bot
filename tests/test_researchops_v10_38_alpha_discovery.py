@@ -203,3 +203,132 @@ def test_module_no_dangerous_primitives():
     for name in ["place_order", "create_order", "set_leverage",
                  "set_margin_mode", "open_position"]:
         assert f"{name}(" not in src and f".{name}" not in src, name
+
+
+# ==========================================================================
+# V10.38.1 P1 -- data snooping guard: thresholds come from TRAIN ONLY
+# ==========================================================================
+
+def _feat_row(ts, burst, close=100.0, avail=None):
+    row = {"ts": ts, "available_at": ts if avail is None else avail, "close": close}
+    for k in CE.DISCOVERY_FEATURES:
+        row[k] = 0.0
+    row["burst_score"] = burst
+    return row
+
+
+def _lab_row(ts, outcome):
+    return {"ts": ts, "label_available_at": ts + 1, "missing": False,
+            "side": "long", "cost_adjusted_outcome": outcome,
+            "triple_barrier": "TP" if outcome > 0 else "SL", "time_to_hit": 1}
+
+
+def test_discovery_thresholds_are_train_only_no_oos_snooping():
+    rng = random.Random(0)
+    n = 200                                       # split = 120 (train), 80 OOS
+    feats, labs = [], []
+    for i in range(n):
+        if i < 120:                               # stable train distribution
+            burst = rng.uniform(0.0, 1.0)
+            out = 0.0025 if burst > 0.66 else -0.0005
+        else:                                     # extreme OOS distribution
+            burst, out = 50.0, 0.0025
+        feats.append(_feat_row(T0 + i * BAR, burst))
+        labs.append(_lab_row(T0 + i * BAR, out))
+    c1 = CE.discover_candidates(feats, labs)
+    thr1 = {(c["setup_name"], c["side"]): c["threshold"] for c in c1}
+    # mutate ONLY the OOS half to be wildly more extreme
+    for f in feats[120:]:
+        f["burst_score"] *= 100
+    c2 = CE.discover_candidates(feats, labs)
+    thr2 = {(c["setup_name"], c["side"]): c["threshold"] for c in c2}
+    burst_keys = [k for k in thr1 if k[0].startswith("burst_score")]
+    assert burst_keys
+    for k in burst_keys:                          # OOS never moves the threshold
+        assert thr1[k] == thr2[k]
+    assert all(c["threshold_source"] == "train_only" for c in c1 + c2)
+
+
+def test_every_candidate_declares_threshold_source_train_only():
+    bars = make_bars(700, seed=5, planted_signal=True)
+    cands = CE.discover_candidates(CE.build_features(bars), CE.build_labels(bars))
+    assert cands
+    assert all(c["threshold_source"] == "train_only" for c in cands)
+
+
+def test_insufficient_train_never_promising():
+    n = 40                                        # split = 24 < MIN_SAMPLE
+    feats, labs = [], []
+    for i in range(n):
+        feats.append(_feat_row(T0 + i * BAR, 5.0 if i % 3 == 0 else -1.0))
+        labs.append(_lab_row(T0 + i * BAR, 0.003 if i % 3 == 0 else -0.001))
+    cands = CE.discover_candidates(feats, labs)
+    assert cands
+    assert all(c["verdict"] != "PROMISING_RESEARCH_ONLY" for c in cands)
+    assert all(c["verdict"] in ("REJECTED_DATA_QUALITY", "NEEDS_MORE_DATA")
+               for c in cands)
+
+
+# ==========================================================================
+# V10.38.1 P2 -- bar temporal availability (no start-of-bucket lookahead)
+# ==========================================================================
+
+def _minute_base():
+    return (1_700_000_000_000 // 60_000) * 60_000
+
+
+def test_build_bars_from_trades_available_at_after_last_trade():
+    base = _minute_base()
+    trades = [{"timestamp": base + 5_000, "price": 100, "size": 1,
+               "aggressor_side": "buy", "symbol": "BTCUSDT"},
+              {"timestamp": base + 20_000, "price": 101, "size": 2,
+               "aggressor_side": "sell", "symbol": "BTCUSDT"},
+              {"timestamp": base + 59_000, "price": 102, "size": 1,
+               "aggressor_side": "buy", "symbol": "BTCUSDT"}]
+    bars = CE.build_bars_from_trades(trades, 60)
+    assert len(bars) == 1
+    b = bars[0]
+    assert b["bar_start_ts"] == base
+    assert b["bar_start_ts"] <= b["first_trade_ts"]
+    assert b["last_trade_ts"] == base + 59_000
+    assert b["bar_close_ts"] == base + 60_000
+    assert b["available_at"] >= b["last_trade_ts"]
+    assert b["available_at"] == b["bar_close_ts"]
+    assert b["available_at"] != b["bar_start_ts"]
+    assert b["ts"] == b["bar_close_ts"]           # ts anchors to CLOSE, not open
+
+
+def test_features_available_at_not_before_bar_close():
+    base = _minute_base()
+    trades = []
+    for m in range(40):
+        for k in range(3):
+            trades.append({"timestamp": base + m * 60_000 + k * 15_000,
+                           "price": 100 + m * 0.1 + k * 0.02, "size": 1,
+                           "aggressor_side": "buy" if k % 2 else "sell",
+                           "symbol": "BTCUSDT"})
+    bars = CE.build_bars_from_trades(trades, 60)
+    feats = CE.build_features(bars)
+    for f, b in zip(feats, bars):
+        assert f["available_at"] == b["available_at"]
+        assert f["available_at"] >= b["bar_close_ts"]
+        assert f["available_at"] > b["bar_start_ts"]
+    # mutating a LATER bar cannot change already-available earlier features
+    import copy
+    mbars = copy.deepcopy(bars)
+    mbars[30]["close"] *= 5
+    mbars[30]["high"] *= 5
+    f_after = CE.build_features(mbars)
+    for a, c in zip(feats[:20], f_after[:20]):
+        assert a == c
+
+
+def test_no_start_bucket_lookahead_contract():
+    base = _minute_base()
+    trades = [{"timestamp": base + t, "price": 100 + t / 10_000, "size": 1,
+               "aggressor_side": "buy", "symbol": "BTCUSDT"}
+              for t in (1_000, 30_000, 58_000)]
+    b = CE.build_bars_from_trades(trades, 60)[0]
+    assert b["high"] != b["low"]                  # candle spans the whole bucket
+    assert b["available_at"] > b["bar_start_ts"]  # so unknown at bucket start
+    assert b["available_at"] >= b["last_trade_ts"]
