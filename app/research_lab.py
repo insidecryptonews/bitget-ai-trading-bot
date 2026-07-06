@@ -6616,6 +6616,88 @@ class ResearchLab:
                 "CANDIDATE INCUBATOR REPORT V10.38 END"]
         return chr(10).join(out)
 
+    def alpha_improvement_cycle_v1039_cli(self, *, symbols="") -> str:
+        from .labs import alpha_improvement_sprint_v10_39 as A
+        syms = self._v107_csv_arg(symbols)
+        sym = syms[0] if syms else "BTCUSDT"
+        s = A.run_sprint(sym)
+        out = ["ALPHA IMPROVEMENT SPRINT V10.39 START",
+               f"symbol: {sym}  bars: {s.get('n_bars')}  verdict: {s.get('verdict')}"]
+        if s.get("note"):
+            out.append("note: " + s["note"])
+        if s.get("families_total") is not None:
+            out.append(f"round_trip_cost: {s.get('round_trip_cost')}")
+            out.append(f"families: total={s['families_total']} "
+                       f"promising={s['families_promising']} "
+                       f"rejected={s['families_rejected']}")
+            bf = s.get("best_family") or {}
+            out.append(f"best_family: {bf.get('family')} [{bf.get('verdict')}] "
+                       f"netEV={bf.get('net_EV')} lb={bf.get('net_EV_lower_bound')}")
+            bc = s.get("cost_aware_best_cell") or {}
+            out.append(f"cost_aware_best_cell: tf={bc.get('timeframe_min')}m "
+                       f"hz={bc.get('horizon')} {bc.get('best_feature')} "
+                       f"{bc.get('side')} [{bc.get('verdict')}] "
+                       f"lb={bc.get('net_EV_lower_bound')}")
+            out.append(f"any_timeframe_promising: {s.get('any_timeframe_promising')}")
+            out.append("least_bad_features (gross|net|lb, still NOT_ACTIONABLE):")
+            for f in (s.get("least_bad_features") or [])[:5]:
+                out.append(f"  {f['feature']} {f['best_side']} "
+                           f"gross={f['gross_EV']} net={f['net_EV']} "
+                           f"lb={f['net_EV_lower_bound']} n={f['sample_size']}")
+            out.append("diagnosis: " + str(s.get("diagnosis")))
+        if s.get("reports_dir"):
+            out.append("reports_dir: " + s["reports_dir"])
+        out += ["paper_gate: BLOCKED", "edge_validated: false",
+                "not_actionable: true", "no_orders: true", "research_only: true",
+                "can_send_real_orders: false", "paper_filter_enabled: false",
+                "FINAL_RECOMMENDATION=NO LIVE",
+                "ALPHA IMPROVEMENT SPRINT V10.39 END"]
+        return chr(10).join(out)
+
+    def alpha_improvement_diagnose_v1039_cli(self, *, symbols="") -> str:
+        from .labs import alpha_improvement_sprint_v10_39 as A
+        from .labs import continuous_edge_factory_v10_38 as CE
+        syms = self._v107_csv_arg(symbols)
+        sym = syms[0] if syms else "BTCUSDT"
+        data = CE.load_dataset(sym)
+        bars = data.get("bars") or []
+        aux = {k: data.get(k) for k in ("oi", "funding", "orderbook", "liquidations")}
+        out = ["ALPHA IMPROVEMENT DIAGNOSE V10.39 START",
+               f"symbol: {sym}  bars: {len(bars)}"]
+        if len(bars) < 3 * CE.MIN_SAMPLE:
+            out.append(f"NEEDS_MORE_DATA: only {len(bars)} bars; keep collecting")
+        else:
+            d = A.diagnose(bars, aux)
+            out.append(f"round_trip_cost: {d['round_trip_cost']}")
+            out.append("least_bad_features:")
+            for f in d["least_bad_features"]:
+                out.append(f"  {f['feature']} {f['best_side']} gross={f['gross_EV']} "
+                           f"net={f['net_EV']} lb={f['net_EV_lower_bound']} n={f['sample_size']}")
+            out.append("cost_dominated (gross>0 but costs win): "
+                       + ",".join(d["cost_dominated_features"]))
+            out.append("diagnosis: " + d["diagnosis"])
+        out += ["research_only: true", "not_actionable: true",
+                "can_send_real_orders: false", "FINAL_RECOMMENDATION=NO LIVE",
+                "ALPHA IMPROVEMENT DIAGNOSE V10.39 END"]
+        return chr(10).join(out)
+
+    def alpha_improvement_report_v1039_cli(self) -> str:
+        from .labs import alpha_improvement_sprint_v10_39 as A
+        import json as _json
+        path = A.CE._repo_root().joinpath(*A.OUTPUT_SUBDIR) / "alpha_improvement_summary_v1039.json"
+        out = ["ALPHA IMPROVEMENT REPORT V10.39 START"]
+        if path.is_file():
+            s = _json.loads(path.read_text(encoding="utf-8"))
+            out.append(f"last_run: {s.get('ran_at')}  verdict: {s.get('verdict')}")
+            out.append(f"families promising={s.get('families_promising')} "
+                       f"rejected={s.get('families_rejected')}")
+            out.append("methodology: " + _json.dumps(s.get("methodology")))
+        else:
+            out.append("no sprint report yet -- run alpha-improvement-cycle-v1039 first")
+        out += ["paper_gate: BLOCKED", "FINAL_RECOMMENDATION=NO LIVE",
+                "ALPHA IMPROVEMENT REPORT V10.39 END"]
+        return chr(10).join(out)
+
     def free_microstructure_status_page_v1029_cli(self) -> str:
         from .labs import free_microstructure_dataset_assembler_v10_29 as A
         uri = A.write_status_page()
@@ -7940,6 +8022,9 @@ def build_argument_parser() -> argparse.ArgumentParser:
             "continuous-edge-cycle-v1038",
             "alpha-discovery-run-v1038",
             "candidate-incubator-report-v1038",
+            "alpha-improvement-cycle-v1039",
+            "alpha-improvement-diagnose-v1039",
+            "alpha-improvement-report-v1039",
             "ohlcv-replay-loader-smoke-test",
             "ohlcv-replay-loader-audit",
             "duplicate-module-audit-smoke-test",
@@ -8173,6 +8258,9 @@ PUBLIC_RESEARCH_ONLY_COMMANDS = frozenset({
     "continuous-edge-cycle-v1038",
     "alpha-discovery-run-v1038",
     "candidate-incubator-report-v1038",
+    "alpha-improvement-cycle-v1039",
+    "alpha-improvement-diagnose-v1039",
+    "alpha-improvement-report-v1039",
 })
 
 
@@ -8284,6 +8372,12 @@ def _dispatch_public_research_only(args) -> None:
         print(lab.alpha_discovery_run_v1038_cli(symbols=args.symbols))
     elif args.command == "candidate-incubator-report-v1038":
         print(lab.candidate_incubator_report_v1038_cli())
+    elif args.command == "alpha-improvement-cycle-v1039":
+        print(lab.alpha_improvement_cycle_v1039_cli(symbols=args.symbols))
+    elif args.command == "alpha-improvement-diagnose-v1039":
+        print(lab.alpha_improvement_diagnose_v1039_cli(symbols=args.symbols))
+    elif args.command == "alpha-improvement-report-v1039":
+        print(lab.alpha_improvement_report_v1039_cli())
     elif args.command.startswith("bybit-backfill-"):
         cmd = args.command.replace("bybit-backfill-", "").replace("-v1036", "")
         print(lab.bybit_backfill_v1036_cli(
