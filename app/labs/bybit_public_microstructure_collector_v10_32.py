@@ -563,16 +563,18 @@ def status(output_dir: str | None = None) -> dict[str, Any]:
     vr = V24.validate_sample(dataset_dir)
     cls = vr.get("classification", {})
     rep["readiness_verdict"] = cls.get("verdict")
-    if not consistency["source_consistency_ok"]:
-        # fail-closed: mixed or unstamped sources can never be READY
-        rep["readiness_verdict"] = V24.C_INVALID
-        rep["why_not_ready"] = ["SOURCE_MISMATCH_OR_MISSING_STAMP"]
-        rep["can_research_microstructure"] = False
     rep["active_gaps"] = cls.get("active_gaps")
     rep["valid_types"] = cls.get("valid_types")
     rep["density_ok"] = cls.get("density_ok")
     rep["why_not_ready"] = cls.get("why_not_ready")
     rep["can_research_microstructure"] = cls.get("can_research_microstructure")
+    if not consistency["source_consistency_ok"]:
+        # fail-closed: mixed or unstamped sources can never be READY or
+        # research-actionable, even if the base V10.24 density/schema gates pass.
+        rep["readiness_verdict"] = V24.C_INVALID
+        rep["why_not_ready"] = sorted(set((rep.get("why_not_ready") or [])
+                                          + ["SOURCE_MISMATCH_OR_MISSING_STAMP"]))
+        rep["can_research_microstructure"] = False
     rep["honesty"] = ("this is BYBIT data readiness; it never touches the Binance "
                       "readiness and READY is data-readiness, not an edge")
     return rep

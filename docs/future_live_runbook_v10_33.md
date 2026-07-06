@@ -16,7 +16,7 @@ explícita) deben estar TODAS en `[x]`. Hoy están todas en `[ ]`.
 todas sus puertas + firma humana. `micro_live` = importe mínimo absoluto.
 
 ## Antes de encender (el día que toque)
-1. `future-live-readiness-audit` → LIVE_READY: True (checklist).
+1. `future-live-readiness-audit` → `checklist_complete: true` y `ACTUAL_LIVE_READY: false` hasta aprobación humana final.
 2. `future-live-preflight-dry-run` → todos los checks OK.
 3. Dashboard fresco y en verde; datos NO stale; sin errores de colector.
 4. Kill switch probado ESE día (manual y automático).

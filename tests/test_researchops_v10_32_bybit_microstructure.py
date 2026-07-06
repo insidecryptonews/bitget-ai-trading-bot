@@ -223,6 +223,39 @@ def test_source_mismatch_invalidates_readiness(_repo):
     assert st["can_research_microstructure"] is False
 
 
+def test_source_mismatch_blocks_even_when_base_sample_is_ready(_repo):
+    days = 31
+
+    def tx_dense(url, headers):
+        B32.assert_safe_request(url, headers)
+        if "recent-trade" in url:
+            return json.dumps(_payload("trades", n=1500, days=days)).encode()
+        if "tickers" in url:
+            return json.dumps(_payload("orderbook")).encode()
+        if "open-interest" in url:
+            return json.dumps(_payload("oi", n=750, days=days)).encode()
+        return json.dumps(_payload("funding", n=93, days=days)).encode()
+
+    rep = B32.run_cycle("BTCUSDT", apply=True, transport=tx_dense,
+                        poll_spacing_seconds=0, orderbook_polls=1,
+                        liq_source_dir=str(_liq_src(_repo, n=62, days=days)))
+    ds = Path(rep["dataset_dir"])
+    seen = B32._load_seen(str(ds), "orderbook")
+    ob_rows = [{"timestamp": T0 + i * (days * DAY // 320), "symbol": "BTCUSDT",
+                "bid_price_1": "100", "bid_size_1": "2", "ask_price_1": "100.1",
+                "ask_size_1": "1", "depth_level": "L1_TICKER",
+                "source_exchange": "bybit_linear"} for i in range(320)]
+    B32._append_rows(str(ds), "orderbook", ob_rows, seen)
+    assert B32.status()["readiness_verdict"] == V24.C_READY
+
+    with open(ds / "funding.csv", "a", newline="", encoding="utf-8") as f:
+        f.write("1800000000000,BTCUSDT,0.0001,binance_usdm\n")
+    st = B32.status()
+    assert st["readiness_verdict"] == V24.C_INVALID
+    assert st["can_research_microstructure"] is False
+    assert "SOURCE_MISMATCH_OR_MISSING_STAMP" in st["why_not_ready"]
+
+
 def test_bybit_retcode_error_visible(_repo):
     def tx_err(url, headers):
         B32.assert_safe_request(url, headers)
