@@ -179,6 +179,61 @@ def test_tournament_writes_reports(tmp_path, monkeypatch):
         assert (out / name).is_file(), name
 
 
+ZERO = {"fee_bps": 0, "slippage_bps": 0, "spread_bps": 0}
+
+
+def test_same_bar_tp_and_sl_long_is_conservative_sl_first():
+    # future bar touches BOTH tp (high>=100.4) and sl (low<=99.6) -> SL wins
+    bars = [_bar(T0, 100, 100, 100, 100),
+            _bar(T0 + BAR, 100, 101.0, 99.0, 100.2)]
+    o = SH.simulate_trade(bars, 0, "long", 0.004, 0.004, 30, None, costs=ZERO)
+    assert o["exit_reason"] == "SL" and o["hit_sl"] is True and o["hit_tp"] is False
+    assert abs(o["gross_return"] - (-0.004)) < 1e-9
+
+
+def test_same_bar_tp_and_sl_short_is_conservative_sl_first():
+    # short: sl = high>=100.4, tp = low<=99.6; both touched -> SL wins
+    bars = [_bar(T0, 100, 100, 100, 100),
+            _bar(T0 + BAR, 100, 101.0, 99.0, 99.8)]
+    o = SH.simulate_trade(bars, 0, "short", 0.004, 0.004, 30, None, costs=ZERO)
+    assert o["exit_reason"] == "SL" and o["hit_sl"] is True and o["hit_tp"] is False
+    assert abs(o["gross_return"] - (-0.004)) < 1e-9
+
+
+def test_next_open_entry_uses_next_bar_open_not_close():
+    bars = [_bar(T0, 100, 100, 100, 100),
+            _bar(T0 + BAR, 101, 101.7, 100.9, 101.5)]      # opens at 101
+    oc = SH.simulate_trade(bars, 0, "long", 0.006, 0.02, 30, None,
+                           costs=ZERO, entry_mode="close")
+    on = SH.simulate_trade(bars, 0, "long", 0.006, 0.02, 30, None,
+                           costs=ZERO, entry_mode="next_open")
+    assert oc["entry_price"] == 100 and oc["entry_mode"] == "close"
+    assert on["entry_price"] == 101 and on["entry_mode"] == "next_open"
+
+
+def test_next_open_data_gap_when_entry_bar_not_contiguous():
+    bars = [_bar(T0, 100, 100, 100, 100),
+            _bar(T0 + 7 * BAR, 101, 105, 100, 104)]        # cannot fill next open
+    o = SH.simulate_trade(bars, 0, "long", 0.006, 0.02, 30, None, entry_mode="next_open")
+    assert o["exit_reason"] == "DATA_GAP" and o["valid"] is False
+
+
+def test_next_open_no_lookahead():
+    bars = [_bar(T0 + i * BAR, 100, 100.05, 99.95, 100.0) for i in range(40)]
+    base = SH.simulate_trade(bars, 5, "long", 0.02, 0.02, 10, None, entry_mode="next_open")
+    far = [dict(b) for b in bars]
+    for b in far[20:]:
+        b["high"] *= 5
+    assert SH.simulate_trade(far, 5, "long", 0.02, 0.02, 10, None, entry_mode="next_open") == base
+
+
+def test_compare_entry_modes_runs_both_and_stays_blocked():
+    cmp = SH.compare_entry_modes("SYN", bars=edge_bars(700, seed=3))
+    assert "per_policy" in cmp
+    assert cmp["can_send_real_orders"] is False
+    assert cmp["final_recommendation"] == "NO LIVE"
+
+
 def test_module_has_no_order_or_key_primitives():
     src = Path(SH.__file__).read_text(encoding="utf-8")
     # order / key primitives must be absent entirely

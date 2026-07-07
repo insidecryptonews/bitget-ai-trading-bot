@@ -6739,9 +6739,12 @@ class ResearchLab:
         from .labs import shadow_simulation_tournament_v10_40 as SH
         syms = self._v107_csv_arg(symbols)
         sym = syms[0] if syms else "BTCUSDT"
-        s = SH.run_tournament(sym)
-        out = ["SHADOW SIMULATION TOURNAMENT V10.40 START",
-               f"symbol: {sym}  bars: {s.get('n_bars')}  verdict: {s.get('verdict')}"]
+        # realistic entry (fill at next bar open) is the reported run
+        s = SH.run_tournament(sym, entry_mode="next_open")
+        close_ref = SH.run_tournament(sym, entry_mode="close", write_reports=False)
+        out = ["SHADOW SIMULATION TOURNAMENT V10.40 START (V10.41 realism)",
+               f"symbol: {sym}  bars: {s.get('n_bars')}  verdict: {s.get('verdict')}",
+               f"entry_mode: next_open (realistic) | close shown for comparison"]
         if s.get("note"):
             out.append("note: " + s["note"])
         if s.get("policies_total") is not None:
@@ -6766,6 +6769,9 @@ class ResearchLab:
                     out.append(f"  {prof:<14} final={v['final_eur']}EUR "
                                f"ret={v['return_pct']}% maxDD={v['max_drawdown_pct']}% "
                                f"wiped={v['wiped_out']} defensible={v['statistically_defensible']}")
+            out.append(f"entry_mode close-vs-next_open: close_any_beats="
+                       f"{close_ref.get('any_strategy_beats_baseline_and_costs')} "
+                       f"next_open_any_beats={s.get('any_strategy_beats_baseline_and_costs')}")
             out.append(f"execution_rehearsal.real_executor_exists: "
                        f"{s.get('execution_rehearsal', {}).get('real_executor_exists')}")
             out.append(f"micro_live_ready: {s.get('micro_live_ready')}")
@@ -6777,6 +6783,34 @@ class ResearchLab:
                 "edge_validated: false", "not_actionable: true",
                 "FINAL_RECOMMENDATION=NO LIVE",
                 "SHADOW SIMULATION TOURNAMENT V10.40 END"]
+        return chr(10).join(out)
+
+    def data_gap_audit_v1041_cli(self, *, symbols="") -> str:
+        from .labs import data_gap_audit_v10_41 as DGA
+        syms = self._v107_csv_arg(symbols)
+        sym = syms[0] if syms else "BTCUSDT"
+        r = DGA.audit(sym)
+        d = DGA.write_reports(r)
+        out = ["DATA GAP AUDIT V10.41 START",
+               f"symbol: {sym}  n_bars: {r.get('n_bars')}  verdict: {r.get('verdict')}"]
+        if r.get("verdict") != "NO_DATA" and r.get("coverage_ratio") is not None:
+            out += [
+                f"span_expected_bars: {r['expected_bars_between_min_max']}  "
+                f"coverage: {r['coverage_ratio']*100:.1f}%  missing: {r['missing_bars']}",
+                f"gaps>1min: {r['n_gaps']}  max_gap: {r['max_gap_min']}min  "
+                f"mean: {r['mean_gap_min']}min  median: {r['median_gap_min']}min",
+                f"max_contiguous_run: {r['max_contiguous_run_bars']} bars  "
+                f"mean_run: {r['mean_contiguous_run_bars']}",
+                f"gap_cause: pc_off>=60m={r['gap_cause_estimate']['pc_off_like_ge60min']}  "
+                f"rest_cadence<=10m={r['gap_cause_estimate']['rest_cadence_like_le10min']}  "
+                f"other={r['gap_cause_estimate']['other']}",
+                f"streams: {r['streams_row_counts']}",
+                f"fit_for_fine_backtest: {r['fit_for_fine_backtest']}  "
+                f"fit_for_shadow_forward: {r['fit_for_shadow_forward']}",
+                "recommendation: " + r["recommendation"]]
+        out += [f"reports_dir: {d}", "research_only: true", "not_actionable: true",
+                "can_send_real_orders: false", "FINAL_RECOMMENDATION=NO LIVE",
+                "DATA GAP AUDIT V10.41 END"]
         return chr(10).join(out)
 
     def free_microstructure_status_page_v1029_cli(self) -> str:
@@ -8108,6 +8142,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
             "alpha-improvement-report-v1039",
             "alpha-improvement-search-v1039",
             "shadow-simulation-tournament-v1040",
+            "data-gap-audit-v1041",
             "ohlcv-replay-loader-smoke-test",
             "ohlcv-replay-loader-audit",
             "duplicate-module-audit-smoke-test",
@@ -8346,6 +8381,7 @@ PUBLIC_RESEARCH_ONLY_COMMANDS = frozenset({
     "alpha-improvement-report-v1039",
     "alpha-improvement-search-v1039",
     "shadow-simulation-tournament-v1040",
+    "data-gap-audit-v1041",
 })
 
 
@@ -8467,6 +8503,8 @@ def _dispatch_public_research_only(args) -> None:
         print(lab.alpha_improvement_search_v1039_cli(symbols=args.symbols))
     elif args.command == "shadow-simulation-tournament-v1040":
         print(lab.shadow_simulation_tournament_v1040_cli(symbols=args.symbols))
+    elif args.command == "data-gap-audit-v1041":
+        print(lab.data_gap_audit_v1041_cli(symbols=args.symbols))
     elif args.command.startswith("bybit-backfill-"):
         cmd = args.command.replace("bybit-backfill-", "").replace("-v1036", "")
         print(lab.bybit_backfill_v1036_cli(

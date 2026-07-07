@@ -57,13 +57,32 @@ def _round_trip(costs: dict | None = None) -> float:
 
 def simulate_trade(bars: list[dict], i: int, side: str, tp_pct: float,
                    sl_pct: float, time_bars: int, trailing_pct: float | None,
-                   costs: dict | None = None) -> dict | None:
-    """Hypothetical trade opened at CLOSE of bars[i]; outcome read ONLY from
-    bars[i+1:]. SL wins ties (conservative). A timestamp gap > GAP_FACTOR bars
-    aborts the trade as DATA_GAP (never a win)."""
+                   costs: dict | None = None, entry_mode: str = "close") -> dict | None:
+    """Hypothetical trade for the signal at bar i (features available at the
+    CLOSE of bar i). Outcome read ONLY from bars[i+1:]. SL wins ties
+    (conservative). A cadence gap on the first step aborts as DATA_GAP.
+
+    entry_mode='close'    : fill at close of bar i (optimistic; kept for
+                            comparison). Exposure starts at bar i+1.
+    entry_mode='next_open': REALISTIC fill at the OPEN of bar i+1; requires the
+                            i -> i+1 step to be contiguous, else DATA_GAP.
+    In both modes the entry price is known no earlier than the signal
+    (available_at = bar i close < entry time) -> no lookahead."""
     if i + 1 >= len(bars):
         return None
-    entry = bars[i]["close"]
+    if entry_mode == "next_open":
+        if bars[i + 1]["ts"] - bars[i]["ts"] > GAP_FACTOR * BAR_MS:
+            return {"side": side, "exit_reason": "DATA_GAP", "valid": False,
+                    "entry_mode": entry_mode, "gross_return": 0.0,
+                    "net_return": 0.0, "fees": _round_trip(costs), "slippage": 0.0,
+                    "MAE": 0.0, "MFE": 0.0, "bars_held": 0, "duration_min": 0,
+                    "hit_tp": False, "hit_sl": False, "trail_activated": False,
+                    "trail_exit": False}
+        entry = bars[i + 1]["open"]
+        prev_ts = bars[i + 1]["ts"]
+    else:
+        entry = bars[i]["close"]
+        prev_ts = bars[i]["ts"]
     if entry <= 0:
         return None
     future = bars[i + 1:i + 1 + time_bars]
@@ -78,14 +97,14 @@ def simulate_trade(bars: list[dict], i: int, side: str, tp_pct: float,
     trail_active = trail_activated = trail_exit = hit_tp = hit_sl = False
     mae = mfe = 0.0
     exit_reason, exit_price, bars_held = "TIME", future[-1]["close"], len(future)
-    prev_ts = bars[i]["ts"]
     for j, fb in enumerate(future):
         if fb["ts"] - prev_ts > GAP_FACTOR * BAR_MS:            # data cadence gap
             if j == 0:                                          # cannot even step 1 bar
                 return {"side": side, "exit_reason": "DATA_GAP", "valid": False,
-                        "gross_return": 0.0, "net_return": 0.0, "fees": rt,
-                        "slippage": 0.0, "MAE": mae, "MFE": mfe, "bars_held": 0,
-                        "duration_min": 0, "hit_tp": False, "hit_sl": False,
+                        "entry_mode": entry_mode, "gross_return": 0.0,
+                        "net_return": 0.0, "fees": rt, "slippage": 0.0, "MAE": mae,
+                        "MFE": mfe, "bars_held": 0, "duration_min": 0,
+                        "hit_tp": False, "hit_sl": False,
                         "trail_activated": trail_activated, "trail_exit": False}
             # data went stale mid-trade -> close at last contiguous price (halt)
             exit_reason, exit_price, bars_held = "STALE_EXIT", future[j - 1]["close"], j
@@ -118,7 +137,7 @@ def simulate_trade(bars: list[dict], i: int, side: str, tp_pct: float,
             break
     gross = (exit_price / entry - 1) if side == "long" else (entry - exit_price) / entry
     return {"side": side, "exit_reason": exit_reason, "valid": True,
-            "entry_price": entry, "exit_price": exit_price,
+            "entry_mode": entry_mode, "entry_price": entry, "exit_price": exit_price,
             "gross_return": gross, "fees": rt, "slippage": 0.0,
             "net_return": gross - rt, "MAE": mae, "MFE": mfe,
             "bars_held": bars_held, "duration_min": bars_held,
@@ -247,7 +266,8 @@ def _policies() -> dict[str, tuple[str, Callable]]:
 def run_policy(name: str, kind: str, fn: Callable, features: list[dict],
                bars: list[dict], split: int, thr: dict, *, tp_pct: float,
                sl_pct: float, time_bars: int, trailing_pct: float | None,
-               costs: dict | None, cooldown: int, seed: int = 20) -> dict:
+               costs: dict | None, cooldown: int, seed: int = 20,
+               entry_mode: str = "close") -> dict:
     rng = random.Random(seed + hash(name) % 10_000)
     signals: list[dict] = []
     outcomes: list[dict] = []
@@ -258,7 +278,8 @@ def run_policy(name: str, kind: str, fn: Callable, features: list[dict],
             continue
         if i - last_entry < cooldown:                 # avoid correlated overlap
             continue
-        o = simulate_trade(bars, i, side, tp_pct, sl_pct, time_bars, trailing_pct, costs)
+        o = simulate_trade(bars, i, side, tp_pct, sl_pct, time_bars, trailing_pct,
+                           costs, entry_mode=entry_mode)
         if o is None:
             continue
         last_entry = i
@@ -409,10 +430,12 @@ def run_tournament(symbol: str = "BTCUSDT", bars: list[dict] | None = None,
                    aux: dict | None = None, *, tp_pct: float = 0.006,
                    sl_pct: float = 0.006, time_bars: int = DEFAULT_TIME_BARS,
                    trailing_pct: float | None = 0.004, cooldown: int = 5,
-                   costs: dict | None = None, write_reports: bool = True) -> dict:
+                   costs: dict | None = None, entry_mode: str = "close",
+                   write_reports: bool = True) -> dict:
     """Offline shadow tournament. tp/sl default to 60bps with a trailing stop at
     40bps favorable; SL is deliberately NOT tight (volatility room). Everything
-    hypothetical over historical bars."""
+    hypothetical over historical bars. entry_mode 'close' (optimistic) or
+    'next_open' (realistic fill at next bar open)."""
     if bars is None:
         data = CE.load_dataset(symbol)
         bars = data.get("bars") or []
@@ -423,7 +446,7 @@ def run_tournament(symbol: str = "BTCUSDT", bars: list[dict] | None = None,
                                "params": {"tp_pct": tp_pct, "sl_pct": sl_pct,
                                           "time_bars": time_bars,
                                           "trailing_pct": trailing_pct,
-                                          "cooldown": cooldown,
+                                          "cooldown": cooldown, "entry_mode": entry_mode,
                                           "round_trip_cost": round(_round_trip(costs), 6)},
                                **_safety()}
     if len(bars) < 3 * CE.MIN_SAMPLE:
@@ -439,7 +462,7 @@ def run_tournament(symbol: str = "BTCUSDT", bars: list[dict] | None = None,
         results.append(run_policy(name, kind, fn, features, bars, split, thr,
                                    tp_pct=tp_pct, sl_pct=sl_pct, time_bars=time_bars,
                                    trailing_pct=trailing_pct, costs=costs,
-                                   cooldown=cooldown))
+                                   cooldown=cooldown, entry_mode=entry_mode))
     # baseline reference = best baseline lower bound (or -inf if none scored)
     base_lbs = [r["metrics"]["net_EV_lower_bound"] for r in results
                 if r["kind"] == "baseline" and r["metrics"]["net_EV_lower_bound"] is not None]
@@ -489,12 +512,47 @@ def run_tournament(symbol: str = "BTCUSDT", bars: list[dict] | None = None,
         "micro_live_blockers": ["no_validated_edge", "no_bitget_credentials",
                                 "live_order_path_absent", "human_approval_required",
                                 "insufficient_forward_data"],
+        "entry_mode": entry_mode,
         "verdict": ("STRATEGIES_UNDER_RESEARCH" if best else "NO_STRATEGIES"),
         "ranking_key": "net_EV_lower_bound (win_rate is secondary)"})
     if write_reports:
         _write_reports(summary, results, scoreboard, bankroll, rehearsal)
         summary["reports_dir"] = str(CE._repo_root().joinpath(*OUTPUT_SUBDIR)).replace("\\", "/")
     return summary
+
+
+def compare_entry_modes(symbol: str = "BTCUSDT", bars: list[dict] | None = None,
+                        aux: dict | None = None, **kw) -> dict:
+    """Run the tournament under both entry modes and show which strategies were
+    only 'good' because of the optimistic close entry. Realistic = next_open."""
+    kw.pop("entry_mode", None)
+    kw["write_reports"] = False
+    a = run_tournament(symbol, bars, aux, entry_mode="close", **kw)
+    b = run_tournament(symbol, bars, aux, entry_mode="next_open", **kw)
+    if "scoreboard_top" not in a or "scoreboard_top" not in b:
+        return {"note": "insufficient data for comparison", **_safety()}
+
+    def by_name(rep):
+        # need full scoreboard, not just top -> re-read from summary top (8) is
+        # enough for the headline comparison
+        return {m["policy"]: m for m in rep.get("scoreboard_top", [])}
+    ca, cb = by_name(a), by_name(b)
+    rows = []
+    for name in sorted(set(ca) | set(cb)):
+        ma, mb = ca.get(name, {}), cb.get(name, {})
+        rows.append({"policy": name, "kind": ma.get("kind") or mb.get("kind"),
+                     "close_net_EV": ma.get("net_EV"),
+                     "next_open_net_EV": mb.get("net_EV"),
+                     "close_verdict": ma.get("verdict"),
+                     "next_open_verdict": mb.get("verdict"),
+                     "died_on_next_open": (ma.get("verdict") not in (None, "REJECTED")
+                                           and mb.get("verdict") == "REJECTED")})
+    return {"tool_version": TOOL_VERSION, "symbol": symbol,
+            "close_any_beats": a.get("any_strategy_beats_baseline_and_costs"),
+            "next_open_any_beats": b.get("any_strategy_beats_baseline_and_costs"),
+            "close_best": a.get("best_strategy", {}).get("policy") if a.get("best_strategy") else None,
+            "next_open_best": b.get("best_strategy", {}).get("policy") if b.get("best_strategy") else None,
+            "per_policy": rows, **_safety()}
 
 
 def _write_reports(summary, results, scoreboard, bankroll, rehearsal) -> None:
