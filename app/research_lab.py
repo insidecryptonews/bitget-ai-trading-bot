@@ -6813,6 +6813,122 @@ class ResearchLab:
                 "DATA GAP AUDIT V10.41 END"]
         return chr(10).join(out)
 
+    def forward_dataset_view_v1042_cli(self, *, symbols="") -> str:
+        from .labs import data_reliability_v10_42 as DR
+        import json as _json
+        sym = (self._v107_csv_arg(symbols) or ["BTCUSDT"])[0]
+        v = DR.forward_dataset_view(sym)
+        dq = DR.data_quality_gate(v)
+        DR.write_json_md("forward_dataset_view_v1042", {"view": v, "gate": dq},
+                         "# Forward Dataset View V10.42\n\n"
+                         f"segments: {v['n_segments']} · mixed_with_backfill: "
+                         f"{v['mixed_with_backfill']}\nglobal_verdict: {v['global_verdict']} "
+                         f"(coverage {v['global_coverage_ratio']})\nforward_verdict: "
+                         f"{v['forward_verdict']} · forward_bars: {v['forward_n_bars']} · "
+                         f"forward_max_run: {v['forward_max_contiguous_run_bars']}\n"
+                         f"data_quality_gate: {dq['states']}\nreliability: "
+                         f"{dq['tournament_result_reliability']}\n\nNO LIVE.\n")
+        out = ["FORWARD DATASET VIEW V10.42 START",
+               f"symbol: {sym}  segments: {v['n_segments']}  "
+               f"mixed_with_backfill: {v['mixed_with_backfill']}",
+               f"total_bars: {v['total_n_bars']}  forward_bars: {v['forward_n_bars']}",
+               f"global_verdict: {v['global_verdict']} (coverage {v['global_coverage_ratio']})",
+               f"forward_verdict: {v['forward_verdict']}  "
+               f"forward_max_contiguous_run: {v['forward_max_contiguous_run_bars']}",
+               f"data_quality_gate: {dq['states']}",
+               f"tournament_result_reliability: {dq['tournament_result_reliability']}",
+               "research_only: true", "can_send_real_orders: false",
+               "FINAL_RECOMMENDATION=NO LIVE", "FORWARD DATASET VIEW V10.42 END"]
+        return chr(10).join(out)
+
+    def collector_health_v1042_cli(self, *, symbols="") -> str:
+        from .labs import data_reliability_v10_42 as DR
+        sym = (self._v107_csv_arg(symbols) or ["BTCUSDT"])[0]
+        h = DR.collector_health(sym)
+        DR.write_json_md("collector_health_v1042", h,
+                         f"# Collector Health V10.42\n\nstatus: {h.get('status')}\n"
+                         f"sub_states: {h.get('sub_states')}\ntrades_file_age_min: "
+                         f"{h.get('trades_file_age_min')}\nforward_bars: "
+                         f"{h.get('forward_n_bars')}\nreliability: "
+                         f"{h.get('data_reliability')}\n\nNO LIVE.\n")
+        out = ["COLLECTOR HEALTH V10.42 START",
+               f"symbol: {sym}  status: {h.get('status')}  sub_states: {h.get('sub_states')}",
+               f"trades_file_age_min: {h.get('trades_file_age_min')}  "
+               f"collector_fresh: {h.get('collector_fresh')}  "
+               f"pc_off_or_down_inferred: {h.get('pc_off_or_down_inferred')}",
+               f"forward_bars: {h.get('forward_n_bars')}  "
+               f"forward_coverage: {h.get('forward_coverage_ratio')}  "
+               f"forward_max_run: {h.get('forward_max_contiguous_run_bars')}",
+               f"mixed_with_backfill: {h.get('mixed_with_backfill')}  "
+               f"disk_free_gb: {h.get('disk_free_gb')}  "
+               f"data_reliability: {h.get('data_reliability')}",
+               "research_only: true", "can_send_real_orders: false",
+               "FINAL_RECOMMENDATION=NO LIVE", "COLLECTOR HEALTH V10.42 END"]
+        return chr(10).join(out)
+
+    def gap_repair_plan_v1042_cli(self, *, symbols="", dry_run=True) -> str:
+        from .labs import data_reliability_v10_42 as DR
+        sym = (self._v107_csv_arg(symbols) or ["BTCUSDT"])[0]
+        p = DR.gap_repair_plan(sym, mode="dry-run" if dry_run else "audit")
+        out = ["GAP REPAIR PLAN V10.42 START",
+               f"symbol: {sym}  mode: {p['mode']}  verdict: {p['verdict']}",
+               f"gap_classes: {p['gap_classes']}",
+               f"apply_supported: {p['apply_supported']}  never_invents_ticks: "
+               f"{p['never_invents_ticks']}",
+               "explanation: " + p["explanation"],
+               "research_only: true", "can_send_real_orders: false",
+               "FINAL_RECOMMENDATION=NO LIVE", "GAP REPAIR PLAN V10.42 END"]
+        return chr(10).join(out)
+
+    def bottleneck_map_v1042_cli(self, *, symbols="") -> str:
+        from .labs import data_reliability_v10_42 as DR
+        import json as _json
+        sym = (self._v107_csv_arg(symbols) or ["BTCUSDT"])[0]
+        m = DR.bottleneck_map(sym)
+        md = ["# Bottleneck Map V10.42 — RESEARCH ONLY, NO LIVE", "",
+              f"symbol: {sym} · collector: {m['collector_status']} · "
+              f"forward_verdict: {m['forward_verdict']} · reliability: "
+              f"{m['tournament_reliability']}", "",
+              f"data_quality_gate: {m['data_quality_gate']}", "",
+              "| area | issue | status | fix |", "|---|---|---|---|"]
+        for b in m["bottlenecks"]:
+            md.append(f"| {b['area']} | {b['issue']} | {b['status']} | {b['fix']} |")
+        md += ["", f"top_priority: **{m['top_priority']}**", "",
+               "strategy_universe: " + _json.dumps(m["strategy_universe"]), "",
+               "NO LIVE."]
+        DR.write_json_md("bottleneck_map_v1042", m, "\n".join(md))
+        out = ["BOTTLENECK MAP V10.42 START",
+               f"symbol: {sym}  collector: {m['collector_status']}  "
+               f"forward_verdict: {m['forward_verdict']}  "
+               f"reliability: {m['tournament_reliability']}",
+               f"data_quality_gate: {m['data_quality_gate']}",
+               f"gap_repair_verdict: {m['gap_repair_verdict']}",
+               "bottlenecks:"]
+        for b in m["bottlenecks"]:
+            out.append(f"  [{b['status']}] {b['area']}: {b['issue']} -> {b['fix']}")
+        out += [f"top_priority: {m['top_priority']}",
+                "research_only: true", "can_send_real_orders: false",
+                "FINAL_RECOMMENDATION=NO LIVE", "BOTTLENECK MAP V10.42 END"]
+        return chr(10).join(out)
+
+    def bybit_trades_ws_collect_v1042_cli(self, *, symbols="", seconds=60) -> str:
+        from .labs import bybit_trades_ws_collector_v10_42 as WS
+        syms = self._v107_csv_arg(symbols) or ["BTCUSDT"]
+        r = WS.ws_collect_sample(syms, seconds=int(seconds))
+        out = ["BYBIT TRADES WS COLLECT V10.42 START",
+               f"symbols: {','.join(syms)}  seconds: {seconds}",
+               f"collect_status: {r.get('collect_status')}"]
+        if r.get("detail"):
+            out.append("detail: " + str(r["detail"]))
+        out += [f"frames: {r.get('frames')}  unique_trades: {r.get('unique_trades')}  "
+                f"rows_added: {r.get('rows_added')}  total_rows: {r.get('total_rows')}",
+                f"dataset: {r.get('dataset')}" if r.get("dataset") else "dataset: (none)",
+                "uses_api_keys: false", "sends_orders: false",
+                "subscribes_private_channels: false", "research_only: true",
+                "can_send_real_orders: false", "FINAL_RECOMMENDATION=NO LIVE",
+                "BYBIT TRADES WS COLLECT V10.42 END"]
+        return chr(10).join(out)
+
     def free_microstructure_status_page_v1029_cli(self) -> str:
         from .labs import free_microstructure_dataset_assembler_v10_29 as A
         uri = A.write_status_page()
@@ -8143,6 +8259,11 @@ def build_argument_parser() -> argparse.ArgumentParser:
             "alpha-improvement-search-v1039",
             "shadow-simulation-tournament-v1040",
             "data-gap-audit-v1041",
+            "forward-dataset-view-v1042",
+            "collector-health-v1042",
+            "gap-repair-plan-v1042",
+            "bottleneck-map-v1042",
+            "bybit-trades-ws-collect-v1042",
             "ohlcv-replay-loader-smoke-test",
             "ohlcv-replay-loader-audit",
             "duplicate-module-audit-smoke-test",
@@ -8382,6 +8503,11 @@ PUBLIC_RESEARCH_ONLY_COMMANDS = frozenset({
     "alpha-improvement-search-v1039",
     "shadow-simulation-tournament-v1040",
     "data-gap-audit-v1041",
+    "forward-dataset-view-v1042",
+    "collector-health-v1042",
+    "gap-repair-plan-v1042",
+    "bottleneck-map-v1042",
+    "bybit-trades-ws-collect-v1042",
 })
 
 
@@ -8505,6 +8631,16 @@ def _dispatch_public_research_only(args) -> None:
         print(lab.shadow_simulation_tournament_v1040_cli(symbols=args.symbols))
     elif args.command == "data-gap-audit-v1041":
         print(lab.data_gap_audit_v1041_cli(symbols=args.symbols))
+    elif args.command == "forward-dataset-view-v1042":
+        print(lab.forward_dataset_view_v1042_cli(symbols=args.symbols))
+    elif args.command == "collector-health-v1042":
+        print(lab.collector_health_v1042_cli(symbols=args.symbols))
+    elif args.command == "gap-repair-plan-v1042":
+        print(lab.gap_repair_plan_v1042_cli(symbols=args.symbols))
+    elif args.command == "bottleneck-map-v1042":
+        print(lab.bottleneck_map_v1042_cli(symbols=args.symbols))
+    elif args.command == "bybit-trades-ws-collect-v1042":
+        print(lab.bybit_trades_ws_collect_v1042_cli(symbols=args.symbols))
     elif args.command.startswith("bybit-backfill-"):
         cmd = args.command.replace("bybit-backfill-", "").replace("-v1036", "")
         print(lab.bybit_backfill_v1036_cli(
