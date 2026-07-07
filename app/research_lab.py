@@ -6735,6 +6735,50 @@ class ResearchLab:
                 "ALPHA_IMPROVEMENT_SEARCH_V1039 END"]
         return chr(10).join(out)
 
+    def shadow_simulation_tournament_v1040_cli(self, *, symbols="") -> str:
+        from .labs import shadow_simulation_tournament_v10_40 as SH
+        syms = self._v107_csv_arg(symbols)
+        sym = syms[0] if syms else "BTCUSDT"
+        s = SH.run_tournament(sym)
+        out = ["SHADOW SIMULATION TOURNAMENT V10.40 START",
+               f"symbol: {sym}  bars: {s.get('n_bars')}  verdict: {s.get('verdict')}"]
+        if s.get("note"):
+            out.append("note: " + s["note"])
+        if s.get("policies_total") is not None:
+            p = s.get("params", {})
+            out.append(f"params: tp={p.get('tp_pct')} sl={p.get('sl_pct')} "
+                       f"trail={p.get('trailing_pct')} horizon={p.get('time_bars')} "
+                       f"cost={p.get('round_trip_cost')}")
+            out.append(f"policies: {s['policies_total']}  ranking_key: {s['ranking_key']}")
+            out.append(f"best_baseline_lower_bound: {s.get('best_baseline_lower_bound')}")
+            out.append(f"any_strategy_beats_baseline_and_costs: "
+                       f"{s.get('any_strategy_beats_baseline_and_costs')}")
+            out.append("scoreboard_top (by net_EV_lower_bound):")
+            for m in s.get("scoreboard_top", [])[:8]:
+                out.append(f"  {m['policy']:<32} [{m['kind']}/{m['verdict']}] "
+                           f"n={m['n_signals']} win%={m.get('win_rate')} "
+                           f"PF={m.get('profit_factor')} netEV={m.get('net_EV')} "
+                           f"lb={m.get('net_EV_lower_bound')} DD={m.get('max_drawdown')}")
+            bk = s.get("bankroll_20eur") or {}
+            if bk:
+                out.append("20EUR shadow bankroll (FAKE, best strategy):")
+                for prof, v in bk.items():
+                    out.append(f"  {prof:<14} final={v['final_eur']}EUR "
+                               f"ret={v['return_pct']}% maxDD={v['max_drawdown_pct']}% "
+                               f"wiped={v['wiped_out']} defensible={v['statistically_defensible']}")
+            out.append(f"execution_rehearsal.real_executor_exists: "
+                       f"{s.get('execution_rehearsal', {}).get('real_executor_exists')}")
+            out.append(f"micro_live_ready: {s.get('micro_live_ready')}")
+            out.append("micro_live_blockers: " + ",".join(s.get("micro_live_blockers", [])))
+        if s.get("reports_dir"):
+            out.append("reports_dir: " + s["reports_dir"])
+        out += ["research_only: true", "shadow_only: true", "sends_orders: false",
+                "can_send_real_orders: false", "paper_filter_enabled: false",
+                "edge_validated: false", "not_actionable: true",
+                "FINAL_RECOMMENDATION=NO LIVE",
+                "SHADOW SIMULATION TOURNAMENT V10.40 END"]
+        return chr(10).join(out)
+
     def free_microstructure_status_page_v1029_cli(self) -> str:
         from .labs import free_microstructure_dataset_assembler_v10_29 as A
         uri = A.write_status_page()
@@ -8063,6 +8107,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
             "alpha-improvement-diagnose-v1039",
             "alpha-improvement-report-v1039",
             "alpha-improvement-search-v1039",
+            "shadow-simulation-tournament-v1040",
             "ohlcv-replay-loader-smoke-test",
             "ohlcv-replay-loader-audit",
             "duplicate-module-audit-smoke-test",
@@ -8300,6 +8345,7 @@ PUBLIC_RESEARCH_ONLY_COMMANDS = frozenset({
     "alpha-improvement-diagnose-v1039",
     "alpha-improvement-report-v1039",
     "alpha-improvement-search-v1039",
+    "shadow-simulation-tournament-v1040",
 })
 
 
@@ -8419,6 +8465,8 @@ def _dispatch_public_research_only(args) -> None:
         print(lab.alpha_improvement_report_v1039_cli())
     elif args.command == "alpha-improvement-search-v1039":
         print(lab.alpha_improvement_search_v1039_cli(symbols=args.symbols))
+    elif args.command == "shadow-simulation-tournament-v1040":
+        print(lab.shadow_simulation_tournament_v1040_cli(symbols=args.symbols))
     elif args.command.startswith("bybit-backfill-"):
         cmd = args.command.replace("bybit-backfill-", "").replace("-v1036", "")
         print(lab.bybit_backfill_v1036_cli(
