@@ -6945,6 +6945,109 @@ class ResearchLab:
             "final_recommendation: NO LIVE",
             "RESEARCH DASHBOARD V10.43A END"])
 
+    def ws_forward_dataset_view_v1043b_cli(self, *, symbols="") -> str:
+        from .labs import ws_dataset_integration_v10_43b as WS
+        sym = (self._v107_csv_arg(symbols) or ["BTCUSDT"])[0]
+        v = WS.ws_forward_dataset_view(sym)
+        WS_dir = WS.CE._repo_root().joinpath(*WS.OUTPUT_SUBDIR)
+        WS_dir.mkdir(parents=True, exist_ok=True)
+        import json as _json
+        (WS_dir / "ws_forward_dataset_view_v1043b.json").write_text(
+            _json.dumps(v, indent=2, default=str), encoding="utf-8")
+        return chr(10).join([
+            "WS FORWARD DATASET VIEW V10.43B START",
+            f"symbol: {sym}  source: ws_v10_42  verdict: {v.get('verdict')}",
+            f"ws_trades_used: {v.get('ws_trades_used')}  bars_created: {v.get('bars_created')}",
+            f"forward_bars: {v.get('forward_bars')}  forward_coverage: {v.get('forward_coverage')}",
+            f"max_contiguous_run: {v.get('max_contiguous_run')}  ws_file_age_min: {v.get('ws_file_age_min')}",
+            f"reliability: {v.get('reliability')}  data_quality_gate: {v.get('data_quality_gate')}",
+            f"fit_for_fine_backtest: {v.get('fit_for_fine_backtest')}  "
+            f"fit_for_shadow_forward: {v.get('fit_for_shadow_forward')}",
+            "research_only: true", "can_send_real_orders: false",
+            "FINAL_RECOMMENDATION=NO LIVE", "WS FORWARD DATASET VIEW V10.43B END"])
+
+    def dataset_source_compare_v1043b_cli(self, *, symbols="") -> str:
+        from .labs import ws_dataset_integration_v10_43b as WS
+        sym = (self._v107_csv_arg(symbols) or ["BTCUSDT"])[0]
+        c = WS.dataset_source_compare(sym)
+        WS_dir = WS.CE._repo_root().joinpath(*WS.OUTPUT_SUBDIR)
+        WS_dir.mkdir(parents=True, exist_ok=True)
+        import json as _json
+        (WS_dir / "dataset_source_compare_v1043b.json").write_text(
+            _json.dumps(c, indent=2, default=str), encoding="utf-8")
+        r, w = c["rest"], c["ws"]
+        return chr(10).join([
+            "DATASET SOURCE COMPARE V10.43B START",
+            f"symbol: {sym}",
+            f"REST bars={r['bars']} max_run={r['max_contiguous_run']} coverage={r['coverage']}",
+            f"WS   bars={w['bars']} max_run={w['max_contiguous_run']} coverage={w['coverage']}",
+            f"which_better_by_contiguity: {c['which_better_by_contiguity']}",
+            f"recommended_source: {c['recommended_source']}",
+            f"blockers: {c['blockers']}",
+            "research_only: true", "can_send_real_orders: false",
+            "FINAL_RECOMMENDATION=NO LIVE", "DATASET SOURCE COMPARE V10.43B END"])
+
+    def shadow_simulation_tournament_ws_v1043b_cli(self, *, symbols="") -> str:
+        from .labs import autonomous_strategy_lab_v10_43b as LAB
+        sym = (self._v107_csv_arg(symbols) or ["BTCUSDT"])[0]
+        r = LAB.run_ws_tournament(sym)
+        out = ["SHADOW SIMULATION TOURNAMENT WS V10.43B START",
+               f"symbol: {sym}  source: ws_v10_42  n_bars: {r.get('n_bars')}",
+               f"verdict: {r.get('verdict')}",
+               f"ws_max_contiguous_run: {r.get('ws_max_contiguous_run')}",
+               f"any_strategy_beats_baseline_and_costs: {r.get('any_strategy_beats_baseline_and_costs')}"]
+        best = r.get("best_strategy") or {}
+        if best:
+            out.append(f"best: {best.get('policy')} [{best.get('verdict')}] "
+                       f"netEV={best.get('net_EV')} lb={best.get('net_EV_lower_bound')} "
+                       f"n={best.get('n_signals')}")
+        out += ["micro_live_ready: false", "research_only: true",
+                "can_send_real_orders: false", "FINAL_RECOMMENDATION=NO LIVE",
+                "SHADOW SIMULATION TOURNAMENT WS V10.43B END"]
+        return chr(10).join(out)
+
+    def autonomous_strategy_lab_v1043b_cli(self, *, symbols="", data_source="auto") -> str:
+        from .labs import autonomous_strategy_lab_v10_43b as LAB
+        sym = (self._v107_csv_arg(symbols) or ["BTCUSDT"])[0]
+        s = LAB.run_lab(sym, data_source=data_source)
+        out = ["AUTONOMOUS STRATEGY LAB V10.43B START",
+               f"symbol: {sym}  requested_source: {s.get('requested_source')}  "
+               f"effective_source: {s.get('effective_source')}  bars: {s.get('n_bars')}",
+               f"verdict: {s.get('verdict')}"]
+        if s.get("note"):
+            out.append("note: " + s["note"])
+        if s.get("candidates_generated") is not None:
+            out.append(f"candidates_generated: {s['candidates_generated']}  "
+                       f"verdict_counts: {s.get('verdict_counts')}")
+            out.append(f"watchlist_or_better: {s.get('watchlist_or_better')}  "
+                       f"best_baseline_lb: {s.get('best_baseline_lower_bound')}")
+            b = s.get("best") or {}
+            out.append(f"best: {b.get('strategy_name')} [{b.get('verdict')}] "
+                       f"family={b.get('family')} netEV={b.get('net_EV')} "
+                       f"lb={b.get('net_EV_lower_bound')} n={b.get('sample_size')}")
+            out.append(f"top_rejection_reasons: {s.get('top_rejection_reasons')}")
+            out.append(f"lead_lag: {s.get('lead_lag')}")
+            out.append(f"ranking_key: {s.get('ranking_key')}")
+        if s.get("reports_dir"):
+            out.append("reports_dir: " + s["reports_dir"])
+        out += ["research_only: true", "edge_validated: false",
+                "can_send_real_orders: false", "not_actionable: true",
+                "FINAL_RECOMMENDATION=NO LIVE", "AUTONOMOUS STRATEGY LAB V10.43B END"]
+        return chr(10).join(out)
+
+    def research_dashboard_build_v1043b_cli(self, *, symbols="") -> str:
+        from .labs import research_dashboard_v10_43b as DASH
+        sym = (self._v107_csv_arg(symbols) or ["BTCUSDT"])[0]
+        r = DASH.build_dashboard(sym)
+        return chr(10).join([
+            "DASHBOARD_BUILD_COMPLETED",
+            f"symbol: {sym}", f"ws_verdict: {r.get('ws_verdict')}",
+            f"readiness: {r.get('readiness')}",
+            f"html: {r.get('html')}", f"json: {r.get('json')}",
+            f"open_url: {r.get('url')}", "mode: RESEARCH_ONLY",
+            "edge_validated: false", "can_send_real_orders: false",
+            "final_recommendation: NO LIVE", "RESEARCH DASHBOARD V10.43B END"])
+
     def research_dashboard_open_v1043a_cli(self, *, symbols="") -> str:
         from .labs import research_dashboard_v10_43a as DASH
         import os as _os
@@ -8302,6 +8405,11 @@ def build_argument_parser() -> argparse.ArgumentParser:
             "bybit-trades-ws-collect-v1042",
             "research-dashboard-build-v1043a",
             "research-dashboard-open-v1043a",
+            "ws-forward-dataset-view-v1043b",
+            "dataset-source-compare-v1043b",
+            "shadow-simulation-tournament-ws-v1043b",
+            "autonomous-strategy-lab-v1043b",
+            "research-dashboard-build-v1043b",
             "ohlcv-replay-loader-smoke-test",
             "ohlcv-replay-loader-audit",
             "duplicate-module-audit-smoke-test",
@@ -8388,6 +8496,9 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--id", default="", help="Catalyst id manual.")
     parser.add_argument("--title", default="", help="Titulo del catalyst manual.")
     parser.add_argument("--symbols", default="", help="Simbolos afectados, separados por coma.")
+    parser.add_argument("--data-source", dest="data_source", default="auto",
+                        choices=["auto", "ws", "rest"],
+                        help="V10.43B data source for the strategy lab (default auto).")
     parser.add_argument("--category", default="other", help="Categoria catalyst.")
     parser.add_argument("--direction", default="unknown", help="Direccion catalyst.")
     parser.add_argument("--severity", default="low", help="Severidad catalyst.")
@@ -8548,6 +8659,11 @@ PUBLIC_RESEARCH_ONLY_COMMANDS = frozenset({
     "bybit-trades-ws-collect-v1042",
     "research-dashboard-build-v1043a",
     "research-dashboard-open-v1043a",
+    "ws-forward-dataset-view-v1043b",
+    "dataset-source-compare-v1043b",
+    "shadow-simulation-tournament-ws-v1043b",
+    "autonomous-strategy-lab-v1043b",
+    "research-dashboard-build-v1043b",
 })
 
 
@@ -8685,6 +8801,17 @@ def _dispatch_public_research_only(args) -> None:
         print(lab.research_dashboard_build_v1043a_cli(symbols=args.symbols))
     elif args.command == "research-dashboard-open-v1043a":
         print(lab.research_dashboard_open_v1043a_cli(symbols=args.symbols))
+    elif args.command == "ws-forward-dataset-view-v1043b":
+        print(lab.ws_forward_dataset_view_v1043b_cli(symbols=args.symbols))
+    elif args.command == "dataset-source-compare-v1043b":
+        print(lab.dataset_source_compare_v1043b_cli(symbols=args.symbols))
+    elif args.command == "shadow-simulation-tournament-ws-v1043b":
+        print(lab.shadow_simulation_tournament_ws_v1043b_cli(symbols=args.symbols))
+    elif args.command == "autonomous-strategy-lab-v1043b":
+        print(lab.autonomous_strategy_lab_v1043b_cli(
+            symbols=args.symbols, data_source=getattr(args, "data_source", "auto")))
+    elif args.command == "research-dashboard-build-v1043b":
+        print(lab.research_dashboard_build_v1043b_cli(symbols=args.symbols))
     elif args.command.startswith("bybit-backfill-"):
         cmd = args.command.replace("bybit-backfill-", "").replace("-v1036", "")
         print(lab.bybit_backfill_v1036_cli(
