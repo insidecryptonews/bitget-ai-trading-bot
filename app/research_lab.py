@@ -7035,6 +7035,37 @@ class ResearchLab:
                 "FINAL_RECOMMENDATION=NO LIVE", "AUTONOMOUS STRATEGY LAB V10.43B END"]
         return chr(10).join(out)
 
+    def exit_optimization_v1043b_cli(self, *, symbols="", data_source="auto") -> str:
+        from .labs import exit_optimization_v10_43b as EO
+        sym = (self._v107_csv_arg(symbols) or ["BTCUSDT"])[0]
+        s = EO.run_exit_optimization(sym, data_source=data_source)
+        out = ["EXIT OPTIMIZATION V10.43B START",
+               f"symbol: {sym}  source: {s.get('effective_source')}  bars: {s.get('n_bars')}",
+               f"aggressiveness_from: {s.get('aggressiveness_from')}",
+               f"verdict: {s.get('verdict')}"]
+        if s.get("note"):
+            out.append("note: " + s["note"])
+        if s.get("variants_x_horizons") is not None:
+            out.append(f"entries: {s.get('n_entries')}  variants_x_horizons: {s.get('variants_x_horizons')}")
+            out.append(f"baseline_exit_lower_bound: {s.get('baseline_exit_lower_bound')}  "
+                       f"watchlist_or_better: {s.get('watchlist_or_better')}")
+            b = s.get("best_variant") or {}
+            out.append(f"best_variant: {b.get('exit_variant')}@{b.get('horizon')} "
+                       f"[{b.get('verdict')}] netEV={b.get('net_EV')} "
+                       f"lb={b.get('net_EV_lower_bound')} capture={b.get('capture_ratio')} "
+                       f"n={b.get('sample_size')}")
+            wl = s.get("winner_loser") or {}
+            out.append(f"winner_loser: reached+40bps_but_closed<=0={wl.get('reached_+40bps_but_closed_<=0_pct')}% "
+                       f"never_favorable={wl.get('never_went_favorable_pct')}% "
+                       f"avg_MFE_captured={wl.get('avg_pct_of_MFE_captured')}%")
+        if s.get("reports_dir"):
+            out.append("reports_dir: " + s["reports_dir"])
+        out += ["changes_leverage: false", "changes_sizing: false",
+                "research_only: true", "edge_validated: false",
+                "can_send_real_orders: false", "FINAL_RECOMMENDATION=NO LIVE",
+                "EXIT OPTIMIZATION V10.43B END"]
+        return chr(10).join(out)
+
     def research_dashboard_build_v1043b_cli(self, *, symbols="") -> str:
         from .labs import research_dashboard_v10_43b as DASH
         sym = (self._v107_csv_arg(symbols) or ["BTCUSDT"])[0]
@@ -8409,6 +8440,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
             "dataset-source-compare-v1043b",
             "shadow-simulation-tournament-ws-v1043b",
             "autonomous-strategy-lab-v1043b",
+            "exit-optimization-v1043b",
             "research-dashboard-build-v1043b",
             "ohlcv-replay-loader-smoke-test",
             "ohlcv-replay-loader-audit",
@@ -8663,6 +8695,7 @@ PUBLIC_RESEARCH_ONLY_COMMANDS = frozenset({
     "dataset-source-compare-v1043b",
     "shadow-simulation-tournament-ws-v1043b",
     "autonomous-strategy-lab-v1043b",
+    "exit-optimization-v1043b",
     "research-dashboard-build-v1043b",
 })
 
@@ -8809,6 +8842,9 @@ def _dispatch_public_research_only(args) -> None:
         print(lab.shadow_simulation_tournament_ws_v1043b_cli(symbols=args.symbols))
     elif args.command == "autonomous-strategy-lab-v1043b":
         print(lab.autonomous_strategy_lab_v1043b_cli(
+            symbols=args.symbols, data_source=getattr(args, "data_source", "auto")))
+    elif args.command == "exit-optimization-v1043b":
+        print(lab.exit_optimization_v1043b_cli(
             symbols=args.symbols, data_source=getattr(args, "data_source", "auto")))
     elif args.command == "research-dashboard-build-v1043b":
         print(lab.research_dashboard_build_v1043b_cli(symbols=args.symbols))
