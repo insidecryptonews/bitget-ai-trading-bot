@@ -124,18 +124,110 @@ def simulate_exit(bars: list[dict], i: int, side: str, tp: float, sl: float,
 
 
 def _partial_tp(bars, i, side, tp1, tp2, sl, horizon, costs):
-    """Approximate a partial TP: half at a near TP, half at a farther TP/time.
-    Extra half round-trip cost for the second leg."""
-    a = simulate_exit(bars, i, side, tp1, sl, None, None, horizon, costs)
-    b = simulate_exit(bars, i, side, tp2, sl, None, None, horizon, costs)
-    if not a or not b or not a["valid"] or not b["valid"]:
-        return a if (a and not a["valid"]) else b
-    extra = SH._round_trip(costs) * 0.5
-    net = 0.5 * a["net_return"] + 0.5 * b["net_return"] - extra
-    return {"valid": True, "exit_reason": "PARTIAL", "gross": 0.5 * a["gross"] + 0.5 * b["gross"],
-            "net_return": net, "mfe": max(a["mfe"], b["mfe"]), "mae": min(a["mae"], b["mae"]),
-            "bars_held": max(a["bars_held"], b["bars_held"]),
-            "captured_of_mfe": (net / max(a["mfe"], b["mfe"])) if max(a["mfe"], b["mfe"]) > 1e-9 else None}
+    """Conservative partial TP model.
+
+    The first half only exits at TP1 if TP1 is reached before the stop. If the
+    same bar contains the stop and TP1, STOP_BEFORE_TP applies and the full
+    trade stops out. After TP1, the second half is replayed bar-by-bar toward
+    TP2/SL/TIME/STALE. This is still an approximation (no partial-fill venue
+    mechanics), but it no longer averages two independent full-size trades.
+    """
+    if i + 1 >= len(bars):
+        return None
+    if bars[i + 1]["ts"] - bars[i]["ts"] > GAP_FACTOR * BAR_MS:
+        return {"valid": False, "exit_reason": "DATA_GAP", "net_return": 0.0,
+                "gross": 0.0, "mfe": 0.0, "mae": 0.0, "bars_held": 0,
+                "partial_tp_model": "approx_conservative"}
+    entry = bars[i + 1]["open"]
+    if entry <= 0:
+        return None
+    future = bars[i + 1:i + 1 + horizon]
+    if not future:
+        return None
+    rt = SH._round_trip(costs)
+    tp1_px = entry * (1 + tp1) if side == "long" else entry * (1 - tp1)
+    tp2_px = entry * (1 + tp2) if side == "long" else entry * (1 - tp2)
+    sl_px = entry * (1 - sl) if side == "long" else entry * (1 + sl)
+
+    def gross_for(px):
+        return (px / entry - 1) if side == "long" else (entry - px) / entry
+
+    mfe = mae = 0.0
+    prev_ts = bars[i + 1]["ts"]
+    tp1_done = False
+    first_gross = None
+    second_gross = None
+    exit_reason = "TIME"
+    held = len(future)
+    last_close = future[-1]["close"]
+
+    for j, fb in enumerate(future):
+        if fb["ts"] - prev_ts > GAP_FACTOR * BAR_MS:
+            if j == 0:
+                return {"valid": False, "exit_reason": "DATA_GAP", "net_return": 0.0,
+                        "gross": 0.0, "mfe": mfe, "mae": mae, "bars_held": 0,
+                        "partial_tp_model": "approx_conservative"}
+            last_close = future[j - 1]["close"]
+            exit_reason = "PARTIAL_TP1_THEN_STALE" if tp1_done else "STALE_EXIT"
+            held = j
+            if tp1_done:
+                second_gross = gross_for(last_close)
+            else:
+                first_gross = gross_for(last_close)
+            break
+        prev_ts = fb["ts"]
+        last_close = fb["close"]
+        up, dn = fb["high"] / entry - 1, fb["low"] / entry - 1
+        if side == "long":
+            mfe, mae = max(mfe, up), min(mae, dn)
+            stop_hit = fb["low"] <= sl_px
+            tp1_hit = fb["high"] >= tp1_px
+            tp2_hit = fb["high"] >= tp2_px
+        else:
+            mfe, mae = max(mfe, -dn), min(mae, -up)
+            stop_hit = fb["high"] >= sl_px
+            tp1_hit = fb["low"] <= tp1_px
+            tp2_hit = fb["low"] <= tp2_px
+
+        if not tp1_done:
+            if stop_hit:
+                first_gross = gross_for(sl_px)
+                exit_reason = "SL"
+                held = j + 1
+                break
+            if tp1_hit:
+                tp1_done = True
+                first_gross = gross_for(tp1_px)
+                if tp2_hit:
+                    second_gross = gross_for(tp2_px)
+                    exit_reason = "PARTIAL_TP2"
+                    held = j + 1
+                    break
+                continue
+        else:
+            if stop_hit:
+                second_gross = gross_for(sl_px)
+                exit_reason = "PARTIAL_TP1_THEN_SL"
+                held = j + 1
+                break
+            if tp2_hit:
+                second_gross = gross_for(tp2_px)
+                exit_reason = "PARTIAL_TP2"
+                held = j + 1
+                break
+
+    if first_gross is None:
+        first_gross = gross_for(last_close)
+    if tp1_done and second_gross is None:
+        second_gross = gross_for(last_close)
+        exit_reason = "PARTIAL_TP1_THEN_TIME" if exit_reason == "TIME" else exit_reason
+    gross = first_gross if not tp1_done else 0.5 * first_gross + 0.5 * second_gross
+    net = gross - rt
+    return {"valid": True, "exit_reason": exit_reason, "gross": gross,
+            "net_return": net, "mfe": mfe, "mae": mae, "bars_held": held,
+            "partial_tp_model": "approx_conservative",
+            "tp1_reached": tp1_done,
+            "captured_of_mfe": (net / mfe) if mfe > 1e-9 else None}
 
 
 # ==========================================================================
@@ -201,6 +293,7 @@ def _eval_variant(bars, feats, entries, var, horizon, costs=None) -> dict:
     return {"policy_name": "momentum_long_base", "exit_variant": var["name"],
             "horizon": horizon, "tp": var["tp"], "sl": var["sl"],
             "trailing": var["trail"], "break_even": var["be"],
+            "partial_tp_model": ("approx_conservative" if var.get("partial") else None),
             "sample_size": len(outs),
             "avg_MFE": round(avg_mfe, 6) if mfes else None,
             "avg_MAE": round(st.mean(maes), 6) if maes else None,
@@ -335,7 +428,7 @@ def _write(summary, rows, wl) -> None:
     d = CE._repo_root().joinpath(*OUTPUT_SUBDIR)
     d.mkdir(parents=True, exist_ok=True)
     cols = ["policy_name", "exit_variant", "horizon", "tp", "sl", "trailing",
-            "break_even", "sample_size", "avg_MFE", "avg_MAE", "capture_ratio",
+            "break_even", "partial_tp_model", "sample_size", "avg_MFE", "avg_MAE", "capture_ratio",
             "net_EV", "net_EV_lower_bound", "max_drawdown", "profit_factor",
             "win_rate", "payoff_ratio", "cost_sensitivity", "verdict",
             "rejection_reason"]

@@ -7079,6 +7079,159 @@ class ResearchLab:
             "edge_validated: false", "can_send_real_orders: false",
             "final_recommendation: NO LIVE", "RESEARCH DASHBOARD V10.43B END"])
 
+    def bybit_trades_ws_persistent_v1043c_cli(self, *, symbols="") -> str:
+        from .labs import bybit_trades_ws_persistent_v10_43c as PWS
+        syms = self._v107_csv_arg(symbols) or ["BTCUSDT"]
+        r = PWS.connect_and_run_live(syms)
+        return chr(10).join([
+            "BYBIT TRADES WS PERSISTENT V10.43C START",
+            f"symbols: {','.join(syms)}",
+            f"status: {r.get('status')}",
+            f"trades_count: {r.get('trades_count')}",
+            f"messages_count: {r.get('messages_count')}",
+            f"reconnect_count: {r.get('reconnect_count')}",
+            f"uptime_seconds: {r.get('uptime_seconds')}",
+            f"write_path: {r.get('write_path')}",
+            "uses_api_keys: false", "subscribes_private_channels: false",
+            "sends_orders: false", "research_only: true",
+            "can_send_real_orders: false", "FINAL_RECOMMENDATION=NO LIVE",
+            "BYBIT TRADES WS PERSISTENT V10.43C END"])
+
+    def ws_persistent_health_v1043c_cli(self, *, symbols="") -> str:
+        from .labs import ws_continuity_v10_43c as PWS
+        sym = (self._v107_csv_arg(symbols) or ["BTCUSDT"])[0]
+        h = PWS.ws_persistent_health(sym)
+        return chr(10).join([
+            "WS PERSISTENT HEALTH V10.43C START",
+            f"symbol: {sym}",
+            f"status: {h.get('status')} connected: {h.get('connected')}",
+            f"age_seconds: {h.get('age_seconds')} health_file_age_seconds: {h.get('health_file_age_seconds')}",
+            f"dataset_file_age_min: {h.get('dataset_file_age_min')}",
+            f"messages_count: {h.get('messages_count')} trades_count: {h.get('trades_count')}",
+            f"reconnect_count: {h.get('reconnect_count')} duplicates_skipped: {h.get('duplicates_skipped')}",
+            f"write_path: {h.get('write_path')}",
+            "research_only: true", "can_send_real_orders: false",
+            "FINAL_RECOMMENDATION=NO LIVE", "WS PERSISTENT HEALTH V10.43C END"])
+
+    def ws_continuity_audit_v1043c_cli(self, *, symbols="") -> str:
+        from .labs import ws_continuity_v10_43c as PWS
+        sym = (self._v107_csv_arg(symbols) or ["BTCUSDT"])[0]
+        r = PWS.ws_continuity_audit(sym)
+        PWS.write_reports(sym)
+        return chr(10).join([
+            "WS CONTINUITY AUDIT V10.43C START",
+            f"symbol: {sym} source: {r.get('source')} verdict: {r.get('verdict')}",
+            f"trades: {r.get('trades')} bars: {r.get('bars')} forward_bars: {r.get('forward_bars')}",
+            f"max_contiguous_run: {r.get('max_contiguous_run')} forward_coverage: {r.get('forward_coverage')}",
+            f"fit_for_fine_backtest: {r.get('fit_for_fine_backtest')} fit_for_shadow_forward: {r.get('fit_for_shadow_forward')}",
+            f"collector_status: {r.get('collector_status')} ws_file_age_min: {r.get('ws_file_age_min')}",
+            f"gap_count: {r.get('gap_count')} improving_vs_v1042: {r.get('improving_vs_v1042')}",
+            "research_only: true", "can_send_real_orders: false",
+            "FINAL_RECOMMENDATION=NO LIVE", "WS CONTINUITY AUDIT V10.43C END"])
+
+    def dataset_source_compare_v1043c_cli(self, *, symbols="") -> str:
+        from .labs import ws_continuity_v10_43c as PWS
+        sym = (self._v107_csv_arg(symbols) or ["BTCUSDT"])[0]
+        c = PWS.dataset_source_compare_3way(sym)
+        PWS.write_reports(sym)
+        rest, ws, pws = c.get("rest", {}), c.get("ws", {}), c.get("ws_persistent", {})
+        return chr(10).join([
+            "DATASET SOURCE COMPARE V10.43C START",
+            f"symbol: {sym}",
+            f"REST          bars={rest.get('bars')} max_run={rest.get('max_contiguous_run')} coverage={rest.get('coverage')}",
+            f"WS v10.42     bars={ws.get('bars')} max_run={ws.get('max_contiguous_run')} coverage={ws.get('coverage')}",
+            f"WS persistent bars={pws.get('bars')} max_run={pws.get('max_contiguous_run')} coverage={pws.get('coverage')}",
+            f"recommended_source: {c.get('recommended_source')}",
+            f"ready_for_shadow_forward: {c.get('ready_for_shadow_forward')}",
+            f"blockers: {c.get('blockers')}",
+            "research_only: true", "can_send_real_orders: false",
+            "FINAL_RECOMMENDATION=NO LIVE", "DATASET SOURCE COMPARE V10.43C END"])
+
+    def shadow_simulation_tournament_ws_persistent_v1043c_cli(self, *, symbols="") -> str:
+        from .labs import autonomous_strategy_lab_v10_43b as LAB
+        sym = (self._v107_csv_arg(symbols) or ["BTCUSDT"])[0]
+        r = LAB.run_ws_tournament(sym, source="ws_persistent")
+        out = ["SHADOW SIMULATION TOURNAMENT WS PERSISTENT V10.43C START",
+               f"symbol: {sym}  source: {r.get('source')}  n_bars: {r.get('n_bars')}",
+               f"verdict: {r.get('verdict')}",
+               f"ws_max_contiguous_run: {r.get('ws_max_contiguous_run')}",
+               f"any_strategy_beats_baseline_and_costs: {r.get('any_strategy_beats_baseline_and_costs')}"]
+        best = r.get("best_strategy") or {}
+        if best:
+            out.append(f"best: {best.get('policy')} [{best.get('verdict')}] "
+                       f"netEV={best.get('net_EV')} lb={best.get('net_EV_lower_bound')} "
+                       f"n={best.get('n_signals')}")
+        out += ["micro_live_ready: false", "research_only: true",
+                "can_send_real_orders: false", "FINAL_RECOMMENDATION=NO LIVE",
+                "SHADOW SIMULATION TOURNAMENT WS PERSISTENT V10.43C END"]
+        return chr(10).join(out)
+
+    def autonomous_strategy_lab_v1043c_cli(self, *, symbols="", data_source="ws_persistent") -> str:
+        from .labs import strategy_lab_hardening_v10_43c as HARD
+        sym = (self._v107_csv_arg(symbols) or ["BTCUSDT"])[0]
+        s = HARD.run_hardened_lab(sym, data_source=data_source)
+        out = ["AUTONOMOUS STRATEGY LAB HARDENED V10.43C START",
+               f"symbol: {sym}  requested_source: {s.get('requested_source')}  "
+               f"effective_source: {s.get('effective_source')}  bars: {s.get('n_bars')}",
+               f"global_verdict: {s.get('global_verdict')}",
+               f"candidates_generated: {s.get('candidates_generated')}  "
+               f"verdict_counts: {s.get('verdict_counts')}",
+               f"rejection_category_counts: {s.get('rejection_category_counts')}",
+               f"watchlist_or_better: {s.get('watchlist_or_better')}",
+               f"ranking_key: {s.get('ranking_key')}"]
+        best = s.get("best") or {}
+        if best:
+            out.append(f"best: {best.get('strategy_name')} [{best.get('verdict')}] "
+                       f"netEV={best.get('net_EV')} lb={best.get('net_EV_lower_bound')} "
+                       f"n={best.get('sample_size')}")
+        sens = s.get("sensitivity") or {}
+        out.append(f"sensitivity: {sens.get('verdict') or sens.get('status')}")
+        if s.get("reports_dir"):
+            out.append("reports_dir: " + s["reports_dir"])
+        out += ["research_only: true", "edge_validated: false",
+                "can_send_real_orders: false", "not_actionable: true",
+                "FINAL_RECOMMENDATION=NO LIVE", "AUTONOMOUS STRATEGY LAB HARDENED V10.43C END"]
+        return chr(10).join(out)
+
+    def exit_optimization_v1043c_cli(self, *, symbols="", data_source="ws_persistent") -> str:
+        from .labs import exit_optimization_v10_43b as EO
+        sym = (self._v107_csv_arg(symbols) or ["BTCUSDT"])[0]
+        s = EO.run_exit_optimization(sym, data_source=data_source)
+        out = ["EXIT OPTIMIZATION V10.43C START",
+               f"symbol: {sym}  source: {s.get('effective_source')}  bars: {s.get('n_bars')}",
+               f"aggressiveness_from: {s.get('aggressiveness_from')}",
+               f"verdict: {s.get('verdict')}"]
+        if s.get("note"):
+            out.append("note: " + s["note"])
+        if s.get("variants_x_horizons") is not None:
+            out.append(f"entries: {s.get('n_entries')}  variants_x_horizons: {s.get('variants_x_horizons')}")
+            b = s.get("best_variant") or {}
+            out.append(f"best_variant: {b.get('exit_variant')}@{b.get('horizon')} "
+                       f"[{b.get('verdict')}] netEV={b.get('net_EV')} "
+                       f"lb={b.get('net_EV_lower_bound')} capture={b.get('capture_ratio')} "
+                       f"partial_tp_model={b.get('partial_tp_model')} n={b.get('sample_size')}")
+        if s.get("reports_dir"):
+            out.append("reports_dir: " + s["reports_dir"])
+        out += ["changes_leverage: false", "changes_sizing: false",
+                "research_only: true", "edge_validated: false",
+                "can_send_real_orders: false", "FINAL_RECOMMENDATION=NO LIVE",
+                "EXIT OPTIMIZATION V10.43C END"]
+        return chr(10).join(out)
+
+    def research_dashboard_build_v1043c_cli(self, *, symbols="") -> str:
+        from .labs import research_dashboard_v10_43c as DASH
+        sym = (self._v107_csv_arg(symbols) or ["BTCUSDT"])[0]
+        r = DASH.build_dashboard(sym)
+        return chr(10).join([
+            "DASHBOARD_BUILD_COMPLETED",
+            f"symbol: {sym}",
+            f"ws_persistent_verdict: {r.get('ws_persistent_verdict')}",
+            f"readiness: {r.get('readiness')}",
+            f"html: {r.get('html')}", f"json: {r.get('json')}",
+            f"open_url: {r.get('url')}", "mode: RESEARCH_ONLY",
+            "edge_validated: false", "can_send_real_orders: false",
+            "final_recommendation: NO LIVE", "RESEARCH DASHBOARD V10.43C END"])
+
     def research_dashboard_open_v1043a_cli(self, *, symbols="") -> str:
         from .labs import research_dashboard_v10_43a as DASH
         import os as _os
@@ -8442,6 +8595,14 @@ def build_argument_parser() -> argparse.ArgumentParser:
             "autonomous-strategy-lab-v1043b",
             "exit-optimization-v1043b",
             "research-dashboard-build-v1043b",
+            "bybit-trades-ws-persistent-v1043c",
+            "ws-persistent-health-v1043c",
+            "ws-continuity-audit-v1043c",
+            "dataset-source-compare-v1043c",
+            "shadow-simulation-tournament-ws-persistent-v1043c",
+            "autonomous-strategy-lab-v1043c",
+            "exit-optimization-v1043c",
+            "research-dashboard-build-v1043c",
             "ohlcv-replay-loader-smoke-test",
             "ohlcv-replay-loader-audit",
             "duplicate-module-audit-smoke-test",
@@ -8529,8 +8690,8 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--title", default="", help="Titulo del catalyst manual.")
     parser.add_argument("--symbols", default="", help="Simbolos afectados, separados por coma.")
     parser.add_argument("--data-source", dest="data_source", default="auto",
-                        choices=["auto", "ws", "rest"],
-                        help="V10.43B data source for the strategy lab (default auto).")
+                        choices=["auto", "ws", "ws_persistent", "rest"],
+                        help="V10.43B/C data source for the strategy lab (default auto).")
     parser.add_argument("--category", default="other", help="Categoria catalyst.")
     parser.add_argument("--direction", default="unknown", help="Direccion catalyst.")
     parser.add_argument("--severity", default="low", help="Severidad catalyst.")
@@ -8697,6 +8858,14 @@ PUBLIC_RESEARCH_ONLY_COMMANDS = frozenset({
     "autonomous-strategy-lab-v1043b",
     "exit-optimization-v1043b",
     "research-dashboard-build-v1043b",
+    "bybit-trades-ws-persistent-v1043c",
+    "ws-persistent-health-v1043c",
+    "ws-continuity-audit-v1043c",
+    "dataset-source-compare-v1043c",
+    "shadow-simulation-tournament-ws-persistent-v1043c",
+    "autonomous-strategy-lab-v1043c",
+    "exit-optimization-v1043c",
+    "research-dashboard-build-v1043c",
 })
 
 
@@ -8848,6 +9017,24 @@ def _dispatch_public_research_only(args) -> None:
             symbols=args.symbols, data_source=getattr(args, "data_source", "auto")))
     elif args.command == "research-dashboard-build-v1043b":
         print(lab.research_dashboard_build_v1043b_cli(symbols=args.symbols))
+    elif args.command == "bybit-trades-ws-persistent-v1043c":
+        print(lab.bybit_trades_ws_persistent_v1043c_cli(symbols=args.symbols))
+    elif args.command == "ws-persistent-health-v1043c":
+        print(lab.ws_persistent_health_v1043c_cli(symbols=args.symbols))
+    elif args.command == "ws-continuity-audit-v1043c":
+        print(lab.ws_continuity_audit_v1043c_cli(symbols=args.symbols))
+    elif args.command == "dataset-source-compare-v1043c":
+        print(lab.dataset_source_compare_v1043c_cli(symbols=args.symbols))
+    elif args.command == "shadow-simulation-tournament-ws-persistent-v1043c":
+        print(lab.shadow_simulation_tournament_ws_persistent_v1043c_cli(symbols=args.symbols))
+    elif args.command == "autonomous-strategy-lab-v1043c":
+        print(lab.autonomous_strategy_lab_v1043c_cli(
+            symbols=args.symbols, data_source=getattr(args, "data_source", "ws_persistent")))
+    elif args.command == "exit-optimization-v1043c":
+        print(lab.exit_optimization_v1043c_cli(
+            symbols=args.symbols, data_source=getattr(args, "data_source", "ws_persistent")))
+    elif args.command == "research-dashboard-build-v1043c":
+        print(lab.research_dashboard_build_v1043c_cli(symbols=args.symbols))
     elif args.command.startswith("bybit-backfill-"):
         cmd = args.command.replace("bybit-backfill-", "").replace("-v1036", "")
         print(lab.bybit_backfill_v1036_cli(

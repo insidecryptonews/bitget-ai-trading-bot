@@ -53,7 +53,10 @@ def _safety() -> dict[str, Any]:
 # ==========================================================================
 
 def _load_bars(symbol: str, data_source: str) -> tuple[list[dict], str, dict]:
-    """Resolve data source and return (bars, effective_source, meta)."""
+    """Resolve data source and return (bars, effective_source, meta).
+
+    Sources: rest (V10.32) | ws (V10.42) | ws_persistent (V10.43C) | auto. `auto`
+    prefers the MOST CONTINUOUS available dataset (persistent > ws > rest)."""
     def rest():
         try:
             return CE.load_dataset(symbol).get("bars") or []
@@ -61,10 +64,25 @@ def _load_bars(symbol: str, data_source: str) -> tuple[list[dict], str, dict]:
             return []
     if data_source == "rest":
         return rest(), "rest", {}
+    if data_source == "ws_persistent":
+        from . import ws_continuity_v10_43c as PWS
+        r = PWS.load_persistent_bars(symbol)
+        return r["bars"], "ws_persistent", r["meta"]
     ws = WS.load_ws_bars(symbol)
     if data_source == "ws":
         return ws["bars"], "ws", ws["meta"]
-    # auto: prefer WS if its contiguity beats REST
+    # auto: prefer the most continuous available source (persistent > ws > rest)
+    try:
+        from . import ws_continuity_v10_43c as PWS
+        cmp3 = PWS.dataset_source_compare_3way(symbol)
+        if cmp3["recommended_source"] == "ws_persistent":
+            pr = PWS.load_persistent_bars(symbol)
+            if pr["bars"]:
+                return pr["bars"], "ws_persistent", pr["meta"]
+        if cmp3["recommended_source"] == "ws" and ws["bars"]:
+            return ws["bars"], "ws", ws["meta"]
+    except Exception:
+        pass
     cmp = WS.dataset_source_compare(symbol)
     if cmp["recommended_source"] == "ws" and ws["bars"]:
         return ws["bars"], "ws", ws["meta"]
@@ -168,7 +186,8 @@ def _verdict(m: dict, best_baseline_lb: float, slip_lb) -> tuple[str, str]:
 
 
 def run_lab(symbol: str = "BTCUSDT", data_source: str = "auto",
-            write_reports: bool = True) -> dict[str, Any]:
+            write_reports: bool = True,
+            include_candidates: bool = False) -> dict[str, Any]:
     bars, eff_source, meta = _load_bars(symbol, data_source)
     summary: dict[str, Any] = {"tool_version": TOOL_VERSION, "symbol": symbol,
                                "requested_source": data_source,
@@ -180,6 +199,8 @@ def run_lab(symbol: str = "BTCUSDT", data_source: str = "auto",
                               else "INSUFFICIENT_SAMPLE")
         summary["note"] = f"only {len(bars)} bars from {eff_source}; keep collecting"
         summary["candidates"] = []
+        if include_candidates:
+            summary["candidates_detail"] = []
         if write_reports:
             _write(summary, [], [], {}, _lead_lag(symbol, bars, eff_source))
         return summary
@@ -244,6 +265,8 @@ def run_lab(symbol: str = "BTCUSDT", data_source: str = "auto",
         "ranking_key": "net_EV_lower_bound (win_rate secondary)",
         "verdict": ("STRATEGIES_UNDER_RESEARCH" if promoted
                     else "NO_EDGE_ALL_REJECTED")})
+    if include_candidates:
+        summary["candidates_detail"] = candidates
     if write_reports:
         _write(summary, candidates, promoted, counts, lead)
         summary["reports_dir"] = str(CE._repo_root().joinpath(*OUTPUT_SUBDIR)).replace("\\", "/")
@@ -312,20 +335,32 @@ def _lead_lag(symbol: str, bars: list[dict], source: str) -> dict[str, Any]:
 # WS tournament wrapper (B2) - reuses V10.40 run_tournament on WS bars
 # ==========================================================================
 
-def run_ws_tournament(symbol: str = "BTCUSDT", write_reports: bool = True) -> dict[str, Any]:
-    loaded = WS.load_ws_bars(symbol)
+def run_ws_tournament(symbol: str = "BTCUSDT", write_reports: bool = True,
+                      source: str = "ws") -> dict[str, Any]:
+    if source == "ws_persistent":
+        from . import ws_continuity_v10_43c as PWS
+        loaded = PWS.load_persistent_bars(symbol)
+        _src_label = "ws_persistent_v10_43c"
+    else:
+        loaded = WS.load_ws_bars(symbol)
+        _src_label = "ws_v10_42"
     bars = loaded["bars"]
     if not bars:
         rep = {"tool_version": TOOL_VERSION, "symbol": symbol, "verdict": "NO_WS_DATA",
-               "n_bars": 0, **_safety()}
+               "source": _src_label, "n_bars": 0, **_safety()}
         if write_reports:
             _write_ws_tour(rep, {})
         return rep
-    view = WS.ws_forward_dataset_view(symbol)
-    if view.get("verdict") == "WS_TOO_GAPPY" or view.get("reliability") == "NOT_RELIABLE_GAPS":
-        gappy = True
+    if source == "ws_persistent":
+        from . import ws_continuity_v10_43c as PWS
+        ca = PWS.ws_continuity_audit(symbol)
+        view = {"verdict": ca.get("verdict"), "reliability": ca.get("reliability"),
+                "max_contiguous_run": ca.get("max_contiguous_run")}
+        gappy = ca.get("verdict") in ("WS_TOO_GAPPY", "WS_STALE", "WS_COLLECTOR_DOWN")
     else:
-        gappy = False
+        view = WS.ws_forward_dataset_view(symbol)
+        gappy = (view.get("verdict") == "WS_TOO_GAPPY"
+                 or view.get("reliability") == "NOT_RELIABLE_GAPS")
     t = SH.run_tournament(symbol, bars=bars, entry_mode="next_open", write_reports=False)
     n_best = ((t.get("best_strategy") or {}).get("n_signals")) or 0
     if t.get("verdict") == "NEEDS_MORE_DATA" or n_best < MIN_OOS:
@@ -336,7 +371,7 @@ def run_ws_tournament(symbol: str = "BTCUSDT", write_reports: bool = True) -> di
         verdict = "WS_TOO_GAPPY"
     else:
         verdict = "NO_EDGE_ALL_REJECTED"
-    rep = {"tool_version": TOOL_VERSION, "symbol": symbol, "source": "ws_v10_42",
+    rep = {"tool_version": TOOL_VERSION, "symbol": symbol, "source": _src_label,
            "n_bars": len(bars), "ws_forward_verdict": view.get("verdict"),
            "ws_max_contiguous_run": view.get("max_contiguous_run"),
            "any_strategy_beats_baseline_and_costs": t.get("any_strategy_beats_baseline_and_costs"),
