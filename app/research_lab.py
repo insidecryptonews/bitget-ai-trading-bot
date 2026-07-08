@@ -6929,6 +6929,42 @@ class ResearchLab:
                 "BYBIT TRADES WS COLLECT V10.42 END"]
         return chr(10).join(out)
 
+    def research_dashboard_build_v1043a_cli(self, *, symbols="") -> str:
+        from .labs import research_dashboard_v10_43a as DASH
+        sym = (self._v107_csv_arg(symbols) or ["BTCUSDT"])[0]
+        r = DASH.build_dashboard(sym)
+        return chr(10).join([
+            "DASHBOARD_BUILD_COMPLETED",
+            f"symbol: {sym}",
+            f"readiness: {r.get('readiness')}",
+            f"html: {r.get('html')}",
+            f"json: {r.get('json')}",
+            f"open_url: {r.get('url')}",
+            "mode: RESEARCH_ONLY",
+            "edge_validated: false", "can_send_real_orders: false",
+            "final_recommendation: NO LIVE",
+            "RESEARCH DASHBOARD V10.43A END"])
+
+    def research_dashboard_open_v1043a_cli(self, *, symbols="") -> str:
+        from .labs import research_dashboard_v10_43a as DASH
+        import os as _os
+        sym = (self._v107_csv_arg(symbols) or ["BTCUSDT"])[0]
+        html_path = DASH.CE._repo_root().joinpath(*DASH.OUTPUT_SUBDIR) / "index.html"
+        if not html_path.is_file():
+            DASH.build_dashboard(sym)
+        opened = False
+        try:
+            _os.startfile(str(html_path))  # Windows default browser; safe, read-only
+            opened = True
+        except Exception:
+            opened = False
+        return chr(10).join([
+            "RESEARCH DASHBOARD OPEN V10.43A",
+            f"html: {str(html_path).replace(chr(92), '/')}",
+            f"open_url: file:///{str(html_path).replace(chr(92), '/').lstrip('/')}",
+            f"launched_default_browser: {str(opened).lower()}",
+            "mode: RESEARCH_ONLY", "final_recommendation: NO LIVE"])
+
     def free_microstructure_status_page_v1029_cli(self) -> str:
         from .labs import free_microstructure_dataset_assembler_v10_29 as A
         uri = A.write_status_page()
@@ -8264,6 +8300,8 @@ def build_argument_parser() -> argparse.ArgumentParser:
             "gap-repair-plan-v1042",
             "bottleneck-map-v1042",
             "bybit-trades-ws-collect-v1042",
+            "research-dashboard-build-v1043a",
+            "research-dashboard-open-v1043a",
             "ohlcv-replay-loader-smoke-test",
             "ohlcv-replay-loader-audit",
             "duplicate-module-audit-smoke-test",
@@ -8508,6 +8546,8 @@ PUBLIC_RESEARCH_ONLY_COMMANDS = frozenset({
     "gap-repair-plan-v1042",
     "bottleneck-map-v1042",
     "bybit-trades-ws-collect-v1042",
+    "research-dashboard-build-v1043a",
+    "research-dashboard-open-v1043a",
 })
 
 
@@ -8641,6 +8681,10 @@ def _dispatch_public_research_only(args) -> None:
         print(lab.bottleneck_map_v1042_cli(symbols=args.symbols))
     elif args.command == "bybit-trades-ws-collect-v1042":
         print(lab.bybit_trades_ws_collect_v1042_cli(symbols=args.symbols))
+    elif args.command == "research-dashboard-build-v1043a":
+        print(lab.research_dashboard_build_v1043a_cli(symbols=args.symbols))
+    elif args.command == "research-dashboard-open-v1043a":
+        print(lab.research_dashboard_open_v1043a_cli(symbols=args.symbols))
     elif args.command.startswith("bybit-backfill-"):
         cmd = args.command.replace("bybit-backfill-", "").replace("-v1036", "")
         print(lab.bybit_backfill_v1036_cli(
