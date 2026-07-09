@@ -7258,6 +7258,62 @@ class ResearchLab:
             "final_recommendation: NO LIVE",
             "DASHBOARD WATCH V10.43C END"])
 
+    def alpha_factory_v1044_cli(self, *, symbols="", data_source="ws_persistent",
+                                max_runtime_minutes=60.0) -> str:
+        from .labs import alpha_factory_v10_44 as AF
+        r = AF.run_alpha_factory(
+            symbols=symbols or "BTCUSDT", data_source=data_source,
+            max_runtime_minutes=float(max_runtime_minutes or 60.0),
+            write_reports=True)
+        return AF.render_cli(r)
+
+    def exit_factory_v1044_cli(self, *, symbols="", data_source="ws_persistent") -> str:
+        from .labs import exit_factory_v10_44 as EF
+        r = EF.run_exit_factory(symbols=symbols or "BTCUSDT",
+                                data_source=data_source, write_reports=True)
+        return EF.render_cli(r)
+
+    def candidate_incubator_v1044_cli(self, *, symbols="", data_source="ws_persistent") -> str:
+        from .labs import candidate_incubator_v10_44 as INC
+        r = INC.run_incubator(symbols=symbols or "BTCUSDT",
+                              data_source=data_source, write_reports=True)
+        return INC.render_cli(r)
+
+    def research_heavy_run_v1044_cli(self, *, symbols="", data_source="ws_persistent",
+                                     max_runtime_minutes=90.0) -> str:
+        from .labs import alpha_factory_v10_44 as AF
+        from .labs import candidate_incubator_v10_44 as INC
+        from .labs import exit_factory_v10_44 as EF
+        from .labs import research_dashboard_v10_43c as DASH
+        syms = symbols or "BTCUSDT"
+        alpha = AF.run_alpha_factory(
+            symbols=syms, data_source=data_source,
+            max_runtime_minutes=float(max_runtime_minutes or 90.0),
+            write_reports=True)
+        exits = EF.run_exit_factory(symbols=syms, data_source=data_source,
+                                    write_reports=True)
+        inc = INC.run_incubator(symbols=syms, data_source=data_source,
+                                write_reports=True)
+        dash = DASH.build_dashboard((self._v107_csv_arg(syms) or ["BTCUSDT"])[0],
+                                    auto_refresh_seconds=30, fast=True)
+        lines = ["RESEARCH HEAVY RUN V10.44 START",
+                 f"symbols: {syms}",
+                 f"data_source: {data_source}",
+                 f"alpha_verdict: {alpha.get('overall_verdict')}",
+                 f"alpha_strategies_tested: {alpha.get('strategies_tested')}",
+                 f"exit_verdict: {exits.get('overall_verdict')}",
+                 f"incubator_verdict: {inc.get('overall_verdict')}",
+                 f"dashboard_html: {dash.get('html')}",
+                 f"reports_dir: {alpha.get('reports_dir')}",
+                 "research_only: true",
+                 "paper_filter_enabled: false",
+                 "can_send_real_orders: false",
+                 "paper_ready: false",
+                 "live_ready: false",
+                 "final_recommendation: NO LIVE",
+                 "RESEARCH HEAVY RUN V10.44 END"]
+        return chr(10).join(lines)
+
     def research_dashboard_open_v1043a_cli(self, *, symbols="") -> str:
         from .labs import research_dashboard_v10_43a as DASH
         import os as _os
@@ -8630,6 +8686,10 @@ def build_argument_parser() -> argparse.ArgumentParser:
             "exit-optimization-v1043c",
             "research-dashboard-build-v1043c",
             "research-dashboard-watch-v1043c",
+            "alpha-factory-v1044",
+            "exit-factory-v1044",
+            "candidate-incubator-v1044",
+            "research-heavy-run-v1044",
             "ohlcv-replay-loader-smoke-test",
             "ohlcv-replay-loader-audit",
             "duplicate-module-audit-smoke-test",
@@ -8719,6 +8779,8 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--data-source", dest="data_source", default="auto",
                         choices=["auto", "ws", "ws_persistent", "rest"],
                         help="V10.43B/C data source for the strategy lab (default auto).")
+    parser.add_argument("--max-runtime-minutes", type=float, default=60.0,
+                        help="Runtime budget for V10.44 heavy research-only sprint.")
     parser.add_argument("--category", default="other", help="Categoria catalyst.")
     parser.add_argument("--direction", default="unknown", help="Direccion catalyst.")
     parser.add_argument("--severity", default="low", help="Severidad catalyst.")
@@ -8897,6 +8959,10 @@ PUBLIC_RESEARCH_ONLY_COMMANDS = frozenset({
     "exit-optimization-v1043c",
     "research-dashboard-build-v1043c",
     "research-dashboard-watch-v1043c",
+    "alpha-factory-v1044",
+    "exit-factory-v1044",
+    "candidate-incubator-v1044",
+    "research-heavy-run-v1044",
 })
 
 
@@ -9071,6 +9137,20 @@ def _dispatch_public_research_only(args) -> None:
         print(lab.research_dashboard_watch_v1043c_cli(
             symbols=args.symbols, interval_seconds=args.interval_seconds,
             open_browser=args.open, once=args.once))
+    elif args.command == "alpha-factory-v1044":
+        print(lab.alpha_factory_v1044_cli(
+            symbols=args.symbols, data_source=getattr(args, "data_source", "ws_persistent"),
+            max_runtime_minutes=getattr(args, "max_runtime_minutes", 60.0)))
+    elif args.command == "exit-factory-v1044":
+        print(lab.exit_factory_v1044_cli(
+            symbols=args.symbols, data_source=getattr(args, "data_source", "ws_persistent")))
+    elif args.command == "candidate-incubator-v1044":
+        print(lab.candidate_incubator_v1044_cli(
+            symbols=args.symbols, data_source=getattr(args, "data_source", "ws_persistent")))
+    elif args.command == "research-heavy-run-v1044":
+        print(lab.research_heavy_run_v1044_cli(
+            symbols=args.symbols, data_source=getattr(args, "data_source", "ws_persistent"),
+            max_runtime_minutes=getattr(args, "max_runtime_minutes", 90.0)))
     elif args.command.startswith("bybit-backfill-"):
         cmd = args.command.replace("bybit-backfill-", "").replace("-v1036", "")
         print(lab.bybit_backfill_v1036_cli(

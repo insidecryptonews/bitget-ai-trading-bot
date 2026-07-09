@@ -32,6 +32,8 @@ LOCK_FILE = "dashboard_watch_v1043c.lock"
 DEFAULT_REFRESH_SECONDS = 30
 MIN_REFRESH_SECONDS = 15
 SLOW_STALE_SECONDS = 15 * 60
+SLOW_SOURCE_REFRESH_SECONDS = 180
+CACHE_FILE = "dashboard_fast_cache_v1043c.json"
 
 
 def _safety() -> dict[str, Any]:
@@ -88,17 +90,8 @@ def gather_state_fast(symbol: str = "BTCUSDT") -> dict[str, Any]:
         health = PWS.ws_persistent_health(symbol)
     except Exception:
         health = {"status": "NO_DATA"}
-    try:
-        continuity = PWS.ws_continuity_audit(symbol)
-    except Exception:
-        continuity = {"verdict": "NO_WS_DATA", "max_contiguous_run": 0}
-    try:
-        compare = PWS.dataset_source_compare_3way(symbol)
-    except Exception:
-        compare = {"recommended_source": "rest", "blockers": ["COMPARE_FAILED"],
-                   "rest": {}, "ws": {}, "ws_persistent": {}}
-
     out_dir = _output_dir()
+    continuity, compare, source_meta = _cached_source_metrics(symbol, out_dir)
     previous = _read_json(out_dir / "dashboard_data_v10_43c.json") or {}
     strategy = previous.get("strategy_hardening") or _missing_slow("STRATEGY_METRICS_MISSING")
     tournament = previous.get("ws_persistent_tournament") or _missing_slow("TOURNAMENT_METRICS_MISSING")
@@ -110,7 +103,7 @@ def gather_state_fast(symbol: str = "BTCUSDT") -> dict[str, Any]:
             "strategy_hardening": strategy, "ws_persistent_tournament": tournament,
             "exit_optimization": exits, "readiness_v1043c": readiness,
             "fast_metrics": {"last_updated_at": _utc_now(), "source": "fast_watcher"},
-            "slow_metrics": slow_meta, **_safety()}
+            "slow_metrics": {**slow_meta, **source_meta}, **_safety()}
 
 
 def _missing_slow(status: str) -> dict[str, Any]:
@@ -135,6 +128,82 @@ def _slow_metrics_meta(previous: dict[str, Any], out_dir: Path) -> dict[str, Any
             "exit_stale": stale,
             "note": ("slow metrics are reused from the latest dashboard JSON; "
                      "run strategy/exit CLIs to refresh them")}
+
+
+def _cached_source_metrics(symbol: str, out_dir: Path) -> tuple[dict, dict, dict]:
+    """Cache the expensive continuity/source comparison used by the watcher.
+
+    Persistent health remains fresh every refresh. Continuity and 3-way source
+    comparison can scan large CSVs, so the watcher recomputes them at a slower
+    cadence and labels the cache age explicitly. A changed file before the slow
+    cadence is not ignored; it is shown as `source_dataset_changed_since_cache`.
+    """
+    cache_path = out_dir / CACHE_FILE
+    cache = _read_json(cache_path) or {}
+    now_ts = datetime.now(timezone.utc).timestamp()
+    sig = _source_signature(symbol)
+    age = None
+    try:
+        age = now_ts - float(cache.get("updated_ts"))
+    except Exception:
+        age = None
+    usable = (
+        cache.get("symbol") == symbol
+        and isinstance(cache.get("continuity"), dict)
+        and isinstance(cache.get("compare"), dict)
+        and age is not None
+        and age < SLOW_SOURCE_REFRESH_SECONDS
+    )
+    if usable:
+        dataset_changed = cache.get("source_signature") != sig
+        meta = {
+            "source_metrics_cache": "HIT",
+            "source_metrics_age_seconds": round(age, 1),
+            "source_metrics_stale": False,
+            "source_metrics_refresh_seconds": SLOW_SOURCE_REFRESH_SECONDS,
+            "source_dataset_changed_since_cache": bool(dataset_changed),
+            "source_metrics_note": (
+                "continuity/source compare cached for fast watcher; health is fresh")
+        }
+        return cache["continuity"], cache["compare"], meta
+    try:
+        continuity = PWS.ws_continuity_audit(symbol)
+    except Exception:
+        continuity = {"verdict": "NO_WS_DATA", "max_contiguous_run": 0,
+                      "cache_error": "continuity_failed"}
+    try:
+        compare = PWS.dataset_source_compare_3way(symbol)
+    except Exception:
+        compare = {"recommended_source": "rest", "blockers": ["COMPARE_FAILED"],
+                   "rest": {}, "ws": {}, "ws_persistent": {}}
+    payload = {"symbol": symbol, "updated_at": _utc_now(), "updated_ts": now_ts,
+               "source_signature": sig, "continuity": continuity, "compare": compare,
+               "mode": "RESEARCH_ONLY", "final_recommendation": FINAL_RECOMMENDATION_NO_LIVE}
+    try:
+        out_dir.mkdir(parents=True, exist_ok=True)
+        tmp = cache_path.with_suffix(cache_path.suffix + ".tmp")
+        tmp.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
+        os.replace(tmp, cache_path)
+    except OSError:
+        pass
+    meta = {"source_metrics_cache": "MISS_REFRESHED",
+            "source_metrics_age_seconds": 0.0,
+            "source_metrics_stale": False,
+            "source_metrics_refresh_seconds": SLOW_SOURCE_REFRESH_SECONDS,
+            "source_dataset_changed_since_cache": False,
+            "source_metrics_note": "continuity/source compare recomputed this refresh"}
+    return continuity, compare, meta
+
+
+def _source_signature(symbol: str) -> dict[str, Any]:
+    try:
+        p = PWS._persistent_path()
+        st = p.stat() if p.is_file() else None
+        return {"symbol": symbol, "path": str(p).replace("\\", "/"),
+                "size": st.st_size if st else 0,
+                "mtime": st.st_mtime if st else None}
+    except Exception:
+        return {"symbol": symbol, "path": None, "size": 0, "mtime": None}
 
 
 def _output_dir() -> Path:
@@ -267,7 +336,44 @@ def _panel_watch(d: dict) -> str:
         A._kv("Exit metrics updated", slow.get("exit_last_updated_at")) +
         A._kv("Exit metrics stale", slow.get("exit_stale"),
               "warn" if slow.get("exit_stale") else "ok") +
+        A._kv("Continuity cache", slow.get("source_metrics_cache")) +
+        A._kv("Continuity cache age (s)", slow.get("source_metrics_age_seconds")) +
+        A._kv("Dataset changed since cache", slow.get("source_dataset_changed_since_cache"),
+              "warn" if slow.get("source_dataset_changed_since_cache") else "ok") +
         '<div class="sub">Fast watcher does not run full strategy lab / tournament / exit optimization every refresh.</div>')
+
+
+def _latest_v1044() -> dict[str, Any]:
+    out = CE._repo_root().joinpath("reports", "research", "v10_44_alpha_sprint")
+    return {
+        "alpha": _read_json(out / "alpha_factory_v10_44.json") or {},
+        "exit": _read_json(out / "exit_factory_v10_44.json") or {},
+        "incubator": _read_json(out / "candidate_incubator_v10_44.json") or {},
+        "out_dir": str(out).replace("\\", "/"),
+    }
+
+
+def _panel_alpha_factory(d: dict) -> str:
+    v = _latest_v1044()
+    alpha = v["alpha"]
+    inc = v["incubator"]
+    ex = v["exit"]
+    counts = inc.get("state_counts") or alpha.get("candidate_status_counts") or {}
+    best = inc.get("best_research_candidate") or alpha.get("best_candidate") or {}
+    return (
+        A._kv("Alpha verdict", alpha.get("overall_verdict") or "NOT_RUN",
+              A._state_kind(alpha.get("overall_verdict") or "NEED_DATA")) +
+        A._kv("Strategies tested", alpha.get("strategies_tested", 0)) +
+        A._kv("Incubator verdict", inc.get("overall_verdict") or "NOT_RUN",
+              A._state_kind(inc.get("overall_verdict") or "NEED_DATA")) +
+        A._kv("State counts", counts) +
+        A._kv("Best candidate", best.get("candidate_id") or "NONE") +
+        A._kv("Best state", best.get("incubator_state") or best.get("status") or "NONE",
+              A._state_kind(best.get("incubator_state") or best.get("status") or "NEED_DATA")) +
+        A._kv("Exit verdict", ex.get("overall_verdict") or "NOT_RUN",
+              A._state_kind(ex.get("overall_verdict") or "NEED_DATA")) +
+        A._kv("Reports", v["out_dir"]) +
+        '<div class="sub">V10.44 Alpha Factory is research-only. Candidate labels are NOT executable signals. NO LIVE.</div>')
 
 
 def _panel_lattice(d: dict) -> str:
@@ -296,6 +402,7 @@ def render_html(d: dict, auto_refresh_seconds: int | None = None) -> str:
         watch=_panel_watch(d),
         pws=_panel_persistent_ws(d), compare=_panel_compare(d),
         strategy=_panel_strategy(d), exits=_panel_exit(d),
+        alpha=_panel_alpha_factory(d),
         lattice=_panel_lattice(d),
         graph=A._relationship_graph((d.get("persistent_continuity") or {}).get("verdict")),
         gen=html.escape(datetime.now(timezone.utc).isoformat()))
@@ -334,6 +441,7 @@ _EXTRA = """
   <div class="card wide"><h3>Dashboard Auto Refresh</h3>{watch}</div>
   <div class="card wide"><h3>Persistent WS Panel</h3>{pws}</div>
   <div class="card wide"><h3>REST vs WS vs WS Persistent</h3>{compare}</div>
+  <div class="card wide"><h3>Alpha Factory V10.44</h3>{alpha}</div>
   <div class="card"><h3>Strategy Lab Hardened</h3>{strategy}</div>
   <div class="card"><h3>Exit Optimization Panel</h3>{exits}</div>
   <div class="card"><h3>Probability Lattice</h3>{lattice}</div>
