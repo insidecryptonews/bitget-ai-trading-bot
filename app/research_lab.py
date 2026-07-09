@@ -7218,19 +7218,45 @@ class ResearchLab:
                 "EXIT OPTIMIZATION V10.43C END"]
         return chr(10).join(out)
 
-    def research_dashboard_build_v1043c_cli(self, *, symbols="") -> str:
+    def research_dashboard_build_v1043c_cli(self, *, symbols="", auto_refresh_seconds=0) -> str:
         from .labs import research_dashboard_v10_43c as DASH
         sym = (self._v107_csv_arg(symbols) or ["BTCUSDT"])[0]
-        r = DASH.build_dashboard(sym)
+        refresh = int(auto_refresh_seconds or 0) or None
+        r = DASH.build_dashboard(sym, auto_refresh_seconds=refresh)
         return chr(10).join([
             "DASHBOARD_BUILD_COMPLETED",
             f"symbol: {sym}",
             f"ws_persistent_verdict: {r.get('ws_persistent_verdict')}",
             f"readiness: {r.get('readiness')}",
+            f"auto_refresh_seconds: {r.get('auto_refresh_seconds')}",
             f"html: {r.get('html')}", f"json: {r.get('json')}",
             f"open_url: {r.get('url')}", "mode: RESEARCH_ONLY",
             "edge_validated: false", "can_send_real_orders: false",
             "final_recommendation: NO LIVE", "RESEARCH DASHBOARD V10.43C END"])
+
+    def research_dashboard_watch_v1043c_cli(self, *, symbols="", interval_seconds=30,
+                                            open_browser=False, once=False) -> str:
+        from .labs import research_dashboard_v10_43c as DASH
+        sym = (self._v107_csv_arg(symbols) or ["BTCUSDT"])[0]
+        r = DASH.run_dashboard_watch(sym, interval_seconds=interval_seconds,
+                                     open_browser=open_browser, once=once)
+        return chr(10).join([
+            "DASHBOARD WATCH V10.43C START",
+            f"symbol: {sym}",
+            f"watcher_status: {r.get('watcher_status')}",
+            f"interval_seconds: {r.get('interval_seconds')}",
+            f"refresh_count: {r.get('refresh_count')}",
+            f"last_refresh_at: {r.get('last_refresh_at')}",
+            f"next_refresh_at: {r.get('next_refresh_at')}",
+            f"last_error: {r.get('last_error')}",
+            f"dashboard_html: {r.get('dashboard_html')}",
+            f"dashboard_json: {r.get('dashboard_json')}",
+            "mode: RESEARCH_ONLY",
+            "edge_validated: false",
+            "can_send_real_orders: false",
+            "paper_filter_enabled: false",
+            "final_recommendation: NO LIVE",
+            "DASHBOARD WATCH V10.43C END"])
 
     def research_dashboard_open_v1043a_cli(self, *, symbols="") -> str:
         from .labs import research_dashboard_v10_43a as DASH
@@ -8603,6 +8629,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
             "autonomous-strategy-lab-v1043c",
             "exit-optimization-v1043c",
             "research-dashboard-build-v1043c",
+            "research-dashboard-watch-v1043c",
             "ohlcv-replay-loader-smoke-test",
             "ohlcv-replay-loader-audit",
             "duplicate-module-audit-smoke-test",
@@ -8788,6 +8815,9 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--forward-shadow", action="store_true", help="V10.12 shadow runner: forward shadow (no orders, no live, no paper).")
     parser.add_argument("--universe", default="", help="V10.28 comma-separated symbol universe to scan (default: 19 liquid USDT-perps). Public OHLCV only.")
     parser.add_argument("--interval-seconds", type=float, default=60.0, help="V10.28 seconds between scan cycles in the live shadow scanner.")
+    parser.add_argument("--auto-refresh-seconds", type=int, default=0, help="V10.43C dashboard meta refresh seconds (0 disables).")
+    parser.add_argument("--once", action="store_true", help="V10.43C dashboard watcher: run one refresh and exit.")
+    parser.add_argument("--open", action="store_true", help="V10.43C dashboard watcher: open the local static HTML in the default browser.")
     parser.add_argument("--max-scans", type=int, default=1, help="V10.28 number of scan cycles (<=0 = run until Ctrl+C or q/quit/exit/stop).")
     parser.add_argument("--request-budget", type=int, default=6, help="V10.28 bounded GET requests per symbol per scan (public klines).")
     parser.add_argument("--date", default="", help="V10.36 backfill day (YYYY-MM-DD).")
@@ -8866,6 +8896,7 @@ PUBLIC_RESEARCH_ONLY_COMMANDS = frozenset({
     "autonomous-strategy-lab-v1043c",
     "exit-optimization-v1043c",
     "research-dashboard-build-v1043c",
+    "research-dashboard-watch-v1043c",
 })
 
 
@@ -9034,7 +9065,12 @@ def _dispatch_public_research_only(args) -> None:
         print(lab.exit_optimization_v1043c_cli(
             symbols=args.symbols, data_source=getattr(args, "data_source", "ws_persistent")))
     elif args.command == "research-dashboard-build-v1043c":
-        print(lab.research_dashboard_build_v1043c_cli(symbols=args.symbols))
+        print(lab.research_dashboard_build_v1043c_cli(
+            symbols=args.symbols, auto_refresh_seconds=args.auto_refresh_seconds))
+    elif args.command == "research-dashboard-watch-v1043c":
+        print(lab.research_dashboard_watch_v1043c_cli(
+            symbols=args.symbols, interval_seconds=args.interval_seconds,
+            open_browser=args.open, once=args.once))
     elif args.command.startswith("bybit-backfill-"):
         cmd = args.command.replace("bybit-backfill-", "").replace("-v1036", "")
         print(lab.bybit_backfill_v1036_cli(
