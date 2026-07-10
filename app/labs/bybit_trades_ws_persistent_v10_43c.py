@@ -286,6 +286,58 @@ def stream_session(recv_fn: Callable[[], Any], state: dict, on_flush, *,
     return {"ended": ended, "session_msgs": smsgs}
 
 
+_CSV_COLS = V42._CSV_COLS
+SEED_TAIL_ROWS = 150_000        # trade_ids read from the CSV tail on startup
+
+
+def seed_seen_from_tail(data_dir, max_rows: int = SEED_TAIL_ROWS) -> set[str]:
+    """Read the LAST max_rows trade_ids from trades.csv for cross-restart dedup.
+
+    Duplicates across restarts can only come from the subscribe snapshot replay
+    (last few hundred trades) or an overlapping reconnect window (seconds), so a
+    bounded tail (~150k rows ≈ hours of tape) is far more than enough — reading
+    every id would cost unbounded memory as the dataset grows."""
+    import csv as _csv
+    from collections import deque
+    p = Path(data_dir) / "trades.csv"
+    if not p.is_file():
+        return set()
+    tail: deque = deque(maxlen=max_rows)
+    try:
+        with open(p, "r", newline="", encoding="utf-8", errors="ignore") as f:
+            for r in _csv.DictReader(f):
+                tid = r.get("trade_id")
+                if tid:
+                    tail.append(tid)
+    except Exception:
+        return set(tail)
+    return set(tail)
+
+
+def append_rows_incremental(rows: list[dict], data_dir) -> dict[str, Any]:
+    """TRUE append: write only the new rows at the end of trades.csv.
+
+    The V10.42 append_rows re-reads and REWRITES the whole CSV on every flush —
+    at ~90MB that costs ~9s of blocked recv every ~20s of tape, which starves
+    the socket (no recv, no ping), gets the connection dropped and punches the
+    very holes the persistent collector exists to remove. Rows are sorted
+    within the batch; readers sort globally when building bars, and dedup is
+    guaranteed by the in-process `seen` set seeded from the CSV tail."""
+    import csv as _csv
+    data_dir = Path(data_dir)
+    data_dir.mkdir(parents=True, exist_ok=True)
+    f = data_dir / "trades.csv"
+    new_file = not f.is_file()
+    rows = sorted(rows, key=lambda r: int(r["timestamp"]))
+    with open(f, "a", newline="", encoding="utf-8") as fh:
+        w = _csv.DictWriter(fh, fieldnames=_CSV_COLS)
+        if new_file:
+            w.writeheader()
+        for r in rows:
+            w.writerow({k: r.get(k) for k in _CSV_COLS})
+    return {"rows_added": len(rows), "path": str(f).replace("\\", "/")}
+
+
 def run_persistent(connect_fn: Callable[[list[str]], Callable | None],
                    symbols: list[str], *,
                    now_ms_fn: Callable[[], int] | None = None,
@@ -319,13 +371,19 @@ def run_persistent(connect_fn: Callable[[list[str]], Callable | None],
             return {"tool_version": TOOL_VERSION, "status": "ALREADY_RUNNING",
                     "detail": "another persistent writer holds the lock",
                     "holder": holder, **_safety()}
+    # cross-restart dedup without unbounded memory: seed from the CSV tail
+    if on_flush is None:
+        try:
+            state["seen"] |= seed_seen_from_tail(_dataset_dir(base))
+        except Exception:
+            pass
 
     def flush_and_persist(rows: list[dict]) -> None:
         if on_flush:
             on_flush(rows)
         else:
             try:
-                ap = V42.append_rows(rows, _dataset_dir(base))
+                ap = append_rows_incremental(rows, _dataset_dir(base))
                 p = Path(ap["path"])
                 state["current_file_size"] = p.stat().st_size if p.is_file() else 0
             except Exception:
@@ -336,6 +394,7 @@ def run_persistent(connect_fn: Callable[[list[str]], Callable | None],
             write_health(state, now_ms_fn(), base=base, stale_s=stale_s)
 
     sessions = 0
+    consecutive_failures = 0        # backoff key: FAILURES IN A ROW, not lifetime
     try:
         while True:
             if max_sessions is not None and sessions >= max_sessions:
@@ -349,11 +408,17 @@ def run_persistent(connect_fn: Callable[[list[str]], Callable | None],
                 recv_fn = None
             if recv_fn is None:                             # connect failed
                 state["reconnect_count"] += 1
+                consecutive_failures += 1
                 sessions += 1
                 if write_health_file:
                     write_health(state, now_ms_fn(), base=base, stale_s=stale_s)
-                backoff_sleep_fn(BACKOFF_S[min(state["reconnect_count"] - 1, len(BACKOFF_S) - 1)])
+                backoff_sleep_fn(BACKOFF_S[min(consecutive_failures - 1, len(BACKOFF_S) - 1)])
                 continue
+            # health snapshot at session start: without this the health file can
+            # show DISCONNECTED between sessions even while the tape is flowing
+            state["connected"] = True
+            if write_health_file:
+                write_health(state, now_ms_fn(), base=base, stale_s=stale_s)
             res = stream_session(
                 recv_fn, state, flush_and_persist, now_ms_fn=now_ms_fn,
                 flush_every_n=flush_every_n, flush_every_s=flush_every_s,
@@ -366,6 +431,8 @@ def run_persistent(connect_fn: Callable[[list[str]], Callable | None],
                 except Exception:
                     pass
             sessions += 1
+            if res.get("session_msgs", 0) > 0:
+                consecutive_failures = 0                    # healthy session -> fast retry
             if write_health_file:
                 write_health(state, now_ms_fn(), base=base, stale_s=stale_s)
             if res["ended"] in ("max_runtime", "max_msgs") and \
@@ -374,9 +441,10 @@ def run_persistent(connect_fn: Callable[[list[str]], Callable | None],
                 continue
             if res["ended"] in ("recv_error", "stale", "stream_end"):
                 state["reconnect_count"] += 1
+                consecutive_failures += 1
                 if max_sessions is None and max_runtime_s is None:
                     break                                   # unbounded caller handled elsewhere
-                backoff_sleep_fn(BACKOFF_S[min(state["reconnect_count"] - 1, len(BACKOFF_S) - 1)])
+                backoff_sleep_fn(BACKOFF_S[min(consecutive_failures - 1, len(BACKOFF_S) - 1)])
     finally:
         if use_lock:
             release_writer_lock(_dataset_dir(base), pid)
@@ -402,6 +470,8 @@ def connect_and_run_live(symbols: list[str], base=None,
                 "detail": "websocket-client not importable; live collector unavailable",
                 **_safety()}
 
+    import time as _t
+
     def connect_fn(syms):
         try:
             ws = websocket.create_connection(WS_PUBLIC_LINEAR, timeout=20)
@@ -409,8 +479,18 @@ def connect_and_run_live(symbols: list[str], base=None,
             ws.send(json.dumps(subscribe_message(syms)))
         except Exception:
             return None
+        last_ping = {"t": _t.time()}
 
         def recv():
+            # Bybit v5 requires a client heartbeat (~20s); without it the server
+            # can drop the socket during quiet periods or backpressure.
+            now = _t.time()
+            if now - last_ping["t"] >= 15:
+                try:
+                    ws.send('{"op":"ping"}')
+                    last_ping["t"] = now
+                except Exception:
+                    raise                                    # dead socket -> reconnect
             try:
                 raw = ws.recv()
             except websocket.WebSocketTimeoutException:      # type: ignore
@@ -438,5 +518,7 @@ def status() -> dict[str, Any]:
             "persistent_loop_implemented": True, "live_connect_guarded": True,
             "endpoint": WS_PUBLIC_LINEAR, "dataset": "/".join(WS_PERSISTENT_SUBDIR),
             "how_to_run": "scripts/collect_bybit_trades_ws_persistent_forever.ps1",
-            "improves_over": "v10.42 (no 60s reconnect holes; one long-lived socket)",
+            "improves_over": ("v10.42 (no 60s reconnect holes; one long-lived socket; "
+                              "incremental append instead of full-CSV rewrite per flush; "
+                              "bybit ping keepalive; consecutive-failure backoff)"),
             "safety": "public only, no keys, no orders, research-only", **_safety()}

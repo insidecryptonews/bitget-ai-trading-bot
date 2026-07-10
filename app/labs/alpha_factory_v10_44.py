@@ -365,7 +365,8 @@ def _metrics_from_outcomes(outs: list[dict], n_tests: int) -> dict[str, Any]:
 
 def _simulate_candidate(rule: dict[str, Any], exit_cfg: dict[str, Any],
                         feats: list[dict], bars: list[dict],
-                        q: dict[str, float], costs: dict | None = None) -> dict[str, Any]:
+                        q: dict[str, float], costs: dict | None = None,
+                        n_tests: int = 1) -> dict[str, Any]:
     fn = _rule_fn(rule, q)
     outs: list[dict] = []
     rows: list[dict[str, Any]] = []
@@ -392,8 +393,8 @@ def _simulate_candidate(rule: dict[str, Any], exit_cfg: dict[str, Any],
     by = {}
     for name, (lo, hi) in ranges.items():
         part = [o for o in outs if lo <= int(o.get("signal_i", -1)) < hi]
-        by[name] = _metrics_from_outcomes(part, n_tests=1)
-    all_m = _metrics_from_outcomes(outs, n_tests=1)
+        by[name] = _metrics_from_outcomes(part, n_tests=n_tests)
+    all_m = _metrics_from_outcomes(outs, n_tests=n_tests)
     return {"outcomes": outs, "rows": rows, "metrics_all": all_m, "metrics_by_split": by}
 
 
@@ -487,10 +488,14 @@ def run_alpha_factory(symbols: str = "BTCUSDT", data_source: str = "ws_persisten
                     errors.append("runtime_budget_exhausted")
                     break
                 tested += 1
-                sim = _simulate_candidate(rule, exit_cfg, feats, bars, q)
+                # the multiple-testing penalty is applied to EVERY lower bound so
+                # the ranking key is honestly "adjusted for 50 hypotheses tested"
+                sim = _simulate_candidate(rule, exit_cfg, feats, bars, q,
+                                          n_tests=total_tests)
                 stress_metrics: dict[str, dict] = {}
                 for sname, costs in COST_STRESS.items():
-                    ss = _simulate_candidate(rule, exit_cfg, feats, bars, q, costs=costs or None)
+                    ss = _simulate_candidate(rule, exit_cfg, feats, bars, q,
+                                             costs=costs or None, n_tests=total_tests)
                     stress_metrics[sname] = ss["metrics_by_split"]["test"]
                 all_m = sim["metrics_all"]
                 val_m = sim["metrics_by_split"]["validation"]
@@ -674,4 +679,3 @@ def render_cli(summary: dict[str, Any], title: str = "ALPHA FACTORY V10.44") -> 
     lines.append("final_recommendation: NO LIVE")
     lines.append(f"{title} END")
     return "\n".join(lines)
-

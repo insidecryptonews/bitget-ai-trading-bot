@@ -108,4 +108,3 @@ def test_alpha_factory_source_has_no_trading_side_effect_calls():
     ]
     for token in forbidden:
         assert token not in source
-

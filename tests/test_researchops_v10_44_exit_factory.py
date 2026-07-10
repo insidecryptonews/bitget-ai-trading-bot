@@ -84,4 +84,3 @@ def test_exit_factory_source_has_no_trading_side_effect_calls():
                   "set_margin_mode", "ExecutionEngine.execute",
                   "PaperTrader.open_position", "LIVE_TRADING=True"):
         assert token not in source
-

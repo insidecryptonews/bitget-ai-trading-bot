@@ -32,7 +32,7 @@ LOCK_FILE = "dashboard_watch_v1043c.lock"
 DEFAULT_REFRESH_SECONDS = 30
 MIN_REFRESH_SECONDS = 15
 SLOW_STALE_SECONDS = 15 * 60
-SLOW_SOURCE_REFRESH_SECONDS = 180
+SLOW_SOURCE_REFRESH_SECONDS = 300
 CACHE_FILE = "dashboard_fast_cache_v1043c.json"
 
 
@@ -85,12 +85,12 @@ def gather_state_fast(symbol: str = "BTCUSDT") -> dict[str, Any]:
     dashboard JSON when available. Stale or missing slow sections are labelled
     explicitly instead of being fabricated.
     """
-    base = A.gather_state(symbol)
+    out_dir = _output_dir()
+    base = _cached_base_state(symbol, out_dir)
     try:
         health = PWS.ws_persistent_health(symbol)
     except Exception:
         health = {"status": "NO_DATA"}
-    out_dir = _output_dir()
     continuity, compare, source_meta = _cached_source_metrics(symbol, out_dir)
     previous = _read_json(out_dir / "dashboard_data_v10_43c.json") or {}
     strategy = previous.get("strategy_hardening") or _missing_slow("STRATEGY_METRICS_MISSING")
@@ -111,23 +111,62 @@ def _missing_slow(status: str) -> dict[str, Any]:
             "status": status, "stale_or_missing": True, **_safety()}
 
 
+def _iso_age_seconds(iso: str | None) -> float | None:
+    """Age of a real run timestamp (`ran_at`), never of a regenerated file."""
+    if not iso:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(iso))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return round(datetime.now(timezone.utc).timestamp() - dt.timestamp(), 1)
+    except Exception:
+        return None
+
+
 def _slow_metrics_meta(previous: dict[str, Any], out_dir: Path) -> dict[str, Any]:
-    json_path = out_dir / "dashboard_data_v10_43c.json"
-    age = _file_age_seconds(json_path)
+    """Staleness of the heavy sections from their REAL run timestamps.
+
+    The watcher rewrites dashboard_data_v10_43c.json every cycle, so the file
+    mtime is always fresh and must NEVER be used as the heavy-run age. Only the
+    `ran_at` stamped by the strategy/exit runs counts; a missing stamp is
+    reported as STALE_UNKNOWN instead of silently looking fresh."""
     strategy = previous.get("strategy_hardening") or {}
     exits = previous.get("exit_optimization") or {}
-    last_strategy = strategy.get("ran_at") or _mtime_iso(json_path)
-    last_exit = exits.get("ran_at") or _mtime_iso(json_path)
-    stale = age is None or age > SLOW_STALE_SECONDS
-    return {"strategy_last_updated_at": last_strategy,
-            "exit_last_updated_at": last_exit,
-            "strategy_age_seconds": age,
-            "exit_age_seconds": age,
+    s_age = _iso_age_seconds(strategy.get("ran_at"))
+    e_age = _iso_age_seconds(exits.get("ran_at"))
+    s_stale = s_age is None or s_age > SLOW_STALE_SECONDS
+    e_stale = e_age is None or e_age > SLOW_STALE_SECONDS
+    return {"strategy_last_updated_at": strategy.get("ran_at") or "STALE_UNKNOWN",
+            "exit_last_updated_at": exits.get("ran_at") or "STALE_UNKNOWN",
+            "strategy_age_seconds": s_age,
+            "exit_age_seconds": e_age,
             "stale_after_seconds": SLOW_STALE_SECONDS,
-            "strategy_stale": stale,
-            "exit_stale": stale,
-            "note": ("slow metrics are reused from the latest dashboard JSON; "
-                     "run strategy/exit CLIs to refresh them")}
+            "strategy_stale": s_stale,
+            "exit_stale": e_stale,
+            "note": ("staleness measured from each section's real ran_at, not "
+                     "from the regenerated dashboard JSON; run strategy/exit "
+                     "CLIs (or research-heavy-run-v1044) to refresh them")}
+
+
+BASE_STATE_TTL_SECONDS = 120
+_BASE_STATE_CACHE: dict[str, tuple[float, dict]] = {}
+
+
+def _cached_base_state(symbol: str, out_dir: Path) -> dict[str, Any]:
+    """In-process TTL cache for the V10.43A base state (REST health/view).
+
+    A.gather_state re-reads and re-bars the whole REST dataset (~seconds) and the
+    watcher does not need that every 30s. The TTL (not just an mtime signature)
+    guarantees a dead collector is still detected within ~2 minutes — an
+    mtime-only key would freeze the last healthy snapshot forever."""
+    now = time.time()
+    hit = _BASE_STATE_CACHE.get(symbol)
+    if hit is not None and (now - hit[0]) < BASE_STATE_TTL_SECONDS:
+        return dict(hit[1])
+    base = A.gather_state(symbol)
+    _BASE_STATE_CACHE[symbol] = (now, base)
+    return dict(base)
 
 
 def _cached_source_metrics(symbol: str, out_dir: Path) -> tuple[dict, dict, dict]:
@@ -166,13 +205,29 @@ def _cached_source_metrics(symbol: str, out_dir: Path) -> tuple[dict, dict, dict
                 "continuity/source compare cached for fast watcher; health is fresh")
         }
         return cache["continuity"], cache["compare"], meta
+    # single-load: read each large CSV once and share it between the continuity
+    # audit and the 3-way compare (they used to re-read persistent + v10.42 twice)
     try:
-        continuity = PWS.ws_continuity_audit(symbol)
+        pers_loaded = PWS.load_persistent_bars(symbol)
+    except Exception:
+        pers_loaded = {"bars": [], "meta": {"exists": False, "n_trades_raw": 0,
+                                            "n_trades_used": 0, "dropped_rows": 0,
+                                            "ws_file_age_min": None}}
+    try:
+        from . import ws_dataset_integration_v10_43b as _WSB
+        ws_bars = _WSB.load_ws_bars(symbol)["bars"]
+    except Exception:
+        ws_bars = []
+    try:
+        continuity = PWS.ws_continuity_audit(symbol, preloaded=pers_loaded,
+                                             ref_bars=ws_bars)
     except Exception:
         continuity = {"verdict": "NO_WS_DATA", "max_contiguous_run": 0,
                       "cache_error": "continuity_failed"}
     try:
-        compare = PWS.dataset_source_compare_3way(symbol)
+        compare = PWS.dataset_source_compare_3way(symbol,
+                                                  pers_bars=pers_loaded["bars"],
+                                                  ws_bars=ws_bars)
     except Exception:
         compare = {"recommended_source": "rest", "blockers": ["COMPARE_FAILED"],
                    "rest": {}, "ws": {}, "ws_persistent": {}}
@@ -260,10 +315,11 @@ def _panel_persistent_ws(d: dict) -> str:
         A._kv("Last message age (s)", h.get("age_seconds"),
               A._state_kind(h.get("status"))) +
         A._kv("Dataset file age (min)", h.get("dataset_file_age_min")) +
-        A._kv("Messages", h.get("messages_count")) +
-        A._kv("Persistent trades", h.get("trades_count")) +
-        A._kv("Trades", c.get("trades")) +
-        A._kv("Bars", c.get("bars")) +
+        A._kv("Session messages (this process)", h.get("messages_count")) +
+        A._kv("Session new trades (this process)", h.get("trades_count")) +
+        A._kv("Session reconnects", h.get("reconnect_count")) +
+        A._kv("Dataset trades (deduped, all time)", c.get("trades")) +
+        A._kv("Dataset bars (1m)", c.get("bars")) +
         A._kv("Max contiguous run", c.get("max_contiguous_run")) +
         A._kv("Forward coverage", A._pct(c.get("forward_coverage"))) +
         A._kv("Continuity verdict", c.get("verdict"), A._state_kind(c.get("verdict"))) +
@@ -376,6 +432,36 @@ def _panel_alpha_factory(d: dict) -> str:
         '<div class="sub">V10.44 Alpha Factory is research-only. Candidate labels are NOT executable signals. NO LIVE.</div>')
 
 
+def _panel_ai_copilot(d: dict) -> str:
+    rd = CE._repo_root().joinpath("reports", "research", "v10_45_ai_copilot")
+    cop = _read_json(rd / "ai_copilot_last_run_v10_45.json") or {}
+    sim = _read_json(rd / "ai_simulated_trader_v10_45.json") or {}
+    m = sim.get("metrics") or {}
+    b = sim.get("baselines") or {}
+    enabled = bool(cop or sim)
+    return (
+        A._kv("AI copilot", "ENABLED (research/sim only)" if enabled else "NOT_RUN",
+              "warn" if enabled else "muted") +
+        A._kv("Provider", sim.get("provider") or cop.get("provider") or "mock") +
+        A._kv("Copilot last run", cop.get("ran_at") or "NOT_RUN") +
+        A._kv("Ideas generated / rejected",
+              f"{cop.get('ideas_generated', 0)} / {cop.get('ideas_rejected', 0)}") +
+        A._kv("Sim last run", sim.get("ran_at") or "NOT_RUN") +
+        A._kv("Sim decisions", sim.get("n_decisions")) +
+        A._kv("Sim trades (ledger only)", m.get("n_trades")) +
+        A._kv("Sim net_EV", m.get("net_EV")) +
+        A._kv("Sim net_EV lower bound", m.get("net_EV_lower_bound")) +
+        A._kv("Sim PF / maxDD", f"{m.get('profit_factor')} / {m.get('max_drawdown')}") +
+        A._kv("Beats random / buy&hold",
+              f"{b.get('beats_random')} / {b.get('beats_buy_hold')}") +
+        A._kv("Sim verdict", sim.get("verdict") or "NOT_RUN",
+              A._state_kind(sim.get("verdict") or "WAITING_DATA")) +
+        A._kv("Dangerous outputs blocked", sim.get("n_dangerous_outputs")) +
+        '<div class="sub">AI = research/simulation assistant ONLY. Decisions live in an '
+        'isolated paper ledger; no orders, no keys, no live. Privacy: only public '
+        'research summaries are ever sent to a provider.</div>')
+
+
 def _panel_lattice(d: dict) -> str:
     cont = d.get("persistent_continuity", {})
     tour = d.get("ws_persistent_tournament") or {}
@@ -403,6 +489,7 @@ def render_html(d: dict, auto_refresh_seconds: int | None = None) -> str:
         pws=_panel_persistent_ws(d), compare=_panel_compare(d),
         strategy=_panel_strategy(d), exits=_panel_exit(d),
         alpha=_panel_alpha_factory(d),
+        ai=_panel_ai_copilot(d),
         lattice=_panel_lattice(d),
         graph=A._relationship_graph((d.get("persistent_continuity") or {}).get("verdict")),
         gen=html.escape(datetime.now(timezone.utc).isoformat()))
@@ -442,6 +529,7 @@ _EXTRA = """
   <div class="card wide"><h3>Persistent WS Panel</h3>{pws}</div>
   <div class="card wide"><h3>REST vs WS vs WS Persistent</h3>{compare}</div>
   <div class="card wide"><h3>Alpha Factory V10.44</h3>{alpha}</div>
+  <div class="card wide"><h3>AI Research Co-Pilot V10.45</h3>{ai}</div>
   <div class="card"><h3>Strategy Lab Hardened</h3>{strategy}</div>
   <div class="card"><h3>Exit Optimization Panel</h3>{exits}</div>
   <div class="card"><h3>Probability Lattice</h3>{lattice}</div>

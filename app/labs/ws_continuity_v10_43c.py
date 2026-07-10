@@ -111,17 +111,22 @@ def _forward_metrics(symbol: str, bars: list[dict]) -> dict[str, Any]:
             "fit_for_shadow_forward": bool(view.get("fit_for_shadow_forward"))}
 
 
-def ws_continuity_audit(symbol: str = "BTCUSDT", base=None) -> dict[str, Any]:
+def ws_continuity_audit(symbol: str = "BTCUSDT", base=None,
+                        preloaded: dict | None = None,
+                        ref_bars: list[dict] | None = None) -> dict[str, Any]:
     """Continuity verdict for the persistent WS dataset, on the honest ladder from
     NO_WS_DATA up to WS_READY_FOR_SHADOW_FORWARD. `improving` compares the
-    persistent contiguity against the older V10.42 WS dataset."""
-    loaded = load_persistent_bars(symbol, base=base)
+    persistent contiguity against the older V10.42 WS dataset.
+
+    `preloaded` / `ref_bars` let a caller that already read the (large) CSVs
+    share them instead of re-reading; behaviour is identical when omitted."""
+    loaded = preloaded if preloaded is not None else load_persistent_bars(symbol, base=base)
     bars, meta = loaded["bars"], loaded["meta"]
     m = _forward_metrics(symbol, bars)
     health = ws_persistent_health(symbol, base=base)
     # reference: the older 60s-cycle WS dataset (to detect real improvement)
     try:
-        ref = WS.load_ws_bars(symbol)["bars"]
+        ref = ref_bars if ref_bars is not None else WS.load_ws_bars(symbol)["bars"]
         ref_run = DR.forward_dataset_view(symbol, bars=ref).get("forward_max_contiguous_run_bars") or 0
     except Exception:
         ref_run = 0
@@ -173,25 +178,58 @@ def _gap_summary(bars: list[dict], gap_bars: int = 2) -> dict[str, Any]:
     return {"gap_count": len(gaps), "recent_gaps": gaps[-5:]}
 
 
-def dataset_source_compare_3way(symbol: str = "BTCUSDT", base=None) -> dict[str, Any]:
+def _dataset_age_min(path) -> float | None:
+    try:
+        if path is None or not path.is_file():
+            return None
+        return round((datetime.now(timezone.utc).timestamp() - path.stat().st_mtime) / 60, 1)
+    except Exception:
+        return None
+
+
+def dataset_source_compare_3way(symbol: str = "BTCUSDT", base=None,
+                                pers_bars: list[dict] | None = None,
+                                ws_bars: list[dict] | None = None,
+                                rest_bars: list[dict] | None = None) -> dict[str, Any]:
     """Compare REST (V10.32) vs WS (V10.42) vs WS-persistent (V10.43C) on forward
     continuity, recommend a source, and — crucially — surface explicit blockers so
-    `recommended_source` is never mistaken for 'ready for shadow-forward'."""
-    try:
-        rest_bars = CE.load_dataset(symbol).get("bars") or []
-    except Exception:
-        rest_bars = []
-    try:
-        ws_bars = WS.load_ws_bars(symbol)["bars"]
-    except Exception:
-        ws_bars = []
-    pers_bars = load_persistent_bars(symbol, base=base)["bars"]
+    `recommended_source` is never mistaken for 'ready for shadow-forward'.
+
+    A source whose dataset file has gone stale (collector dead) is never
+    recommended over a live one, no matter its historical contiguity. Preloaded
+    bar lists can be passed to avoid re-reading large CSVs."""
+    if rest_bars is None:
+        try:
+            rest_bars = CE.load_dataset(symbol).get("bars") or []
+        except Exception:
+            rest_bars = []
+    if ws_bars is None:
+        try:
+            ws_bars = WS.load_ws_bars(symbol)["bars"]
+        except Exception:
+            ws_bars = []
+    if pers_bars is None:
+        pers_bars = load_persistent_bars(symbol, base=base)["bars"]
     rest = _forward_metrics(symbol, rest_bars)
     ws = _forward_metrics(symbol, ws_bars)
     pers = _forward_metrics(symbol, pers_bars)
+    # dataset freshness: a dead collector's dataset must not win the recommendation
+    try:
+        rest_path = CE._repo_root().joinpath("external_data", "staging",
+                                             "bybit_microstructure_v10_32",
+                                             "dataset", "trades.csv")
+    except Exception:
+        rest_path = None
+    ages = {"rest": _dataset_age_min(rest_path),
+            "ws": _dataset_age_min(WS._ws_path()),
+            "ws_persistent": _dataset_age_min(_persistent_path(base))}
+    for name, m in (("rest", rest), ("ws", ws), ("ws_persistent", pers)):
+        m["dataset_age_min"] = ages[name]
+        m["dataset_fresh"] = ages[name] is not None and ages[name] <= STALE_MIN
     ranked = sorted(
         [("ws_persistent", pers), ("ws", ws), ("rest", rest)],
-        key=lambda kv: kv[1]["max_contiguous_run"], reverse=True)
+        key=lambda kv: (kv[1]["dataset_fresh"], kv[1]["max_contiguous_run"]),
+        reverse=True)
     recommended, rec_m = ranked[0]
     # if nothing has data at all -> rest by default (still fail-closed downstream)
     if rec_m["max_contiguous_run"] == 0 and not pers_bars and not ws_bars:
@@ -207,7 +245,9 @@ def dataset_source_compare_3way(symbol: str = "BTCUSDT", base=None) -> dict[str,
             blockers.append("WS_TOO_GAPPY_FOR_SHADOW_FORWARD")
         else:
             blockers.append("WS_INSUFFICIENT_FOR_SHADOW_FORWARD")
-    ready = bool(rec_m["fit_for_shadow_forward"])
+    if not rec_m.get("dataset_fresh"):
+        blockers.append("RECOMMENDED_SOURCE_STALE")
+    ready = bool(rec_m["fit_for_shadow_forward"]) and rec_m.get("dataset_fresh", False)
     return {"tool_version": TOOL_VERSION, "symbol": symbol,
             "ran_at": datetime.now(timezone.utc).isoformat(),
             "rest": rest, "ws": ws, "ws_persistent": pers,

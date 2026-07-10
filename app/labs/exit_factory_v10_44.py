@@ -89,6 +89,7 @@ def run_exit_factory(symbols: str = "BTCUSDT", data_source: str = "ws_persistent
         if symbol not in grouped:
             grouped[symbol] = []
         grouped[symbol].append(c)
+    n_tests_total = max(1, len(source_candidates) * len(_exit_variants()))
     for symbol, candidates in grouped.items():
         bars, eff_source, _meta = LAB._load_bars(symbol, data_source)
         if len(bars) < AF.MIN_BARS:
@@ -107,7 +108,7 @@ def run_exit_factory(symbols: str = "BTCUSDT", data_source: str = "ws_persistent
                     "sl": ex["sl"],
                     "trail": ex["trail"],
                     "horizon": ex["horizon"],
-                }, feats, bars, q)
+                }, feats, bars, q, n_tests=n_tests_total)
                 tm = sim["metrics_by_split"]["test"]
                 vm = sim["metrics_by_split"]["validation"]
                 status = _status(tm, vm, c)
@@ -234,4 +235,3 @@ def render_cli(summary: dict[str, Any]) -> str:
              "final_recommendation: NO LIVE",
              "EXIT FACTORY V10.44 END"]
     return "\n".join(lines)
-
