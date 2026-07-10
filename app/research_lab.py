@@ -7314,6 +7314,43 @@ class ResearchLab:
                  "RESEARCH HEAVY RUN V10.44 END"]
         return chr(10).join(lines)
 
+    def ai_provider_audit_v1045_cli(self) -> str:
+        from .labs import ai_research_copilot_v10_45 as COP
+        d = COP.write_provider_audit_report()
+        a = COP.provider_audit()
+        lines = ["AI PROVIDER AUDIT V10.45 START"]
+        for p in a["providers"]:
+            lines.append(f"- {p['provider']}: status={p['status']} cost={p['cost']} fit={p['fit']}")
+        lines += [f"recommendation: {a['recommendation']}",
+                  f"reports_dir: {d}",
+                  "keys_source: environment variables only (never .env)",
+                  "default_provider: mock", "no_orders: true",
+                  "can_send_real_orders: false",
+                  "final_recommendation: NO LIVE",
+                  "AI PROVIDER AUDIT V10.45 END"]
+        return chr(10).join(lines)
+
+    def ai_research_copilot_v1045_cli(self, *, symbols="", provider="mock",
+                                      mode="propose") -> str:
+        from .labs import ai_research_copilot_v10_45 as COP
+        sym = (self._v107_csv_arg(symbols) or ["BTCUSDT"])[0]
+        # the shared --mode arg defaults to a V10.12 value; anything outside the
+        # V10.45 vocabulary falls back to `propose` (never crashes, never live)
+        mode = mode if mode in COP.MODES else "propose"
+        provider = (provider or "mock")
+        r = COP.run_copilot(mode=mode, provider=provider, symbol=sym)
+        return COP.render_cli(r)
+
+    def ai_simulated_trader_v1045_cli(self, *, symbols="", provider="mock",
+                                      data_source="ws_persistent",
+                                      max_bars=300) -> str:
+        from .labs import ai_simulated_trader_v10_45 as SIM
+        sym = (self._v107_csv_arg(symbols) or ["BTCUSDT"])[0]
+        r = SIM.run_ai_simulated_trader(sym, provider=(provider or "mock"),
+                                        data_source=data_source,
+                                        max_bars=int(max_bars or 300))
+        return SIM.render_cli(r)
+
     def research_dashboard_open_v1043a_cli(self, *, symbols="") -> str:
         from .labs import research_dashboard_v10_43a as DASH
         import os as _os
@@ -8690,6 +8727,9 @@ def build_argument_parser() -> argparse.ArgumentParser:
             "exit-factory-v1044",
             "candidate-incubator-v1044",
             "research-heavy-run-v1044",
+            "ai-provider-audit-v1045",
+            "ai-research-copilot-v1045",
+            "ai-simulated-trader-v1045",
             "ohlcv-replay-loader-smoke-test",
             "ohlcv-replay-loader-audit",
             "duplicate-module-audit-smoke-test",
@@ -8781,6 +8821,10 @@ def build_argument_parser() -> argparse.ArgumentParser:
                         help="V10.43B/C data source for the strategy lab (default auto).")
     parser.add_argument("--max-runtime-minutes", type=float, default=60.0,
                         help="Runtime budget for V10.44 heavy research-only sprint.")
+    # V10.45 reuses the pre-existing --provider (V10.6) and --mode (V10.12)
+    # args; empty/foreign values fall back to the mock provider fail-closed.
+    parser.add_argument("--max-bars", type=int, default=300,
+                        help="V10.45 simulated trader replay length in bars.")
     parser.add_argument("--category", default="other", help="Categoria catalyst.")
     parser.add_argument("--direction", default="unknown", help="Direccion catalyst.")
     parser.add_argument("--severity", default="low", help="Severidad catalyst.")
@@ -8963,6 +9007,9 @@ PUBLIC_RESEARCH_ONLY_COMMANDS = frozenset({
     "exit-factory-v1044",
     "candidate-incubator-v1044",
     "research-heavy-run-v1044",
+    "ai-provider-audit-v1045",
+    "ai-research-copilot-v1045",
+    "ai-simulated-trader-v1045",
 })
 
 
@@ -9151,6 +9198,17 @@ def _dispatch_public_research_only(args) -> None:
         print(lab.research_heavy_run_v1044_cli(
             symbols=args.symbols, data_source=getattr(args, "data_source", "ws_persistent"),
             max_runtime_minutes=getattr(args, "max_runtime_minutes", 90.0)))
+    elif args.command == "ai-provider-audit-v1045":
+        print(lab.ai_provider_audit_v1045_cli())
+    elif args.command == "ai-research-copilot-v1045":
+        print(lab.ai_research_copilot_v1045_cli(
+            symbols=args.symbols, provider=getattr(args, "provider", "mock"),
+            mode=getattr(args, "mode", "propose")))
+    elif args.command == "ai-simulated-trader-v1045":
+        print(lab.ai_simulated_trader_v1045_cli(
+            symbols=args.symbols, provider=getattr(args, "provider", "mock"),
+            data_source=getattr(args, "data_source", "ws_persistent"),
+            max_bars=getattr(args, "max_bars", 300)))
     elif args.command.startswith("bybit-backfill-"):
         cmd = args.command.replace("bybit-backfill-", "").replace("-v1036", "")
         print(lab.bybit_backfill_v1036_cli(
