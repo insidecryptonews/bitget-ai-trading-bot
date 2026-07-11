@@ -463,8 +463,8 @@ def _panel_ai_copilot(d: dict) -> str:
 
 
 def _panel_edge_discovery(d: dict) -> str:
-    rd = CE._repo_root().joinpath("reports", "research", "v10_45_2_edge_discovery")
-    s = _read_json(rd / "edge_discovery_summary_v10_45_2.json") or {}
+    rd = CE._repo_root().joinpath("reports", "research", "v10_45_3_edge_discovery")
+    s = _read_json(rd / "edge_discovery_summary_v10_45_3.json") or {}
     conn = _read_json(rd / "provider_connectivity_v10_45_1.json") or {}
     provs = ", ".join(f"{p.get('provider')}={'OK' if p.get('available') else 'DOWN'}"
                       for p in (conn.get("providers") or [])) or "NOT_RUN"

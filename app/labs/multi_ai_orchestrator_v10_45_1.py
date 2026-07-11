@@ -29,7 +29,7 @@ from . import FINAL_RECOMMENDATION_NO_LIVE
 from . import ai_providers_v10_45_1 as PROV
 from . import edge_discovery_engine_v10_45_1 as ENG
 
-TOOL_VERSION = "v10.45.1"
+TOOL_VERSION = "v10.45.3"
 
 ROLES_GENERATION = (
     ("HYPOTHESIS_GENERATOR",
@@ -114,20 +114,28 @@ def _market_context(data_note: str) -> str:
 def generate_hypotheses(providers: dict[str, PROV.BaseProvider],
                         data_note: str, log=print) -> dict[str, Any]:
     """Ask each available REAL provider to fill several generation roles."""
+    import hashlib as _hl
     raw_ideas: list[dict] = []
     calls: list[dict] = []
+    role_meta: dict[str, dict] = {}
     order = [p for p in ("ollama", "gemini", "groq") if p in providers]
     if not order:
-        return {"ideas": [], "calls": [], "note": "no real providers available"}
+        return {"ideas": [], "calls": [], "role_meta": {},
+                "note": "no real providers available"}
     role_idx = 0
     for role, brief in ROLES_GENERATION:
         prov = providers[order[role_idx % len(order)]]
         role_idx += 1
         prompt = (f"ROLE: {role}. {brief}\n{_market_context(data_note)}\n"
                   + SCHEMA_INSTRUCTIONS)
+        prompt_sha = _hl.sha256(prompt.encode("utf-8")).hexdigest()[:16]
         r = prov.generate(prompt, temperature=0.8)
+        role_meta[role] = {"provider": prov.name,
+                           "model": getattr(prov, "model", None),
+                           "prompt_sha": prompt_sha}
         calls.append({"role": role, "provider": prov.name,
                       "model": getattr(prov, "model", None),
+                      "prompt_sha": prompt_sha,
                       "ok": bool(r.get("ok")), "cached": r.get("cached"),
                       "latency_s": r.get("latency_s"),
                       "error": r.get("error")})
@@ -145,7 +153,7 @@ def generate_hypotheses(providers: dict[str, PROV.BaseProvider],
         took = "cache" if r.get("cached") else f"{r.get('latency_s')}s"
         log(f"  {role} via {prov.name} ({getattr(prov, 'model', None)}): "
             f"{len(strategies)} strategies ({took})")
-    return {"ideas": raw_ideas, "calls": calls}
+    return {"ideas": raw_ideas, "calls": calls, "role_meta": role_meta}
 
 
 def cross_critique(providers: dict[str, PROV.BaseProvider],
@@ -399,10 +407,15 @@ def run_edge_discovery(symbol: str = "BTCUSDT", use_ai: bool = True,
     log(f"data: {data_note}")
     dq = ENG.dataset_quality(bars)
     seg = ENG.split_indices(len(bars))
+    prov = ENG.code_tree_hash()
     ENG.set_run_context(
         run_id=run_id, iteration=iteration, parent_experiment=parent_experiment,
         repo_commit=BF._repo_commit(), dataset_sha256=manifest.get("sha256"),
         downloader_version=manifest.get("downloader_version"),
+        code_tree_hash=prov["code_tree_hash"],
+        runner_version=prov["runner_version"],
+        dirty_worktree=prov["dirty_worktree"],
+        download_complete=manifest.get("download_complete"),
         symbol=symbol, timeframe=timeframe, venue="bitget",
         splits={k: [bars[max(v[0], 0)]["ts"], bars[min(v[1], len(bars) - 1)]["ts"]]
                 for k, v in seg.items()},
@@ -427,6 +440,7 @@ def run_edge_discovery(symbol: str = "BTCUSDT", use_ai: bool = True,
             gen = generate_hypotheses(providers, data_note, log=log)
             ai_meta["calls"] = gen["calls"]
             ai_meta["ideas"] = len(gen["ideas"])
+            ai_meta["role_meta"] = gen.get("role_meta", {})
             raw.extend(gen["ideas"])
     # ---------- compile ----------
     import hashlib as _hashlib
@@ -440,8 +454,12 @@ def run_edge_discovery(symbol: str = "BTCUSDT", use_ai: bool = True,
         origin = str(s.get("origin", ""))
         if origin.startswith("ai:"):
             parts = origin.split(":")
+            role_name = parts[2] if len(parts) > 2 else None
+            rm = (ai_meta.get("role_meta") or {}).get(role_name, {})
             prov_meta = {"provider": parts[1] if len(parts) > 1 else None,
-                         "role": parts[2] if len(parts) > 2 else None}
+                         "role": role_name,
+                         "model": rm.get("model"),
+                         "prompt_sha": rm.get("prompt_sha")}
         if state == "OK":
             compiled.append(spec)
             ENG.ledger_append({"phase": "compile", "state": "OK",
@@ -470,8 +488,10 @@ def run_edge_discovery(symbol: str = "BTCUSDT", use_ai: bool = True,
         for cnote in critiques:
             ENG.ledger_append({"phase": "critique", **cnote})
     # ---------- deterministic funnel (the only judge) ----------
-    funnel = ENG.run_funnel(bars, feats, compiled, n_trials_total=n_trials_total,
-                            log=log)
+    funnel = ENG.run_funnel(
+        bars, feats, compiled, n_trials_total=n_trials_total,
+        promotion_allowed=bool(manifest.get("download_complete", True)),
+        log=log)
     finals = funnel["finalists"]
     by_state: dict[str, int] = {}
     for e in funnel["results"]:
@@ -495,6 +515,8 @@ def run_edge_discovery(symbol: str = "BTCUSDT", use_ai: bool = True,
                                           "screening_survivors",
                                           "validation_survivors")},
         "n_trials_total": funnel.get("n_trials_total"),
+        "m_raw": funnel.get("m_raw"),
+        "m_effective": funnel.get("m_effective"),
         "replays_run": funnel.get("replays_run"),
         "expected_random_survivors_at_5pct":
             funnel.get("expected_random_survivors_at_5pct"),
@@ -522,11 +544,11 @@ def _write_reports(summary: dict, funnel: dict, log=print) -> None:
     out = ENG._out()
     tf = summary.get("timeframe", "1m")
     sfx = "" if tf == "1m" else f"_{tf}"
-    tmp = out / f"edge_discovery_summary_v10_45_2{sfx}.json.tmp"
+    tmp = out / f"edge_discovery_summary_v10_45_3{sfx}.json.tmp"
     tmp.write_text(json.dumps(summary, indent=2, default=str), encoding="utf-8")
-    _os.replace(tmp, out / f"edge_discovery_summary_v10_45_2{sfx}.json")
+    _os.replace(tmp, out / f"edge_discovery_summary_v10_45_3{sfx}.json")
     # strategy scoreboard (every phase result)
-    with open(out / f"strategy_scoreboard_v10_45_2{sfx}.csv", "w", newline="",
+    with open(out / f"strategy_scoreboard_v10_45_3{sfx}.csv", "w", newline="",
               encoding="utf-8") as f:
         w = _csv.writer(f)
         w.writerow(["phase", "strategy_id", "origin", "state", "n_trades",
@@ -539,7 +561,7 @@ def _write_reports(summary: dict, funnel: dict, log=print) -> None:
                         m.get("net_EV_lower_bound"), m.get("profit_factor"),
                         m.get("win_rate"), m.get("max_drawdown")])
     # cost stress scoreboard (finalists)
-    with open(out / f"cost_stress_scoreboard_v10_45_2{sfx}.csv", "w", newline="",
+    with open(out / f"cost_stress_scoreboard_v10_45_3{sfx}.csv", "w", newline="",
               encoding="utf-8") as f:
         w = _csv.writer(f)
         w.writerow(["strategy_id", "state", "val_net_EV", "holdout_net_EV",
@@ -554,7 +576,7 @@ def _write_reports(summary: dict, funnel: dict, log=print) -> None:
                         cs.get("spread_x2"), cs.get("slip_x2"),
                         cs.get("nonfill10_latency"), e.get("stress_ok")])
     md = _memo(summary)
-    (out / f"edge_discovery_report_v10_45_2{sfx}.md").write_text(md, encoding="utf-8")
+    (out / f"edge_discovery_report_v10_45_3{sfx}.md").write_text(md, encoding="utf-8")
     log(f"reports -> {out}")
 
 
@@ -562,7 +584,7 @@ def _memo(s: dict) -> str:
     ca = s.get("cost_attribution_best") or {}
     mt = s.get("multiple_testing_sensitivity") or {}
     lines = [
-        "# V10.45.2 Multi-AI Edge Discovery — RESEARCH ONLY, NO LIVE", "",
+        "# V10.45.3 Multi-AI Edge Discovery — RESEARCH ONLY, NO LIVE", "",
         f"- ran_at: {s['ran_at']} · runtime: {s['runtime_s']}s · run_id: {s.get('run_id')}",
         f"- data: {s['data_note']} · sha256: {str(s.get('dataset_sha256'))[:16]} · "
         f"quality: {s.get('data_quality')}",

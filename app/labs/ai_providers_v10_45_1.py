@@ -37,9 +37,9 @@ from typing import Any
 from . import FINAL_RECOMMENDATION_NO_LIVE
 from . import continuous_edge_factory_v10_38 as CE
 
-TOOL_VERSION = "v10.45.2"
+TOOL_VERSION = "v10.45.3"
 CACHE_SUBDIR = ("external_data", "staging", "ai_cache_v10_45_1")
-OUTPUT_SUBDIR = ("reports", "research", "v10_45_2_edge_discovery")
+OUTPUT_SUBDIR = ("reports", "research", "v10_45_3_edge_discovery")
 
 OLLAMA_BASE = "http://localhost:11434"
 GROQ_BASE = "https://api.groq.com/openai/v1"
@@ -67,12 +67,31 @@ def _safety() -> dict[str, Any]:
             "final_recommendation": FINAL_RECOMMENDATION_NO_LIVE}
 
 
+MAX_RETRY_AFTER_S = 120.0     # never sleep hours because of a malicious header
+
+_SANITIZE_PATTERNS = (
+    # JSON credential fields: "api_key": "...", "token": '...', "secret": ...
+    (re.compile(r'("?(?:api[_-]?key|apikey|token|secret|password|passwd|pwd|'
+                r'authorization|auth|credential[s]?|access[_-]?key)"?\s*[:=]\s*)'
+                r'("[^"]*"|\'[^\']*\'|\S+)', re.I), r"\1<redacted>"),
+    # Authorization / Bearer headers in any case
+    (re.compile(r"(bearer|basic)\s+\S+", re.I), r"\1 <redacted>"),
+    # query strings: ?key=...&token=... (any case)
+    (re.compile(r"([?&](?:key|apikey|api_key|token|secret|signature|sign|"
+                r"password)=)[^&\s\"']+", re.I), r"\1<redacted>"),
+    # long opaque blobs (keys are long); keep after targeted rules
+    (re.compile(r"[A-Za-z0-9_\-]{28,}"), "<redacted>"),
+)
+
+
 def sanitize_error(msg: str) -> str:
-    """Strip anything that could be a credential from an error string."""
+    """Credential-safe error text. Applies layered case-insensitive redaction
+    (key=value, JSON fields, Bearer/Basic headers, query strings, long opaque
+    blobs) and caps the length. Prefer building messages from the allowlist
+    (provider, HTTP status, error class) and passing bodies through here."""
     s = str(msg)[:400]
-    s = re.sub(r"(key|token|bearer|authorization)[=:\s]+\S+", r"\1=<redacted>", s,
-               flags=re.I)
-    s = re.sub(r"[A-Za-z0-9_\-]{28,}", "<redacted>", s)   # long opaque blobs
+    for pat, repl in _SANITIZE_PATTERNS:
+        s = pat.sub(repl, s)
     return s
 
 
@@ -375,14 +394,20 @@ class GroqProvider(BaseProvider):
                         "text": text, "latency_s": round(time.time() - t0, 2),
                         "cached": False, "ratelimit": self.last_ratelimit}
             if status == 429:
-                retry_after = parse_retry_after(hdrs.get("retry-after"))
+                raw_ra = hdrs.get("retry-after")
+                retry_after = parse_retry_after(raw_ra)
                 wait = retry_after if retry_after is not None else \
                     (BACKOFF_BASE_S * (2 ** attempt) + random.uniform(0, 1))
-                self.fallback_events.append(f"groq 429 attempt={attempt} wait={wait:.1f}s")
+                capped = min(wait, MAX_RETRY_AFTER_S)
+                self.fallback_events.append(
+                    f"groq 429 attempt={attempt} raw_type="
+                    f"{'numeric' if (raw_ra or '').strip().replace('.', '', 1).isdigit() else ('http-date' if retry_after is not None and raw_ra else 'absent/invalid')} "
+                    f"parsed={None if retry_after is None else round(retry_after, 1)} "
+                    f"capped={capped:.1f}s")
                 if attempt == MAX_RETRIES - 1:
-                    self.rl.pause(max(retry_after or 0, 60))
+                    self.rl.pause(min(max(retry_after or 0, 60), MAX_RETRY_AFTER_S))
                     return {"ok": False, "provider": self.name, "error": "RATE_LIMITED_429"}
-                time.sleep(wait)
+                time.sleep(capped)
                 continue
             err = sanitize_error(json.dumps((body or {}))[:200])
             return {"ok": False, "provider": self.name, "error": f"HTTP_{status}: {err}"}
@@ -476,14 +501,19 @@ class GeminiProvider(BaseProvider):
                         "text": text, "latency_s": round(time.time() - t0, 2),
                         "cached": False}
             if status == 429:
-                retry_after = parse_retry_after(hdrs.get("retry-after"))
+                raw_ra = hdrs.get("retry-after")
+                retry_after = parse_retry_after(raw_ra)
                 wait = retry_after if retry_after is not None else \
                     (BACKOFF_BASE_S * (2 ** attempt) + random.uniform(0, 1))
-                self.fallback_events.append(f"gemini 429 attempt={attempt} wait={wait:.1f}s")
+                capped = min(wait, MAX_RETRY_AFTER_S)
+                self.fallback_events.append(
+                    f"gemini 429 attempt={attempt} "
+                    f"parsed={None if retry_after is None else round(retry_after, 1)} "
+                    f"capped={capped:.1f}s")
                 if attempt == MAX_RETRIES - 1:
-                    self.rl.pause(max(retry_after or 0, 60))
+                    self.rl.pause(min(max(retry_after or 0, 60), MAX_RETRY_AFTER_S))
                     return {"ok": False, "provider": self.name, "error": "RATE_LIMITED_429"}
-                time.sleep(wait)
+                time.sleep(capped)
                 continue
             err = sanitize_error(json.dumps((body or {}))[:200])
             return {"ok": False, "provider": self.name, "error": f"HTTP_{status}: {err}"}

@@ -215,8 +215,9 @@ def _good_val():
 
 
 def _good_hold():
-    return {"n_trades": 20, "net_EV": 0.002, "net_EV_lower_bound": 0.0008,
-            "profit_factor": 1.5, "censored_ratio": 0.0}
+    return {"n_trades": 20, "n_eff": 20, "net_EV": 0.002,
+            "net_EV_lower_bound": 0.0008, "profit_factor": 1.5,
+            "max_drawdown": -0.02, "censored_ratio": 0.0}
 
 
 def test_gate_pf_02_dd_90pct_rejected():
@@ -403,8 +404,8 @@ def test_ledger_entries_carry_run_provenance(tmp_path, monkeypatch):
                         timeframe="1m", cost_config=dict(ENG.DEFAULT_COSTS))
     ENG.ledger_append({"phase": "compile", "state": "INVALID",
                        "strategy_id": "x"})
-    ledger = (tmp_path / "reports" / "research" / "v10_45_2_edge_discovery" /
-              "experiment_ledger_v10_45_2.jsonl")
+    ledger = (tmp_path / "reports" / "research" / "v10_45_3_edge_discovery" /
+              "experiment_ledger_v10_45_3.jsonl")
     entry = json.loads(ledger.read_text(encoding="utf-8").splitlines()[-1])
     for k in ("run_id", "repo_commit", "dataset_sha256", "symbol",
               "timeframe", "cost_config", "at", "phase", "state"):
@@ -420,11 +421,18 @@ def test_trailing_exit_reported_as_trail_not_sl():
     bars = _bars(400, seed=15)
     i = 300
     e = bars[i + 1]["open"]
+    # engineered rally MUST be OHLC-consistent (open within [low, high]):
+    # each bar opens at the previous close — the fill invariant enforces this
+    prev_close = bars[i + 1]["close"]
     for k, mult in ((2, 1.006), (3, 1.010), (4, 1.014)):
-        bars[i + k]["high"] = e * mult
-        bars[i + k]["low"] = e * (mult - 0.002)
+        bars[i + k]["open"] = prev_close
         bars[i + k]["close"] = e * (mult - 0.001)
-    bars[i + 5]["high"] = e * 1.012
+        bars[i + k]["high"] = max(e * mult, prev_close)
+        bars[i + k]["low"] = min(e * (mult - 0.002), prev_close)
+        prev_close = bars[i + k]["close"]
+    bars[i + 5]["open"] = prev_close
+    bars[i + 5]["close"] = e * 1.004
+    bars[i + 5]["high"] = max(e * 1.012, prev_close)
     bars[i + 5]["low"] = e * 1.002                # falls through trail stop
     feats = ENG.build_features(bars)
     seen: set[str] = set()

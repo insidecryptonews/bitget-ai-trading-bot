@@ -242,11 +242,16 @@ def test_trailing_is_causal():
     bars = _bars(400, seed=15)
     i = 300
     e = bars[i + 1]["open"]
+    prev_close = bars[i + 1]["close"]
     for k, mult in ((2, 1.004), (3, 1.008), (4, 1.012)):
-        bars[i + k]["high"] = e * mult
-        bars[i + k]["low"] = e * (mult - 0.003)
+        bars[i + k]["open"] = prev_close
         bars[i + k]["close"] = e * (mult - 0.001)
-    bars[i + 5]["high"] = e * 1.010
+        bars[i + k]["high"] = max(e * mult, prev_close)
+        bars[i + k]["low"] = min(e * (mult - 0.003), prev_close)
+        prev_close = bars[i + k]["close"]
+    bars[i + 5]["open"] = prev_close
+    bars[i + 5]["close"] = e * 1.002
+    bars[i + 5]["high"] = max(e * 1.010, prev_close)
     bars[i + 5]["low"] = e * 1.000                          # dips into trail
     feats = _feats(bars)
     seen: set[str] = set()
@@ -310,8 +315,8 @@ def test_funnel_on_pure_noise_promotes_nothing(tmp_path, monkeypatch):
              if e["state"] == "PAPER_CANDIDATE_RESEARCH_ONLY"]
     # on 3000 bars of pure noise nothing should clear validation+holdout+stress
     assert len(paper) == 0
-    ledger = (tmp_path / "reports" / "research" / "v10_45_2_edge_discovery" /
-              "experiment_ledger_v10_45_2.jsonl")
+    ledger = (tmp_path / "reports" / "research" / "v10_45_3_edge_discovery" /
+              "experiment_ledger_v10_45_3.jsonl")
     assert ledger.is_file()
     lines = ledger.read_text(encoding="utf-8").strip().splitlines()
     assert len(lines) >= len(compiled)                       # every result logged

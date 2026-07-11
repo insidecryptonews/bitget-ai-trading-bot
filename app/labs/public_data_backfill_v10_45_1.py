@@ -27,10 +27,12 @@ from . import FINAL_RECOMMENDATION_NO_LIVE
 from . import continuous_edge_factory_v10_38 as CE
 from .ai_providers_v10_45_1 import _http_json, sanitize_error
 
-TOOL_VERSION = "v10.45.2"
-DOWNLOADER_VERSION = "v10.45.2 (pagination end=batch_min-1: no candle dropped "
-DOWNLOADER_VERSION += "at page boundaries; strict delta==T quality audit)"
-DATA_SUBDIR = ("external_data", "staging", "klines_v10_45_2")
+TOOL_VERSION = "v10.45.3"
+DOWNLOADER_VERSION = ("v10.45.3 (pagination end=batch_min live-probed; window "
+                      "trim to requested range; download completeness contract; "
+                      "raw per-candle validation; symlink containment)")
+DATA_SUBDIR = ("external_data", "staging", "klines_v10_45_3")
+COMPLETENESS_TOLERANCE_BARS = 3   # last candle may still be open + boundary jitter
 BITGET_BASE = "https://api.bitget.com"
 BYBIT_BASE = "https://api.bybit.com"
 BAR_MS = 60_000
@@ -51,13 +53,20 @@ def validate_symbol(symbol: str) -> str:
 
 
 def _contained_path(venue: str, symbol: str, suffix: str) -> Path:
-    """Build an output path and PROVE it stays inside the data directory."""
+    """Build an output path and PROVE it stays inside the data directory —
+    including when the data directory itself (or a parent) is a symlink or
+    Windows junction pointing outside the repo (reparse-point escape)."""
     if venue not in ALLOWED_VENUES:
         raise ValueError(f"invalid venue: {str(venue)[:20]!r}")
     sym = validate_symbol(symbol)
-    base = _data_dir().resolve()
-    p = (base / f"{venue}_{sym}_1m{suffix}").resolve()
-    if base not in p.parents:
+    base = _data_dir()
+    repo_real = Path(os.path.realpath(str(CE._repo_root())))
+    base_real = Path(os.path.realpath(str(base)))
+    if repo_real != base_real and repo_real not in base_real.parents:
+        raise ValueError("data directory escapes the repository root "
+                         "(symlink/junction detected)")
+    p = Path(os.path.realpath(str(base / f"{venue}_{sym}_1m{suffix}")))
+    if base_real != p.parent and base_real not in p.parents:
         raise ValueError("path escapes data directory")
     return p
 
@@ -120,7 +129,8 @@ def paginate_klines(fetch_page, end_ms: int, target_start_ms: int,
     return [rows[k] for k in sorted(rows)]
 
 
-def fetch_bitget_1m(symbol: str, days: int, log=print) -> list[list]:
+def fetch_bitget_1m(symbol: str, days: int, log=print,
+                    end_ms: int | None = None) -> list[list]:
     """Paginate Bitget USDT-futures 1m candles backwards. Public, no keys."""
     symbol = validate_symbol(symbol)
 
@@ -132,12 +142,13 @@ def fetch_bitget_1m(symbol: str, days: int, log=print) -> list[list]:
             log(f"  bitget HTTP {status}")
             return []
         return (body or {}).get("data") or []
-    now = _now_ms()
+    now = end_ms if end_ms is not None else _now_ms()
     return paginate_klines(page, now, now - days * 86_400_000, 900, log=log,
                            label=f"bitget {symbol}")
 
 
-def fetch_bybit_1m(symbol: str, days: int, log=print) -> list[list]:
+def fetch_bybit_1m(symbol: str, days: int, log=print,
+                   end_ms: int | None = None) -> list[list]:
     """Paginate Bybit linear 1m klines backwards (lists arrive NEWEST-FIRST)."""
     symbol = validate_symbol(symbol)
 
@@ -149,7 +160,7 @@ def fetch_bybit_1m(symbol: str, days: int, log=print) -> list[list]:
             log(f"  bybit HTTP {status}")
             return []
         return ((body or {}).get("result") or {}).get("list") or []
-    now = _now_ms()
+    now = end_ms if end_ms is not None else _now_ms()
     return paginate_klines(page, now, now - days * 86_400_000, 400, log=log,
                            label=f"bybit {symbol}")
 
@@ -186,6 +197,34 @@ def strict_quality(ts_list: list[int], bar_ms: int = BAR_MS) -> dict[str, Any]:
                              and irregular == 0 and coverage >= 0.999)}
 
 
+def validate_raw_candle(row: list) -> bool:
+    """Per-candle validation BEFORE anything downstream touches it:
+    finite OHLCV, non-negative volume/turnover, coherent OHLC, valid ts."""
+    try:
+        ts = int(row[0])
+        o, h, l, c, v, t = (float(row[1]), float(row[2]), float(row[3]),
+                            float(row[4]), float(row[5]), float(row[6]))
+    except (TypeError, ValueError, IndexError):
+        return False
+    import math as _m
+    if ts <= 0 or not all(_m.isfinite(x) for x in (o, h, l, c, v, t)):
+        return False
+    if v < 0 or t < 0 or o <= 0 or c <= 0 or l <= 0:
+        return False
+    if h < max(o, c) or l > min(o, c) or l > h:
+        return False
+    return True
+
+
+def raw_quality_report(rows: list[list]) -> dict[str, Any]:
+    """Raw-candle quality over the full download; resampling and research are
+    only allowed on a PASS (5m/15m quality can never hide 1m defects)."""
+    invalid = sum(1 for r in rows if not validate_raw_candle(r))
+    ts_q = strict_quality([int(r[0]) for r in rows if validate_raw_candle(r)])
+    return {**ts_q, "invalid_candles": invalid,
+            "raw_quality_pass": bool(ts_q["quality_pass"] and invalid == 0)}
+
+
 def _repo_commit() -> str:
     try:
         out = subprocess.run(["git", "rev-parse", "--short", "HEAD"],
@@ -197,7 +236,19 @@ def _repo_commit() -> str:
 
 
 def save_dataset(venue: str, symbol: str, rows: list[list],
-                 requested_days: int) -> dict[str, Any]:
+                 requested_days: int,
+                 requested_start_ms: int | None = None,
+                 requested_end_ms: int | None = None) -> dict[str, Any]:
+    """Trim to the REQUESTED window, validate every raw candle, record the
+    full completeness contract and write CSV + manifest atomically."""
+    if requested_end_ms is None:
+        requested_end_ms = (_now_ms() // BAR_MS) * BAR_MS
+    if requested_start_ms is None:
+        requested_start_ms = requested_end_ms - requested_days * 86_400_000
+    # hard trim: never keep bars outside the requested interval
+    rows = [r for r in rows
+            if requested_start_ms <= int(r[0]) < requested_end_ms]
+    raw_q = raw_quality_report(rows)
     path = _contained_path(venue, symbol, ".csv")
     with open(path, "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
@@ -206,6 +257,10 @@ def save_dataset(venue: str, symbol: str, rows: list[list],
             w.writerow(r)
     sha = hashlib.sha256(path.read_bytes()).hexdigest()
     ts_list = [r[0] for r in rows]
+    expected_bars = max(0, (requested_end_ms - requested_start_ms) // BAR_MS)
+    coverage_ratio = (len(rows) / expected_bars) if expected_bars else 0.0
+    download_complete = (expected_bars - len(rows)) <= COMPLETENESS_TOLERANCE_BARS \
+        and raw_q["raw_quality_pass"]
     manifest = {
         "tool_version": TOOL_VERSION,
         "downloader_version": DOWNLOADER_VERSION,
@@ -216,11 +271,28 @@ def save_dataset(venue: str, symbol: str, rows: list[list],
         "timezone": "UTC (epoch ms)",
         "downloaded_at": datetime.now(timezone.utc).isoformat(),
         "requested_days": requested_days,
+        "requested_start": datetime.fromtimestamp(
+            requested_start_ms / 1000, timezone.utc).isoformat(),
+        "requested_end": datetime.fromtimestamp(
+            requested_end_ms / 1000, timezone.utc).isoformat(),
+        "actual_start": (datetime.fromtimestamp(ts_list[0] / 1000, timezone.utc)
+                         .isoformat() if ts_list else None),
+        "actual_end": (datetime.fromtimestamp(ts_list[-1] / 1000, timezone.utc)
+                       .isoformat() if ts_list else None),
+        "actual_coverage_seconds": ((ts_list[-1] - ts_list[0]) // 1000 + 60
+                                    if ts_list else 0),
+        "expected_bars": expected_bars,
+        "actual_bars": len(rows),
+        "coverage_ratio": round(coverage_ratio, 6),
+        "completeness_tolerance_bars": COMPLETENESS_TOLERANCE_BARS,
+        "download_complete": download_complete,
         "n_bars": len(rows),
         "period_start": (datetime.fromtimestamp(ts_list[0] / 1000, timezone.utc)
                          .isoformat() if ts_list else None),
         "period_end": (datetime.fromtimestamp(ts_list[-1] / 1000, timezone.utc)
                        .isoformat() if ts_list else None),
+        "invalid_candles": raw_q["invalid_candles"],
+        "raw_quality_pass": raw_q["raw_quality_pass"],
         **strict_quality(ts_list),
         "sha256": sha,
         "availability_contract": "bar open ts T is available at T+60000ms (close)",
@@ -270,24 +342,33 @@ def load_klines(venue: str, symbol: str) -> list[dict]:
 
 def run_backfill(symbols_bitget: list[str], symbols_bybit: list[str],
                  days: int = 90, log=print) -> dict[str, Any]:
+    # ONE shared requested window (minute-aligned) for every dataset in the
+    # run, so all manifests state the same explicit interval and every CSV is
+    # trimmed to exactly that window
+    req_end = (_now_ms() // BAR_MS) * BAR_MS
+    req_start = req_end - days * 86_400_000
     manifests = []
     for sym in symbols_bitget:
         log(f"fetch bitget {sym} {days}d ...")
-        rows = fetch_bitget_1m(sym, days, log=log)
-        m = save_dataset("bitget", sym, rows, days)
-        log(f"  -> {m['n_bars']} bars, {m['gap_count']} gaps, sha={m['sha256'][:12]}")
+        rows = fetch_bitget_1m(sym, days, log=log, end_ms=req_end)
+        m = save_dataset("bitget", sym, rows, days,
+                         requested_start_ms=req_start, requested_end_ms=req_end)
+        log(f"  -> {m['n_bars']}/{m['expected_bars']} bars, gaps={m['gap_count']}, "
+            f"complete={m['download_complete']}, sha={m['sha256'][:12]}")
         manifests.append(m)
     for sym in symbols_bybit:
         log(f"fetch bybit {sym} {days}d ...")
-        rows = fetch_bybit_1m(sym, days, log=log)
-        m = save_dataset("bybit", sym, rows, days)
-        log(f"  -> {m['n_bars']} bars, {m['gap_count']} gaps, sha={m['sha256'][:12]}")
+        rows = fetch_bybit_1m(sym, days, log=log, end_ms=req_end)
+        m = save_dataset("bybit", sym, rows, days,
+                         requested_start_ms=req_start, requested_end_ms=req_end)
+        log(f"  -> {m['n_bars']}/{m['expected_bars']} bars, gaps={m['gap_count']}, "
+            f"complete={m['download_complete']}, sha={m['sha256'][:12]}")
         manifests.append(m)
     summary = {"tool_version": TOOL_VERSION,
                "ran_at": datetime.now(timezone.utc).isoformat(),
                "datasets": manifests, **_safety()}
-    out = CE._repo_root().joinpath("reports", "research", "v10_45_1_edge_discovery")
+    out = CE._repo_root().joinpath("reports", "research", "v10_45_3_edge_discovery")
     out.mkdir(parents=True, exist_ok=True)
-    (out / "data_backfill_manifest_v10_45_1.json").write_text(
+    (out / "data_backfill_manifest_v10_45_3.json").write_text(
         json.dumps(summary, indent=2, default=str), encoding="utf-8")
     return summary
