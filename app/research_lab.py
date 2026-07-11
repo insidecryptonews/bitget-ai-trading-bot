@@ -7393,8 +7393,18 @@ class ResearchLab:
                  f"duplicates: {s.get('duplicates')}  invalid: {s.get('invalid')}  "
                  f"executed: {s.get('executed')}",
                  f"funnel: {s.get('funnel')}",
+                 f"n_trials_total: {s.get('n_trials_total')}  "
+                 f"replays_run: {s.get('replays_run')}",
+                 f"data_quality: {s.get('data_quality')}",
                  f"state_counts: {s.get('state_counts')}",
                  f"finalists: {s.get('finalists')}"]
+        ca = s.get("cost_attribution_best") or {}
+        if ca:
+            lines.append(
+                f"cost_attribution({ca.get('strategy_id')}): "
+                f"gross={ca.get('gross_EV')} fees={ca.get('fee_impact')} "
+                f"spread={ca.get('spread_impact')} slip={ca.get('slippage_impact')} "
+                f"funding={ca.get('funding_impact')} net={ca.get('net_EV')}")
         for e in (s.get("top_candidates") or [])[:5]:
             hm = e.get("holdout_metrics") or {}
             lines.append(f"top: {e['strategy_id']} [{e['state']}] "

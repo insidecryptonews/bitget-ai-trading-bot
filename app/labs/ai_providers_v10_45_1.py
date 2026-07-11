@@ -37,9 +37,9 @@ from typing import Any
 from . import FINAL_RECOMMENDATION_NO_LIVE
 from . import continuous_edge_factory_v10_38 as CE
 
-TOOL_VERSION = "v10.45.1"
+TOOL_VERSION = "v10.45.2"
 CACHE_SUBDIR = ("external_data", "staging", "ai_cache_v10_45_1")
-OUTPUT_SUBDIR = ("reports", "research", "v10_45_1_edge_discovery")
+OUTPUT_SUBDIR = ("reports", "research", "v10_45_2_edge_discovery")
 
 OLLAMA_BASE = "http://localhost:11434"
 GROQ_BASE = "https://api.groq.com/openai/v1"
@@ -74,6 +74,27 @@ def sanitize_error(msg: str) -> str:
                flags=re.I)
     s = re.sub(r"[A-Za-z0-9_\-]{28,}", "<redacted>", s)   # long opaque blobs
     return s
+
+
+def parse_retry_after(value: str | None) -> float | None:
+    """RFC-compliant Retry-After: numeric seconds OR an HTTP-date. Invalid or
+    missing values return None (caller falls back to exponential backoff)."""
+    if not value:
+        return None
+    v = str(value).strip()
+    try:
+        secs = float(v)
+        return max(0.0, secs) if secs == secs and secs != float("inf") else None
+    except ValueError:
+        pass
+    try:
+        from email.utils import parsedate_to_datetime
+        dt = parsedate_to_datetime(v)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return max(0.0, (dt - datetime.now(timezone.utc)).total_seconds())
+    except Exception:
+        return None
 
 
 def _cache_dir() -> Path:
@@ -212,6 +233,15 @@ class OllamaProvider(BaseProvider):
         return [m.get("name", "") for m in body.get("models", []) if m.get("name")]
 
     @staticmethod
+    def model_digests() -> dict[str, str]:
+        """Model -> content digest for provenance (best effort)."""
+        status, body, _ = _http_json(f"{OLLAMA_BASE}/api/tags", timeout=5)
+        if status != 200 or not body:
+            return {}
+        return {m.get("name", ""): str(m.get("digest", ""))[:19]
+                for m in body.get("models", []) if m.get("name")}
+
+    @staticmethod
     def _pick(models: list[str]) -> str | None:
         for pref in OLLAMA_PREFERRED:
             if pref in models:
@@ -277,9 +307,21 @@ class GroqProvider(BaseProvider):
     def _discover(self) -> list[str]:
         status, body, _ = _http_json(f"{GROQ_BASE}/models", headers=self._headers(),
                                      timeout=15)
+        self.discover_status = status
         if status != 200 or not body:
             return []
         return [m.get("id", "") for m in body.get("data", []) if m.get("id")]
+
+    def unavailable_reason(self) -> str:
+        """Never attributes a cause the server did not state."""
+        if not self._key_present:
+            return "MISSING_API_KEY"
+        st = getattr(self, "discover_status", None)
+        if st == 403:
+            return "GROQ_FORBIDDEN_CAUSE_UNKNOWN"
+        if st == 401:
+            return "GROQ_UNAUTHORIZED_401"
+        return f"NO_MODELS_DISCOVERED_HTTP_{st}"
 
     @staticmethod
     def _pick(models: list[str]) -> str | None:
@@ -311,6 +353,8 @@ class GroqProvider(BaseProvider):
                         "never suggest real orders. Reply with STRICT JSON only."},
                        {"role": "user", "content": prompt}]}
         for attempt in range(MAX_RETRIES):
+            if not self.budget_left():           # budget gate on EVERY attempt
+                return {"ok": False, "provider": self.name, "error": "BUDGET_EXHAUSTED"}
             if not self.rl.wait():
                 return {"ok": False, "provider": self.name, "error": "PROVIDER_PAUSED_429"}
             t0 = time.time()
@@ -331,12 +375,12 @@ class GroqProvider(BaseProvider):
                         "text": text, "latency_s": round(time.time() - t0, 2),
                         "cached": False, "ratelimit": self.last_ratelimit}
             if status == 429:
-                retry_after = float(hdrs.get("retry-after", 0) or 0)
-                wait = retry_after or (BACKOFF_BASE_S * (2 ** attempt)
-                                       + random.uniform(0, 1))
+                retry_after = parse_retry_after(hdrs.get("retry-after"))
+                wait = retry_after if retry_after is not None else \
+                    (BACKOFF_BASE_S * (2 ** attempt) + random.uniform(0, 1))
                 self.fallback_events.append(f"groq 429 attempt={attempt} wait={wait:.1f}s")
                 if attempt == MAX_RETRIES - 1:
-                    self.rl.pause(max(retry_after, 60))
+                    self.rl.pause(max(retry_after or 0, 60))
                     return {"ok": False, "provider": self.name, "error": "RATE_LIMITED_429"}
                 time.sleep(wait)
                 continue
@@ -413,6 +457,8 @@ class GeminiProvider(BaseProvider):
                 "suggest real orders. Reply with STRICT JSON only."}]}}
         url = f"{GEMINI_BASE}/models/{self.model}:generateContent"
         for attempt in range(MAX_RETRIES):
+            if not self.budget_left():           # budget gate on EVERY attempt
+                return {"ok": False, "provider": self.name, "error": "BUDGET_EXHAUSTED"}
             if not self.rl.wait():
                 return {"ok": False, "provider": self.name, "error": "PROVIDER_PAUSED_429"}
             t0 = time.time()
@@ -430,12 +476,12 @@ class GeminiProvider(BaseProvider):
                         "text": text, "latency_s": round(time.time() - t0, 2),
                         "cached": False}
             if status == 429:
-                retry_after = float(hdrs.get("retry-after", 0) or 0)
-                wait = retry_after or (BACKOFF_BASE_S * (2 ** attempt)
-                                       + random.uniform(0, 1))
+                retry_after = parse_retry_after(hdrs.get("retry-after"))
+                wait = retry_after if retry_after is not None else \
+                    (BACKOFF_BASE_S * (2 ** attempt) + random.uniform(0, 1))
                 self.fallback_events.append(f"gemini 429 attempt={attempt} wait={wait:.1f}s")
                 if attempt == MAX_RETRIES - 1:
-                    self.rl.pause(max(retry_after, 60))
+                    self.rl.pause(max(retry_after or 0, 60))
                     return {"ok": False, "provider": self.name, "error": "RATE_LIMITED_429"}
                 time.sleep(wait)
                 continue
@@ -466,9 +512,14 @@ def connectivity_test(write_reports: bool = True) -> dict[str, Any]:
     gem = GeminiProvider(max_requests=3)
     for prov in (oll, groq, gem):
         if not getattr(prov, "available", False):
-            reason = ("OLLAMA_NOT_RUNNING" if prov.name == "ollama" else
-                      ("MISSING_API_KEY" if not getattr(prov, "_key_present", True)
-                       else "NO_MODELS_DISCOVERED"))
+            if prov.name == "ollama":
+                reason = "OLLAMA_NOT_RUNNING"
+            elif hasattr(prov, "unavailable_reason"):
+                reason = prov.unavailable_reason()
+            elif not getattr(prov, "_key_present", True):
+                reason = "MISSING_API_KEY"
+            else:
+                reason = "NO_MODELS_DISCOVERED"
             results.append({"provider": prov.name, "available": False,
                             "model": None, "latency_s": None, "error": reason})
             continue
@@ -480,14 +531,17 @@ def connectivity_test(write_reports: bool = True) -> dict[str, Any]:
                 parsed = json.loads(r["text"])
             except Exception:
                 parsed = None
-        results.append({"provider": prov.name, "available": ok,
-                        "model": getattr(prov, "model", None),
-                        "models_discovered": getattr(prov, "models", [])[:25],
-                        "latency_s": r.get("latency_s"),
-                        "json_ok": isinstance(parsed, dict),
-                        "ratelimit_headers": {k: v for k, v in
-                                              (r.get("ratelimit") or {}).items()},
-                        "error": sanitize_error(r.get("error", "")) if not ok else None})
+        entry = {"provider": prov.name, "available": ok,
+                 "model": getattr(prov, "model", None),
+                 "models_discovered": getattr(prov, "models", [])[:25],
+                 "latency_s": r.get("latency_s"),
+                 "json_ok": isinstance(parsed, dict),
+                 "ratelimit_headers": {k: v for k, v in
+                                       (r.get("ratelimit") or {}).items()},
+                 "error": sanitize_error(r.get("error", "")) if not ok else None}
+        if prov.name == "ollama":
+            entry["model_digests"] = OllamaProvider.model_digests()
+        results.append(entry)
     report = {"tool_version": TOOL_VERSION,
               "ran_at": datetime.now(timezone.utc).isoformat(),
               "env": env_key_status(), "providers": results,

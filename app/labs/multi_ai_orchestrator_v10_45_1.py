@@ -356,25 +356,64 @@ def procedural_universe() -> list[dict]:
 
 def run_edge_discovery(symbol: str = "BTCUSDT", use_ai: bool = True,
                        write_reports: bool = True, timeframe: str = "1m",
+                       n_trials_total: int | None = None,
+                       run_id: str | None = None,
+                       iteration: int = 1, parent_experiment: str | None = None,
                        log=print) -> dict[str, Any]:
     import csv as _csv
     import os as _os
+    import uuid
     from . import public_data_backfill_v10_45_1 as BF
     started = datetime.now(timezone.utc)
+    run_id = run_id or f"edr_{uuid.uuid4().hex[:12]}"
     # ---------- data (Bitget = target venue; Bybit = cross-venue reference) --
     bars = BF.load_klines("bitget", symbol)
     ref = BF.load_klines("bybit", symbol)
-    factor = {"1m": 1, "5m": 5, "15m": 15}.get(timeframe, 1)
+    manifest = BF.load_manifest("bitget", symbol) or {}
+    factor = {"1m": 1, "5m": 5, "15m": 15, "1h": 60}.get(timeframe, 1)
     if factor > 1:
         bars = ENG.resample_bars(bars, factor)
         ref = ENG.resample_bars(ref, factor)
+    if len(bars) < 5000:
+        return {"status": "NEED_MORE_DATA",
+                "detail": f"{len(bars)} {timeframe} bars", **_safety()}
+    # zero-gap promotion rule: if the full dataset has real gaps (exchange
+    # maintenance), run on the longest strictly-contiguous segment instead —
+    # a TIME-based subset chosen before any strategy runs (not outcome-biased)
+    dq_full = ENG.dataset_quality(bars)
+    segment_note = "full dataset"
+    if not dq_full.get("quality_pass"):
+        bar_ms = dq_full.get("bar_ms") or 60_000
+        seg_bars = ENG.longest_contiguous_segment(bars, bar_ms=bar_ms)
+        if len(seg_bars) >= 5000:
+            segment_note = (f"longest contiguous segment {len(seg_bars)}/"
+                            f"{len(bars)} bars (full data had "
+                            f"{dq_full.get('gap_count')} gaps)")
+            bars = seg_bars
+            ref_ts = {b["ts"] for b in bars}
+            ref = [r for r in ref if r["ts"] in ref_ts] if ref else ref
     data_note = (f"{len(bars)} {timeframe} bars of {symbol} on bitget "
-                 f"(+{len(ref)} bybit reference bars)")
+                 f"(+{len(ref)} bybit reference bars) [{segment_note}]")
     if len(bars) < 5000:
         return {"status": "NEED_MORE_DATA", "detail": data_note, **_safety()}
     log(f"data: {data_note}")
+    dq = ENG.dataset_quality(bars)
+    seg = ENG.split_indices(len(bars))
+    ENG.set_run_context(
+        run_id=run_id, iteration=iteration, parent_experiment=parent_experiment,
+        repo_commit=BF._repo_commit(), dataset_sha256=manifest.get("sha256"),
+        downloader_version=manifest.get("downloader_version"),
+        symbol=symbol, timeframe=timeframe, venue="bitget",
+        splits={k: [bars[max(v[0], 0)]["ts"], bars[min(v[1], len(bars) - 1)]["ts"]]
+                for k, v in seg.items()},
+        cost_config=dict(ENG.DEFAULT_COSTS),
+        data_quality={k: dq.get(k) for k in ("quality_pass", "gap_count",
+                                             "duplicates", "out_of_order",
+                                             "irregular_deltas", "invalid_ohlc",
+                                             "coverage")})
     feats = ENG.build_features(bars, ref_bars=ref)
-    log(f"features built: {len(feats)} rows x {len(ENG.FEATURE_REGISTRY)} catalog")
+    log(f"features built: {len(feats)} rows x {len(ENG.FEATURE_REGISTRY)} catalog "
+        f"| quality_pass={dq.get('quality_pass')} gaps={dq.get('gap_count')}")
     # ---------- universe: procedural + AI ----------
     raw: list[dict] = procedural_universe()
     n_procedural = len(raw)
@@ -390,23 +429,38 @@ def run_edge_discovery(symbol: str = "BTCUSDT", use_ai: bool = True,
             ai_meta["ideas"] = len(gen["ideas"])
             raw.extend(gen["ideas"])
     # ---------- compile ----------
+    import hashlib as _hashlib
     seen: set[str] = set()
     compiled: list[dict] = []
     n_invalid = n_dup = 0
     for s in raw:
-        state, spec = ENG.compile_strategy(s, seen)
+        state, spec = ENG.compile_strategy(s, seen, symbol=symbol,
+                                           timeframe=timeframe)
+        prov_meta = {}
+        origin = str(s.get("origin", ""))
+        if origin.startswith("ai:"):
+            parts = origin.split(":")
+            prov_meta = {"provider": parts[1] if len(parts) > 1 else None,
+                         "role": parts[2] if len(parts) > 2 else None}
         if state == "OK":
             compiled.append(spec)
+            ENG.ledger_append({"phase": "compile", "state": "OK",
+                               "strategy_id": spec["strategy_id"],
+                               "signature": spec["signature"],
+                               "origin": origin, **prov_meta,
+                               "strategy_raw": s, "strategy_compiled": spec})
         elif state == "DUPLICATE":
             n_dup += 1
             ENG.ledger_append({"phase": "compile", "state": "DUPLICATE",
-                               "origin": s.get("origin"),
-                               "strategy_id": s.get("strategy_id")})
+                               "origin": origin, **prov_meta,
+                               "strategy_id": s.get("strategy_id"),
+                               "strategy_raw": s})
         else:
             n_invalid += 1
             ENG.ledger_append({"phase": "compile", "state": "INVALID",
-                               "origin": s.get("origin"),
-                               "strategy_id": str(s.get("strategy_id"))[:60]})
+                               "origin": origin, **prov_meta,
+                               "strategy_id": str(s.get("strategy_id"))[:60],
+                               "strategy_raw": s})
     log(f"universe: {len(raw)} raw ({n_procedural} procedural + {ai_meta['ideas']} AI) "
         f"-> {len(compiled)} compiled, {n_dup} dup, {n_invalid} invalid")
     # ---------- cross-model criticism (annotation only) ----------
@@ -416,7 +470,8 @@ def run_edge_discovery(symbol: str = "BTCUSDT", use_ai: bool = True,
         for cnote in critiques:
             ENG.ledger_append({"phase": "critique", **cnote})
     # ---------- deterministic funnel (the only judge) ----------
-    funnel = ENG.run_funnel(bars, feats, compiled, log=log)
+    funnel = ENG.run_funnel(bars, feats, compiled, n_trials_total=n_trials_total,
+                            log=log)
     finals = funnel["finalists"]
     by_state: dict[str, int] = {}
     for e in funnel["results"]:
@@ -425,10 +480,13 @@ def run_edge_discovery(symbol: str = "BTCUSDT", use_ai: bool = True,
                  reverse=True)
     summary = {
         "tool_version": TOOL_VERSION, "ran_at": started.isoformat(),
+        "run_id": run_id, "iteration": iteration,
         "runtime_s": round((datetime.now(timezone.utc) - started).total_seconds(), 1),
         "symbol": symbol, "timeframe": timeframe,
         "target_venue": "bitget", "reference_venue": "bybit",
         "n_bars": len(bars), "data_note": data_note,
+        "dataset_sha256": manifest.get("sha256"),
+        "data_quality": funnel.get("data_quality"),
         "hypotheses_total": len(raw), "procedural": n_procedural,
         "ai_generated": ai_meta["ideas"], "ai_calls": ai_meta["calls"],
         "duplicates": n_dup, "invalid": n_invalid,
@@ -436,6 +494,15 @@ def run_edge_discovery(symbol: str = "BTCUSDT", use_ai: bool = True,
         "funnel": {k: funnel[k] for k in ("universe", "discovery_survivors",
                                           "screening_survivors",
                                           "validation_survivors")},
+        "n_trials_total": funnel.get("n_trials_total"),
+        "replays_run": funnel.get("replays_run"),
+        "expected_random_survivors_at_5pct":
+            funnel.get("expected_random_survivors_at_5pct"),
+        "multiple_testing_sensitivity": funnel.get("multiple_testing_sensitivity"),
+        "cost_attribution_best": funnel.get("cost_attribution_best"),
+        "baseline_best_lb": funnel.get("baseline_best_lb"),
+        "execution_proxies": funnel.get("execution_proxies"),
+        "proxy_note": ENG.PROXY_NOTE,
         "state_counts": by_state,
         "finalists": len(finals),
         "top_candidates": top[:10],
@@ -455,11 +522,11 @@ def _write_reports(summary: dict, funnel: dict, log=print) -> None:
     out = ENG._out()
     tf = summary.get("timeframe", "1m")
     sfx = "" if tf == "1m" else f"_{tf}"
-    tmp = out / f"edge_discovery_summary_v10_45_1{sfx}.json.tmp"
+    tmp = out / f"edge_discovery_summary_v10_45_2{sfx}.json.tmp"
     tmp.write_text(json.dumps(summary, indent=2, default=str), encoding="utf-8")
-    _os.replace(tmp, out / f"edge_discovery_summary_v10_45_1{sfx}.json")
+    _os.replace(tmp, out / f"edge_discovery_summary_v10_45_2{sfx}.json")
     # strategy scoreboard (every phase result)
-    with open(out / f"strategy_scoreboard_v10_45_1{sfx}.csv", "w", newline="",
+    with open(out / f"strategy_scoreboard_v10_45_2{sfx}.csv", "w", newline="",
               encoding="utf-8") as f:
         w = _csv.writer(f)
         w.writerow(["phase", "strategy_id", "origin", "state", "n_trades",
@@ -472,7 +539,7 @@ def _write_reports(summary: dict, funnel: dict, log=print) -> None:
                         m.get("net_EV_lower_bound"), m.get("profit_factor"),
                         m.get("win_rate"), m.get("max_drawdown")])
     # cost stress scoreboard (finalists)
-    with open(out / f"cost_stress_scoreboard_v10_45_1{sfx}.csv", "w", newline="",
+    with open(out / f"cost_stress_scoreboard_v10_45_2{sfx}.csv", "w", newline="",
               encoding="utf-8") as f:
         w = _csv.writer(f)
         w.writerow(["strategy_id", "state", "val_net_EV", "holdout_net_EV",
@@ -487,20 +554,33 @@ def _write_reports(summary: dict, funnel: dict, log=print) -> None:
                         cs.get("spread_x2"), cs.get("slip_x2"),
                         cs.get("nonfill10_latency"), e.get("stress_ok")])
     md = _memo(summary)
-    (out / f"edge_discovery_report_v10_45_1{sfx}.md").write_text(md, encoding="utf-8")
+    (out / f"edge_discovery_report_v10_45_2{sfx}.md").write_text(md, encoding="utf-8")
     log(f"reports -> {out}")
 
 
 def _memo(s: dict) -> str:
+    ca = s.get("cost_attribution_best") or {}
+    mt = s.get("multiple_testing_sensitivity") or {}
     lines = [
-        "# V10.45.1 Multi-AI Edge Discovery — RESEARCH ONLY, NO LIVE", "",
-        f"- ran_at: {s['ran_at']} · runtime: {s['runtime_s']}s",
-        f"- data: {s['data_note']}",
+        "# V10.45.2 Multi-AI Edge Discovery — RESEARCH ONLY, NO LIVE", "",
+        f"- ran_at: {s['ran_at']} · runtime: {s['runtime_s']}s · run_id: {s.get('run_id')}",
+        f"- data: {s['data_note']} · sha256: {str(s.get('dataset_sha256'))[:16]} · "
+        f"quality: {s.get('data_quality')}",
         f"- hypotheses: {s['hypotheses_total']} total "
         f"({s['procedural']} procedural + {s['ai_generated']} AI) · "
         f"dup={s['duplicates']} invalid={s['invalid']} executed={s['executed']}",
+        f"- multiple testing: m={s.get('n_trials_total')} trials · "
+        f"replays_run={s.get('replays_run')} · expected random survivors @5%: "
+        f"{s.get('expected_random_survivors_at_5pct')} · sensitivity: {mt}",
         f"- funnel: {s['funnel']}",
         f"- state_counts: {s['state_counts']}", "",
+        "## Cost attribution (best candidate, validation slice)", "",
+        f"- strategy: {ca.get('strategy_id')}",
+        f"- gross_EV: {ca.get('gross_EV')} · fee_impact: {ca.get('fee_impact')} · "
+        f"spread_impact: {ca.get('spread_impact')} · slippage_impact: "
+        f"{ca.get('slippage_impact')} · funding_impact: {ca.get('funding_impact')} "
+        f"· net_EV: {ca.get('net_EV')}", "",
+        f"- execution proxies (cap promotion at SHADOW): {s.get('execution_proxies')}", "",
         "## Top candidates (holdout-ranked)", ""]
     for e in s.get("top_candidates") or []:
         vm = e.get("validation_metrics") or {}

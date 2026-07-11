@@ -463,8 +463,8 @@ def _panel_ai_copilot(d: dict) -> str:
 
 
 def _panel_edge_discovery(d: dict) -> str:
-    rd = CE._repo_root().joinpath("reports", "research", "v10_45_1_edge_discovery")
-    s = _read_json(rd / "edge_discovery_summary_v10_45_1.json") or {}
+    rd = CE._repo_root().joinpath("reports", "research", "v10_45_2_edge_discovery")
+    s = _read_json(rd / "edge_discovery_summary_v10_45_2.json") or {}
     conn = _read_json(rd / "provider_connectivity_v10_45_1.json") or {}
     provs = ", ".join(f"{p.get('provider')}={'OK' if p.get('available') else 'DOWN'}"
                       for p in (conn.get("providers") or [])) or "NOT_RUN"
@@ -487,9 +487,11 @@ def _panel_edge_discovery(d: dict) -> str:
               A._state_kind(top.get("state") or "WAITING_DATA")) +
         A._kv("Best holdout EV / lb",
               f"{hm.get('net_EV')} / {hm.get('net_EV_lower_bound')}") +
+        A._kv("Data quality pass", (s.get("data_quality") or {}).get("quality_pass")) +
+        A._kv("Trials (multiple testing m)", s.get("n_trials_total")) +
         '<div class="sub">Judge = deterministic replay funnel with locked holdout; '
-        'AI (Ollama/Groq/Gemini) only proposes/critiques. Max state: '
-        'PAPER_CANDIDATE_RESEARCH_ONLY. NO LIVE.</div>')
+        'AI (Ollama/Groq/Gemini) only proposes/critiques. Execution proxies cap '
+        'promotion at SHADOW. NO LIVE.</div>')
 
 
 def _panel_lattice(d: dict) -> str:

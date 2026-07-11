@@ -272,18 +272,27 @@ def test_split_indices_have_embargo():
 
 
 def test_gate_never_returns_forbidden_states():
-    good = {"n_trades": 50, "net_EV": 0.001, "net_EV_lower_bound": 0.0005,
+    good = {"n_trades": 50, "n_eff": 50, "net_EV": 0.001,
+            "net_EV_lower_bound": 0.0005, "profit_factor": 1.5,
+            "max_drawdown": -0.02, "censored_ratio": 0.0,
             "outlier_dependence": 0.0004, "stability_sign": 1}
     for hold in (None,
-                 {"n_trades": 20, "net_EV": 0.001, "net_EV_lower_bound": 0.0004},
-                 {"n_trades": 20, "net_EV": -0.001, "net_EV_lower_bound": -0.002},
-                 {"n_trades": 3, "net_EV": 0.001, "net_EV_lower_bound": 0.0}):
+                 {"n_trades": 20, "net_EV": 0.001, "net_EV_lower_bound": 0.0004,
+                  "profit_factor": 1.4, "censored_ratio": 0.0},
+                 {"n_trades": 20, "net_EV": -0.001, "net_EV_lower_bound": -0.002,
+                  "profit_factor": 0.6, "censored_ratio": 0.0},
+                 {"n_trades": 3, "net_EV": 0.001, "net_EV_lower_bound": 0.0,
+                  "profit_factor": 1.2, "censored_ratio": 0.0}):
         for stress in (True, False):
-            g = ENG.gate(good, hold, stress)
-            assert g in ENG.ALLOWED_STATES
-            assert "LIVE" not in g
-    assert ENG.gate({"n_trades": 5, "net_EV": 1, "net_EV_lower_bound": 1},
-                    None, True) == "NEED_MORE_DATA"
+            for dq in (True, False):
+                g = ENG.gate(good, hold, stress, data_quality_pass=dq)
+                assert g in ENG.ALLOWED_STATES
+                assert "LIVE" not in g
+    assert ENG.gate({"n_trades": 5, "n_eff": 5, "net_EV": 1,
+                     "net_EV_lower_bound": 1, "profit_factor": 9,
+                     "max_drawdown": 0, "censored_ratio": 0},
+                    None, True, data_quality_pass=True) == "NEED_MORE_DATA"
+    assert ENG.gate(good, None, True, data_quality_pass=False) == "INVALID_DATA"
 
 
 def test_funnel_on_pure_noise_promotes_nothing(tmp_path, monkeypatch):
@@ -301,8 +310,8 @@ def test_funnel_on_pure_noise_promotes_nothing(tmp_path, monkeypatch):
              if e["state"] == "PAPER_CANDIDATE_RESEARCH_ONLY"]
     # on 3000 bars of pure noise nothing should clear validation+holdout+stress
     assert len(paper) == 0
-    ledger = (tmp_path / "reports" / "research" / "v10_45_1_edge_discovery" /
-              "experiment_ledger_v10_45_1.jsonl")
+    ledger = (tmp_path / "reports" / "research" / "v10_45_2_edge_discovery" /
+              "experiment_ledger_v10_45_2.jsonl")
     assert ledger.is_file()
     lines = ledger.read_text(encoding="utf-8").strip().splitlines()
     assert len(lines) >= len(compiled)                       # every result logged
@@ -379,7 +388,12 @@ def test_resample_aggregates_and_drops_partial_tail():
 
 def test_replay_gap_detection_respects_bar_interval():
     """On 5m bars a normal 5m step must NOT be treated as a gap."""
-    bars = ENG.resample_bars(_bars(2000, seed=17), 5)
+    raw = _bars(2000, seed=17)
+    shift = 300_000 - (T0 % 300_000)          # strict resample needs alignment
+    for b in raw:
+        b["ts"] += shift
+        b["available_at"] += shift
+    bars = ENG.resample_bars(raw, 5)
     feats = ENG.build_features(bars)
     seen: set[str] = set()
     _, spec = ENG.compile_strategy(_spec(entry_conditions=[
