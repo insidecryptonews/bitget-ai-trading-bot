@@ -1,0 +1,911 @@
+"""ResearchOps V10.45.1 - Multi-AI Edge Discovery ENGINE (research only, NO LIVE).
+
+The deterministic half of the multi-AI sprint:
+
+  * ex-ante FEATURE ENGINE over 1m OHLCV bars (indicators, price action,
+    volatility, sessions, regimes, optional cross-venue and flow features);
+  * strict STRATEGY SCHEMA + COMPILER: AI/procedural JSON -> deterministic
+    rules; ambiguous, dangerous, duplicate or impossible strategies rejected;
+  * one CANONICAL REPLAY for every candidate and baseline: next-open entry,
+    fees+spread+slippage per side, funding pro-rata, SL-before-TP same-bar
+    conservatism, partial TP1 by tranche, causal trailing, time exits, gap
+    handling and end-of-replay censoring;
+  * a staged FUNNEL: discovery -> screening (parameter perturbation + light
+    cost stress) -> validation (non-overlapping trades, multiple-testing lower
+    bound) -> LOCKED HOLDOUT (finalists only, never re-tuned) -> cost stress;
+  * mandatory BASELINES through the exact same replay;
+  * an append-only experiment LEDGER including every rejected strategy.
+
+Gates cap at PAPER_CANDIDATE_RESEARCH_ONLY. A live-ready state does not exist
+in this vocabulary.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import math
+import os
+import random
+import statistics as st
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Callable
+
+from . import FINAL_RECOMMENDATION_NO_LIVE
+from . import continuous_edge_factory_v10_38 as CE
+
+TOOL_VERSION = "v10.45.1"
+OUTPUT_SUBDIR = ("reports", "research", "v10_45_1_edge_discovery")
+BAR_MS = 60_000
+WARMUP = 240                      # bars needed before first feature row is valid
+EMBARGO_BARS = 240                # purge between funnel segments
+MAX_CONDITIONS = 6
+MIN_DISCOVERY_TRADES = 20
+MIN_VALIDATION_TRADES = 15
+MIN_HOLDOUT_TRADES = 10
+
+DEFAULT_COSTS = {"taker_fee_bps": 6.0, "spread_bps": 1.0, "slippage_bps": 2.0,
+                 "funding_bps_per_8h": 1.0}
+
+ALLOWED_STATES = ("REJECTED", "DUPLICATE", "INVALID", "NEED_MORE_DATA",
+                  "WATCHLIST_RESEARCH_ONLY", "SHADOW_CANDIDATE_RESEARCH_ONLY",
+                  "PAPER_CANDIDATE_RESEARCH_ONLY")
+REGIMES = ("TREND_UP", "TREND_DOWN", "RANGE", "HIGH_VOLATILITY", "LOW_VOLATILITY",
+           "ASIA", "EU", "US", "ANY")
+OPS = (">", "<", ">=", "<=", "cross_up", "cross_down")
+FORBIDDEN_WORDS = ("order", "leverage", "margin", "live", "api_key", "secret",
+                   "withdraw", "transfer", "position_size")
+
+
+def _safety() -> dict[str, Any]:
+    return {"research_only": True, "simulation_only": True, "shadow_only": True,
+            "can_send_real_orders": False, "paper_filter_enabled": False,
+            "edge_validated": False, "not_actionable": True, "no_orders": True,
+            "final_recommendation": FINAL_RECOMMENDATION_NO_LIVE}
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _out() -> Path:
+    d = CE._repo_root().joinpath(*OUTPUT_SUBDIR)
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+# ==========================================================================
+# FEATURE ENGINE (all ex-ante: row i uses bars[0..i] only)
+# ==========================================================================
+
+def _ema_series(vals: list[float], n: int) -> list[float]:
+    if not vals:
+        return []
+    k = 2.0 / (n + 1)
+    out = [vals[0]]
+    for v in vals[1:]:
+        out.append(out[-1] + k * (v - out[-1]))
+    return out
+
+
+def build_features(bars: list[dict], ref_bars: list[dict] | None = None
+                   ) -> list[dict[str, Any]]:
+    """Feature rows aligned to bars; row i is available at bars[i] close.
+    ref_bars (another venue) are aligned by open-ts for cross-venue features."""
+    n = len(bars)
+    if n == 0:
+        return []
+    o = [b["open"] for b in bars]
+    h = [b["high"] for b in bars]
+    l = [b["low"] for b in bars]
+    c = [b["close"] for b in bars]
+    v = [b.get("volume", 0.0) for b in bars]
+    ts = [b["ts"] for b in bars]
+    buyv = [b.get("buy_volume") for b in bars]
+    has_flow = all(x is not None for x in buyv[:50]) if n >= 50 else False
+
+    ema8 = _ema_series(c, 8)
+    ema21 = _ema_series(c, 21)
+    ema55 = _ema_series(c, 55)
+    ema200 = _ema_series(c, 200)
+
+    # Wilder-style incrementals
+    rsi = [50.0] * n
+    avg_g = avg_l = 0.0
+    tr_list = [0.0] * n
+    atr = [0.0] * n
+    adx = [0.0] * n
+    pdm_s = ndm_s = tr_s = 0.0
+    dx_hist: list[float] = []
+    macd_line = [0.0] * n
+    ema12 = _ema_series(c, 12)
+    ema26 = _ema_series(c, 26)
+    for i in range(n):
+        macd_line[i] = ema12[i] - ema26[i]
+    macd_sig = _ema_series(macd_line, 9)
+
+    ref_by_ts = {rb["ts"]: rb for rb in (ref_bars or [])}
+    ref_c_prev: dict[int, float] = {}
+    if ref_bars:
+        rc = [rb["close"] for rb in ref_bars]
+        rts = [rb["ts"] for rb in ref_bars]
+        for j in range(len(ref_bars)):
+            ref_c_prev[rts[j]] = rc[j - 5] if j >= 5 else rc[0]
+
+    obv = 0.0
+    obv_hist: list[float] = []
+    feats: list[dict[str, Any]] = []
+    day_anchor = None
+    vwap_num = vwap_den = 0.0
+    for i in range(n):
+        close, high, low, open_ = c[i], h[i], l[i], o[i]
+        # RSI(14) Wilder
+        if i > 0:
+            ch = close - c[i - 1]
+            g, ls = max(ch, 0.0), max(-ch, 0.0)
+            if i <= 14:
+                avg_g += g / 14
+                avg_l += ls / 14
+            else:
+                avg_g = (avg_g * 13 + g) / 14
+                avg_l = (avg_l * 13 + ls) / 14
+            rsi[i] = 100.0 - 100.0 / (1 + avg_g / avg_l) if avg_l > 1e-12 else 100.0
+        # TR / ATR(14) / ADX(14)
+        if i > 0:
+            tr = max(high - low, abs(high - c[i - 1]), abs(low - c[i - 1]))
+            pdm = max(high - h[i - 1], 0.0)
+            ndm = max(l[i - 1] - low, 0.0)
+            if pdm < ndm:
+                pdm = 0.0
+            elif ndm < pdm:
+                ndm = 0.0
+            if i <= 14:
+                tr_s += tr; pdm_s += pdm; ndm_s += ndm
+                atr[i] = tr_s / min(i, 14)
+            else:
+                tr_s = tr_s - tr_s / 14 + tr
+                pdm_s = pdm_s - pdm_s / 14 + pdm
+                ndm_s = ndm_s - ndm_s / 14 + ndm
+                atr[i] = tr_s / 14
+            pdi = 100 * pdm_s / tr_s if tr_s > 1e-12 else 0.0
+            ndi = 100 * ndm_s / tr_s if tr_s > 1e-12 else 0.0
+            dx = 100 * abs(pdi - ndi) / (pdi + ndi) if (pdi + ndi) > 1e-12 else 0.0
+            dx_hist.append(dx)
+            adx[i] = st.mean(dx_hist[-14:]) if len(dx_hist) >= 3 else 0.0
+        # OBV
+        if i > 0:
+            obv += v[i] if close > c[i - 1] else (-v[i] if close < c[i - 1] else 0.0)
+        obv_hist.append(obv)
+        # session VWAP (UTC-day anchored)
+        day = ts[i] // 86_400_000
+        if day != day_anchor:
+            day_anchor = day
+            vwap_num = vwap_den = 0.0
+        tp = (high + low + close) / 3.0
+        vwap_num += tp * v[i]
+        vwap_den += v[i]
+        vwap = vwap_num / vwap_den if vwap_den > 1e-12 else close
+
+        def ret(k: int) -> float:
+            return close / c[i - k] - 1.0 if i >= k and c[i - k] > 0 else 0.0
+        win20 = c[max(0, i - 19):i + 1]
+        sma20 = st.mean(win20)
+        sd20 = st.pstdev(win20) if len(win20) > 2 else 0.0
+        hh20 = max(h[max(0, i - 19):i]) if i >= 1 else high      # PRIOR 20 highs
+        ll20 = min(l[max(0, i - 19):i]) if i >= 1 else low
+        hh55 = max(h[max(0, i - 54):i]) if i >= 1 else high
+        ll55 = min(l[max(0, i - 54):i]) if i >= 1 else low
+        atr_pct = atr[i] / close if close > 0 else 0.0
+        rets30 = [c[j] / c[j - 1] - 1 for j in range(max(1, i - 29), i + 1)]
+        rv30 = st.pstdev(rets30) if len(rets30) > 2 else 0.0
+        vol_hist = [x for x in v[max(0, i - 29):i + 1]]
+        vol_mean = st.mean(vol_hist) if vol_hist else 0.0
+        vol_sd = st.pstdev(vol_hist) if len(vol_hist) > 2 else 0.0
+        vol_z = (v[i] - vol_mean) / vol_sd if vol_sd > 1e-12 else 0.0
+        # ATR percentile over 240 bars
+        atr_win = [atr[j] for j in range(max(1, i - 239), i + 1)]
+        atr_rank = (sum(1 for x in atr_win if x <= atr[i]) / len(atr_win)
+                    if atr_win else 0.5)
+        bb_up = sma20 + 2 * sd20
+        bb_dn = sma20 - 2 * sd20
+        bb_w = (bb_up - bb_dn) / close if close > 0 else 0.0
+        kel_up = ema21[i] + 1.5 * atr[i]
+        kel_dn = ema21[i] - 1.5 * atr[i]
+        stoch_win = rsi[max(0, i - 13):i + 1]
+        s_lo, s_hi = (min(stoch_win), max(stoch_win)) if stoch_win else (0, 100)
+        hour = int((ts[i] // 3_600_000) % 24)
+        dow = int(((ts[i] // 86_400_000) + 4) % 7)      # 1970-01-01 = Thursday
+        macd_h = macd_line[i] - macd_sig[i]
+        macd_h_prev = (macd_line[i - 1] - macd_sig[i - 1]) if i > 0 else macd_h
+        obv_slope = ((obv_hist[-1] - obv_hist[-11]) / (abs(obv_hist[-11]) + 1e-9)
+                     if len(obv_hist) > 11 else 0.0)
+        # regime
+        if atr_rank >= 0.8:
+            vol_regime = "HIGH_VOLATILITY"
+        elif atr_rank <= 0.2:
+            vol_regime = "LOW_VOLATILITY"
+        else:
+            vol_regime = "MID_VOL"
+        if ema21[i] > ema55[i] and close > ema200[i]:
+            trend_regime = "TREND_UP"
+        elif ema21[i] < ema55[i] and close < ema200[i]:
+            trend_regime = "TREND_DOWN"
+        else:
+            trend_regime = "RANGE"
+        session = "ASIA" if hour < 8 else ("EU" if hour < 14 else "US")
+        # cross-venue (ref close at same bar ts; both known at bar close)
+        rb = ref_by_ts.get(ts[i])
+        if rb is not None and rb.get("close", 0) > 0 and i >= 5 and c[i - 5] > 0:
+            ref_ret5 = rb["close"] / ref_c_prev.get(ts[i], rb["close"]) - 1.0
+            xv_ret_gap = ref_ret5 - ret(5)
+            xv_dislocation = (rb["close"] / close) - 1.0
+        else:
+            xv_ret_gap = 0.0
+            xv_dislocation = 0.0
+        f = {
+            "i": i, "ts": ts[i], "available_at": bars[i].get("available_at", ts[i] + BAR_MS),
+            "close": close,
+            "ret_1": ret(1), "ret_3": ret(3), "ret_5": ret(5),
+            "ret_15": ret(15), "ret_30": ret(30), "ret_60": ret(60),
+            "rsi_14": rsi[i],
+            "stoch_rsi": ((rsi[i] - s_lo) / (s_hi - s_lo) if s_hi > s_lo else 0.5),
+            "cci_20": ((tp - st.mean([(h[j] + l[j] + c[j]) / 3 for j in range(max(0, i - 19), i + 1)]))
+                       / (0.015 * (st.pstdev([(h[j] + l[j] + c[j]) / 3 for j in range(max(0, i - 19), i + 1)]) + 1e-9))
+                       if i >= 3 else 0.0),
+            "roc_10": ret(10),
+            "macd_hist": macd_h, "macd_hist_prev": macd_h_prev,
+            "macd_cross_up": 1.0 if macd_h > 0 >= macd_h_prev else 0.0,
+            "macd_cross_down": 1.0 if macd_h < 0 <= macd_h_prev else 0.0,
+            "adx_14": adx[i], "atr_14": atr[i], "atr_pct": atr_pct,
+            "atr_percentile_240": atr_rank,
+            "bb_pos": (close - bb_dn) / (bb_up - bb_dn) if bb_up > bb_dn else 0.5,
+            "bb_width": bb_w,
+            "keltner_pos": (close - kel_dn) / (kel_up - kel_dn) if kel_up > kel_dn else 0.5,
+            "squeeze_on": 1.0 if (bb_up < kel_up and bb_dn > kel_dn) else 0.0,
+            "donchian_pos_20": (close - ll20) / (hh20 - ll20) if hh20 > ll20 else 0.5,
+            "donchian_break_up": 1.0 if close > hh20 else 0.0,
+            "donchian_break_down": 1.0 if close < ll20 else 0.0,
+            "donchian_break_up_55": 1.0 if close > hh55 else 0.0,
+            "donchian_break_down_55": 1.0 if close < ll55 else 0.0,
+            "ema_fast_slope": (ema8[i] / ema21[i] - 1.0) if ema21[i] > 0 else 0.0,
+            "ema_slow_slope": (ema21[i] / ema55[i] - 1.0) if ema55[i] > 0 else 0.0,
+            "price_vs_ema200": (close / ema200[i] - 1.0) if ema200[i] > 0 else 0.0,
+            "ema_align_up": 1.0 if ema8[i] > ema21[i] > ema55[i] else 0.0,
+            "ema_align_down": 1.0 if ema8[i] < ema21[i] < ema55[i] else 0.0,
+            "vwap_dist": (close / vwap - 1.0) if vwap > 0 else 0.0,
+            "obv_slope_10": obv_slope,
+            "vol_z_30": vol_z, "rv_30": rv30,
+            "range_pos_20": (close - ll20) / (hh20 - ll20) if hh20 > ll20 else 0.5,
+            "body_pct": (close - open_) / close if close > 0 else 0.0,
+            "upper_wick": (high - max(open_, close)) / close if close > 0 else 0.0,
+            "lower_wick": (min(open_, close) - low) / close if close > 0 else 0.0,
+            "compression": (bb_w / (atr_pct + 1e-9)) if atr_pct > 0 else 0.0,
+            "hour_utc": float(hour), "dow": float(dow),
+            "is_funding_hour": 1.0 if hour in (0, 8, 16) else 0.0,
+            "session": session, "trend_regime": trend_regime,
+            "vol_regime": vol_regime,
+            "xv_ret_gap": xv_ret_gap, "xv_dislocation": xv_dislocation,
+        }
+        if has_flow:
+            bv = float(bars[i].get("buy_volume") or 0.0)
+            sv = float(bars[i].get("sell_volume") or 0.0)
+            f["flow_imbalance"] = (bv - sv) / (bv + sv) if (bv + sv) > 0 else 0.0
+        feats.append(f)
+    return feats
+
+
+FEATURE_REGISTRY = (
+    "ret_1", "ret_3", "ret_5", "ret_15", "ret_30", "ret_60", "rsi_14",
+    "stoch_rsi", "cci_20", "roc_10", "macd_hist", "macd_cross_up",
+    "macd_cross_down", "adx_14", "atr_pct", "atr_percentile_240", "bb_pos",
+    "bb_width", "keltner_pos", "squeeze_on", "donchian_pos_20",
+    "donchian_break_up", "donchian_break_down", "donchian_break_up_55",
+    "donchian_break_down_55", "ema_fast_slope", "ema_slow_slope",
+    "price_vs_ema200", "ema_align_up", "ema_align_down", "vwap_dist",
+    "obv_slope_10", "vol_z_30", "rv_30", "range_pos_20", "body_pct",
+    "upper_wick", "lower_wick", "compression", "hour_utc", "dow",
+    "is_funding_hour", "xv_ret_gap", "xv_dislocation", "flow_imbalance")
+
+
+# ==========================================================================
+# STRATEGY SCHEMA + COMPILER
+# ==========================================================================
+
+def canonical_signature(s: dict) -> str:
+    conds = sorted(f'{x.get("feature")}{x.get("op")}{x.get("value")}'
+                   for x in (s.get("entry_conditions") or []))
+    sig = "|".join([s.get("side", ""), s.get("regime_filter") or "ANY",
+                    json.dumps(s.get("stop_policy"), sort_keys=True),
+                    json.dumps(s.get("take_profit_policy"), sort_keys=True),
+                    json.dumps(s.get("trailing_policy"), sort_keys=True),
+                    str(s.get("time_exit")), *conds])
+    return hashlib.sha1(sig.encode("utf-8")).hexdigest()[:16]
+
+
+def compile_strategy(s: dict, seen_signatures: set[str]) -> tuple[str, dict | None]:
+    """Validate + compile a strategy JSON -> deterministic spec.
+    Returns (state, compiled|None). state in OK/INVALID/DUPLICATE."""
+    if not isinstance(s, dict):
+        return "INVALID", None
+    blob = json.dumps(s, default=str).lower()
+    for w in FORBIDDEN_WORDS:
+        if f'"{w}' in blob or f"{w}(" in blob:
+            return "INVALID", None
+    side = str(s.get("side", "")).upper()
+    if side not in ("LONG", "SHORT"):
+        return "INVALID", None
+    conds = s.get("entry_conditions")
+    if not isinstance(conds, list) or not (1 <= len(conds) <= MAX_CONDITIONS):
+        return "INVALID", None
+    compiled_conds = []
+    for cond in conds:
+        if not isinstance(cond, dict):
+            return "INVALID", None
+        feat = cond.get("feature")
+        op = cond.get("op")
+        val = cond.get("value")
+        if feat not in FEATURE_REGISTRY or op not in OPS:
+            return "INVALID", None
+        if op in ("cross_up", "cross_down"):
+            # only macd has explicit cross features; treat as boolean flag
+            compiled_conds.append((f"macd_{op}", ">", 0.5))
+            continue
+        try:
+            val = float(val)
+        except (TypeError, ValueError):
+            return "INVALID", None
+        if not math.isfinite(val):
+            return "INVALID", None
+        compiled_conds.append((feat, op, val))
+    regime = s.get("regime_filter") or "ANY"
+    if regime not in REGIMES:
+        return "INVALID", None
+    stop = s.get("stop_policy") or {}
+    tp = s.get("take_profit_policy") or {}
+    trail = s.get("trailing_policy") or {}
+    try:
+        stop_type = stop.get("type", "fixed")
+        stop_val = float(stop.get("value", 0))
+        tp_type = tp.get("type", "fixed")
+        tp_val = float(tp.get("value", 0))
+        partial = tp.get("partial") or None
+        if partial is not None:
+            p_frac = float(partial.get("tp1_frac", 0))
+            p_val = float(partial.get("tp1_value", 0))
+            if not (0.1 <= p_frac <= 0.9) or p_val <= 0:
+                return "INVALID", None
+            partial = {"tp1_frac": p_frac, "tp1_value": p_val,
+                       "move_stop_to_be": bool(partial.get("move_stop_to_be", True))}
+        trail_type = trail.get("type", "none")
+        trail_val = float(trail.get("value", 0) or 0)
+        time_exit = int(s.get("time_exit", 0) or 0)
+        cooldown = int(s.get("cooldown", 5) or 5)
+    except (TypeError, ValueError):
+        return "INVALID", None
+    if stop_type not in ("fixed", "atr") or tp_type not in ("fixed", "atr", "rr"):
+        return "INVALID", None
+    if trail_type not in ("none", "fixed", "atr"):
+        return "INVALID", None
+    if stop_val <= 0 or tp_val <= 0 or not (1 <= time_exit <= 240):
+        return "INVALID", None
+    if stop_type == "fixed" and not (0.0005 <= stop_val <= 0.05):
+        return "INVALID", None
+    if tp_type == "fixed" and not (0.0005 <= tp_val <= 0.10):
+        return "INVALID", None
+    sig = canonical_signature(s)
+    if sig in seen_signatures:
+        return "DUPLICATE", None
+    seen_signatures.add(sig)
+    return "OK", {
+        "strategy_id": str(s.get("strategy_id") or f"strat_{sig}")[:80],
+        "signature": sig,
+        "hypothesis": str(s.get("hypothesis", ""))[:300],
+        "economic_rationale": str(s.get("economic_rationale", ""))[:300],
+        "origin": str(s.get("origin", "unknown"))[:40],
+        "side": side, "regime_filter": regime,
+        "conditions": compiled_conds,
+        "stop": {"type": stop_type, "value": stop_val},
+        "tp": {"type": tp_type, "value": tp_val, "partial": partial},
+        "trail": {"type": trail_type, "value": trail_val},
+        "time_exit": time_exit, "cooldown": max(1, cooldown),
+        "expected_failure_modes": [str(x)[:120] for x in
+                                   (s.get("expected_failure_modes") or [])][:6],
+        "falsification_test": str(s.get("falsification_test", ""))[:200]}
+
+
+def _regime_ok(f: dict, regime: str) -> bool:
+    if regime == "ANY":
+        return True
+    if regime in ("TREND_UP", "TREND_DOWN", "RANGE"):
+        return f.get("trend_regime") == regime
+    if regime in ("HIGH_VOLATILITY", "LOW_VOLATILITY"):
+        return f.get("vol_regime") == regime
+    if regime in ("ASIA", "EU", "US"):
+        return f.get("session") == regime
+    return True
+
+
+def _conditions_true(f: dict, conds: list[tuple]) -> bool:
+    for feat, op, val in conds:
+        x = f.get(feat)
+        if not isinstance(x, (int, float)):
+            return False
+        if op == ">" and not x > val:
+            return False
+        if op == "<" and not x < val:
+            return False
+        if op == ">=" and not x >= val:
+            return False
+        if op == "<=" and not x <= val:
+            return False
+    return True
+
+
+# ==========================================================================
+# CANONICAL REPLAY (single logic for every candidate and baseline)
+# ==========================================================================
+
+def replay(bars: list[dict], feats: list[dict], spec: dict,
+           costs: dict | None = None, i_start: int = WARMUP,
+           i_end: int | None = None, cooldown_override: int | None = None,
+           entry_fill_prob: float = 1.0, extra_entry_slip_bps: float = 0.0,
+           rng_seed: int = 7) -> dict[str, Any]:
+    """Deterministic bar replay of one compiled strategy over [i_start, i_end).
+
+    Contract: signal on bar i close -> entry at bar i+1 open (+slippage+half
+    spread). SL beats TP inside the same bar. Partial TP1 closes a tranche at
+    tp1 and can move the stop to entry. Trailing stops are computed from
+    COMPLETED bars only and applied to the next bar. Gaps: no entry across a
+    gap; forced STALE exit at last close when a gap opens mid-trade. The final
+    open position is closed at the last close and flagged censored."""
+    cst = {**DEFAULT_COSTS, **(costs or {})}
+    per_side = (cst["taker_fee_bps"] + cst["spread_bps"] / 2
+                + cst["slippage_bps"]) / 10_000.0
+    # infer the bar interval (1m/5m/15m...) so gap detection and pro-rata
+    # funding stay correct on resampled data
+    if len(bars) >= 3:
+        diffs = sorted(bars[i + 1]["ts"] - bars[i]["ts"]
+                       for i in range(min(200, len(bars) - 1)))
+        bar_interval = max(diffs[len(diffs) // 2], BAR_MS)
+    else:
+        bar_interval = BAR_MS
+    bars_per_8h = max(1.0, 8 * 3_600_000 / bar_interval)
+    fund_per_bar = cst["funding_bps_per_8h"] / 10_000.0 / bars_per_8h
+    i_end = min(i_end if i_end is not None else len(bars) - 1, len(bars) - 1)
+    cooldown = cooldown_override if cooldown_override is not None else spec["cooldown"]
+    rng = random.Random(rng_seed)
+    trades: list[dict] = []
+    pos: dict | None = None
+    last_exit_i = -10 ** 9
+    long = spec["side"] == "LONG"
+
+    def _tranche_ret(entry_eff: float, exit_px: float, frac: float,
+                     bars_held: int, exit_reason: str) -> dict:
+        exit_eff = exit_px * (1 - per_side) if long else exit_px * (1 + per_side)
+        gross = (exit_eff / entry_eff - 1.0) if long else (entry_eff / exit_eff - 1.0)
+        net = gross - fund_per_bar * bars_held
+        return {"frac": frac, "net": net, "exit_reason": exit_reason,
+                "bars_held": bars_held}
+
+    def _close_all(exit_px: float, reason: str, i: int, censored: bool = False):
+        nonlocal pos, last_exit_i
+        tr = _tranche_ret(pos["entry_eff"], exit_px, pos["frac_open"],
+                          i - pos["entry_i"], reason)
+        pos["tranches"].append(tr)
+        net = sum(t["net"] * t["frac"] for t in pos["tranches"])
+        trades.append({"entry_i": pos["entry_i"], "exit_i": i,
+                       "side": spec["side"], "net_return": round(net, 8),
+                       "exit_reason": reason, "bars_held": i - pos["entry_i"],
+                       "tranches": len(pos["tranches"]), "censored": censored})
+        last_exit_i = i
+        pos = None
+
+    for i in range(i_start, i_end):
+        bar = bars[i]
+        nxt = bars[i + 1]
+        gap = (nxt["ts"] - bar["ts"]) > 2 * bar_interval
+        # ---- manage open position on the CURRENT bar
+        if pos is not None:
+            hi, lo = bar["high"], bar["low"]
+            # 1) stop first (conservative on same-bar ambiguity)
+            stop_px = pos["stop_px"]
+            hit_stop = (lo <= stop_px) if long else (hi >= stop_px)
+            if hit_stop:
+                _close_all(stop_px, "SL" if not pos["be_moved"] else "BE_STOP", i)
+            else:
+                # 2) partial TP1 (only when the stop was not touched this bar)
+                if pos["tp1_px"] is not None:
+                    hit1 = (hi >= pos["tp1_px"]) if long else (lo <= pos["tp1_px"])
+                    if hit1:
+                        frac = pos["tp1_frac"]
+                        pos["tranches"].append(_tranche_ret(
+                            pos["entry_eff"], pos["tp1_px"], frac,
+                            i - pos["entry_i"], "TP1"))
+                        pos["frac_open"] = round(pos["frac_open"] - frac, 6)
+                        pos["tp1_px"] = None
+                        if pos["move_be"]:
+                            pos["stop_px"] = pos["entry_px"]
+                            pos["be_moved"] = True
+                # 3) final TP
+                if pos is not None and pos["tp_px"] is not None:
+                    hit_tp = (hi >= pos["tp_px"]) if long else (lo <= pos["tp_px"])
+                    if hit_tp:
+                        _close_all(pos["tp_px"], "TP", i)
+                # 4) time exit
+                if pos is not None and (i - pos["entry_i"]) >= spec["time_exit"]:
+                    _close_all(bar["close"], "TIME", i)
+                # 5) gap ahead -> stale exit at current close
+                if pos is not None and gap:
+                    _close_all(bar["close"], "STALE_EXIT", i)
+                # 6) causal trailing: update stop AFTER this completed bar
+                if pos is not None and spec["trail"]["type"] != "none":
+                    pos["hwm"] = max(pos["hwm"], hi) if long else min(pos["hwm"], lo)
+                    tv = spec["trail"]["value"]
+                    dist = tv if spec["trail"]["type"] == "fixed" \
+                        else tv * (feats[i]["atr_pct"] or 0.001)
+                    cand = pos["hwm"] * (1 - dist) if long else pos["hwm"] * (1 + dist)
+                    fav = (pos["hwm"] / pos["entry_px"] - 1.0) if long \
+                        else (1.0 - pos["hwm"] / pos["entry_px"])
+                    if fav >= dist:                     # activate after profit
+                        pos["stop_px"] = max(pos["stop_px"], cand) if long \
+                            else min(pos["stop_px"], cand)
+        # ---- new entry decision at bar i close
+        if pos is None and (i - last_exit_i) >= cooldown and not gap:
+            f = feats[i]
+            if _regime_ok(f, spec["regime_filter"]) and \
+                    _conditions_true(f, spec["conditions"]):
+                if entry_fill_prob < 1.0 and rng.random() > entry_fill_prob:
+                    continue                              # modeled non-fill
+                entry_px = nxt["open"]
+                if entry_px <= 0:
+                    continue
+                slip = per_side + extra_entry_slip_bps / 10_000.0
+                entry_eff = entry_px * (1 + slip) if long else entry_px * (1 - slip)
+                atr_p = f["atr_pct"] or 0.001
+                sv = spec["stop"]["value"]
+                stop_dist = sv if spec["stop"]["type"] == "fixed" else sv * atr_p
+                tpv = spec["tp"]["value"]
+                if spec["tp"]["type"] == "fixed":
+                    tp_dist = tpv
+                elif spec["tp"]["type"] == "atr":
+                    tp_dist = tpv * atr_p
+                else:                                     # rr multiple of stop
+                    tp_dist = tpv * stop_dist
+                stop_dist = max(stop_dist, 0.0003)
+                tp_dist = max(tp_dist, 0.0003)
+                partial = spec["tp"]["partial"]
+                pos = {"entry_i": i + 1, "entry_px": entry_px,
+                       "entry_eff": entry_eff,
+                       "stop_px": entry_px * (1 - stop_dist) if long
+                       else entry_px * (1 + stop_dist),
+                       "tp_px": entry_px * (1 + tp_dist) if long
+                       else entry_px * (1 - tp_dist),
+                       "tp1_px": (entry_px * (1 + partial["tp1_value"]) if long
+                                  else entry_px * (1 - partial["tp1_value"]))
+                       if partial else None,
+                       "tp1_frac": partial["tp1_frac"] if partial else 0.0,
+                       "move_be": partial["move_stop_to_be"] if partial else False,
+                       "be_moved": False, "frac_open": 1.0,
+                       "hwm": entry_px, "tranches": []}
+    if pos is not None:
+        _close_all(bars[i_end]["close"], "END_CENSORED", i_end, censored=True)
+    return {"trades": trades, "n_trades": len(trades)}
+
+
+# ==========================================================================
+# METRICS + GATES
+# ==========================================================================
+
+def metrics(trades: list[dict], n_tests: int = 1) -> dict[str, Any]:
+    xs = [t["net_return"] for t in trades]
+    n = len(xs)
+    if n == 0:
+        return {"n_trades": 0, "net_EV": None, "net_EV_lower_bound": None,
+                "profit_factor": None, "win_rate": None, "max_drawdown": None,
+                "outlier_dependence": None, "stability_sign": None,
+                "censored": 0}
+    mean = st.mean(xs)
+    sd = st.pstdev(xs) if n > 1 else 0.0
+    lb = mean - 1.65 * sd / math.sqrt(n) \
+        - math.sqrt(max(math.log(max(n_tests, 2)), 0.0)) * sd / math.sqrt(n)
+    wins = [x for x in xs if x > 0]
+    losses = [x for x in xs if x < 0]
+    pf = (sum(wins) / abs(sum(losses))) if losses and sum(losses) != 0 else \
+        (999.0 if wins else 0.0)
+    cur = peak = dd = 0.0
+    for x in xs:
+        cur += x
+        peak = max(peak, cur)
+        dd = min(dd, cur - peak)
+    top3 = sorted(xs, reverse=True)[:3]
+    ev_wo_top = st.mean([x for x in xs if x not in top3] or [0.0]) \
+        if n > 5 else None
+    half = n // 2
+    s1 = st.mean(xs[:half]) if half else 0.0
+    s2 = st.mean(xs[half:]) if n - half else 0.0
+    return {"n_trades": n, "net_EV": round(mean, 8),
+            "net_EV_lower_bound": round(lb, 8),
+            "profit_factor": round(pf, 4),
+            "win_rate": round(len(wins) / n, 4),
+            "max_drawdown": round(dd, 8),
+            "avg_hold": round(st.mean([t["bars_held"] for t in trades]), 2),
+            "outlier_dependence": (round(ev_wo_top, 8)
+                                   if ev_wo_top is not None else None),
+            "stability_sign": (1 if (s1 > 0) == (s2 > 0) else 0) if n >= 10 else None,
+            "censored": sum(1 for t in trades if t.get("censored"))}
+
+
+def gate(val_m: dict, hold_m: dict | None, stress_ok: bool) -> str:
+    """Deterministic promotion gate. Caps at PAPER_CANDIDATE_RESEARCH_ONLY."""
+    if val_m["n_trades"] < MIN_VALIDATION_TRADES:
+        return "NEED_MORE_DATA"
+    if (val_m["net_EV"] or 0) <= 0:
+        return "REJECTED"
+    if (val_m["net_EV_lower_bound"] or 0) <= 0:
+        return "WATCHLIST_RESEARCH_ONLY"
+    if val_m.get("outlier_dependence") is not None and val_m["outlier_dependence"] <= 0:
+        return "WATCHLIST_RESEARCH_ONLY"
+    if not stress_ok or val_m.get("stability_sign") == 0:
+        return "WATCHLIST_RESEARCH_ONLY"
+    if hold_m is None:
+        return "SHADOW_CANDIDATE_RESEARCH_ONLY"
+    if hold_m["n_trades"] < MIN_HOLDOUT_TRADES:
+        return "SHADOW_CANDIDATE_RESEARCH_ONLY"
+    if (hold_m["net_EV"] or 0) > 0 and (hold_m["net_EV_lower_bound"] or 0) > 0:
+        return "PAPER_CANDIDATE_RESEARCH_ONLY"
+    if (hold_m["net_EV"] or 0) > 0:
+        return "SHADOW_CANDIDATE_RESEARCH_ONLY"
+    return "REJECTED"
+
+
+# ==========================================================================
+# BASELINES (same replay, same costs, same windows)
+# ==========================================================================
+
+def baseline_specs() -> list[dict]:
+    def mk(sid, side, conds, tp, sl, te, regime="ANY", trail_type="none",
+           trail_val=0.0):
+        return {"strategy_id": sid, "origin": "baseline", "side": side,
+                "regime_filter": regime,
+                "entry_conditions": conds,
+                "stop_policy": {"type": "fixed", "value": sl},
+                "take_profit_policy": {"type": "fixed", "value": tp},
+                "trailing_policy": {"type": trail_type, "value": trail_val},
+                "time_exit": te, "cooldown": 5,
+                "hypothesis": "baseline", "economic_rationale": "baseline"}
+    return [
+        mk("baseline_always_long", "LONG",
+           [{"feature": "ret_1", "op": ">=", "value": -1.0}], 0.006, 0.006, 30),
+        mk("baseline_always_short", "SHORT",
+           [{"feature": "ret_1", "op": ">=", "value": -1.0}], 0.006, 0.006, 30),
+        mk("baseline_ema_cross_long", "LONG",
+           [{"feature": "ema_fast_slope", "op": ">", "value": 0.0},
+            {"feature": "ema_align_up", "op": ">", "value": 0.5}], 0.008, 0.006, 45),
+        mk("baseline_rsi_meanrev_long", "LONG",
+           [{"feature": "rsi_14", "op": "<", "value": 30.0}], 0.006, 0.006, 30),
+        mk("baseline_rsi_meanrev_short", "SHORT",
+           [{"feature": "rsi_14", "op": ">", "value": 70.0}], 0.006, 0.006, 30),
+        mk("baseline_donchian_break_long", "LONG",
+           [{"feature": "donchian_break_up", "op": ">", "value": 0.5}], 0.01, 0.006, 60),
+    ]
+
+
+def run_random_baseline(bars, feats, i_start, i_end, costs, freq: float,
+                        seed: int = 99) -> dict:
+    """Random entries at the given per-bar frequency through the SAME replay."""
+    rng = random.Random(seed)
+    spec = {"strategy_id": "baseline_random", "signature": "random",
+            "side": "LONG", "regime_filter": "ANY",
+            "conditions": [("ret_1", ">=", -1.0)],
+            "stop": {"type": "fixed", "value": 0.006},
+            "tp": {"type": "fixed", "value": 0.006, "partial": None},
+            "trail": {"type": "none", "value": 0.0},
+            "time_exit": 30, "cooldown": 1}
+    marks = {i for i in range(i_start, i_end) if rng.random() < freq}
+    fcopy = []
+    for f in feats:
+        g = dict(f)
+        g["ret_1"] = 0.0 if f["i"] in marks else -2.0    # gate via condition
+        fcopy.append(g)
+    r = replay(bars, fcopy, spec, costs=costs, i_start=i_start, i_end=i_end)
+    return metrics(r["trades"])
+
+
+def buy_and_hold_net(bars, i_start, i_end, costs) -> float | None:
+    cst = {**DEFAULT_COSTS, **(costs or {})}
+    per_side = (cst["taker_fee_bps"] + cst["spread_bps"] / 2
+                + cst["slippage_bps"]) / 10_000.0
+    try:
+        e = bars[i_start + 1]["open"] * (1 + per_side)
+        x = bars[i_end]["close"] * (1 - per_side)
+        held = i_end - i_start
+        return x / e - 1.0 - cst["funding_bps_per_8h"] / 10_000.0 / 480.0 * held
+    except Exception:
+        return None
+
+
+# ==========================================================================
+# EXPERIMENT LEDGER (append-only; includes every rejected strategy)
+# ==========================================================================
+
+def ledger_append(entry: dict) -> None:
+    p = _out() / "experiment_ledger_v10_45_1.jsonl"
+    with open(p, "a", encoding="utf-8") as f:
+        f.write(json.dumps({"at": _now(), **entry}, default=str) + "\n")
+
+
+# ==========================================================================
+# FUNNEL
+# ==========================================================================
+
+def resample_bars(bars: list[dict], factor: int) -> list[dict]:
+    """Aggregate 1m bars into factor-minute bars (open=first, high=max,
+    low=min, close=last, volume=sum). available_at = last sub-bar close.
+    Groups are anchored to wall-clock (ts // (factor*BAR_MS)) so a partial
+    trailing group is dropped, never peeked."""
+    if factor <= 1:
+        return bars
+    groups: dict[int, list[dict]] = {}
+    for b in bars:
+        groups.setdefault(b["ts"] // (factor * BAR_MS), []).append(b)
+    out = []
+    keys = sorted(groups)
+    for k in keys[:-1]:                    # drop the (possibly partial) tail
+        g = sorted(groups[k], key=lambda x: x["ts"])
+        out.append({"ts": k * factor * BAR_MS,
+                    "available_at": g[-1].get("available_at", g[-1]["ts"] + BAR_MS),
+                    "open": g[0]["open"], "high": max(x["high"] for x in g),
+                    "low": min(x["low"] for x in g), "close": g[-1]["close"],
+                    "volume": sum(x.get("volume", 0.0) for x in g),
+                    "turnover": sum(x.get("turnover", 0.0) for x in g),
+                    "symbol": g[0].get("symbol"), "venue": g[0].get("venue")})
+    return out
+
+
+def split_indices(n: int) -> dict[str, tuple[int, int]]:
+    d_end = int(n * 0.55)
+    v_start = d_end + EMBARGO_BARS
+    v_end = int(n * 0.775)
+    h_start = v_end + EMBARGO_BARS
+    return {"discovery": (WARMUP, d_end),
+            "validation": (v_start, v_end),
+            "holdout": (h_start, n - 1)}
+
+
+def run_funnel(bars: list[dict], feats: list[dict], compiled: list[dict],
+               costs: dict | None = None, log=print) -> dict[str, Any]:
+    """discovery -> screening (perturbation + light stress) -> validation
+    (non-overlap, multi-test lb) -> locked holdout -> full cost stress."""
+    n = len(bars)
+    seg = split_indices(n)
+    d0, d1 = seg["discovery"]
+    v0, v1 = seg["validation"]
+    h0, h1 = seg["holdout"]
+    results: list[dict] = []
+    n_universe = len(compiled)
+    # ---------- DISCOVERY ----------
+    survivors = []
+    for k, spec in enumerate(compiled):
+        r = replay(bars, feats, spec, costs=costs, i_start=d0, i_end=d1)
+        m = metrics(r["trades"], n_tests=1)
+        entry = {"phase": "discovery", "strategy_id": spec["strategy_id"],
+                 "origin": spec.get("origin"), "signature": spec["signature"],
+                 "metrics": m}
+        if m["n_trades"] < MIN_DISCOVERY_TRADES:
+            entry["state"] = "NEED_MORE_DATA"
+        elif (m["net_EV"] or 0) <= 0:
+            entry["state"] = "REJECTED"
+        else:
+            entry["state"] = "SURVIVED_DISCOVERY"
+            survivors.append(spec)
+        ledger_append(entry)
+        results.append(entry)
+        if (k + 1) % 100 == 0:
+            log(f"  discovery {k + 1}/{n_universe} (survivors so far: {len(survivors)})")
+    log(f"discovery: {len(survivors)}/{n_universe} survived")
+    # ---------- SCREENING (perturbation + light cost stress, discovery data) --
+    screened = []
+    for spec in survivors:
+        perturb_ok = 0
+        perturb_total = 0
+        for mult_stop in (0.8, 1.2):
+            for mult_tp in (0.8, 1.2):
+                p = json.loads(json.dumps(spec))
+                p["stop"]["value"] *= mult_stop
+                p["tp"]["value"] *= mult_tp
+                r = replay(bars, feats, p, costs=costs, i_start=d0, i_end=d1)
+                m = metrics(r["trades"])
+                perturb_total += 1
+                if (m["net_EV"] or 0) > 0:
+                    perturb_ok += 1
+        c25 = {**DEFAULT_COSTS, **(costs or {})}
+        c25 = {k2: (v2 * 1.25 if k2 != "funding_bps_per_8h" else v2)
+               for k2, v2 in c25.items()}
+        r25 = replay(bars, feats, spec, costs=c25, i_start=d0, i_end=d1)
+        m25 = metrics(r25["trades"])
+        ok = perturb_ok >= max(2, int(perturb_total * 0.5)) and (m25["net_EV"] or 0) > 0
+        entry = {"phase": "screening", "strategy_id": spec["strategy_id"],
+                 "perturb_ok": f"{perturb_ok}/{perturb_total}",
+                 "cost25_net_EV": m25["net_EV"],
+                 "state": "SURVIVED_SCREENING" if ok else "REJECTED"}
+        ledger_append(entry)
+        results.append(entry)
+        if ok:
+            screened.append(spec)
+    log(f"screening: {len(screened)}/{len(survivors)} survived")
+    # ---------- VALIDATION (untouched slice, non-overlapping trades) ----------
+    validated = []
+    m_val_by_id: dict[str, dict] = {}
+    n_val_tests = max(len(screened), 1)
+    for spec in screened:
+        r = replay(bars, feats, spec, costs=costs, i_start=v0, i_end=v1,
+                   cooldown_override=max(spec["cooldown"], spec["time_exit"]))
+        m = metrics(r["trades"], n_tests=n_val_tests)
+        m_val_by_id[spec["strategy_id"]] = m
+        ok = (m["n_trades"] >= MIN_VALIDATION_TRADES and (m["net_EV"] or 0) > 0)
+        entry = {"phase": "validation", "strategy_id": spec["strategy_id"],
+                 "metrics": m,
+                 "state": "SURVIVED_VALIDATION" if ok else
+                 ("NEED_MORE_DATA" if m["n_trades"] < MIN_VALIDATION_TRADES
+                  else "REJECTED")}
+        ledger_append(entry)
+        results.append(entry)
+        if ok:
+            validated.append(spec)
+    log(f"validation: {len(validated)}/{len(screened)} survived")
+    # ---------- LOCKED HOLDOUT (finalists only; report, never re-tune) -------
+    finals = []
+    for spec in validated:
+        r = replay(bars, feats, spec, costs=costs, i_start=h0, i_end=h1,
+                   cooldown_override=max(spec["cooldown"], spec["time_exit"]))
+        mh = metrics(r["trades"], n_tests=max(len(validated), 1))
+        # ---------- FULL COST STRESS (validation slice) ----------
+        stress = {}
+        base_c = {**DEFAULT_COSTS, **(costs or {})}
+        variants = {
+            "cost_plus_25": {k2: v2 * 1.25 for k2, v2 in base_c.items()},
+            "cost_plus_50": {k2: v2 * 1.5 for k2, v2 in base_c.items()},
+            "spread_x2": {**base_c, "spread_bps": base_c["spread_bps"] * 2},
+            "slip_x2": {**base_c, "slippage_bps": base_c["slippage_bps"] * 2},
+        }
+        for name, cs in variants.items():
+            rs = replay(bars, feats, spec, costs=cs, i_start=v0, i_end=v1,
+                        cooldown_override=max(spec["cooldown"], spec["time_exit"]))
+            stress[name] = metrics(rs["trades"])["net_EV"]
+        rl = replay(bars, feats, spec, costs=base_c, i_start=v0, i_end=v1,
+                    cooldown_override=max(spec["cooldown"], spec["time_exit"]),
+                    entry_fill_prob=0.9, extra_entry_slip_bps=2.0, rng_seed=13)
+        stress["nonfill10_latency"] = metrics(rl["trades"])["net_EV"]
+        stress_ok = all((x or 0) > 0 for x in stress.values())
+        mv = m_val_by_id[spec["strategy_id"]]
+        state = gate(mv, mh, stress_ok)
+        entry = {"phase": "holdout", "strategy_id": spec["strategy_id"],
+                 "origin": spec.get("origin"),
+                 "hypothesis": spec.get("hypothesis"),
+                 "validation_metrics": mv, "holdout_metrics": mh,
+                 "cost_stress": stress, "stress_ok": stress_ok,
+                 "state": state}
+        ledger_append(entry)
+        results.append(entry)
+        finals.append(entry)
+    # ---------- BASELINES ----------
+    base_out = {}
+    seen_b: set[str] = set()
+    for b in baseline_specs():
+        stt, cb = compile_strategy(b, seen_b)
+        if stt != "OK":
+            continue
+        rb = replay(bars, feats, cb, costs=costs, i_start=v0, i_end=v1,
+                    cooldown_override=max(cb["cooldown"], cb["time_exit"]))
+        base_out[cb["strategy_id"]] = metrics(rb["trades"])
+    base_out["baseline_random"] = run_random_baseline(
+        bars, feats, v0, v1, costs, freq=0.02)
+    base_out["baseline_buy_hold_net"] = buy_and_hold_net(bars, v0, v1, costs)
+    base_out["baseline_no_trade"] = 0.0
+    return {"universe": n_universe, "discovery_survivors": len(survivors),
+            "screening_survivors": len(screened),
+            "validation_survivors": len(validated),
+            "finalists": finals, "baselines": base_out,
+            "splits": {k: v for k, v in seg.items()},
+            "results": results}

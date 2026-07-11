@@ -462,6 +462,36 @@ def _panel_ai_copilot(d: dict) -> str:
         'research summaries are ever sent to a provider.</div>')
 
 
+def _panel_edge_discovery(d: dict) -> str:
+    rd = CE._repo_root().joinpath("reports", "research", "v10_45_1_edge_discovery")
+    s = _read_json(rd / "edge_discovery_summary_v10_45_1.json") or {}
+    conn = _read_json(rd / "provider_connectivity_v10_45_1.json") or {}
+    provs = ", ".join(f"{p.get('provider')}={'OK' if p.get('available') else 'DOWN'}"
+                      for p in (conn.get("providers") or [])) or "NOT_RUN"
+    counts = s.get("state_counts") or {}
+    top = (s.get("top_candidates") or [{}])[0] if s.get("top_candidates") else {}
+    hm = top.get("holdout_metrics") or {}
+    return (
+        A._kv("Engine last run", s.get("ran_at") or "NOT_RUN") +
+        A._kv("Providers", provs) +
+        A._kv("Data", s.get("data_note") or "N/A") +
+        A._kv("Hypotheses (proc + AI)",
+              f"{s.get('hypotheses_total', 0)} ({s.get('procedural', 0)} + "
+              f"{s.get('ai_generated', 0)})") +
+        A._kv("Executed / dup / invalid",
+              f"{s.get('executed', 0)} / {s.get('duplicates', 0)} / {s.get('invalid', 0)}") +
+        A._kv("Funnel", s.get("funnel")) +
+        A._kv("State counts", counts) +
+        A._kv("Best (holdout)", top.get("strategy_id") or "NONE") +
+        A._kv("Best state", top.get("state") or "N/A",
+              A._state_kind(top.get("state") or "WAITING_DATA")) +
+        A._kv("Best holdout EV / lb",
+              f"{hm.get('net_EV')} / {hm.get('net_EV_lower_bound')}") +
+        '<div class="sub">Judge = deterministic replay funnel with locked holdout; '
+        'AI (Ollama/Groq/Gemini) only proposes/critiques. Max state: '
+        'PAPER_CANDIDATE_RESEARCH_ONLY. NO LIVE.</div>')
+
+
 def _panel_lattice(d: dict) -> str:
     cont = d.get("persistent_continuity", {})
     tour = d.get("ws_persistent_tournament") or {}
@@ -490,6 +520,7 @@ def render_html(d: dict, auto_refresh_seconds: int | None = None) -> str:
         strategy=_panel_strategy(d), exits=_panel_exit(d),
         alpha=_panel_alpha_factory(d),
         ai=_panel_ai_copilot(d),
+        edge=_panel_edge_discovery(d),
         lattice=_panel_lattice(d),
         graph=A._relationship_graph((d.get("persistent_continuity") or {}).get("verdict")),
         gen=html.escape(datetime.now(timezone.utc).isoformat()))
@@ -530,6 +561,7 @@ _EXTRA = """
   <div class="card wide"><h3>REST vs WS vs WS Persistent</h3>{compare}</div>
   <div class="card wide"><h3>Alpha Factory V10.44</h3>{alpha}</div>
   <div class="card wide"><h3>AI Research Co-Pilot V10.45</h3>{ai}</div>
+  <div class="card wide"><h3>Multi-AI Edge Discovery V10.45.1</h3>{edge}</div>
   <div class="card"><h3>Strategy Lab Hardened</h3>{strategy}</div>
   <div class="card"><h3>Exit Optimization Panel</h3>{exits}</div>
   <div class="card"><h3>Probability Lattice</h3>{lattice}</div>

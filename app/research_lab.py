@@ -7351,6 +7351,62 @@ class ResearchLab:
                                         max_bars=int(max_bars or 300))
         return SIM.render_cli(r)
 
+    def ai_connectivity_test_v10451_cli(self) -> str:
+        from .labs import ai_providers_v10_45_1 as P
+        r = P.connectivity_test(write_reports=True)
+        lines = ["AI CONNECTIVITY TEST V10.45.1 START",
+                 f"GROQ_API_KEY_detected: {r['env']['GROQ_API_KEY_detected']}",
+                 f"GEMINI_API_KEY_detected: {r['env']['GEMINI_API_KEY_detected']}"]
+        for p in r["providers"]:
+            lines.append(f"{p['provider']}: available={p['available']} "
+                         f"model={p.get('model')} latency_s={p.get('latency_s')} "
+                         f"error={p.get('error')}")
+        lines += ["keys_never_printed: true", "research_only: true",
+                  "can_send_real_orders: false",
+                  "final_recommendation: NO LIVE",
+                  "AI CONNECTIVITY TEST V10.45.1 END"]
+        return chr(10).join(lines)
+
+    def public_data_backfill_v10451_cli(self, *, symbols="", days=90) -> str:
+        from .labs import public_data_backfill_v10_45_1 as BF
+        syms = self._v107_csv_arg(symbols) or ["BTCUSDT"]
+        s = BF.run_backfill(syms, [syms[0]], days=int(days or 90))
+        lines = ["PUBLIC DATA BACKFILL V10.45.1 START"]
+        for m in s["datasets"]:
+            lines.append(f"{m['venue']} {m['symbol']}: {m['n_bars']} bars "
+                         f"gaps={m['gap_count']} sha={m['sha256'][:12]}")
+        lines += ["public_endpoints_only: true", "uses_api_keys: false",
+                  "final_recommendation: NO LIVE",
+                  "PUBLIC DATA BACKFILL V10.45.1 END"]
+        return chr(10).join(lines)
+
+    def edge_discovery_run_v10451_cli(self, *, symbols="", use_ai=True) -> str:
+        from .labs import multi_ai_orchestrator_v10_45_1 as ORCH
+        sym = (self._v107_csv_arg(symbols) or ["BTCUSDT"])[0]
+        s = ORCH.run_edge_discovery(sym, use_ai=bool(use_ai))
+        lines = ["EDGE DISCOVERY RUN V10.45.1 START",
+                 f"symbol: {sym}  target_venue: bitget",
+                 f"status: {s.get('status', 'COMPLETED')}",
+                 f"n_bars: {s.get('n_bars')}",
+                 f"hypotheses_total: {s.get('hypotheses_total')}  "
+                 f"procedural: {s.get('procedural')}  ai: {s.get('ai_generated')}",
+                 f"duplicates: {s.get('duplicates')}  invalid: {s.get('invalid')}  "
+                 f"executed: {s.get('executed')}",
+                 f"funnel: {s.get('funnel')}",
+                 f"state_counts: {s.get('state_counts')}",
+                 f"finalists: {s.get('finalists')}"]
+        for e in (s.get("top_candidates") or [])[:5]:
+            hm = e.get("holdout_metrics") or {}
+            lines.append(f"top: {e['strategy_id']} [{e['state']}] "
+                         f"holdout_EV={hm.get('net_EV')} "
+                         f"lb={hm.get('net_EV_lower_bound')} n={hm.get('n_trades')}")
+        lines += [f"runtime_s: {s.get('runtime_s')}",
+                  "judge: deterministic replay (LLM votes never promote)",
+                  "research_only: true", "can_send_real_orders: false",
+                  "final_recommendation: NO LIVE",
+                  "EDGE DISCOVERY RUN V10.45.1 END"]
+        return chr(10).join(lines)
+
     def research_dashboard_open_v1043a_cli(self, *, symbols="") -> str:
         from .labs import research_dashboard_v10_43a as DASH
         import os as _os
@@ -8730,6 +8786,9 @@ def build_argument_parser() -> argparse.ArgumentParser:
             "ai-provider-audit-v1045",
             "ai-research-copilot-v1045",
             "ai-simulated-trader-v1045",
+            "ai-connectivity-test-v10451",
+            "public-data-backfill-v10451",
+            "edge-discovery-run-v10451",
             "ohlcv-replay-loader-smoke-test",
             "ohlcv-replay-loader-audit",
             "duplicate-module-audit-smoke-test",
@@ -9010,6 +9069,9 @@ PUBLIC_RESEARCH_ONLY_COMMANDS = frozenset({
     "ai-provider-audit-v1045",
     "ai-research-copilot-v1045",
     "ai-simulated-trader-v1045",
+    "ai-connectivity-test-v10451",
+    "public-data-backfill-v10451",
+    "edge-discovery-run-v10451",
 })
 
 
@@ -9209,6 +9271,13 @@ def _dispatch_public_research_only(args) -> None:
             symbols=args.symbols, provider=getattr(args, "provider", "mock"),
             data_source=getattr(args, "data_source", "ws_persistent"),
             max_bars=getattr(args, "max_bars", 300)))
+    elif args.command == "ai-connectivity-test-v10451":
+        print(lab.ai_connectivity_test_v10451_cli())
+    elif args.command == "public-data-backfill-v10451":
+        print(lab.public_data_backfill_v10451_cli(
+            symbols=args.symbols, days=getattr(args, "days", 90)))
+    elif args.command == "edge-discovery-run-v10451":
+        print(lab.edge_discovery_run_v10451_cli(symbols=args.symbols))
     elif args.command.startswith("bybit-backfill-"):
         cmd = args.command.replace("bybit-backfill-", "").replace("-v1036", "")
         print(lab.bybit_backfill_v1036_cli(
