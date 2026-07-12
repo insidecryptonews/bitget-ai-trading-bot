@@ -209,8 +209,8 @@ def test_holdout_never_touched_when_nothing_eligible(monkeypatch, tmp_path):
     # slice must never have been replayed
     assert out["validation_survivors"] == 0
     assert touched == []
-    ledger = (tmp_path / "reports" / "research" / "v10_45_4_edge_discovery" /
-              "experiment_ledger_v10_45_4.jsonl")
+    ledger = (tmp_path / "reports" / "research" / "v10_45_5_edge_discovery" /
+              "experiment_ledger_v10_45_5.jsonl")
     entries = [json.loads(l) for l in ledger.read_text(encoding="utf-8").splitlines()]
     accesses = [e for e in entries if e.get("phase") == "holdout_access"]
     assert all(e["holdout_accessed"] is False for e in accesses)
@@ -376,12 +376,12 @@ def test_symlinked_data_dir_rejected(monkeypatch, tmp_path):
 
     def fake_realpath(p):
         rp = real(p)
-        if "klines_v10_45_4" in str(p):
+        if "klines_v10_45_5" in str(p):
             return str(outside)
         return rp
     monkeypatch.setattr(BF.os.path, "realpath", fake_realpath)
     with pytest.raises(ValueError):
-        BF._contained_path("bitget", "BTCUSDT", ".csv")
+        BF._dataset_dir("bitget", "BTCUSDT")
 
 
 # ==========================================================================
@@ -509,8 +509,8 @@ def test_code_tree_hash_and_ledger_provenance(tmp_path, monkeypatch):
                         runner_version=prov["runner_version"],
                         dirty_worktree=prov["dirty_worktree"])
     ENG.ledger_append({"phase": "test", "state": "OK"})
-    ledger = (tmp_path / "reports" / "research" / "v10_45_4_edge_discovery" /
-              "experiment_ledger_v10_45_4.jsonl")
+    ledger = (tmp_path / "reports" / "research" / "v10_45_5_edge_discovery" /
+              "experiment_ledger_v10_45_5.jsonl")
     e = json.loads(ledger.read_text(encoding="utf-8").splitlines()[-1])
     assert e["code_tree_hash"] == prov["code_tree_hash"]
     assert e["runner_version"] == ENG.RUNNER_VERSION
@@ -532,11 +532,16 @@ def test_m_computed_automatically_from_actual_trials(tmp_path, monkeypatch):
         stt, c = ENG.compile_strategy(s, seen)
         if stt == "OK":
             compiled.append(c)
-    out = ENG.run_funnel(bars, feats, compiled, n_trials_total=3,
-                         log=lambda *a: None)
-    assert out["m_raw"] >= len(compiled)          # counts real evaluations
-    assert out["m_effective"] == out["m_raw"] * 3
+    ENG.set_run_context()
+    out = ENG.run_funnel(bars, feats, compiled, log=lambda *a: None)
+    # V10.45.5: m comes from the PRE-REGISTERED enumeration (13 trials per
+    # spec + shared baselines), fixed BEFORE phase A ever runs
+    expected_members = len(ENG.enumerate_trial_members(
+        compiled, "TEST", "1m"))
+    assert out["m_effective"] == expected_members
+    assert out["m_effective"] >= 13 * len(compiled)
     assert out["n_trials_total"] == out["m_effective"]
+    assert out["registry_sha256"] is not None
 
 
 # ==========================================================================

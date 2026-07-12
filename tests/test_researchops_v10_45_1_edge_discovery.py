@@ -77,8 +77,12 @@ def test_sanitize_error_redacts_long_blobs_and_keys():
 def test_cache_roundtrip(tmp_path, monkeypatch):
     monkeypatch.setattr(P.CE, "_repo_root", lambda: tmp_path)
     P.cache_put("mock", "m1", "prompt-x", '{"a":1}')
-    assert P.cache_get("mock", "m1", "prompt-x") == '{"a":1}'
+    got = P.cache_get("mock", "m1", "prompt-x")
+    assert got is not None and json.loads(got) == {"a": 1}
     assert P.cache_get("mock", "m1", "prompt-OTHER") is None
+    # non-JSON bodies are NEVER stored: metadata-only entry -> cache MISS
+    P.cache_put("mock", "m1", "prompt-t", "plain text " + "body")
+    assert P.cache_get("mock", "m1", "prompt-t") is None
 
 
 def test_rate_limiter_pause_blocks():
@@ -315,8 +319,8 @@ def test_funnel_on_pure_noise_promotes_nothing(tmp_path, monkeypatch):
              if e["state"] == "PAPER_CANDIDATE_RESEARCH_ONLY"]
     # on 3000 bars of pure noise nothing should clear validation+holdout+stress
     assert len(paper) == 0
-    ledger = (tmp_path / "reports" / "research" / "v10_45_4_edge_discovery" /
-              "experiment_ledger_v10_45_4.jsonl")
+    ledger = (tmp_path / "reports" / "research" / "v10_45_5_edge_discovery" /
+              "experiment_ledger_v10_45_5.jsonl")
     assert ledger.is_file()
     lines = ledger.read_text(encoding="utf-8").strip().splitlines()
     assert len(lines) >= len(compiled)                       # every result logged
@@ -330,8 +334,10 @@ def test_planted_edge_is_found_by_funnel(tmp_path, monkeypatch):
     price, bars = 100.0, []
     n = 8000
     for i in range(n):
-        # planted: a strong 3-bar upward burst every 79 bars
-        drift = 0.004 if (i % 79) < 3 else rng.uniform(-0.0012, 0.0012)
+        # planted: a strong NOISY 3-bar upward burst every 79 bars (noise
+        # makes trade returns heterogeneous, as real signals are; perfectly
+        # identical returns are treated as DEGENERATE evidence by design)
+        drift = (0.004 + rng.uniform(-0.001, 0.001)) if (i % 79) < 3             else rng.uniform(-0.0012, 0.0012)
         new = price * (1 + drift)
         bars.append({"ts": T0 + i * BAR, "available_at": T0 + i * BAR + BAR,
                      "open": price, "high": max(price, new) * 1.0008,
@@ -344,9 +350,10 @@ def test_planted_edge_is_found_by_funnel(tmp_path, monkeypatch):
     _, spec = ENG.compile_strategy(_spec(
         strategy_id="planted_cycle_long",
         entry_conditions=[{"feature": "ret_1", "op": ">", "value": 0.003}],
-        stop_policy={"type": "fixed", "value": 0.008},
-        take_profit_policy={"type": "fixed", "value": 0.008},
-        time_exit=4, cooldown=3), seen)
+        stop_policy={"type": "fixed", "value": 0.012},
+        take_profit_policy={"type": "fixed", "value": 0.03},
+        time_exit=3, cooldown=3), seen)
+    ENG.set_run_context()
     out = ENG.run_funnel(bars, feats, [spec], log=lambda *a: None)
     # the engine DETECTS the real signal (merit gates pass) ...
     assert out["validation_survivors"] >= 1

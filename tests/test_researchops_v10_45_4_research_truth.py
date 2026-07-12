@@ -212,10 +212,11 @@ def test_verify_dataset_manifest_missing_and_orchestrator_fail_closed(
     monkeypatch.setattr(BF.CE, "_repo_root", lambda: tmp_path)
     v = BF.verify_dataset("bitget", "BTCUSDT")
     assert v["ok"] is False
-    assert v["status"] == "INVALID_DATA_MANIFEST_MISSING"
+    assert v["status"] == "INVALID_MANIFEST_CONTRACT"
+    assert v["detail"] == "NO_CURRENT_GENERATION"
     out = ORCH.run_edge_discovery(symbol="BTCUSDT", use_ai=False,
                                   write_reports=False, log=lambda *a: None)
-    assert out["status"] == "INVALID_DATA_MANIFEST_MISSING"
+    assert out["status"] == "INVALID_MANIFEST_CONTRACT"
     assert out["can_send_real_orders"] is False
     # fail-closed means NO funnel artifacts at all
     assert "funnel" not in out and "finalists" not in out
@@ -227,12 +228,14 @@ def test_verify_dataset_sha_mismatch(tmp_path, monkeypatch):
     BF.save_dataset("bitget", "BTCUSDT", rows, 3,
                     requested_start_ms=t_start, requested_end_ms=t_end)
     assert BF.verify_dataset("bitget", "BTCUSDT")["status"] == "DATASET_VERIFIED"
-    csv_path = BF._contained_path("bitget", "BTCUSDT", ".csv")
-    with open(csv_path, "a", encoding="utf-8") as f:
-        f.write("tampered,after,save\n")
+    cur = BF.current_generation("bitget", "BTCUSDT")
+    with open(cur["csv_path"], "a", encoding="utf-8", newline="") as f:
+        f.write("1700000000000,1,1,1,1,1,1" + chr(10))
     v = BF.verify_dataset("bitget", "BTCUSDT")
     assert v["ok"] is False
-    assert v["status"] == "INVALID_DATA_SHA_MISMATCH"
+    assert v["status"] == "INVALID_SHA"
+    # the strict loader also refuses: no CURRENT-consistent generation
+    assert BF.load_klines("bitget", "BTCUSDT") == []
 
 
 def test_gappy_dataset_blocks_and_no_longest_segment_rescue(
@@ -240,15 +243,12 @@ def test_gappy_dataset_blocks_and_no_longest_segment_rescue(
     """A dataset with ANY gap is INVALID for research. The old
     longest-contiguous-segment rescue path no longer exists anywhere."""
     monkeypatch.setattr(BF.CE, "_repo_root", lambda: tmp_path)
-    rows, t_start, t_end = _rows_1m()
+    rows, t_start, t_end = _rows_1m(drop=set(range(2000, 2010)))
     BF.save_dataset("bitget", "BTCUSDT", rows, 3,
                     requested_start_ms=t_start, requested_end_ms=t_end)
-    mpath = BF._contained_path("bitget", "BTCUSDT", "_manifest.json")
-    man = json.loads(mpath.read_text(encoding="utf-8"))
-    man["gap_count"] = 2                              # adversarial manifest
-    mpath.write_text(json.dumps(man), encoding="utf-8")
     v = BF.verify_dataset("bitget", "BTCUSDT")
-    assert v["status"] == "INVALID_DATA_GAPS"
+    # recomputed FROM THE CSV ROWS, row by row: the gap itself is found
+    assert v["status"] == "INVALID_GAP"
     assert not hasattr(ENG, "longest_contiguous_segment")
     src = Path(ORCH.__file__).read_text(encoding="utf-8")
     assert "longest_contiguous_segment" not in src
@@ -256,12 +256,12 @@ def test_gappy_dataset_blocks_and_no_longest_segment_rescue(
 
 def test_incomplete_download_blocks(tmp_path, monkeypatch):
     monkeypatch.setattr(BF.CE, "_repo_root", lambda: tmp_path)
-    rows, t_start, t_end = _rows_1m(drop=set(range(2000, 2010)))
+    rows, t_start, t_end = _rows_1m(drop=set(range(4310, 4320)))
     BF.save_dataset("bitget", "BTCUSDT", rows, 3,
                     requested_start_ms=t_start, requested_end_ms=t_end)
     v = BF.verify_dataset("bitget", "BTCUSDT")
     assert v["ok"] is False
-    assert v["status"] == "INVALID_DATA_DOWNLOAD_INCOMPLETE"
+    assert v["status"] == "INVALID_COVERAGE"
 
 
 def test_raw_quality_fail_blocks_before_resample(tmp_path, monkeypatch):
@@ -272,30 +272,43 @@ def test_raw_quality_fail_blocks_before_resample(tmp_path, monkeypatch):
     m = BF.save_dataset("bitget", "BTCUSDT", rows, 3,
                         requested_start_ms=t_start, requested_end_ms=t_end)
     assert m["raw_quality_pass"] is False             # detected at save time
-    mpath = BF._contained_path("bitget", "BTCUSDT", "_manifest.json")
-    man = json.loads(mpath.read_text(encoding="utf-8"))
-    man["download_complete"] = True                   # adversarial claim
-    mpath.write_text(json.dumps(man), encoding="utf-8")
     v = BF.verify_dataset("bitget", "BTCUSDT")
-    assert v["status"] == "INVALID_DATA_RAW_QUALITY"
+    # even a LYING manifest cannot help: every CSV row is re-parsed
+    assert v["status"] == "INVALID_OHLC"
+    with pytest.raises(BF.DatasetError):
+        BF.load_klines("bitget", "BTCUSDT")           # strict loader agrees
 
 
 # ==========================================================================
 # PHYSICALLY SEALED HOLDOUT + UNFORGEABLE TOKEN
 # ==========================================================================
 
-def test_sealed_holdout_blocks_without_or_with_forged_token():
+def test_sealed_holdout_blocks_without_or_with_forged_token(
+        tmp_path, monkeypatch):
+    monkeypatch.setattr(ENG.CE, "_repo_root", lambda: tmp_path)
     bars = _bars(600)
-    sealed = ENG.SealedHoldout(bars, None, 400, 600)
-    assert sealed.descriptor == {"sealed": True, "content": "opaque"}
+    desc = ENG.seal_holdout(bars, None, 400, 600,
+                            dataset_generation_id="g1",
+                            dataset_sha256="d" * 64,
+                            symbol="X", timeframe="1m")
+    # descriptor is OPAQUE: no bars, no counts, no timestamps of the range
+    assert desc["sealed"] is True and desc["content"] == "opaque"
+    dumped = json.dumps(desc)
+    assert "bars" not in desc and "local_h0" not in dumped
+    assert str(bars[400]["ts"]) not in dumped
+    bindings = ENG.holdout_bindings(
+        run_id="r", sprint_id="s", strategy_id="x", compiled_spec_sha="c",
+        validation_metrics_sha="v", dataset_generation_id="g1",
+        holdout_descriptor_sha=desc["descriptor_sha256"],
+        registry_sha256="rs")
     with pytest.raises(PermissionError):
-        sealed.open(None)
-    forged = ENG.HoldoutAccessToken("x", "y", _secret=object())
+        ENG.open_holdout(desc, None, bindings)        # no token
+    forged = {"bindings_sha256": "x" * 64, "nonce": "f" * 32,
+              "issued_at_ms": 0, "expires_at_ms": 10 ** 18,
+              "gate_version": ENG.GATE_VERSION,
+              "scope": "holdout_replay_once", "hmac": "0" * 64}
     with pytest.raises(PermissionError):
-        sealed.open(forged)
-    # private storage is name-mangled: no public attribute leaks the bars
-    public = [a for a in vars(sealed) if not a.startswith("_")]
-    assert public == ["descriptor"]
+        ENG.open_holdout(desc, forged, bindings)      # forged HMAC
 
 
 def _good_metrics():
@@ -326,18 +339,48 @@ def test_missing_baselines_block_holdout_token():
     assert "MATCHED_BASELINE_MISSING" in reasons
 
 
-def test_token_granted_without_proxies_opens_sealed_holdout():
+def test_token_granted_without_proxies_opens_sealed_holdout(
+        tmp_path, monkeypatch):
+    monkeypatch.setattr(ENG.CE, "_repo_root", lambda: tmp_path)
+    bars = _bars(600)
+    desc = ENG.seal_holdout(bars, None, 400, 600,
+                            dataset_generation_id="g1",
+                            dataset_sha256="d" * 64,
+                            symbol="X", timeframe="1m")
+    bindings = ENG.holdout_bindings(
+        run_id="r", sprint_id="s", strategy_id="s1", compiled_spec_sha="c",
+        validation_metrics_sha="v", dataset_generation_id="g1",
+        holdout_descriptor_sha=desc["descriptor_sha256"],
+        registry_sha256="rs")
     m = _good_metrics()
     token, reasons = ENG.issue_holdout_token(
         "s1", m, stress_ok=True, data_quality_pass=True,
         baseline_best_lb=0.0001, matched_baseline_ev=0.0001,
-        execution_proxies=())
+        execution_proxies=(), bindings=bindings)
     assert reasons == [] and token is not None
-    bars = _bars(600)
-    sealed = ENG.SealedHoldout(bars, None, 400, 600)
-    bars_full, feats_full, _ref, h0, h1 = sealed.open(token)
-    assert (h0, h1) == (400, 600)
-    assert len(feats_full) == len(bars_full) == 600
+    bars_ctx, feats_ctx, h0, h1 = ENG.open_holdout(desc, token, bindings)
+    # context = 300 pre-holdout bars (already-known data) + the holdout
+    assert (h0, h1) == (300, 500)
+    assert len(bars_ctx) == len(feats_ctx) == 500
+    # ONE-USE: the same token can never open the holdout again
+    with pytest.raises(PermissionError):
+        ENG.open_holdout(desc, token, bindings)
+    # a fresh token for ANOTHER strategy is invalid for these bindings
+    other = dict(bindings, strategy_id="s2")
+    token2, _ = ENG.issue_holdout_token(
+        "s2", m, stress_ok=True, data_quality_pass=True,
+        baseline_best_lb=0.0001, matched_baseline_ev=0.0001,
+        execution_proxies=(), bindings=other)
+    with pytest.raises(PermissionError):
+        ENG.open_holdout(desc, token2, bindings)
+    # changed validation metrics invalidate too
+    token3, _ = ENG.issue_holdout_token(
+        "s1", m, stress_ok=True, data_quality_pass=True,
+        baseline_best_lb=0.0001, matched_baseline_ev=0.0001,
+        execution_proxies=(), bindings=bindings)
+    with pytest.raises(PermissionError):
+        ENG.open_holdout(desc, token3,
+                         dict(bindings, validation_metrics_sha="CHANGED"))
 
 
 def test_funnel_with_no_survivor_reports_zero_holdout_accesses(
@@ -360,8 +403,9 @@ def _planted_bars(n=8000, reverse_from=None):
     price, bars = 100.0, []
     for i in range(n):
         if (i % 79) < 3:
-            drift = -0.004 if (reverse_from is not None
-                               and i >= reverse_from) else 0.004
+            base = -0.004 if (reverse_from is not None
+                              and i >= reverse_from) else 0.004
+            drift = base + rng.uniform(-0.001, 0.001)   # heterogeneous
         else:
             drift = rng.uniform(-0.0012, 0.0012)
         new = price * (1 + drift)
@@ -378,9 +422,9 @@ def _planted_spec(sid="planted_cycle_long"):
     _, spec = ENG.compile_strategy(_spec(
         strategy_id=sid,
         entry_conditions=[{"feature": "ret_1", "op": ">", "value": 0.003}],
-        stop_policy={"type": "fixed", "value": 0.008},
-        take_profit_policy={"type": "fixed", "value": 0.008},
-        time_exit=4, cooldown=3), set())
+        stop_policy={"type": "fixed", "value": 0.012},
+        take_profit_policy={"type": "fixed", "value": 0.03},
+        time_exit=3, cooldown=3), set())
     return spec
 
 
@@ -394,11 +438,13 @@ def test_unstable_holdout_is_never_promoted(tmp_path, monkeypatch):
     feats = ENG.build_features(bars)
     real_issue = ENG.issue_holdout_token
 
-    def waive_proxies(sid, m, stress_ok, dqp, blb, mbe, execution_proxies=None):
+    def waive_proxies(sid, m, stress_ok, dqp, blb, mbe,
+                      execution_proxies=None, bindings=None):
         return real_issue(sid, m, stress_ok, dqp, blb, mbe,
-                          execution_proxies=())
+                          execution_proxies=(), bindings=bindings)
 
     monkeypatch.setattr(ENG, "issue_holdout_token", waive_proxies)
+    ENG.set_run_context()
     out = ENG.run_funnel(bars, feats, [_planted_spec()], log=lambda *a: None)
     assert out["validation_survivors"] >= 1           # DV edge is real
     assert out["holdout_accesses"] == 1               # token was granted
@@ -446,49 +492,63 @@ def test_two_phase_registry_same_m_global_across_members(tmp_path, monkeypatch):
     seg = ENG.split_indices(len(bars))
     v1 = seg["validation"][1]
     h0, h1 = seg["holdout"]
-    sealed = ENG.SealedHoldout(bars, None, h0, h1)
+    compiled = [_planted_spec("m1"), _planted_spec("m2")]
+    sealed = ENG.seal_holdout(bars, None, h0, h1,
+                              dataset_generation_id="g1",
+                              dataset_sha256="d" * 64,
+                              symbol="X", timeframe="1m")
+    members = ENG.enumerate_trial_members(compiled, "X", "1m")
+    ENG.registry_open("sp_test", members)
+    with pytest.raises(ValueError, match="REGISTRY_ALREADY"):
+        ENG.registry_open("sp_test", members)         # no reopening
+    with pytest.raises(ValueError, match="REGISTRY_M_MISMATCH"):
+        ENG.registry_close("sp_test", 999, ["r1"])    # m must equal members
+    closed = ENG.registry_close("sp_test", len(members), ["r1"])
+    with pytest.raises(ValueError, match="REGISTRY_DOUBLE_CLOSE"):
+        ENG.registry_close("sp_test", len(members), ["r1"])
+    m_global = closed["m_global"]
+    assert m_global == len(members) >= 13 * len(compiled)
+    ENG.set_run_context(run_id="r1", sprint_id="sp_test", symbol="X",
+                        timeframe="1m",
+                        registry_sha_at_close=closed["registry_sha256"],
+                        dataset_generation_id="g1",
+                        holdout_descriptor_sha=sealed["descriptor_sha256"])
     quiet = lambda *a: None
-    stA1 = ENG.run_funnel_phase_a(bars[:v1], feats[:v1],
-                                  [_planted_spec("m1")], seg, log=quiet)
-    stA2 = ENG.run_funnel_phase_a(bars[:v1], feats[:v1],
-                                  [_planted_spec("m2")], seg, log=quiet)
-    m_global = stA1["m_partial"] + stA2["m_partial"]
-    ENG.registry_append({"kind": "sprint_member", "sprint_id": "sp_test",
-                         "run_id": "r1", "m_partial": stA1["m_partial"],
-                         "m_global": m_global})
-    ENG.registry_append({"kind": "sprint_member", "sprint_id": "sp_test",
-                         "run_id": "r2", "m_partial": stA2["m_partial"],
-                         "m_global": m_global})
-    ENG.registry_close("sp_test", m_global, ["r1", "r2"])
-    assert ENG.registry_sha() is not None
-    fB1 = ENG.run_funnel_phase_b(stA1, sealed, m_global, log=quiet)
-    fB2 = ENG.run_funnel_phase_b(stA2, sealed, m_global, log=quiet)
-    for f in (fB1, fB2):
-        assert f["m_effective"] == m_global           # SAME total everywhere
-        vals = [e for e in f["results"] if e.get("phase") == "validation"]
-        assert vals, "planted edge must reach validation"
-        for e in vals:
-            assert e["n_tests_applied"] == m_global
-            assert e["metrics"]["n_tests_applied"] == m_global
-    reg = (tmp_path / "reports" / "research" / "v10_45_4_edge_discovery" /
-           ENG.REGISTRY_FILE).read_text(encoding="utf-8")
-    kinds = [json.loads(x)["kind"] for x in reg.splitlines() if x.strip()]
-    assert kinds.count("sprint_member") == 2
-    assert kinds.count("sprint_close") == 1
+    stA = ENG.run_funnel_phase_a(bars[:v1], feats[:v1], compiled, seg,
+                                 log=quiet)
+    fB = ENG.run_funnel_phase_b(stA, sealed, m_global, log=quiet)
+    assert fB["m_effective"] == m_global              # SAME total everywhere
+    vals = [e for e in fB["results"] if e.get("phase") == "validation"]
+    assert vals, "planted edge must reach validation"
+    for e in vals:
+        assert e["n_tests_applied"] == m_global
+        assert e["metrics"]["n_tests_applied"] == m_global
+    # empty pre-registration is refused
+    with pytest.raises(ValueError, match="REGISTRY_OPEN_EMPTY"):
+        ENG.registry_open("sp_empty", [])
+    # duplicate members are refused
+    dup = members[:1] * 2
+    with pytest.raises(ValueError, match="REGISTRY_DUPLICATE_MEMBERS"):
+        ENG.registry_open("sp_dup", dup)
+    # running phase A BEFORE any close is refused
+    ENG.set_run_context(run_id="rX", sprint_id="sp_never_closed", symbol="X",
+                        timeframe="1m", registry_sha_at_close="zz")
+    with pytest.raises(ValueError, match="REGISTRY_NOT_CLOSED"):
+        ENG.run_funnel_phase_a(bars[:v1], feats[:v1], compiled, seg,
+                               log=quiet)
 
 
 def test_registry_closed_rejects_new_trials(tmp_path, monkeypatch):
     monkeypatch.setattr(ENG.CE, "_repo_root", lambda: tmp_path)
-    ENG.registry_append({"kind": "sprint_member", "sprint_id": "sp_x",
-                         "run_id": "r1", "m_partial": 10, "m_global": 10})
-    ENG.registry_close("sp_x", 10, ["r1"])
+    members = ENG.enumerate_trial_members([_compile(strategy_id="s1")],
+                                          "X", "1m")
+    ENG.registry_open("sp_x", members)
+    ENG.registry_close("sp_x", len(members), ["r1"])
     with pytest.raises(ValueError, match="REGISTRY_CLOSED"):
-        ENG.registry_append({"kind": "sprint_member", "sprint_id": "sp_x",
-                             "run_id": "r_late", "m_partial": 5,
-                             "m_global": 15})
+        ENG.registry_append({"kind": "trial", "sprint_id": "sp_x",
+                             "member_id": "late", "strategy_id": "late"})
     # other sprints stay open
-    ENG.registry_append({"kind": "sprint_member", "sprint_id": "sp_y",
-                         "run_id": "r9", "m_partial": 3, "m_global": 3})
+    ENG.registry_append({"kind": "note", "sprint_id": "sp_y", "run_id": "r9"})
 
 
 # ==========================================================================
@@ -522,9 +582,18 @@ def test_baseline_never_duplicates_entry_timestamps():
     trades = [_trade(300 + (i % 3), 300 + (i % 3) + 10, 0.001)
               for i in range(20)]
     mb = ENG.exposure_matched_baseline(bars, spec, trades, 300, 316)
-    assert mb["status"] == "OK"
-    assert mb["no_duplicate_timestamps"] is True
-    assert mb["mean_placed_per_seed"] <= 5 < mb["matched_entries"]
+    # V10.45.5 FAIL-CLOSED: the used-set forbids duplicated timestamps, so
+    # only a handful can be placed -> the baseline must declare itself
+    # INCOMPLETE and block the holdout, never degrade silently
+    assert mb["status"] == "BASELINE_INCOMPLETE"
+    assert mb["holdout_blocked"] is True
+    assert mb["mean_EV"] is None
+    assert mb["requested"] == 20
+    assert mb["min_placed"] < 20
+    seed0 = mb["per_seed"][0]
+    assert seed0["requested"] == 20 and seed0["placed"] < 20
+    assert seed0["rejected"] == 20 - seed0["placed"]
+    assert "NO_FREE_WINDOW" in seed0["rejection_reasons"]
 
 
 # ==========================================================================
@@ -533,7 +602,7 @@ def test_baseline_never_duplicates_entry_timestamps():
 
 def test_safe_atomic_write_verified_and_no_tmp_residue(tmp_path, monkeypatch):
     monkeypatch.setattr(BF.CE, "_repo_root", lambda: tmp_path)
-    d = tmp_path / "external_data" / "staging" / "klines_v10_45_4"
+    d = tmp_path / "external_data" / "staging" / "klines_v10_45_5"
     d.mkdir(parents=True)
     p = d / "x.csv"
     data = b"ts,open\n1,2\n"
@@ -575,7 +644,7 @@ def test_failure_between_csv_and_manifest_leaves_no_valid_pair(
     orig = BF.safe_atomic_write
 
     def crash_on_manifest(path, data):
-        if str(path).endswith("_manifest.json"):
+        if str(path).endswith("manifest.json"):
             raise IOError("simulated crash between CSV and manifest")
         return orig(path, data)
 
@@ -584,9 +653,16 @@ def test_failure_between_csv_and_manifest_leaves_no_valid_pair(
         BF.save_dataset("bitget", "BTCUSDT", rows, 3,
                         requested_start_ms=t_start, requested_end_ms=t_end)
     monkeypatch.setattr(BF, "safe_atomic_write", orig)
+    # the CURRENT marker was never written: the orphan CSV is NOT a
+    # generation, the verifier fails closed and the loader sees nothing
     v = BF.verify_dataset("bitget", "BTCUSDT")
-    assert v["ok"] is False                           # orphan CSV != valid pair
-    assert v["status"] == "INVALID_DATA_MANIFEST_MISSING"
+    assert v["ok"] is False
+    assert v["status"] == "INVALID_MANIFEST_CONTRACT"
+    assert v["detail"] == "NO_CURRENT_GENERATION"
+    assert BF.load_klines("bitget", "BTCUSDT") == []
+    rec = BF.recover_staging("bitget", "BTCUSDT")
+    assert rec["current_generation"] is None
+    assert len(rec["orphan_generations"]) == 1        # kept, never current
 
 
 # ==========================================================================
@@ -603,10 +679,11 @@ def test_sanitize_obj_redacts_short_secrets_and_nested_structures():
     clean = P.sanitize_obj(obj)
     dumped = json.dumps(clean)
     assert secret_short not in dumped.replace("public", "")
-    assert clean["API-Key"] == "<redacted>"
-    assert clean["Authorization"] == "<redacted>"
-    assert clean["nested"][0]["access_token"] == "<redacted>"
-    assert clean["nested"][1]["Client-Secret"] == "<redacted>"
+    # V10.45.5 allowlist policy: sensitive keys are REMOVED entirely
+    assert "API-Key" not in clean
+    assert "Authorization" not in clean
+    assert "access_token" not in clean["nested"][0]
+    assert "Client-Secret" not in clean["nested"][1]
     assert clean["note"] == "public text"
     assert clean["nested"][0]["keep"] == "fine"
 
@@ -635,14 +712,20 @@ def test_cache_never_stores_sensitive_fields(tmp_path, monkeypatch):
     files = list(tmp_path.rglob("mock_*.json"))
     assert len(files) == 1
     raw = files[0].read_text(encoding="utf-8")
-    assert secret not in raw
-    assert "<redacted>" in raw
+    assert secret not in raw                          # value gone from disk
     got = P.cache_get("mock", "m1", "prompt-1")
     assert secret not in got
+    assert "api_key" not in json.loads(got)           # key REMOVED entirely
     assert "strategies here" in got
-    # clean JSON stays byte-identical (provenance-exact cache)
+    # clean JSON round-trips semantically (allowlist re-serialization)
     P.cache_put("mock", "m1", "prompt-2", '{"a":1}')
-    assert P.cache_get("mock", "m1", "prompt-2") == '{"a":1}'
+    assert json.loads(P.cache_get("mock", "m1", "prompt-2")) == {"a": 1}
+    # non-JSON bodies are NEVER stored
+    P.cache_put("mock", "m1", "prompt-3", "raw text with maybe-" + "secrets")
+    assert P.cache_get("mock", "m1", "prompt-3") is None
+    metas = [p for p in tmp_path.rglob("mock_*.json")
+             if "non_json_meta" in p.read_text(encoding="utf-8")]
+    assert metas and "maybe-" not in metas[0].read_text(encoding="utf-8")
 
 
 # ==========================================================================
@@ -672,14 +755,17 @@ def test_last_closed_5m_bucket_kept_only_with_as_of():
 def test_write_commit_seal_is_fail_closed_and_versioned(tmp_path, monkeypatch):
     monkeypatch.setattr(ENG.CE, "_repo_root", lambda: tmp_path)
     seal = ENG.write_commit_seal(expected_commit="deadbeef" * 5)
-    p = (tmp_path / "reports" / "research" / "v10_45_4_edge_discovery" /
-         "commit_seal_v10_45_4.json")
+    p = (tmp_path / "reports" / "research" / "v10_45_5_edge_discovery" /
+         "commit_seal_v10_45_5.json")
     assert p.is_file()
     on_disk = json.loads(p.read_text(encoding="utf-8"))
-    assert on_disk["match"] is False                  # no git here -> no claim
-    for k in ("code_tree_hash", "files", "runner_version", "registry_file",
-              "registry_sha256", "dirty_worktree", "tool_version"):
+    assert on_disk["match"] is False        # no git, no output manifest here
+    for k in ("git_tree_oid", "relevant_blob_oids", "semantic_code_hash",
+              "files", "runner_version", "registry_file", "registry_sha256",
+              "output_manifest_sha256", "certifies", "dirty_tracked_files",
+              "tool_version"):
         assert k in on_disk
-    assert on_disk["tool_version"] == "v10.45.4"
+    assert "output_manifest" in on_disk["certifies"]
+    assert on_disk["tool_version"] == "v10.45.5"
     assert on_disk["can_send_real_orders"] is False
     assert seal["final_recommendation"].startswith("NO LIVE")

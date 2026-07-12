@@ -37,9 +37,9 @@ from typing import Any
 from . import FINAL_RECOMMENDATION_NO_LIVE
 from . import continuous_edge_factory_v10_38 as CE
 
-TOOL_VERSION = "v10.45.4"
+TOOL_VERSION = "v10.45.5"
 CACHE_SUBDIR = ("external_data", "staging", "ai_cache_v10_45_1")
-OUTPUT_SUBDIR = ("reports", "research", "v10_45_4_edge_discovery")
+OUTPUT_SUBDIR = ("reports", "research", "v10_45_5_edge_discovery")
 
 OLLAMA_BASE = "http://localhost:11434"
 GROQ_BASE = "https://api.groq.com/openai/v1"
@@ -107,19 +107,21 @@ _SENSITIVE_KEYS = re.compile(
 
 def sanitize_obj(obj):
     """STRUCTURAL sanitization for nested dicts/lists: any key that names a
-    credential is redacted regardless of value length or case; strings pass
-    through sanitize_error. Successful responses are sanitized BEFORE caching
-    — the cache can never store a sensitive field even if a provider echoes
-    one back."""
+    credential is REMOVED regardless of value length or case. Remaining
+    strings pass through the TARGETED redaction rules only (key=value,
+    Bearer/Basic, query strings, URL-encoded): the generic long-blob rule is
+    for opaque error text and would corrupt benign long identifiers inside
+    already-structured JSON."""
     if isinstance(obj, dict):
-        return {k: ("<redacted>" if _SENSITIVE_KEYS.match(str(k))
-                    else sanitize_obj(v))
-                for k, v in obj.items()}
+        return {k: sanitize_obj(v) for k, v in obj.items()
+                if not _SENSITIVE_KEYS.match(str(k))}
     if isinstance(obj, list):
         return [sanitize_obj(x) for x in obj]
     if isinstance(obj, str):
-        return sanitize_error(obj) if len(obj) > 20 or "=" in obj or ":" in obj \
-            else obj
+        out = obj
+        for pat, repl in _SANITIZE_PATTERNS[:-1]:
+            out = pat.sub(repl, out)
+        return out
     return obj
 
 
@@ -159,9 +161,8 @@ def parse_retry_after(value: str | None) -> float | None:
 
 
 def _cache_dir() -> Path:
-    d = CE._repo_root().joinpath(*CACHE_SUBDIR)
-    d.mkdir(parents=True, exist_ok=True)
-    return d
+    from . import public_data_backfill_v10_45_1 as BF
+    return BF.validated_dir(*CACHE_SUBDIR)
 
 
 def _cache_key(provider: str, model: str, prompt: str, version: str = TOOL_VERSION) -> str:
@@ -170,26 +171,43 @@ def _cache_key(provider: str, model: str, prompt: str, version: str = TOOL_VERSI
 
 
 def cache_get(provider: str, model: str, prompt: str) -> str | None:
+    """Returns the sanitized JSON body for structured entries; metadata-only
+    entries (non-JSON responses) always MISS so the caller re-generates."""
     p = _cache_dir() / f"{provider}_{_cache_key(provider, model, prompt)}.json"
     if not p.is_file():
         return None
     try:
         obj = json.loads(p.read_text(encoding="utf-8"))
+        if obj.get("kind") != "json":
+            return None
         return obj.get("response")
     except Exception:
         return None
 
 
 def cache_put(provider: str, model: str, prompt: str, response: str) -> None:
+    """FAIL-CLOSED cache policy:
+    * structured JSON -> parse, DROP every sensitive-named field recursively,
+      sanitize remaining strings, serialize the CLEAN object;
+    * anything else -> NEVER store the body: allowed metadata only (provider,
+      model, hash, timestamp);
+    * written via validated dir + exclusive temp + atomic replace."""
+    from . import public_data_backfill_v10_45_1 as BF
     p = _cache_dir() / f"{provider}_{_cache_key(provider, model, prompt)}.json"
+    meta = {"provider": provider, "model": model,
+            "cached_at": datetime.now(timezone.utc).isoformat(),
+            "prompt_sha": _cache_key(provider, model, prompt),
+            "response_sha256": hashlib.sha256(
+                str(response).encode("utf-8", errors="replace")).hexdigest()}
     try:
-        p.write_text(json.dumps({"provider": provider, "model": model,
-                                 "cached_at": datetime.now(timezone.utc).isoformat(),
-                                 "prompt_sha": _cache_key(provider, model, prompt),
-                                 # sanitized BEFORE storage: the cache never
-                                 # holds a credential a provider echoed back
-                                 "response": sanitize_response_text(response)}),
-                     encoding="utf-8")
+        obj = json.loads(response)
+        clean = sanitize_obj(obj)
+        entry = {**meta, "kind": "json", "response": json.dumps(clean)}
+    except Exception:
+        entry = {**meta, "kind": "non_json_meta", "response": None,
+                 "note": "raw non-JSON bodies are never cached"}
+    try:
+        BF.safe_atomic_write(p, json.dumps(entry).encode("utf-8"))
     except Exception:
         pass
 

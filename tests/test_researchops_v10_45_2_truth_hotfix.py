@@ -272,11 +272,15 @@ def test_symbol_whitelist_rejects_traversal(bad):
 
 def test_contained_path_stays_inside_data_dir(monkeypatch, tmp_path: Path):
     monkeypatch.setattr(BF.CE, "_repo_root", lambda: tmp_path)
-    p = BF._contained_path("bitget", "BTCUSDT", ".csv")
+    p = BF._dataset_dir("bitget", "BTCUSDT")
     base = tmp_path.resolve()
-    assert base in p.parents
+    assert base in p.resolve().parents
     with pytest.raises(ValueError):
-        BF._contained_path("evil_venue", "BTCUSDT", ".csv")
+        BF._dataset_dir("evil_venue", "BTCUSDT")
+    with pytest.raises(ValueError):
+        BF.validated_dir("external_data", "..", "escape")
+    with pytest.raises(ValueError):
+        BF.validated_dir("external_data", "a/b")
 
 
 # ==========================================================================
@@ -404,8 +408,8 @@ def test_ledger_entries_carry_run_provenance(tmp_path, monkeypatch):
                         timeframe="1m", cost_config=dict(ENG.DEFAULT_COSTS))
     ENG.ledger_append({"phase": "compile", "state": "INVALID",
                        "strategy_id": "x"})
-    ledger = (tmp_path / "reports" / "research" / "v10_45_4_edge_discovery" /
-              "experiment_ledger_v10_45_4.jsonl")
+    ledger = (tmp_path / "reports" / "research" / "v10_45_5_edge_discovery" /
+              "experiment_ledger_v10_45_5.jsonl")
     entry = json.loads(ledger.read_text(encoding="utf-8").splitlines()[-1])
     for k in ("run_id", "repo_commit", "dataset_sha256", "symbol",
               "timeframe", "cost_config", "at", "phase", "state"):

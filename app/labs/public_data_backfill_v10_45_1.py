@@ -1,9 +1,10 @@
-"""ResearchOps V10.45.1 - Public historical kline backfill (research only).
+"""ResearchOps V10.45.5 - Public historical kline backfill (research only).
 
 Downloads PUBLIC 1m klines from Bitget (target venue) and Bybit (cross-venue
 reference) — no keys, no private endpoints, market-data endpoints only — and
-registers every dataset with a full manifest: source, venue, symbol, period,
-timezone, gaps, duplicates, checksum, availability contract and limitations.
+publishes every dataset as a content-addressed GENERATION (CSV + manifest +
+atomic CURRENT marker). Verification is derived from the CSV itself: the
+manifest is only the expected contract, never the source of truth.
 
 The point-in-time contract for downstream research: a bar with open time T is
 COMPLETE and available at T + timeframe. Features may only use bars whose
@@ -14,10 +15,14 @@ from __future__ import annotations
 
 import csv
 import hashlib
+import io
 import json
+import math
 import os
 import re
+import stat as _stat
 import subprocess
+import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -27,12 +32,13 @@ from . import FINAL_RECOMMENDATION_NO_LIVE
 from . import continuous_edge_factory_v10_38 as CE
 from .ai_providers_v10_45_1 import _http_json, sanitize_error
 
-TOOL_VERSION = "v10.45.4"
-DOWNLOADER_VERSION = ("v10.45.4 (pagination end=batch_min live-probed; window "
-                      "trim to requested range; download completeness contract; "
-                      "raw per-candle validation; symlink+hardlink containment; "
-                      "atomic fsync writes)")
-DATA_SUBDIR = ("external_data", "staging", "klines_v10_45_4")
+TOOL_VERSION = "v10.45.5"
+DOWNLOADER_VERSION = ("v10.45.5 (pagination end=batch_min live-probed; "
+                      "content-addressed CSV+manifest generations with atomic "
+                      "CURRENT marker; CSV-derived verification; strict "
+                      "order-preserving loader; pre-mkdir path validation; "
+                      "exclusive temp files with mandatory fsync)")
+DATA_SUBDIR = ("external_data", "staging", "klines_v10_45_5")
 COMPLETENESS_TOLERANCE_BARS = 3   # last candle may still be open + boundary jitter
 BITGET_BASE = "https://api.bitget.com"
 BYBIT_BASE = "https://api.bybit.com"
@@ -42,6 +48,8 @@ SYMBOL_RE = re.compile(r"^[A-Z0-9]{3,20}$")
 ALLOWED_VENUES = ("bitget", "bybit")
 WINDOWS_RESERVED = {"CON", "PRN", "AUX", "NUL"} | {f"COM{i}" for i in range(1, 10)} \
     | {f"LPT{i}" for i in range(1, 10)}
+CSV_HEADER = ["ts", "open", "high", "low", "close", "volume", "turnover"]
+CURRENT_MARKER = "CURRENT.json"
 
 
 def validate_symbol(symbol: str) -> str:
@@ -53,40 +61,136 @@ def validate_symbol(symbol: str) -> str:
     return s
 
 
-def _contained_path(venue: str, symbol: str, suffix: str) -> Path:
-    """Build an output path and PROVE it stays inside the data directory —
-    including when the data directory itself (or a parent) is a symlink or
-    Windows junction pointing outside the repo (reparse-point escape)."""
-    if venue not in ALLOWED_VENUES:
-        raise ValueError(f"invalid venue: {str(venue)[:20]!r}")
-    sym = validate_symbol(symbol)
-    base = _data_dir()
-    repo_real = Path(os.path.realpath(str(CE._repo_root())))
-    base_real = Path(os.path.realpath(str(base)))
-    if repo_real != base_real and repo_real not in base_real.parents:
-        raise ValueError("data directory escapes the repository root "
-                         "(symlink/junction detected)")
-    p = Path(os.path.realpath(str(base / f"{venue}_{sym}_1m{suffix}")))
-    if base_real != p.parent and base_real not in p.parents:
-        raise ValueError("path escapes data directory")
-    return p
-
-
 def _safety() -> dict[str, Any]:
     return {"research_only": True, "public_endpoints_only": True,
             "uses_api_keys": False, "can_send_real_orders": False,
             "final_recommendation": FINAL_RECOMMENDATION_NO_LIVE}
 
 
-def _data_dir() -> Path:
-    d = CE._repo_root().joinpath(*DATA_SUBDIR)
-    d.mkdir(parents=True, exist_ok=True)
-    return d
-
-
 def _now_ms() -> int:
     return int(time.time() * 1000)
 
+
+# ==========================================================================
+# PATH SAFETY: validate root and every parent BEFORE any mkdir
+# ==========================================================================
+
+_REPARSE_ATTR = 0x400          # FILE_ATTRIBUTE_REPARSE_POINT (junctions too)
+
+
+def _is_link_like(p) -> bool:
+    """True for symlinks AND Windows junctions/reparse points (lstat-based,
+    never follows the link)."""
+    try:
+        st_ = os.lstat(p)
+    except OSError:
+        return False
+    if getattr(st_, "st_file_attributes", 0) & _REPARSE_ATTR:
+        return True
+    return _stat.S_ISLNK(st_.st_mode)
+
+
+def validated_dir(*parts: str) -> Path:
+    """Return repo_root/<parts...> creating missing components ONE at a time,
+    validating each existing component BEFORE mkdir: no symlink, junction or
+    reparse point anywhere in the chain, no traversal metacharacters, and the
+    final real path must stay inside the repository root. mkdir never follows
+    a link because the parent was validated first."""
+    root = Path(os.path.realpath(str(CE._repo_root())))
+    if not root.is_dir():
+        raise ValueError("repository root is not a directory")
+    cur = root
+    for part in parts:
+        p = str(part)
+        if not p or p in (".", "..") or any(c in p for c in "/\\:"):
+            raise ValueError(f"invalid path component: {p[:40]!r}")
+        cur = cur / p
+        if os.path.lexists(cur):
+            if _is_link_like(cur):
+                raise ValueError(f"link/junction/reparse point in path: {p!r}")
+            if not cur.is_dir():
+                raise ValueError(f"path component is not a directory: {p!r}")
+        else:
+            os.mkdir(cur)                     # parent already validated
+        real = Path(os.path.realpath(str(cur)))
+        if root != real and root not in real.parents:
+            raise ValueError("directory escapes repository root")
+    return cur
+
+
+def _dataset_dir(venue: str, symbol: str) -> Path:
+    if venue not in ALLOWED_VENUES:
+        raise ValueError(f"invalid venue: {str(venue)[:20]!r}")
+    sym = validate_symbol(symbol)
+    return validated_dir(*DATA_SUBDIR, f"{venue}_{sym}_1m")
+
+
+# ==========================================================================
+# EXCLUSIVE TEMP FILES + ATOMIC, VERIFIED WRITES
+# ==========================================================================
+
+def safe_atomic_write(path, data: bytes) -> str:
+    """Atomic write with an EXCLUSIVE random-named temp file:
+
+    * destination parent validated (containment, no link/reparse);
+    * destination itself refused if it is a link or hardlinked (st_nlink>1);
+    * temp created by tempfile.mkstemp (O_CREAT|O_EXCL) inside the validated
+      directory, handle kept from creation through write;
+    * write -> flush -> fsync (an fsync failure RAISES, never fake success);
+    * temp content verified by SHA before the atomic replace;
+    * destination verified by SHA after the replace;
+    * the temp file is removed on ANY exception."""
+    path = Path(path)
+    parent = path.parent
+    base = Path(os.path.realpath(str(parent)))
+    repo_real = Path(os.path.realpath(str(CE._repo_root())))
+    if repo_real != base and repo_real not in base.parents:
+        raise ValueError("write target escapes repository root")
+    if _is_link_like(parent):
+        raise ValueError("destination directory is a link/reparse point")
+    if os.path.lexists(path):
+        if _is_link_like(path):
+            raise ValueError("destination is a symlink/reparse point")
+        st_ = os.stat(path)
+        if getattr(st_, "st_nlink", 1) > 1:
+            raise ValueError("refusing to overwrite a hardlinked file")
+    expected = hashlib.sha256(data).hexdigest()
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".part",
+                                    dir=str(base))
+    tmp = Path(tmp_name)
+    fd_open = True
+    try:
+        st_t = os.fstat(fd)
+        if getattr(st_t, "st_nlink", 1) > 1:
+            raise ValueError("temp file is hardlinked")
+        os.write(fd, data)
+        os.fsync(fd)                          # failure RAISES: no fake success
+        os.close(fd)
+        fd_open = False
+        if hashlib.sha256(tmp.read_bytes()).hexdigest() != expected:
+            raise IOError("temp content verification failed")
+        os.replace(tmp, path)
+    except BaseException:
+        if fd_open:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        try:
+            if tmp.exists():
+                os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+    sha = hashlib.sha256(path.read_bytes()).hexdigest()
+    if sha != expected:
+        raise IOError("post-write SHA verification failed")
+    return sha
+
+
+# ==========================================================================
+# DOWNLOAD (unchanged pagination semantics, live-probed in V10.45.2)
+# ==========================================================================
 
 def paginate_klines(fetch_page, end_ms: int, target_start_ms: int,
                     max_requests: int, log=print, label: str = "") -> list[list]:
@@ -96,12 +200,10 @@ def paginate_klines(fetch_page, end_ms: int, target_start_ms: int,
     from `end = batch_min` (the smallest open-ts of the batch). Probed LIVE on
     Bitget: /history-candles returns candles whose CLOSE <= endTime, so with
     endTime = batch_min the candle opening at batch_min - BAR_MS (closing at
-    batch_min) is included and batch_min itself is not re-sent. For venues
-    keyed on the open (inclusive or exclusive) the same endTime either
-    re-sends batch_min (absorbed by the ts-keyed dict) or continues cleanly —
-    no candle is lost under ANY of the three semantics. The V10.45.1 bug
-    subtracted a full BAR_MS, silently dropping one candle per page (644
-    phantom 'gaps' in 129k bars = exactly 1 per page)."""
+    batch_min) is included and batch_min itself is not re-sent. INGEST is the
+    only place allowed to sort/dedupe (exchange pages arrive newest-first);
+    everything downstream of the published CSV preserves order and fails on
+    any violation instead."""
     rows: dict[int, list] = {}
     end = end_ms
     requests = 0
@@ -166,6 +268,10 @@ def fetch_bybit_1m(symbol: str, days: int, log=print,
                            label=f"bybit {symbol}")
 
 
+# ==========================================================================
+# RAW QUALITY (shared by ingest and CSV-derived verification)
+# ==========================================================================
+
 def strict_quality(ts_list: list[int], bar_ms: int = BAR_MS) -> dict[str, Any]:
     """STRICT continuity: only delta == bar_ms is continuous. Anything else is
     a gap, duplicate or irregularity — a 2-minute step on 1m data is a gap."""
@@ -207,8 +313,7 @@ def validate_raw_candle(row: list) -> bool:
                             float(row[4]), float(row[5]), float(row[6]))
     except (TypeError, ValueError, IndexError):
         return False
-    import math as _m
-    if ts <= 0 or not all(_m.isfinite(x) for x in (o, h, l, c, v, t)):
+    if ts <= 0 or not all(math.isfinite(x) for x in (o, h, l, c, v, t)):
         return False
     if v < 0 or t < 0 or o <= 0 or c <= 0 or l <= 0:
         return False
@@ -226,74 +331,9 @@ def raw_quality_report(rows: list[list]) -> dict[str, Any]:
             "raw_quality_pass": bool(ts_q["quality_pass"] and invalid == 0)}
 
 
-def verify_dataset(venue: str, symbol: str) -> dict[str, Any]:
-    """FAIL-CLOSED dataset verification, mandatory before resampling or
-    feature construction. Structured statuses, never silent trimming."""
-    try:
-        csv_path = _contained_path(venue, symbol, ".csv")
-        man_path = _contained_path(venue, symbol, "_manifest.json")
-    except ValueError as exc:
-        return {"ok": False, "status": "INVALID_DATA_PATH",
-                "detail": str(exc)[:120]}
-    if not man_path.is_file():
-        return {"ok": False, "status": "INVALID_DATA_MANIFEST_MISSING"}
-    try:
-        manifest = json.loads(man_path.read_text(encoding="utf-8"))
-    except Exception:
-        return {"ok": False, "status": "INVALID_DATA_MANIFEST_CORRUPT"}
-    if not csv_path.is_file():
-        return {"ok": False, "status": "INVALID_DATA_CSV_MISSING"}
-    sha = hashlib.sha256(csv_path.read_bytes()).hexdigest()
-    if sha != manifest.get("sha256"):
-        return {"ok": False, "status": "INVALID_DATA_SHA_MISMATCH",
-                "manifest_sha": str(manifest.get("sha256"))[:16],
-                "actual_sha": sha[:16]}
-    if manifest.get("download_complete") is not True:
-        return {"ok": False, "status": "INVALID_DATA_DOWNLOAD_INCOMPLETE",
-                "coverage_ratio": manifest.get("coverage_ratio")}
-    if manifest.get("raw_quality_pass") is not True:
-        return {"ok": False, "status": "INVALID_DATA_RAW_QUALITY",
-                "invalid_candles": manifest.get("invalid_candles")}
-    if (manifest.get("gap_count") or 0) > 0:
-        return {"ok": False, "status": "INVALID_DATA_GAPS",
-                "gap_count": manifest.get("gap_count")}
-    if (manifest.get("duplicates") or 0) > 0 or \
-            (manifest.get("out_of_order") or 0) > 0 or \
-            (manifest.get("irregular_deltas") or 0) > 0:
-        return {"ok": False, "status": "INVALID_DATA_IRREGULAR"}
-    return {"ok": True, "status": "DATASET_VERIFIED", "sha256": sha,
-            "manifest": manifest}
-
-
-def safe_atomic_write(path, data: bytes) -> str:
-    """Containment-validated atomic write: temp file inside the validated
-    root, flush + fsync, atomic replace, post-write SHA verification. Refuses
-    to overwrite hardlinked destinations and never opens the final path for
-    destructive writing directly."""
-    path = Path(path)
-    base = Path(os.path.realpath(str(path.parent)))
-    repo_real = Path(os.path.realpath(str(CE._repo_root())))
-    if repo_real != base and repo_real not in base.parents:
-        raise ValueError("write target escapes repository root")
-    if path.exists():
-        st_ = os.stat(path)
-        if getattr(st_, "st_nlink", 1) > 1:
-            raise ValueError("refusing to overwrite a hardlinked file")
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    with open(tmp, "wb") as f:
-        f.write(data)
-        f.flush()
-        try:
-            os.fsync(f.fileno())
-        except OSError:
-            pass
-    os.replace(tmp, path)
-    sha = hashlib.sha256(path.read_bytes()).hexdigest()
-    expected = hashlib.sha256(data).hexdigest()
-    if sha != expected:
-        raise IOError("post-write SHA verification failed")
-    return sha
-
+# ==========================================================================
+# GENERATION PUBLISH: CSV + manifest as ONE logical transaction
+# ==========================================================================
 
 def _repo_commit() -> str:
     try:
@@ -305,12 +345,72 @@ def _repo_commit() -> str:
         return "unknown"
 
 
+def recover_staging(venue: str, symbol: str) -> dict[str, Any]:
+    """Startup/publish recovery: remove orphan exclusive temps, NEVER touch
+    the generation referenced by a valid CURRENT marker, never delete data.
+    Orphan generation directories are kept (they are never 'current') and
+    reported for later cleanup."""
+    d = _dataset_dir(venue, symbol)
+    removed_tmp = 0
+    for p in d.rglob("*.part"):
+        try:
+            p.unlink()
+            removed_tmp += 1
+        except OSError:
+            pass
+    cur = _read_current(d)
+    orphans = []
+    for g in d.glob("gen_*"):
+        if not g.is_dir():
+            continue
+        if cur and g.name == f"gen_{cur.get('generation_id')}":
+            continue
+        orphans.append(g.name)
+    return {"removed_temp_files": removed_tmp, "orphan_generations": orphans,
+            "current_generation": (cur or {}).get("generation_id")}
+
+
+def _read_current(dsdir: Path) -> dict | None:
+    p = dsdir / CURRENT_MARKER
+    if not p.is_file():
+        return None
+    try:
+        cur = json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    if not cur.get("generation_id") or not cur.get("csv_sha256") \
+            or not cur.get("manifest_sha256"):
+        return None
+    return cur
+
+
+def current_generation(venue: str, symbol: str) -> dict | None:
+    """Resolve the CURRENT generation and re-verify BOTH content hashes
+    against the marker. A generation is usable only when marker, CSV and
+    manifest all agree; anything else is treated as absent (fail-closed)."""
+    d = _dataset_dir(venue, symbol)
+    cur = _read_current(d)
+    if cur is None:
+        return None
+    g = d / f"gen_{cur['generation_id']}"
+    csv_p, man_p = g / "data.csv", g / "manifest.json"
+    if not csv_p.is_file() or not man_p.is_file():
+        return None
+    if hashlib.sha256(csv_p.read_bytes()).hexdigest() != cur["csv_sha256"]:
+        return None
+    if hashlib.sha256(man_p.read_bytes()).hexdigest() != cur["manifest_sha256"]:
+        return None
+    return {**cur, "csv_path": csv_p, "manifest_path": man_p}
+
+
 def save_dataset(venue: str, symbol: str, rows: list[list],
                  requested_days: int,
                  requested_start_ms: int | None = None,
                  requested_end_ms: int | None = None) -> dict[str, Any]:
-    """Trim to the REQUESTED window, validate every raw candle, record the
-    full completeness contract and write CSV + manifest atomically."""
+    """Publish a content-addressed generation: CSV and manifest are written
+    and verified in a staging generation directory, then a single atomic
+    CURRENT marker commits BOTH. A crash at any earlier point leaves the
+    previous generation untouched and current."""
     if requested_end_ms is None:
         requested_end_ms = (_now_ms() // BAR_MS) * BAR_MS
     if requested_start_ms is None:
@@ -319,15 +419,15 @@ def save_dataset(venue: str, symbol: str, rows: list[list],
     rows = [r for r in rows
             if requested_start_ms <= int(r[0]) < requested_end_ms]
     raw_q = raw_quality_report(rows)
-    path = _contained_path(venue, symbol, ".csv")
-    import io
     buf = io.StringIO()
     w = csv.writer(buf, lineterminator="\n")
-    w.writerow(["ts", "open", "high", "low", "close", "volume", "turnover"])
+    w.writerow(CSV_HEADER)
     for r in rows:
         w.writerow(r)
-    sha = safe_atomic_write(path, buf.getvalue().encode("utf-8"))
-    ts_list = [r[0] for r in rows]
+    csv_bytes = buf.getvalue().encode("utf-8")
+    csv_sha = hashlib.sha256(csv_bytes).hexdigest()
+    generation_id = csv_sha[:16]               # content-addressed
+    ts_list = [int(r[0]) for r in rows]
     expected_bars = max(0, (requested_end_ms - requested_start_ms) // BAR_MS)
     coverage_ratio = (len(rows) / expected_bars) if expected_bars else 0.0
     download_complete = (expected_bars - len(rows)) <= COMPLETENESS_TOLERANCE_BARS \
@@ -336,6 +436,7 @@ def save_dataset(venue: str, symbol: str, rows: list[list],
         "tool_version": TOOL_VERSION,
         "downloader_version": DOWNLOADER_VERSION,
         "repo_commit": _repo_commit(),
+        "generation_id": generation_id,
         "source": ("bitget public /api/v2/mix/market/history-candles"
                    if venue == "bitget" else "bybit public /v5/market/kline"),
         "venue": venue, "symbol": symbol, "timeframe": "1m",
@@ -348,70 +449,262 @@ def save_dataset(venue: str, symbol: str, rows: list[list],
             requested_start_ms / 1000, timezone.utc).isoformat(),
         "requested_end": datetime.fromtimestamp(
             requested_end_ms / 1000, timezone.utc).isoformat(),
+        "actual_start_ms": ts_list[0] if ts_list else None,
+        "actual_end_ms": ts_list[-1] if ts_list else None,
         "actual_start": (datetime.fromtimestamp(ts_list[0] / 1000, timezone.utc)
                          .isoformat() if ts_list else None),
         "actual_end": (datetime.fromtimestamp(ts_list[-1] / 1000, timezone.utc)
                        .isoformat() if ts_list else None),
-        "actual_coverage_seconds": ((ts_list[-1] - ts_list[0]) // 1000 + 60
-                                    if ts_list else 0),
         "expected_bars": expected_bars,
         "actual_bars": len(rows),
+        "n_bars": len(rows),
         "coverage_ratio": round(coverage_ratio, 6),
         "completeness_tolerance_bars": COMPLETENESS_TOLERANCE_BARS,
         "download_complete": download_complete,
-        "n_bars": len(rows),
-        "period_start": (datetime.fromtimestamp(ts_list[0] / 1000, timezone.utc)
-                         .isoformat() if ts_list else None),
-        "period_end": (datetime.fromtimestamp(ts_list[-1] / 1000, timezone.utc)
-                       .isoformat() if ts_list else None),
         "invalid_candles": raw_q["invalid_candles"],
         "raw_quality_pass": raw_q["raw_quality_pass"],
         **strict_quality(ts_list),
-        "sha256": sha,
+        "sha256": csv_sha,
         "availability_contract": "bar open ts T is available at T+60000ms (close)",
         "limitations": ("aggregated OHLCV only: no per-side flow, no book, no "
                         "trades; funding/OI not included; venue clock assumed UTC"),
         "license_note": ("public market-data endpoint, no auth, used for "
                          "personal research within venue API ToS rate limits"),
-        "path": str(path).replace("\\", "/"),
         **_safety()}
-    mpath = _contained_path(venue, symbol, "_manifest.json")
-    safe_atomic_write(mpath, json.dumps(manifest, indent=2,
-                                        default=str).encode("utf-8"))
-    return manifest
+    dsdir = _dataset_dir(venue, symbol)
+    recover_staging(venue, symbol)
+    gdir = validated_dir(*DATA_SUBDIR, f"{venue}_{symbol}_1m",
+                         f"gen_{generation_id}")
+    written_csv_sha = safe_atomic_write(gdir / "data.csv", csv_bytes)
+    man_bytes = json.dumps(manifest, indent=2, default=str).encode("utf-8")
+    written_man_sha = safe_atomic_write(gdir / "manifest.json", man_bytes)
+    # staging re-verification of BOTH artifacts before the commit marker
+    if hashlib.sha256((gdir / "data.csv").read_bytes()).hexdigest() != csv_sha \
+            or hashlib.sha256((gdir / "manifest.json").read_bytes()).hexdigest() \
+            != written_man_sha:
+        raise IOError("staging verification failed; generation NOT committed")
+    marker = {"generation_id": generation_id,
+              "csv_sha256": written_csv_sha,
+              "manifest_sha256": written_man_sha,
+              "committed_at": datetime.now(timezone.utc).isoformat(),
+              "tool_version": TOOL_VERSION}
+    safe_atomic_write(dsdir / CURRENT_MARKER,
+                      json.dumps(marker, indent=2).encode("utf-8"))
+    return {**manifest, "path": str(gdir / "data.csv").replace("\\", "/")}
 
 
 def load_manifest(venue: str, symbol: str) -> dict[str, Any] | None:
+    cur = current_generation(venue, symbol)
+    if cur is None:
+        return None
     try:
-        p = _contained_path(venue, symbol, "_manifest.json")
-        return json.loads(p.read_text(encoding="utf-8"))
+        return json.loads(cur["manifest_path"].read_text(encoding="utf-8"))
     except Exception:
         return None
 
 
+# ==========================================================================
+# STRICT LOADER: preserves CSV order, fails on the FIRST violation
+# ==========================================================================
+
+class DatasetError(ValueError):
+    def __init__(self, status: str, detail: str = ""):
+        super().__init__(f"{status}: {detail}" if detail else status)
+        self.status = status
+        self.detail = detail
+
+
 def load_klines(venue: str, symbol: str) -> list[dict]:
-    """Load a saved kline CSV as canonical bar dicts (ascending, deduped).
-    available_at = bar close (open ts + 60s): strictly no lookahead."""
-    path = _contained_path(venue, symbol, ".csv")
-    if not path.is_file():
+    """Load the CURRENT generation CSV as canonical bar dicts, PRESERVING file
+    order. Never sorts, never skips a row, never repairs: the first schema,
+    finiteness, OHLC, order, duplicate or interval violation raises a
+    structured DatasetError. Returns [] only when no generation exists."""
+    cur = current_generation(venue, symbol)
+    if cur is None:
         return []
     bars: list[dict] = []
-    with open(path, "r", newline="", encoding="utf-8") as f:
-        for r in csv.DictReader(f):
+    prev_ts = None
+    with open(cur["csv_path"], "r", newline="", encoding="utf-8") as f:
+        rd = csv.reader(f)
+        header = next(rd, None)
+        if header != CSV_HEADER:
+            raise DatasetError("INVALID_SCHEMA", f"header={header!r}")
+        for i, r in enumerate(rd, start=2):
+            if len(r) != 7:
+                raise DatasetError("INVALID_SCHEMA", f"line {i}: {len(r)} fields")
             try:
-                ts = int(r["ts"])
-                bars.append({"ts": ts, "bar_open_ts": ts,
-                             "bar_close_ts": ts + BAR_MS,
-                             "available_at": ts + BAR_MS,
-                             "open": float(r["open"]), "high": float(r["high"]),
-                             "low": float(r["low"]), "close": float(r["close"]),
-                             "volume": float(r["volume"]),
-                             "turnover": float(r["turnover"]),
-                             "symbol": symbol, "venue": venue})
-            except (KeyError, ValueError, TypeError):
-                continue
-    bars.sort(key=lambda b: b["ts"])
+                ts = int(r[0])
+                o, h, l, c = float(r[1]), float(r[2]), float(r[3]), float(r[4])
+                v, t = float(r[5]), float(r[6])
+            except (ValueError, TypeError):
+                raise DatasetError("INVALID_SCHEMA", f"line {i}: unparseable")
+            if not all(math.isfinite(x) for x in (o, h, l, c, v, t)):
+                raise DatasetError("INVALID_NON_FINITE", f"line {i}")
+            if v < 0:
+                raise DatasetError("INVALID_NEGATIVE_VOLUME", f"line {i}")
+            if t < 0:
+                raise DatasetError("INVALID_NEGATIVE_TURNOVER", f"line {i}")
+            if ts <= 0 or o <= 0 or c <= 0 or l <= 0 or h < max(o, c) \
+                    or l > min(o, c) or l > h:
+                raise DatasetError("INVALID_OHLC", f"line {i}")
+            if prev_ts is not None:
+                if ts == prev_ts:
+                    raise DatasetError("INVALID_DUPLICATE", f"line {i}")
+                if ts < prev_ts:
+                    raise DatasetError("INVALID_TIMESTAMP_ORDER", f"line {i}")
+            prev_ts = ts
+            bars.append({"ts": ts, "bar_open_ts": ts,
+                         "bar_close_ts": ts + BAR_MS,
+                         "available_at": ts + BAR_MS,
+                         "open": o, "high": h, "low": l, "close": c,
+                         "volume": v, "turnover": t,
+                         "symbol": symbol, "venue": venue})
     return bars
+
+
+# ==========================================================================
+# VERIFICATION DERIVED FROM THE CSV (manifest = expected contract only)
+# ==========================================================================
+
+def _fail(status: str, **kw) -> dict[str, Any]:
+    return {"ok": False, "status": status, **kw}
+
+
+def verify_dataset(venue: str, symbol: str,
+                   expected_timeframe: str = "1m") -> dict[str, Any]:
+    """FAIL-CLOSED verification computed FROM THE CSV. The manifest states the
+    expected contract; every quality figure is recomputed from the actual
+    bytes and rows and compared against it. No sorting, no row skipping, no
+    repair, no longest-segment rescue. Mandatory before resample/features/
+    splits/discovery."""
+    try:
+        d = _dataset_dir(venue, symbol)
+    except ValueError as exc:
+        return _fail("INVALID_VENUE" if "venue" in str(exc) else "INVALID_SYMBOL",
+                     detail=str(exc)[:120])
+    cur = _read_current(d)
+    if cur is None:
+        return _fail("INVALID_MANIFEST_CONTRACT", detail="NO_CURRENT_GENERATION")
+    g = d / f"gen_{cur['generation_id']}"
+    csv_p, man_p = g / "data.csv", g / "manifest.json"
+    if not man_p.is_file():
+        return _fail("INVALID_MANIFEST_CONTRACT", detail="MANIFEST_MISSING")
+    if not csv_p.is_file():
+        return _fail("INVALID_MANIFEST_CONTRACT", detail="CSV_MISSING")
+    man_bytes = man_p.read_bytes()
+    if hashlib.sha256(man_bytes).hexdigest() != cur["manifest_sha256"]:
+        return _fail("INVALID_SHA", detail="manifest hash != CURRENT marker")
+    try:
+        manifest = json.loads(man_bytes.decode("utf-8"))
+    except Exception:
+        return _fail("INVALID_MANIFEST_CONTRACT", detail="MANIFEST_CORRUPT")
+    # ---- 1) SHA of the actual CSV bytes
+    csv_bytes = csv_p.read_bytes()
+    sha = hashlib.sha256(csv_bytes).hexdigest()
+    if sha != cur["csv_sha256"]:
+        return _fail("INVALID_SHA", detail="csv hash != CURRENT marker",
+                     actual_sha=sha[:16])
+    if sha != manifest.get("sha256"):
+        return _fail("INVALID_SHA", detail="csv hash != manifest contract",
+                     actual_sha=sha[:16])
+    # ---- 2) identity contract
+    if manifest.get("venue") != venue:
+        return _fail("INVALID_VENUE", manifest_venue=manifest.get("venue"))
+    if manifest.get("symbol") != symbol:
+        return _fail("INVALID_SYMBOL", manifest_symbol=manifest.get("symbol"))
+    if manifest.get("timeframe") != expected_timeframe:
+        return _fail("INVALID_TIMEFRAME",
+                     manifest_timeframe=manifest.get("timeframe"))
+    # ---- 3) parse EVERY row strictly, in file order, recomputing everything
+    n_rows = 0
+    first_ts = last_ts = None
+    prev_ts = None
+    try:
+        rd = csv.reader(io.StringIO(csv_bytes.decode("utf-8")))
+        header = next(rd, None)
+        if header != CSV_HEADER:
+            return _fail("INVALID_SCHEMA", detail=f"header={header!r}")
+        for i, r in enumerate(rd, start=2):
+            if len(r) != 7:
+                return _fail("INVALID_SCHEMA", detail=f"line {i}: {len(r)} fields")
+            try:
+                ts = int(r[0])
+                o, h, l, c = float(r[1]), float(r[2]), float(r[3]), float(r[4])
+                v, t = float(r[5]), float(r[6])
+            except (ValueError, TypeError):
+                return _fail("INVALID_SCHEMA", detail=f"line {i}: unparseable")
+            if not all(math.isfinite(x) for x in (o, h, l, c, v, t)):
+                return _fail("INVALID_NON_FINITE", detail=f"line {i}")
+            if v < 0:
+                return _fail("INVALID_NEGATIVE_VOLUME", detail=f"line {i}")
+            if t < 0:
+                return _fail("INVALID_NEGATIVE_TURNOVER", detail=f"line {i}")
+            if ts <= 0 or o <= 0 or c <= 0 or l <= 0 or h < max(o, c) \
+                    or l > min(o, c) or l > h:
+                return _fail("INVALID_OHLC", detail=f"line {i}")
+            if prev_ts is not None:
+                delta = ts - prev_ts
+                if delta == 0:
+                    return _fail("INVALID_DUPLICATE", detail=f"line {i}")
+                if delta < 0:
+                    return _fail("INVALID_TIMESTAMP_ORDER", detail=f"line {i}")
+                if delta % BAR_MS != 0:
+                    return _fail("INVALID_TIMESTAMP_INTERVAL",
+                                 detail=f"line {i}: delta={delta}")
+                if delta != BAR_MS:
+                    return _fail("INVALID_GAP",
+                                 detail=f"line {i}: missing={delta // BAR_MS - 1}")
+            first_ts = ts if first_ts is None else first_ts
+            last_ts = ts
+            prev_ts = ts
+            n_rows += 1
+    except UnicodeDecodeError:
+        return _fail("INVALID_SCHEMA", detail="not utf-8")
+    if n_rows == 0:
+        return _fail("INVALID_COVERAGE", detail="zero rows")
+    # ---- 4) window / coverage / as_of recomputed vs contract
+    req_start = manifest.get("requested_start_ms")
+    req_end = manifest.get("requested_end_ms")
+    if not isinstance(req_start, int) or not isinstance(req_end, int) \
+            or req_end <= req_start:
+        return _fail("INVALID_MANIFEST_CONTRACT", detail="requested window")
+    if req_end % BAR_MS != 0:
+        return _fail("INVALID_AS_OF", detail="as_of not bar-aligned")
+    if first_ts < req_start or last_ts >= req_end:
+        return _fail("INVALID_COVERAGE",
+                     detail=f"rows outside requested window "
+                            f"[{req_start},{req_end})")
+    if last_ts + BAR_MS > req_end:
+        return _fail("INVALID_AS_OF",
+                     detail="last bar closes after as_of")
+    expected_bars = (req_end - req_start) // BAR_MS
+    missing = expected_bars - n_rows
+    if missing > COMPLETENESS_TOLERANCE_BARS:
+        return _fail("INVALID_COVERAGE",
+                     detail=f"{n_rows}/{expected_bars} rows")
+    # ---- 5) manifest contract must MATCH the recomputed truth
+    recomputed = {"n_rows": n_rows, "first_ts": first_ts, "last_ts": last_ts,
+                  "gap_count": 0, "duplicates": 0, "out_of_order": 0,
+                  "irregular_deltas": 0, "invalid_candles": 0,
+                  "expected_bars": expected_bars,
+                  "coverage_ratio": round(n_rows / expected_bars, 6)
+                  if expected_bars else 0.0}
+    contract_checks = (
+        ("n_bars", n_rows), ("actual_bars", n_rows),
+        ("gap_count", 0), ("duplicates", 0), ("out_of_order", 0),
+        ("irregular_deltas", 0), ("invalid_candles", 0),
+        ("raw_quality_pass", True), ("download_complete", True),
+        ("actual_start_ms", first_ts), ("actual_end_ms", last_ts),
+        ("generation_id", cur["generation_id"]))
+    for key, truth in contract_checks:
+        if manifest.get(key) != truth:
+            return _fail("INVALID_MANIFEST_CONTRACT",
+                         detail=f"{key}: manifest={manifest.get(key)!r} "
+                                f"recomputed={truth!r}")
+    return {"ok": True, "status": "DATASET_VERIFIED", "sha256": sha,
+            "generation_id": cur["generation_id"],
+            "recomputed": recomputed, "manifest": manifest,
+            "as_of_ms": req_end}
 
 
 def run_backfill(symbols_bitget: list[str], symbols_bybit: list[str],
@@ -422,27 +715,22 @@ def run_backfill(symbols_bitget: list[str], symbols_bybit: list[str],
     req_end = (_now_ms() // BAR_MS) * BAR_MS
     req_start = req_end - days * 86_400_000
     manifests = []
-    for sym in symbols_bitget:
-        log(f"fetch bitget {sym} {days}d ...")
-        rows = fetch_bitget_1m(sym, days, log=log, end_ms=req_end)
-        m = save_dataset("bitget", sym, rows, days,
-                         requested_start_ms=req_start, requested_end_ms=req_end)
-        log(f"  -> {m['n_bars']}/{m['expected_bars']} bars, gaps={m['gap_count']}, "
-            f"complete={m['download_complete']}, sha={m['sha256'][:12]}")
-        manifests.append(m)
-    for sym in symbols_bybit:
-        log(f"fetch bybit {sym} {days}d ...")
-        rows = fetch_bybit_1m(sym, days, log=log, end_ms=req_end)
-        m = save_dataset("bybit", sym, rows, days,
-                         requested_start_ms=req_start, requested_end_ms=req_end)
-        log(f"  -> {m['n_bars']}/{m['expected_bars']} bars, gaps={m['gap_count']}, "
-            f"complete={m['download_complete']}, sha={m['sha256'][:12]}")
-        manifests.append(m)
+    for venue, syms in (("bitget", symbols_bitget), ("bybit", symbols_bybit)):
+        for sym in syms:
+            log(f"fetch {venue} {sym} {days}d ...")
+            rows = (fetch_bitget_1m if venue == "bitget" else fetch_bybit_1m)(
+                sym, days, log=log, end_ms=req_end)
+            m = save_dataset(venue, sym, rows, days,
+                             requested_start_ms=req_start,
+                             requested_end_ms=req_end)
+            log(f"  -> {m['n_bars']}/{m['expected_bars']} bars, "
+                f"gaps={m['gap_count']}, complete={m['download_complete']}, "
+                f"gen={m['generation_id']}, sha={m['sha256'][:12]}")
+            manifests.append(m)
     summary = {"tool_version": TOOL_VERSION,
                "ran_at": datetime.now(timezone.utc).isoformat(),
                "datasets": manifests, **_safety()}
-    out = CE._repo_root().joinpath("reports", "research", "v10_45_4_edge_discovery")
-    out.mkdir(parents=True, exist_ok=True)
-    (out / "data_backfill_manifest_v10_45_4.json").write_text(
-        json.dumps(summary, indent=2, default=str), encoding="utf-8")
+    out = validated_dir("reports", "research", "v10_45_5_edge_discovery")
+    safe_atomic_write(out / "data_backfill_manifest_v10_45_5.json",
+                      json.dumps(summary, indent=2, default=str).encode("utf-8"))
     return summary

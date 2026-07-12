@@ -29,7 +29,7 @@ from . import FINAL_RECOMMENDATION_NO_LIVE
 from . import ai_providers_v10_45_1 as PROV
 from . import edge_discovery_engine_v10_45_1 as ENG
 
-TOOL_VERSION = "v10.45.4"
+TOOL_VERSION = "v10.45.5"
 
 ROLES_GENERATION = (
     ("HYPOTHESIS_GENERATOR",
@@ -369,30 +369,20 @@ HONEST_NO_EDGE_VERDICT = (
     "ventana y bajo este modelo de costes.")
 
 
-def _iso_to_ms(s: str | None) -> int | None:
-    if not s:
-        return None
-    try:
-        return int(datetime.fromisoformat(s).timestamp() * 1000)
-    except Exception:
-        return None
-
-
 def _prepare_run(symbol: str, timeframe: str, use_ai: bool, run_id: str,
                  iteration: int, parent_experiment: str | None,
                  ai_bundle: dict | None = None,
                  providers: dict[str, PROV.BaseProvider] | None = None,
                  log=print) -> dict[str, Any]:
-    """Everything BEFORE the funnel, fail-closed:
+    """Everything BEFORE the funnel, in the MANDATORY fail-closed order:
 
-    * `verify_dataset` gates the run — a missing/corrupt manifest, SHA
-      mismatch, incomplete download, raw-quality failure or ANY gap returns a
-      structured INVALID_DATA_* status. There is NO trimming and NO
-      longest-contiguous-segment fallback: gappy data never becomes a run.
-    * the holdout is physically sealed BEFORE any feature is built: features
-      exist only for the discovery+validation slice.
-    * `ai_bundle` lets a sprint reuse ONE set of AI hypotheses across
-      timeframes (the m accounting still counts every evaluation per TF)."""
+      strict raw parse -> CSV-derived quality recomputation -> manifest
+      contract comparison -> SHA -> DATASET_VERIFIED -> resample -> features
+      -> splits -> (later) discovery.
+
+    Nothing resamples, builds features or splits before DATASET_VERIFIED.
+    The holdout is sealed to an ON-DISK artifact and the full bar list is
+    dropped: the run state only ever holds discovery+validation bars."""
     from . import public_data_backfill_v10_45_1 as BF
     ver = BF.verify_dataset("bitget", symbol)
     if not ver.get("ok"):
@@ -402,13 +392,16 @@ def _prepare_run(symbol: str, timeframe: str, use_ai: bool, run_id: str,
     manifest = ver["manifest"]
     ref_ver = BF.verify_dataset("bybit", symbol)
     reference_status = ref_ver.get("status")
-    bars = BF.load_klines("bitget", symbol)
-    ref = BF.load_klines("bybit", symbol) if ref_ver.get("ok") else []
+    try:
+        bars = BF.load_klines("bitget", symbol)
+        ref = BF.load_klines("bybit", symbol) if ref_ver.get("ok") else []
+    except BF.DatasetError as exc:
+        return {"status": exc.status, "detail": exc.detail,
+                "symbol": symbol, "timeframe": timeframe, **_safety()}
     if not ref_ver.get("ok"):
         log(f"reference bybit/{symbol}: {reference_status} -> "
             "cross-venue features excluded")
-    as_of_ms = manifest.get("requested_end_ms") or \
-        _iso_to_ms(manifest.get("requested_end"))
+    as_of_ms = ver["as_of_ms"]
     factor = _TF_FACTOR.get(timeframe, 1)
     if factor > 1:
         bars = ENG.resample_bars(bars, factor, as_of_ms=as_of_ms)
@@ -417,45 +410,54 @@ def _prepare_run(symbol: str, timeframe: str, use_ai: bool, run_id: str,
         return {"status": "NEED_MORE_DATA",
                 "detail": f"{len(bars)} {timeframe} bars",
                 "symbol": symbol, "timeframe": timeframe, **_safety()}
-    # ---- physical holdout isolation BEFORE any feature is built ------------
+    # ---- splits + physical holdout isolation BEFORE any feature ------------
     seg = ENG.split_indices(len(bars))
     v1 = seg["validation"][1]
     h0, h1 = seg["holdout"]
+    n_bars_total = len(bars)
     bars_dv = bars[:v1]
     dv_last_ts = bars_dv[-1]["ts"]
     ref_dv = [r for r in ref if r["ts"] <= dv_last_ts]
-    sealed = ENG.SealedHoldout(bars, ref if ref else None, h0, h1)
+    sealed = ENG.seal_holdout(bars, ref if ref else None, h0, h1,
+                              dataset_generation_id=ver["generation_id"],
+                              dataset_sha256=ver["sha256"],
+                              symbol=symbol, timeframe=timeframe)
+    del bars, ref                      # holdout bars leave run memory here
     dq = ENG.dataset_quality(bars_dv)
     if not dq.get("quality_pass"):
         # NO segment fallback: a gappy series is INVALID for research, period
-        log(f"dataset bitget/{symbol} {timeframe}: INVALID_DATA_GAPS "
+        log(f"dataset bitget/{symbol} {timeframe}: INVALID_GAP "
             f"(gaps={dq.get('gap_count')}) -> fail-closed, no run")
-        return {"status": "INVALID_DATA_GAPS", "data_quality": dq,
+        return {"status": "INVALID_GAP", "data_quality": dq,
                 "symbol": symbol, "timeframe": timeframe, **_safety()}
     data_note = (f"{len(bars_dv)} {timeframe} bars (discovery+validation) of "
                  f"{symbol} on bitget (+{len(ref_dv)} bybit reference bars); "
-                 f"holdout sealed [{h0},{h1}) of {len(bars)} total")
+                 f"holdout sealed on disk [{h0},{h1}) of {n_bars_total} total")
     log(f"data: {data_note}")
-    prov = ENG.code_tree_hash()
+    ident = ENG.code_identity()
     ENG.set_run_context(
         run_id=run_id, iteration=iteration, parent_experiment=parent_experiment,
-        repo_commit=BF._repo_commit(), dataset_sha256=manifest.get("sha256"),
+        repo_commit=ident["repo_commit"],
+        git_tree_oid=ident["git_tree_oid"],
+        dataset_sha256=ver["sha256"],
+        dataset_generation_id=ver["generation_id"],
         reference_dataset_sha256=(ref_ver.get("manifest") or {}).get("sha256"),
+        reference_generation_id=ref_ver.get("generation_id"),
         reference_status=reference_status,
         downloader_version=manifest.get("downloader_version"),
-        code_tree_hash=prov["code_tree_hash"],
-        runner_version=prov["runner_version"],
-        dirty_worktree=prov["dirty_worktree"],
-        download_complete=manifest.get("download_complete"),
+        code_tree_hash=ident["code_tree_hash"],
+        semantic_code_hash=ident["semantic_code_hash"],
+        runner_version=ident["runner_version"],
+        dirty_worktree=ident["dirty_worktree"],
         dataset_verify_status=ver.get("status"),
         as_of_ms=as_of_ms,
-        registry_sha_at_start=ENG.registry_sha(),
+        holdout_descriptor_sha=sealed["descriptor_sha256"],
         symbol=symbol, timeframe=timeframe, venue="bitget",
         # discovery/validation splits carry real timestamps; the HOLDOUT
-        # split is recorded by INDEX only — its bars are sealed and their
-        # timestamps are never read or serialized before token eligibility
-        splits={k: ([bars[max(v[0], 0)]["ts"],
-                     bars[min(v[1], len(bars) - 1)]["ts"]]
+        # split is recorded by INDEX only — its bars are sealed on disk and
+        # never serialized before token eligibility
+        splits={k: ([bars_dv[max(v[0], 0)]["ts"],
+                     bars_dv[min(v[1], len(bars_dv) - 1)]["ts"]]
                     if k != "holdout" else
                     {"index_range": [v[0], v[1]], "content": "sealed"})
                 for k, v in seg.items()},
@@ -466,7 +468,7 @@ def _prepare_run(symbol: str, timeframe: str, use_ai: bool, run_id: str,
                                              "coverage")})
     feats = ENG.build_features(bars_dv, ref_bars=ref_dv)
     log(f"features built: {len(feats)} rows x {len(ENG.FEATURE_REGISTRY)} catalog "
-        f"(discovery+validation ONLY; holdout stays sealed) | "
+        f"(discovery+validation ONLY; holdout stays sealed on disk) | "
         f"quality_pass={dq.get('quality_pass')} gaps={dq.get('gap_count')}")
     # ---------- universe: procedural + AI ----------
     raw: list[dict] = procedural_universe()
@@ -544,8 +546,10 @@ def _prepare_run(symbol: str, timeframe: str, use_ai: bool, run_id: str,
         critiques = cross_critique(providers, compiled, log=log)
         for cnote in critiques:
             ENG.ledger_append({"phase": "critique", **cnote})
-    return {"status": "OK", "bars_dv": bars_dv, "n_bars_total": len(bars),
+    return {"status": "OK", "bars_dv": bars_dv, "n_bars_total": n_bars_total,
             "feats": feats, "seg": seg, "sealed": sealed, "manifest": manifest,
+            "dataset_sha256": ver["sha256"],
+            "dataset_generation_id": ver["generation_id"],
             "reference_sha256": (ref_ver.get("manifest") or {}).get("sha256"),
             "reference_status": reference_status, "as_of_ms": as_of_ms,
             "data_note": data_note, "dq": dq,
@@ -557,14 +561,43 @@ def _prepare_run(symbol: str, timeframe: str, use_ai: bool, run_id: str,
             "symbol": symbol, "timeframe": timeframe}
 
 
+def _execute_member(ctx: dict, sprint_id: str, registry_sha: str,
+                    m_global: int, started: datetime, iteration: int,
+                    write_reports: bool, manifest_id: str,
+                    log=print) -> dict[str, Any]:
+    """Phase A + phase B for one prepared member of an already-CLOSED
+    registry. The run context pins sprint_id and the closed registry SHA
+    before any trial replay executes."""
+    ENG.set_run_context(**ctx["run_context"])
+    ENG.RUN_CONTEXT["sprint_id"] = sprint_id
+    ENG.RUN_CONTEXT["registry_sha_at_close"] = registry_sha
+    ENG.RUN_CONTEXT["m_global_sprint"] = m_global
+    ENG.RUN_CONTEXT["output_manifest_id"] = manifest_id
+    log(f"[{sprint_id}] phase A {ctx['timeframe']} ...")
+    state = ENG.run_funnel_phase_a(
+        ctx["bars_dv"], ctx["feats"], ctx["compiled"], ctx["seg"],
+        promotion_allowed=bool(ctx["manifest"].get("download_complete",
+                                                   False)),
+        log=log)
+    log(f"[{sprint_id}] phase B {ctx['timeframe']} (m_global={m_global}) ...")
+    funnel = ENG.run_funnel_phase_b(state, ctx["sealed"], m_global, log=log)
+    summary = _summarize(ctx, funnel, started, ctx["run_context"]["run_id"],
+                         iteration, sprint_id=sprint_id,
+                         manifest_id=manifest_id)
+    if write_reports:
+        _write_reports(summary, funnel, log=log)
+    return summary
+
+
 def run_edge_discovery(symbol: str = "BTCUSDT", use_ai: bool = True,
                        write_reports: bool = True, timeframe: str = "1m",
                        n_trials_total: int | None = None,
                        run_id: str | None = None,
                        iteration: int = 1, parent_experiment: str | None = None,
                        log=print) -> dict[str, Any]:
-    """Single-timeframe run. For a multi-timeframe tournament use
-    `run_sprint`, which computes ONE sprint-global m before any validation."""
+    """Single-timeframe run under the SAME two-phase registry contract: every
+    trial is enumerated and the registry is opened and CLOSED before phase A.
+    For a multi-timeframe tournament use run_sprint."""
     import uuid
     started = datetime.now(timezone.utc)
     run_id = run_id or f"edr_{uuid.uuid4().hex[:12]}"
@@ -573,43 +606,37 @@ def run_edge_discovery(symbol: str = "BTCUSDT", use_ai: bool = True,
     if ctx.get("status") != "OK":
         return {"tool_version": TOOL_VERSION, "ran_at": started.isoformat(),
                 "run_id": run_id, **ctx}
-    state = ENG.run_funnel_phase_a(
-        ctx["bars_dv"], ctx["feats"], ctx["compiled"], ctx["seg"],
-        promotion_allowed=bool(ctx["manifest"].get("download_complete", False)),
-        log=log)
-    sprint_runs = max(int(n_trials_total or 1), 1) \
-        if (n_trials_total or 0) <= 24 else 1
-    m_global = state["m_partial"] * sprint_runs
-    ENG.registry_append({"kind": "single_run", "run_id": run_id,
-                         "symbol": symbol, "timeframe": timeframe,
-                         "m_partial": state["m_partial"],
-                         "sprint_runs_assumed": sprint_runs,
-                         "m_global_used": m_global,
-                         "universe": state["n_universe"]})
-    funnel = ENG.run_funnel_phase_b(state, ctx["sealed"], m_global, log=log)
-    summary = _summarize(ctx, funnel, started, run_id, iteration,
-                         sprint_id=None)
-    if write_reports:
-        _write_reports(summary, funnel, log=log)
-    return summary
+    members = ENG.enumerate_trial_members(ctx["compiled"], symbol, timeframe)
+    ENG.registry_open(run_id, members)
+    closed = ENG.registry_close(run_id, len(members), [run_id])
+    m_global = closed["m_global"]
+    if n_trials_total and int(n_trials_total) > m_global:
+        m_global = int(n_trials_total)         # callers may only INCREASE m
+    return _execute_member(ctx, run_id, closed["registry_sha256"], m_global,
+                           started, iteration, write_reports,
+                           manifest_id=run_id, log=log)
 
 
 def run_sprint(symbol: str = "BTCUSDT",
                tf_plan: tuple[str, ...] = ("1m", "5m", "15m"),
                use_ai: bool = True, write_reports: bool = True,
                log=print) -> dict[str, Any]:
-    """SPRINT-GLOBAL multiple testing: phase A (universe, baselines,
-    discovery, screening) runs for EVERY timeframe first; m_global = sum of
-    every member's m_partial goes to the persistent registry; only then does
-    ANY validation lower bound get computed (phase B) — every timeframe is
-    corrected with the SAME m_global. AI hypotheses are generated once and
-    reused across timeframes (every evaluation still counts in m)."""
+    """TRUE pre-registration order:
+
+      1. prepare every timeframe (data, AI hypotheses, compile, dedupe);
+      2. enumerate EVERY definitive trial of the whole sprint;
+      3. registry OPEN with all members;
+      4. registry CLOSE exactly once (m_global = unique members, SHA frozen);
+      5. only then phase A + phase B per timeframe, all corrected with the
+         SAME m_global and pinned registry SHA;
+      6. reports, sprint summary, OUTPUT MANIFEST and seal."""
     import uuid
     started = datetime.now(timezone.utc)
     sprint_id = f"sprint_{uuid.uuid4().hex[:10]}"
     providers = PROV.build_providers() if use_ai else {}
     ai_bundle = None
-    members: list[tuple[str, str, dict, dict]] = []
+    members_all: list[dict] = []
+    ctxs: list[dict] = []
     skipped: list[dict] = []
     for tf in tf_plan:
         run_id = f"{sprint_id}_{tf}"
@@ -618,45 +645,29 @@ def run_sprint(symbol: str = "BTCUSDT",
         if ctx.get("status") != "OK":
             skipped.append({"timeframe": tf, "status": ctx.get("status"),
                             "detail": ctx.get("detail")})
-            ENG.registry_append({"kind": "sprint_member_invalid",
-                                 "sprint_id": sprint_id, "run_id": run_id,
-                                 "symbol": symbol, "timeframe": tf,
-                                 "status": ctx.get("status")})
             continue
         if ai_bundle is None and ctx.get("ai_bundle"):
             ai_bundle = ctx["ai_bundle"]
-        log(f"[{sprint_id}] phase A {tf} ...")
-        state = ENG.run_funnel_phase_a(
-            ctx["bars_dv"], ctx["feats"], ctx["compiled"], ctx["seg"],
-            promotion_allowed=bool(ctx["manifest"].get("download_complete",
-                                                       False)),
-            log=log)
-        members.append((tf, run_id, ctx, state))
-    m_global = sum(s["m_partial"] for _, _, _, s in members)
-    for tf, run_id, ctx, state in members:
-        ENG.registry_append({"kind": "sprint_member", "sprint_id": sprint_id,
-                             "run_id": run_id, "symbol": symbol,
-                             "timeframe": tf,
-                             "m_partial": state["m_partial"],
-                             "m_global": m_global,
-                             "universe": state["n_universe"]})
-    ENG.registry_close(sprint_id, m_global,
-                       [run_id for _, run_id, _, _ in members])
-    log(f"[{sprint_id}] m_global = {m_global} "
-        f"(sum of m_partial over {len(members)} timeframes) -> registry CLOSED")
+        members_all.extend(ENG.enumerate_trial_members(
+            ctx["compiled"], symbol, tf))
+        ctxs.append(ctx)
+    if not ctxs:
+        return {"tool_version": TOOL_VERSION, "sprint_id": sprint_id,
+                "status": "NO_VALID_MEMBERS", "skipped": skipped, **_safety()}
+    ENG.registry_open(sprint_id, members_all)
+    closed = ENG.registry_close(
+        sprint_id, len(members_all),
+        [c["run_context"]["run_id"] for c in ctxs])
+    m_global = closed["m_global"]
+    registry_sha = closed["registry_sha256"]
+    log(f"[{sprint_id}] registry CLOSED with m_global={m_global} "
+        f"({len(members_all)} pre-registered trials) sha={registry_sha[:12]}")
+    manifest_id = sprint_id
     summaries: list[dict] = []
-    for tf, run_id, ctx, state in members:
-        ENG.set_run_context(**ctx["run_context"])
-        ENG.RUN_CONTEXT["sprint_id"] = sprint_id
-        ENG.RUN_CONTEXT["m_global_sprint"] = m_global
-        log(f"[{sprint_id}] phase B {tf} (m_global={m_global}) ...")
-        funnel = ENG.run_funnel_phase_b(state, ctx["sealed"], m_global,
-                                        log=log)
-        summary = _summarize(ctx, funnel, started, run_id, 1,
-                             sprint_id=sprint_id)
-        if write_reports:
-            _write_reports(summary, funnel, log=log)
-        summaries.append(summary)
+    for ctx in ctxs:
+        summaries.append(_execute_member(
+            ctx, sprint_id, registry_sha, m_global, started, 1,
+            write_reports, manifest_id, log=log))
     promoted = sum(1 for s in summaries
                    for e in (s.get("top_candidates") or [])
                    if e.get("state") in ("SHADOW_CANDIDATE_RESEARCH_ONLY",
@@ -667,14 +678,15 @@ def run_sprint(symbol: str = "BTCUSDT",
         "conclusión. RESEARCH ONLY, NO LIVE.")
     sprint = {
         "tool_version": TOOL_VERSION, "sprint_id": sprint_id,
+        "output_manifest_id": manifest_id,
         "ran_at": started.isoformat(),
         "runtime_s": round((datetime.now(timezone.utc) - started)
                            .total_seconds(), 1),
         "symbol": symbol, "tf_plan": list(tf_plan),
         "m_global": m_global,
-        "m_partials": {tf: st_["m_partial"] for tf, _, _, st_ in members},
+        "pre_registered_trials": len(members_all),
         "registry_file": ENG.REGISTRY_FILE,
-        "registry_sha256": ENG.registry_sha(),
+        "registry_sha256": registry_sha,
         "registry_state": "CLOSED",
         "skipped": skipped,
         "runs": [{"timeframe": s.get("timeframe"), "run_id": s.get("run_id"),
@@ -684,17 +696,28 @@ def run_sprint(symbol: str = "BTCUSDT",
                   "finalists": s.get("finalists")} for s in summaries],
         "verdict": verdict, **_safety()}
     if write_reports:
-        import os as _os
+        from . import public_data_backfill_v10_45_1 as BF
         out = ENG._out()
-        tmp = out / "sprint_summary_v10_45_4.json.tmp"
-        tmp.write_text(json.dumps(sprint, indent=2, default=str),
-                       encoding="utf-8")
-        _os.replace(tmp, out / "sprint_summary_v10_45_4.json")
+        BF.safe_atomic_write(out / "sprint_summary_v10_45_5.json",
+                             json.dumps(sprint, indent=2,
+                                        default=str).encode("utf-8"))
+        manifest = ENG.write_output_manifest(
+            manifest_id, extra={"sprint_id": sprint_id,
+                                "m_global": m_global,
+                                "verdict": verdict,
+                                "dataset_shas": {
+                                    c["timeframe"]: c["dataset_sha256"]
+                                    for c in ctxs}})
+        seal = ENG.write_commit_seal(
+            output_manifest_sha=manifest["output_manifest_sha256"])
+        sprint["output_manifest_sha256"] = manifest["output_manifest_sha256"]
+        sprint["seal_match"] = seal["match"]
     return sprint
 
 
 def _summarize(ctx: dict, funnel: dict, started: datetime, run_id: str,
-               iteration: int, sprint_id: str | None) -> dict[str, Any]:
+               iteration: int, sprint_id: str | None,
+               manifest_id: str | None = None) -> dict[str, Any]:
     finals = funnel["finalists"]
     by_state: dict[str, int] = {}
     for e in funnel["results"]:
@@ -702,7 +725,6 @@ def _summarize(ctx: dict, funnel: dict, started: datetime, run_id: str,
     top = sorted(finals, key=lambda e: (e["holdout_metrics"].get("net_EV") or -9),
                  reverse=True)
     if not top:
-        # best merit-gated validation candidates for the report (no holdout)
         vals = [e for e in funnel["results"] if e.get("phase") == "validation"]
         top = sorted(vals, key=lambda e: ((e.get("metrics") or {}).get("net_EV")
                                           or -9), reverse=True)[:5]
@@ -716,6 +738,7 @@ def _summarize(ctx: dict, funnel: dict, started: datetime, run_id: str,
     return {
         "tool_version": TOOL_VERSION, "ran_at": started.isoformat(),
         "run_id": run_id, "iteration": iteration, "sprint_id": sprint_id,
+        "output_manifest_id": manifest_id,
         "runtime_s": round((datetime.now(timezone.utc) - started)
                            .total_seconds(), 1),
         "symbol": ctx["symbol"], "timeframe": ctx["timeframe"],
@@ -725,7 +748,8 @@ def _summarize(ctx: dict, funnel: dict, started: datetime, run_id: str,
         "n_bars_dv": len(ctx["bars_dv"]),
         "as_of_ms": ctx.get("as_of_ms"),
         "data_note": ctx["data_note"],
-        "dataset_sha256": ctx["manifest"].get("sha256"),
+        "dataset_sha256": ctx["dataset_sha256"],
+        "dataset_generation_id": ctx["dataset_generation_id"],
         "reference_dataset_sha256": ctx.get("reference_sha256"),
         "data_quality": funnel.get("data_quality"),
         "hypotheses_total": ctx["raw_total"],
@@ -764,43 +788,48 @@ def _summarize(ctx: dict, funnel: dict, started: datetime, run_id: str,
 
 def _write_reports(summary: dict, funnel: dict, log=print) -> None:
     import csv as _csv
-    import os as _os
+    import io as _io
+    from . import public_data_backfill_v10_45_1 as BF
     out = ENG._out()
     tf = summary.get("timeframe", "1m")
     sfx = "" if tf == "1m" else f"_{tf}"
-    tmp = out / f"edge_discovery_summary_v10_45_4{sfx}.json.tmp"
-    tmp.write_text(json.dumps(summary, indent=2, default=str), encoding="utf-8")
-    _os.replace(tmp, out / f"edge_discovery_summary_v10_45_4{sfx}.json")
+    BF.safe_atomic_write(
+        out / f"edge_discovery_summary_v10_45_5{sfx}.json",
+        json.dumps(ENG._json_finite(summary), indent=2,
+                   default=str).encode("utf-8"))
     # strategy scoreboard (every phase result)
-    with open(out / f"strategy_scoreboard_v10_45_4{sfx}.csv", "w", newline="",
-              encoding="utf-8") as f:
-        w = _csv.writer(f)
-        w.writerow(["phase", "strategy_id", "origin", "state", "n_trades",
-                    "net_EV", "net_EV_lower_bound", "profit_factor", "win_rate",
-                    "max_drawdown"])
-        for e in funnel["results"]:
-            m = e.get("metrics") or e.get("validation_metrics") or {}
-            w.writerow([e.get("phase"), e.get("strategy_id"), e.get("origin"),
-                        e.get("state"), m.get("n_trades"), m.get("net_EV"),
-                        m.get("net_EV_lower_bound"), m.get("profit_factor"),
-                        m.get("win_rate"), m.get("max_drawdown")])
+    buf = _io.StringIO()
+    w = _csv.writer(buf, lineterminator="\n")
+    w.writerow(["phase", "strategy_id", "origin", "state", "n_trades",
+                "net_EV", "net_EV_lower_bound", "profit_factor", "win_rate",
+                "max_drawdown"])
+    for e in funnel["results"]:
+        m = e.get("metrics") or e.get("validation_metrics") or {}
+        w.writerow([e.get("phase"), e.get("strategy_id"), e.get("origin"),
+                    e.get("state"), m.get("n_trades"), m.get("net_EV"),
+                    m.get("net_EV_lower_bound"), m.get("profit_factor"),
+                    m.get("win_rate"), m.get("max_drawdown")])
+    BF.safe_atomic_write(out / f"strategy_scoreboard_v10_45_5{sfx}.csv",
+                         buf.getvalue().encode("utf-8"))
     # cost stress scoreboard (finalists)
-    with open(out / f"cost_stress_scoreboard_v10_45_4{sfx}.csv", "w", newline="",
-              encoding="utf-8") as f:
-        w = _csv.writer(f)
-        w.writerow(["strategy_id", "state", "val_net_EV", "holdout_net_EV",
-                    "cost_plus_25", "cost_plus_50", "spread_x2", "slip_x2",
-                    "nonfill10_latency", "stress_ok"])
-        for e in funnel["finalists"]:
-            cs = e.get("cost_stress") or {}
-            w.writerow([e["strategy_id"], e["state"],
-                        (e.get("validation_metrics") or {}).get("net_EV"),
-                        (e.get("holdout_metrics") or {}).get("net_EV"),
-                        cs.get("cost_plus_25"), cs.get("cost_plus_50"),
-                        cs.get("spread_x2"), cs.get("slip_x2"),
-                        cs.get("nonfill10_latency"), e.get("stress_ok")])
+    buf = _io.StringIO()
+    w = _csv.writer(buf, lineterminator="\n")
+    w.writerow(["strategy_id", "state", "val_net_EV", "holdout_net_EV",
+                "cost_plus_25", "cost_plus_50", "spread_x2", "slip_x2",
+                "nonfill10_latency", "stress_ok"])
+    for e in funnel["finalists"]:
+        cs = e.get("cost_stress") or {}
+        w.writerow([e["strategy_id"], e["state"],
+                    (e.get("validation_metrics") or {}).get("net_EV"),
+                    (e.get("holdout_metrics") or {}).get("net_EV"),
+                    cs.get("cost_plus_25"), cs.get("cost_plus_50"),
+                    cs.get("spread_x2"), cs.get("slip_x2"),
+                    cs.get("nonfill10_latency"), e.get("stress_ok")])
+    BF.safe_atomic_write(out / f"cost_stress_scoreboard_v10_45_5{sfx}.csv",
+                         buf.getvalue().encode("utf-8"))
     md = _memo(summary)
-    (out / f"edge_discovery_report_v10_45_4{sfx}.md").write_text(md, encoding="utf-8")
+    BF.safe_atomic_write(out / f"edge_discovery_report_v10_45_5{sfx}.md",
+                         md.encode("utf-8"))
     log(f"reports -> {out}")
 
 
@@ -808,10 +837,12 @@ def _memo(s: dict) -> str:
     ca = s.get("cost_attribution_best") or {}
     mt = s.get("multiple_testing_sensitivity") or {}
     lines = [
-        "# V10.45.4 Multi-AI Edge Discovery — RESEARCH ONLY, NO LIVE", "",
+        "# V10.45.5 Multi-AI Edge Discovery — RESEARCH ONLY, NO LIVE", "",
         f"- ran_at: {s['ran_at']} · runtime: {s['runtime_s']}s · "
-        f"run_id: {s.get('run_id')} · sprint_id: {s.get('sprint_id')}",
+        f"run_id: {s.get('run_id')} · sprint_id: {s.get('sprint_id')} · "
+        f"output_manifest_id: {s.get('output_manifest_id')}",
         f"- data: {s['data_note']} · sha256: {str(s.get('dataset_sha256'))[:16]} · "
+        f"generation: {s.get('dataset_generation_id')} · "
         f"ref sha256: {str(s.get('reference_dataset_sha256'))[:16]} · "
         f"quality: {s.get('data_quality')}",
         f"- hypotheses: {s['hypotheses_total']} total "
@@ -819,7 +850,7 @@ def _memo(s: dict) -> str:
         f"{' reused' if s.get('ai_reused') else ''}) · "
         f"dup={s['duplicates']} invalid={s['invalid']} executed={s['executed']}",
         f"- multiple testing: m_effective={s.get('m_effective')} "
-        f"(m_raw={s.get('m_raw')}) · registry {s.get('registry_file')} "
+        f"(PRE-REGISTERED before phase A) · registry {s.get('registry_file')} "
         f"sha={str(s.get('registry_sha256'))[:16]} · replays_run="
         f"{s.get('replays_run')} · expected random survivors @5%: "
         f"{s.get('expected_random_survivors_at_5pct')} · sensitivity: {mt}",
@@ -841,7 +872,9 @@ def _memo(s: dict) -> str:
         lines.append(
             f"- **{e['strategy_id']}** [{e['state']}] origin={e.get('origin')} · "
             f"val EV={vm.get('net_EV')} lb={vm.get('net_EV_lower_bound')} "
-            f"n={vm.get('n_trades')} n_eff={vm.get('n_eff')} · "
+            f"n={vm.get('n_trades')} n_eff={vm.get('n_eff')} "
+            f"n_cluster={vm.get('n_cluster')} "
+            f"degenerate={vm.get('degenerate_returns')} · "
             f"holdout EV={hm.get('net_EV') if hm else 'NOT ACCESSED'} · "
             f"stress_ok={e.get('stress_ok')}")
     if not s.get("top_candidates"):
@@ -854,8 +887,8 @@ def _memo(s: dict) -> str:
         else:
             lines.append(f"- {k}: {v}")
     lines += ["", "Model votes never promote. The judge is the deterministic "
-              "replay funnel. The holdout is sealed and token-gated; while "
-              "execution proxies exist, holdout access is DENIED and the max "
-              "state is WATCHLIST_RESEARCH_ONLY. "
-              "**FINAL_RECOMMENDATION=NO LIVE.**"]
+              "replay funnel. The holdout lives in a sealed on-disk artifact "
+              "behind a one-use HMAC token; while execution proxies exist, "
+              "holdout access is DENIED and the max state is "
+              "WATCHLIST_RESEARCH_ONLY. **FINAL_RECOMMENDATION=NO LIVE.**"]
     return "\n".join(lines) + "\n"

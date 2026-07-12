@@ -35,8 +35,11 @@ from typing import Any, Callable
 from . import FINAL_RECOMMENDATION_NO_LIVE
 from . import continuous_edge_factory_v10_38 as CE
 
-TOOL_VERSION = "v10.45.4"
-OUTPUT_SUBDIR = ("reports", "research", "v10_45_4_edge_discovery")
+TOOL_VERSION = "v10.45.5"
+OUTPUT_SUBDIR = ("reports", "research", "v10_45_5_edge_discovery")
+HOLDOUT_SUBDIR = ("external_data", "staging", "holdout_v10_45_5")
+GATE_VERSION = "v10.45.5"
+CLUSTER_BLOCK_BARS = 30           # conservative temporal grouping (no event_id)
 
 # execution-model elements that are still PROXIES: promotion is capped at
 # SHADOW_CANDIDATE_RESEARCH_ONLY while any of these remain (fail-closed)
@@ -86,9 +89,20 @@ def _now() -> str:
 
 
 def _out() -> Path:
-    d = CE._repo_root().joinpath(*OUTPUT_SUBDIR)
-    d.mkdir(parents=True, exist_ok=True)
-    return d
+    from . import public_data_backfill_v10_45_1 as BF
+    return BF.validated_dir(*OUTPUT_SUBDIR)
+
+
+def _json_finite(obj):
+    """Recursively replace non-finite floats with None so ledger/report JSON
+    is always valid and a NaN can never masquerade as a number downstream."""
+    if isinstance(obj, float):
+        return obj if math.isfinite(obj) else None
+    if isinstance(obj, dict):
+        return {k: _json_finite(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_json_finite(x) for x in obj]
+    return obj
 
 
 # ==========================================================================
@@ -561,11 +575,33 @@ def _conditions_true(f: dict, conds: list[tuple]) -> bool:
 # CANONICAL REPLAY (single logic for every candidate and baseline)
 # ==========================================================================
 
+def _finite_window_ok(bars, feats, spec, i_start, i_end) -> bool:
+    """Non-finite guard for one replay window: OHLC of every bar plus every
+    feature the spec actually references must be finite. O(range)."""
+    used = {c[0] for c in spec.get("conditions", ())}
+    if (spec.get("stop", {}).get("type") == "atr"
+            or spec.get("tp", {}).get("type") == "atr"
+            or spec.get("trail", {}).get("type") == "atr"):
+        used.add("atr_14")
+    isf = math.isfinite
+    for i in range(max(0, i_start), min(i_end + 1, len(bars))):
+        b = bars[i]
+        if not (isf(b["open"]) and isf(b["high"]) and isf(b["low"])
+                and isf(b["close"])):
+            return False
+        fr = feats[i] if i < len(feats) else {}
+        for name in used:
+            v = fr.get(name)
+            if isinstance(v, float) and not isf(v):
+                return False
+    return True
+
+
 def replay(bars: list[dict], feats: list[dict], spec: dict,
            costs: dict | None = None, i_start: int = WARMUP,
            i_end: int | None = None, cooldown_override: int | None = None,
            entry_fill_prob: float = 1.0, extra_entry_slip_bps: float = 0.0,
-           rng_seed: int = 7) -> dict[str, Any]:
+           rng_seed: int = 7, validated: bool = False) -> dict[str, Any]:
     """Deterministic bar replay of one compiled strategy over [i_start, i_end).
 
     Contract: signal on bar i close -> entry at bar i+1 open (+slippage+half
@@ -588,6 +624,11 @@ def replay(bars: list[dict], feats: list[dict], spec: dict,
     bars_per_8h = max(1.0, 8 * 3_600_000 / bar_interval)
     fund_per_bar = cst["funding_bps_per_8h"] / 10_000.0 / bars_per_8h
     i_end = min(i_end if i_end is not None else len(bars) - 1, len(bars) - 1)
+    # NON-FINITE inputs are refused, never traded (funnels validate the whole
+    # dataset once and pass validated=True to skip the per-replay scan)
+    if not validated and not _finite_window_ok(bars, feats, spec, i_start, i_end):
+        return {"trades": [], "n_trades": 0, "invalid_bar_fills": 0,
+                "ok": False, "status": "INVALID_NON_FINITE_INPUT"}
     cooldown = cooldown_override if cooldown_override is not None else spec["cooldown"]
     rng = random.Random(rng_seed)
     trades: list[dict] = []
@@ -609,6 +650,10 @@ def replay(bars: list[dict], feats: list[dict], spec: dict,
                           i - pos["entry_i"], reason)
         pos["tranches"].append(tr)
         net = sum(t["net"] * t["frac"] for t in pos["tranches"])
+        if not math.isfinite(net):
+            # corrupt PnL can never enter the trade list as a number
+            net = 0.0
+            reason = "INVALID_NON_FINITE"
         trades.append({"entry_i": pos["entry_i"], "exit_i": i,
                        "side": spec["side"], "net_return": round(net, 8),
                        "exit_reason": reason, "bars_held": i - pos["entry_i"],
@@ -623,6 +668,10 @@ def replay(bars: list[dict], feats: list[dict], spec: dict,
         bar) is clamped and FLAGGED so the trade is excluded as
         INVALID_EXECUTION downstream."""
         nonlocal invalid_bar_fills
+        if not (math.isfinite(raw) and math.isfinite(lo) and math.isfinite(hi)):
+            invalid_bar_fills += 1
+            safe = lo if math.isfinite(lo) else (hi if math.isfinite(hi) else 0.0)
+            return safe, False
         if lo - 1e-9 <= raw <= hi + 1e-9:
             return raw, True
         invalid_bar_fills += 1
@@ -777,11 +826,29 @@ def replay(bars: list[dict], feats: list[dict], spec: dict,
 # METRICS + GATES
 # ==========================================================================
 
+def _metrics_invalid(base: dict, status: str) -> dict[str, Any]:
+    return {**base, "ok": False, "status": status,
+            "promotion_allowed": False, "degenerate_returns": None,
+            "net_EV": None, "net_EV_lower_bound": None,
+            "profit_factor": None, "win_rate": None, "max_drawdown": None,
+            "outlier_dependence": None, "stability_sign": None, "n_eff": 0}
+
+
 def metrics(trades: list[dict], n_tests: int = 1) -> dict[str, Any]:
-    """EV / PF / win-rate / DD are computed ONLY over trades with an executable
-    exit (TP/SL/BE/TRAIL/TIME). END_CENSORED and STALE_EXIT never enter the
-    performance statistics — they are reported separately and count against
-    promotion via censored_ratio."""
+    """EV / PF / win-rate / DD over executable exits only. NEVER raises on
+    corrupt data: any non-finite return or malformed trade yields a structured
+    ok=false / INVALID_NON_FINITE_INPUT / promotion_allowed=false result."""
+    try:
+        return _metrics_inner(trades, n_tests)
+    except Exception:
+        return _metrics_invalid(
+            {"n_trades": 0, "n_total_outcomes": len(trades)
+             if isinstance(trades, list) else 0,
+             "censored": 0, "invalid_execution": 0, "censored_ratio": 0.0},
+            "INVALID_NON_FINITE_INPUT")
+
+
+def _metrics_inner(trades: list[dict], n_tests: int = 1) -> dict[str, Any]:
     valid = [t for t in trades if t["exit_reason"] in VALID_EXIT_REASONS
              and not t.get("censored")]
     censored = [t for t in trades if t.get("censored")
@@ -795,8 +862,14 @@ def metrics(trades: list[dict], n_tests: int = 1) -> dict[str, Any]:
             "censored": len(censored), "invalid_execution": len(invalid_exec),
             "censored_ratio": round((len(censored) + len(invalid_exec))
                                     / n_total, 4) if n_total else 0.0}
+    # ---- FINITENESS FIRST: corrupt PnL can never enter any statistic
+    if any(not isinstance(x, (int, float)) or not math.isfinite(x)
+           for x in xs):
+        return _metrics_invalid(base, "INVALID_NON_FINITE_INPUT")
     if n == 0:
-        return {**base, "net_EV": None, "net_EV_lower_bound": None,
+        return {**base, "ok": True, "status": "NO_TRADES",
+                "promotion_allowed": False, "degenerate_returns": None,
+                "net_EV": None, "net_EV_lower_bound": None,
                 "profit_factor": None, "win_rate": None, "max_drawdown": None,
                 "outlier_dependence": None, "stability_sign": None,
                 "n_eff": 0}
@@ -837,14 +910,41 @@ def metrics(trades: list[dict], n_tests: int = 1) -> dict[str, Any]:
             rho = num / denom if denom > 1e-18 else 0.0
             rho_sum += max(rho, 0.0)           # only positive dependence shrinks
         acf_factor = 1.0 + 2.0 * rho_sum
+    # ---- (c) CLUSTER dependence. No event_id exists on public OHLCV, so a
+    # predefined conservative grouping applies: trades whose exposures OVERLAP
+    # chain into one cluster, and trades entering within the same fixed
+    # temporal block (CLUSTER_BLOCK_BARS) share one cluster (same shock /
+    # liquidation episode proxy). The harsher of the two counts wins.
+    ordered = sorted(valid, key=lambda t: t["entry_i"])
+    overlap_chains = 0
+    chain_end = None
+    for t in ordered:
+        if chain_end is None or t["entry_i"] > chain_end:
+            overlap_chains += 1
+            chain_end = t["exit_i"]
+        else:
+            chain_end = max(chain_end, t["exit_i"])
+    temporal_blocks = len({t["entry_i"] // CLUSTER_BLOCK_BARS for t in valid})
+    n_cluster = max(1, min(overlap_chains, temporal_blocks))
+    n_overlap = max(1, int(n / occ_factor))
+    n_acf = max(1, int(n / acf_factor))
     n_eff_proxy = n < 10                       # too small to estimate honestly
     if n_eff_proxy:
-        n_eff = max(1, n // 2)                 # conservative penalty
+        n_eff = max(1, min(n // 2, n_cluster))  # conservative penalty
         n_eff_method = "N_EFF_PROXY_half_n (sample too small for estimation)"
     else:
-        n_eff = max(1, int(n / max(occ_factor, acf_factor)))
-        n_eff_method = (f"min-shrink(occupancy={occ_factor:.3f}, "
-                        f"acf_factor={acf_factor:.3f}), lags 1-5, positive rho only")
+        n_eff = max(1, min(n_overlap, n_acf, n_cluster))
+        n_eff_method = (f"min(n_overlap={n_overlap}, n_acf={n_acf}, "
+                        f"n_cluster={n_cluster}); occupancy={occ_factor:.3f}, "
+                        f"acf={acf_factor:.3f}, lags 1-5 positive rho only")
+    cluster_source = (f"overlap_chain+temporal_block_{CLUSTER_BLOCK_BARS} "
+                      "(no event_id available on public OHLCV)")
+    # ---- DEGENERATE RETURNS: near-zero variance, too few distinct outcomes
+    # or a single event/cluster can never count as strong evidence
+    unique_returns = len({round(x, 10) for x in xs})
+    degenerate = bool((n >= 5 and unique_returns <= 2)
+                      or (n > 3 and sd == 0.0)
+                      or (n >= 5 and n_cluster == 1))
     # ---- uncertainty uses n_eff, never raw n: dependence widens the interval.
     # (Near-)identical returns collapse sd toward 0, which would yield an
     # overconfident lb == mean ("PF=999 as evidence"). A variance FLOOR keeps
@@ -856,7 +956,10 @@ def metrics(trades: list[dict], n_tests: int = 1) -> dict[str, Any]:
         sd_floor_applied = True
     lb = mean - 1.65 * sd_eff / math.sqrt(n_eff) \
         - math.sqrt(max(math.log(max(n_tests, 2)), 0.0)) * sd_eff / math.sqrt(n_eff)
-    return {**base, "net_EV": round(mean, 8),
+    if not math.isfinite(lb):
+        return _metrics_invalid(base, "INVALID_NON_FINITE_INPUT")
+    return {**base, "ok": True, "status": "OK",
+            "net_EV": round(mean, 8),
             "net_EV_lower_bound": round(lb, 8),
             "n_tests_applied": n_tests,
             "profit_factor": round(pf, 4),
@@ -869,13 +972,21 @@ def metrics(trades: list[dict], n_tests: int = 1) -> dict[str, Any]:
             "n_eff": n_eff, "n_eff_method": n_eff_method,
             "n_eff_is_proxy": n_eff_proxy,
             "sd_floor_applied": sd_floor_applied,
+            "degenerate_returns": degenerate,
+            "unique_returns": unique_returns,
+            "promotion_allowed": not degenerate,
             "n_raw": n,
+            "n_overlap": n_overlap,
+            "n_acf": n_acf,
+            "n_cluster": n_cluster,
+            "n_eff_final": n_eff,
+            "cluster_source": cluster_source,
             "acf_factor": round(acf_factor, 4),
             "overlap_factor": round(occ_factor, 4),
             "lb_sensitivity_n_vs_neff": {
                 "lb_with_n_raw": round(
                     mean - (1.65 + math.sqrt(max(math.log(max(n_tests, 2)), 0.0)))
-                    * sd / math.sqrt(n), 8),
+                    * sd / math.sqrt(max(n, 1)), 8) if sd >= 0 else None,
                 "lb_with_n_eff": round(lb, 8)}}
 
 
@@ -899,6 +1010,10 @@ def validation_eligible_for_holdout(val_m: dict | None, stress_ok: bool,
         reasons.append("N_EFF_TOO_SMALL")
     if val_m.get("n_eff_is_proxy"):
         reasons.append("N_EFF_PROXY")
+    if val_m.get("ok") is False:
+        reasons.append("INVALID_NON_FINITE_INPUT")
+    if val_m.get("degenerate_returns"):
+        reasons.append("DEGENERATE_RETURNS")
     if (val_m.get("censored_ratio") or 0) > MAX_CENSORED_RATIO:
         reasons.append("CENSORED_EXCESSIVE")
     if (val_m.get("net_EV") or 0) <= 0:
@@ -926,32 +1041,145 @@ def validation_eligible_for_holdout(val_m: dict | None, stress_ok: bool,
 
 
 # ==========================================================================
-# PHYSICALLY ISOLATED HOLDOUT: sealed container + eligibility token
+# PHYSICALLY ISOLATED HOLDOUT: on-disk sealed artifact + HMAC one-use token
+#
+# THREAT MODEL (honest): this design prevents (a) accidental access, (b)
+# access by strategy/pipeline code through normal arguments, (c) early access
+# before validation gates, (d) token reuse, (e) cross-strategy tokens, and
+# (f) tokens surviving a change of metrics, registry, dataset or gate
+# version. It does NOT defend against a developer with full control of the
+# Python process or of the filesystem (who can read the artifact file or
+# introspect closures); that adversary is out of scope and no in-process
+# scheme can stop them.
 # ==========================================================================
 
-_TOKEN_SECRET = object()          # module-private; cannot be forged externally
+HOLDOUT_CONTEXT_BARS = 300        # >= WARMUP so holdout features are valid
 
 
-class HoldoutAccessToken:
-    """Proof of eligibility. Instances are ONLY issued by
-    issue_holdout_token(); anything else fails the identity check."""
-    __slots__ = ("strategy_id", "validation_sha1", "_secret")
+def _holdout_service():
+    """Private issuing/validating service. The HMAC key is ephemeral and
+    per-process; consumed nonces are stored INSIDE the closure. There is no
+    module-level secret whose import grants access."""
+    import hmac as _hmac
+    _key = os.urandom(32)
+    _issued: dict[str, str] = {}              # nonce -> bindings sha
+    _consumed: set[str] = set()
 
-    def __init__(self, strategy_id: str, validation_sha1: str, _secret=None):
-        self.strategy_id = strategy_id
-        self.validation_sha1 = validation_sha1
-        self._secret = _secret
+    def _bind_sha(bindings: dict) -> str:
+        return hashlib.sha256(json.dumps(bindings, sort_keys=True,
+                                         default=str).encode()).hexdigest()
+
+    def _mac(body: dict) -> str:
+        return _hmac.new(_key, json.dumps(body, sort_keys=True).encode(),
+                         hashlib.sha256).hexdigest()
+
+    def issue(bindings: dict, ttl_s: int = 900) -> dict:
+        nonce = os.urandom(16).hex()
+        body = {"bindings_sha256": _bind_sha(bindings), "nonce": nonce,
+                "issued_at_ms": int(datetime.now(timezone.utc).timestamp() * 1000),
+                "expires_at_ms": int((datetime.now(timezone.utc).timestamp()
+                                      + ttl_s) * 1000),
+                "gate_version": GATE_VERSION,
+                "scope": "holdout_replay_once"}
+        _issued[nonce] = body["bindings_sha256"]
+        return {**body, "hmac": _mac(body)}
+
+    def redeem(token, bindings: dict) -> None:
+        """Validate and CONSUME (one use). Raises PermissionError on any
+        mismatch; consumption happens BEFORE the caller may load anything."""
+        if not isinstance(token, dict) or "hmac" not in token:
+            raise PermissionError("HOLDOUT_LOCKED: no valid token presented")
+        body = {k: v for k, v in token.items() if k != "hmac"}
+        if not _hmac.compare_digest(_mac(body), str(token.get("hmac"))):
+            raise PermissionError("HOLDOUT_LOCKED: token HMAC invalid (forged "
+                                  "or from another process)")
+        nonce = body.get("nonce")
+        if nonce in _consumed:
+            raise PermissionError("HOLDOUT_LOCKED: token already consumed "
+                                  "(one-use)")
+        if nonce not in _issued:
+            raise PermissionError("HOLDOUT_LOCKED: unknown token nonce")
+        if body.get("gate_version") != GATE_VERSION:
+            raise PermissionError("HOLDOUT_LOCKED: gate version mismatch")
+        now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+        if now_ms > int(body.get("expires_at_ms") or 0):
+            raise PermissionError("HOLDOUT_LOCKED: token expired")
+        if body.get("bindings_sha256") != _bind_sha(bindings):
+            raise PermissionError("HOLDOUT_LOCKED: token bound to different "
+                                  "strategy/metrics/dataset/registry")
+        _consumed.add(nonce)                   # consume BEFORE any load
+        del _issued[nonce]
+
+    return issue, redeem
+
+
+_issue_raw_token, _redeem_token = _holdout_service()
+
+
+def holdout_bindings(*, run_id, sprint_id, strategy_id, compiled_spec_sha,
+                     validation_metrics_sha, dataset_generation_id,
+                     holdout_descriptor_sha, registry_sha256) -> dict:
+    """Canonical binding set: a token is valid ONLY for this exact tuple."""
+    return {"run_id": run_id, "sprint_id": sprint_id,
+            "strategy_id": strategy_id,
+            "compiled_spec_sha": compiled_spec_sha,
+            "validation_metrics_sha": validation_metrics_sha,
+            "dataset_generation_id": dataset_generation_id,
+            "holdout_descriptor_sha": holdout_descriptor_sha,
+            "registry_sha256": registry_sha256,
+            "gate_version": GATE_VERSION}
+
+
+def seal_holdout(bars_full: list[dict], ref_full: list[dict] | None,
+                 h0: int, h1: int, *, dataset_generation_id: str,
+                 dataset_sha256: str, symbol: str, timeframe: str) -> dict:
+    """Write the holdout (plus the warmup CONTEXT that precedes it, which is
+    already-known discovery/validation data) to a SEPARATE on-disk artifact
+    and return an OPAQUE descriptor. After this call the caller must drop the
+    full bar list; the run state keeps bars[:v1] only. The descriptor carries
+    no bar values, counts or timestamps of the sealed range."""
+    from . import public_data_backfill_v10_45_1 as BF
+    ctx0 = max(0, h0 - HOLDOUT_CONTEXT_BARS)
+    local_h0 = h0 - ctx0
+    local_h1 = h1 - ctx0
+    seg_bars = bars_full[ctx0:h1]
+    seg_ref = None
+    if ref_full:
+        last_ts = seg_bars[-1]["ts"] if seg_bars else 0
+        first_ts = seg_bars[0]["ts"] if seg_bars else 0
+        seg_ref = [r for r in ref_full if first_ts <= r["ts"] <= last_ts]
+    split_hash = hashlib.sha256(
+        f"{dataset_sha256}|{symbol}|{timeframe}|{h0}|{h1}".encode()).hexdigest()
+    dataset_id = hashlib.sha256(
+        f"{split_hash}|holdout".encode()).hexdigest()[:24]
+    payload = json.dumps({"dataset_id": dataset_id,
+                          "generation_id": dataset_generation_id,
+                          "symbol": symbol, "timeframe": timeframe,
+                          "local_h0": local_h0, "local_h1": local_h1,
+                          "bars": _json_finite(seg_bars),
+                          "ref": _json_finite(seg_ref)},
+                         default=str).encode("utf-8")
+    d = BF.validated_dir(*HOLDOUT_SUBDIR)
+    artifact_sha = BF.safe_atomic_write(d / f"{dataset_id}.json", payload)
+    return {"sealed": True, "content": "opaque",
+            "dataset_id": dataset_id,
+            "generation_id": dataset_generation_id,
+            "descriptor_sha256": artifact_sha,
+            "split_hash": split_hash,
+            "expected_dataset_sha256": dataset_sha256}
 
 
 def issue_holdout_token(strategy_id: str, val_m: dict | None, stress_ok: bool,
                         data_quality_pass: bool,
                         baseline_best_lb: float | None,
                         matched_baseline_ev: float | None,
-                        execution_proxies: tuple = EXECUTION_PROXIES
-                        ) -> tuple[HoldoutAccessToken | None, list[str]]:
-    """The ONLY factory of holdout access. Fail-closed:
-    execution proxies block access entirely; missing baselines block access;
-    every validation gate must pass."""
+                        execution_proxies: tuple = EXECUTION_PROXIES,
+                        bindings: dict | None = None
+                        ) -> tuple[dict | None, list[str]]:
+    """The ONLY factory of holdout access. Fail-closed: execution proxies,
+    missing/incomplete baselines, proxy n_eff, degenerate returns and every
+    validation gate block issuance. The returned token is HMAC-bound to the
+    exact bindings and is single-use."""
     reasons: list[str] = []
     if execution_proxies:
         reasons.append("EXECUTION_PROXIES_BLOCK_HOLDOUT_ACCESS")
@@ -965,42 +1193,53 @@ def issue_holdout_token(strategy_id: str, val_m: dict | None, stress_ok: bool,
     reasons.extend(more)
     if reasons:
         return None, reasons
-    val_hash = hashlib.sha1(json.dumps(val_m, sort_keys=True, default=str)
-                            .encode("utf-8")).hexdigest()[:16]
-    return HoldoutAccessToken(strategy_id, val_hash, _secret=_TOKEN_SECRET), []
+    if bindings is None:
+        val_hash = hashlib.sha1(json.dumps(val_m, sort_keys=True, default=str)
+                                .encode("utf-8")).hexdigest()[:16]
+        bindings = holdout_bindings(
+            run_id=RUN_CONTEXT.get("run_id"), sprint_id=RUN_CONTEXT.get("sprint_id"),
+            strategy_id=strategy_id, compiled_spec_sha=None,
+            validation_metrics_sha=val_hash,
+            dataset_generation_id=RUN_CONTEXT.get("dataset_generation_id"),
+            holdout_descriptor_sha=RUN_CONTEXT.get("holdout_descriptor_sha"),
+            registry_sha256=RUN_CONTEXT.get("registry_sha_at_close"))
+    return _issue_raw_token(bindings), []
 
 
-class SealedHoldout:
-    """Holds the full bar history privately. Before a valid token is
-    presented, the holdout segment is never loaded, sliced, iterated,
-    hashed, counted or featurised — the public descriptor reveals nothing."""
-
-    def __init__(self, bars_full: list[dict], ref_full: list[dict] | None,
-                 h_start: int, h_end: int):
-        self.__bars = bars_full
-        self.__ref = ref_full
-        self.__h0 = h_start
-        self.__h1 = h_end
-        self.descriptor = {"sealed": True, "content": "opaque"}
-
-    def open(self, token) -> tuple[list[dict], list[dict], list[dict] | None,
-                                   int, int]:
-        """Returns (bars_full, feats_full, ref_full, h0, h1). Features for the
-        full history are built HERE, only after eligibility."""
-        if not isinstance(token, HoldoutAccessToken) or \
-                getattr(token, "_secret", None) is not _TOKEN_SECRET:
-            raise PermissionError(
-                "HOLDOUT_LOCKED: access requires a token issued by "
-                "issue_holdout_token() after full validation eligibility")
-        feats_full = build_features(self.__bars, ref_bars=self.__ref)
-        return self.__bars, feats_full, self.__ref, self.__h0, self.__h1
+def open_holdout(descriptor: dict, token, bindings: dict
+                 ) -> tuple[list[dict], list[dict], int, int]:
+    """Dedicated holdout loader. The token is validated and CONSUMED first;
+    only then is the artifact read, its SHA re-verified against the
+    descriptor, and features built over context+holdout. Returns
+    (bars_ctx, feats_ctx, local_h0, local_h1)."""
+    from . import public_data_backfill_v10_45_1 as BF
+    _redeem_token(token, bindings)            # raises; consumes the nonce
+    if not isinstance(descriptor, dict) or not descriptor.get("dataset_id"):
+        raise PermissionError("HOLDOUT_LOCKED: invalid descriptor")
+    d = BF.validated_dir(*HOLDOUT_SUBDIR)
+    p = d / f"{descriptor['dataset_id']}.json"
+    if not p.is_file():
+        raise PermissionError("HOLDOUT_LOCKED: sealed artifact missing")
+    raw = p.read_bytes()
+    if hashlib.sha256(raw).hexdigest() != descriptor.get("descriptor_sha256"):
+        raise PermissionError("HOLDOUT_LOCKED: sealed artifact hash mismatch "
+                              "(dataset changed after sealing)")
+    obj = json.loads(raw.decode("utf-8"))
+    bars_ctx = obj["bars"]
+    feats_ctx = build_features(bars_ctx, ref_bars=obj.get("ref"))
+    ledger_append({"phase": "holdout_open", "dataset_id": obj["dataset_id"],
+                   "strategy_id": bindings.get("strategy_id"),
+                   "holdout_accessed": True,
+                   "validation_metrics_sha": bindings.get(
+                       "validation_metrics_sha")})
+    return bars_ctx, feats_ctx, int(obj["local_h0"]), int(obj["local_h1"])
 
 
 # ==========================================================================
 # GLOBAL MULTIPLE-TESTING REGISTRY (persistent, per sprint)
 # ==========================================================================
 
-REGISTRY_FILE = "global_experiment_registry_v10_45_4.jsonl"
+REGISTRY_FILE = "global_experiment_registry_v10_45_5.jsonl"
 
 
 def _registry_closed_sprints() -> set:
@@ -1018,28 +1257,146 @@ def _registry_closed_sprints() -> set:
     return closed
 
 
+class _RegistryLock:
+    """Exclusive-create lock file: two concurrent writers can never interleave
+    registry records. O_CREAT|O_EXCL is atomic on NTFS and POSIX."""
+
+    def __init__(self, timeout_s: float = 10.0):
+        self._path = _out() / (REGISTRY_FILE + ".lock")
+        self._timeout = timeout_s
+        self._fd = None
+
+    def __enter__(self):
+        import time as _t
+        deadline = _t.monotonic() + self._timeout
+        while True:
+            try:
+                self._fd = os.open(self._path,
+                                   os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                return self
+            except FileExistsError:
+                if _t.monotonic() > deadline:
+                    raise TimeoutError("registry lock busy")
+                _t.sleep(0.05)
+
+    def __exit__(self, *exc):
+        try:
+            if self._fd is not None:
+                os.close(self._fd)
+        finally:
+            try:
+                os.unlink(self._path)
+            except OSError:
+                pass
+
+
+def _registry_records() -> list[dict]:
+    p = _out() / REGISTRY_FILE
+    if not p.is_file():
+        return []
+    out = []
+    for line in p.read_text(encoding="utf-8").splitlines():
+        try:
+            out.append(json.loads(line))
+        except Exception:
+            continue
+    return out
+
+
+def _registry_write(entry: dict) -> None:
+    p = _out() / REGISTRY_FILE
+    with open(p, "a", encoding="utf-8") as f:
+        f.write(json.dumps({"at": _now(), **_json_finite(entry)},
+                           default=str) + "\n")
+
+
 def registry_append(entry: dict) -> None:
     """Append-only registry with a hard CLOSE: once a sprint_close record
     exists for a sprint_id, any further trial registration for that sprint
     RAISES — trials can never be added silently after the statistical total
     was fixed."""
-    sid = entry.get("sprint_id")
-    if sid and entry.get("kind") != "sprint_close" \
-            and sid in _registry_closed_sprints():
-        raise ValueError(f"REGISTRY_CLOSED: sprint {sid} already closed; "
-                         "no new trials can be registered")
-    p = _out() / REGISTRY_FILE
-    with open(p, "a", encoding="utf-8") as f:
-        f.write(json.dumps({"at": _now(), **entry}, default=str) + "\n")
+    with _RegistryLock():
+        sid = entry.get("sprint_id")
+        if sid and entry.get("kind") != "sprint_close" \
+                and sid in _registry_closed_sprints():
+            raise ValueError(f"REGISTRY_CLOSED: sprint {sid} already closed; "
+                             "no new trials can be registered")
+        _registry_write(entry)
 
 
-def registry_close(sprint_id: str, m_global: int, run_ids: list) -> None:
-    """Statistical CLOSE of a sprint (two-phase contract): every member and
-    its m_partial must already be registered; after this record, the registry
-    rejects new trials for the sprint."""
-    registry_append({"kind": "sprint_close", "sprint_id": sprint_id,
-                     "m_global": int(m_global), "run_ids": run_ids,
-                     "state": "CLOSED"})
+def trial_member_id(member: dict) -> str:
+    """Content-addressed identity of ONE pre-registered trial."""
+    keys = ("symbol", "timeframe", "side", "strategy_id", "signature",
+            "kind", "variant", "parent_signature", "seed", "model",
+            "prompt_sha", "origin")
+    canon = {k: member.get(k) for k in keys}
+    return hashlib.sha256(json.dumps(canon, sort_keys=True,
+                                     default=str).encode()).hexdigest()[:24]
+
+
+def registry_open(sprint_id: str, members: list[dict]) -> dict[str, Any]:
+    """PHASE 1 of the two-phase registry: pre-register EVERY definitive trial
+    (strategies, perturbations, screening/stress evaluations, baselines,
+    seeds, models, prompts) BEFORE any discovery replay runs. Duplicate
+    members, an already-open or already-closed sprint, or an empty member
+    list all raise."""
+    if not members:
+        raise ValueError("REGISTRY_OPEN_EMPTY: no trials to pre-register")
+    ids = [trial_member_id(m) for m in members]
+    if len(set(ids)) != len(ids):
+        dup = len(ids) - len(set(ids))
+        raise ValueError(f"REGISTRY_DUPLICATE_MEMBERS: {dup} duplicates")
+    with _RegistryLock():
+        for r in _registry_records():
+            if r.get("sprint_id") == sprint_id and \
+                    r.get("kind") in ("sprint_open", "sprint_close"):
+                raise ValueError(f"REGISTRY_ALREADY_{'CLOSED' if r['kind'] == 'sprint_close' else 'OPEN'}: {sprint_id}")
+        _registry_write({"kind": "sprint_open", "sprint_id": sprint_id,
+                         "state": "OPEN", "n_members": len(members)})
+        for m, mid in zip(members, ids):
+            _registry_write({**m, "trial_kind": m.get("kind"),
+                             "kind": "trial", "sprint_id": sprint_id,
+                             "member_id": mid})
+    return {"sprint_id": sprint_id, "n_members": len(members),
+            "member_ids": set(ids)}
+
+
+def registry_close(sprint_id: str, m_global: int, run_ids: list) -> dict:
+    """PHASE 2: statistical CLOSE. Requires an OPEN sprint with members,
+    refuses a second close, and refuses any m_global that does not equal the
+    unique pre-registered member count. Returns the frozen totals + SHA."""
+    with _RegistryLock():
+        recs = _registry_records()
+        opened = any(r.get("kind") == "sprint_open"
+                     and r.get("sprint_id") == sprint_id for r in recs)
+        members = [r for r in recs if r.get("kind") == "trial"
+                   and r.get("sprint_id") == sprint_id]
+        if any(r.get("kind") == "sprint_close"
+               and r.get("sprint_id") == sprint_id for r in recs):
+            raise ValueError(f"REGISTRY_DOUBLE_CLOSE: {sprint_id}")
+        if not opened or not members:
+            raise ValueError(f"REGISTRY_CLOSE_WITHOUT_MEMBERS: {sprint_id}")
+        unique = len({r.get("member_id") for r in members})
+        if int(m_global) != unique:
+            raise ValueError(f"REGISTRY_M_MISMATCH: m_global={m_global} but "
+                             f"unique members={unique}")
+        _registry_write({"kind": "sprint_close", "sprint_id": sprint_id,
+                         "m_global_raw": unique, "m_global_effective": unique,
+                         "m_method": ("unique pre-registered trials; no "
+                                      "dependence discount (conservative)"),
+                         "m_global": unique, "run_ids": run_ids,
+                         "state": "CLOSED"})
+    return {"sprint_id": sprint_id, "m_global": unique,
+            "registry_sha256": registry_sha()}
+
+
+def registry_members(sprint_id: str) -> set[str]:
+    return {r.get("member_id") for r in _registry_records()
+            if r.get("kind") == "trial" and r.get("sprint_id") == sprint_id}
+
+
+def registry_is_closed(sprint_id: str) -> bool:
+    return sprint_id in _registry_closed_sprints()
 
 
 def registry_sha() -> str | None:
@@ -1054,7 +1411,8 @@ def state_from_reasons(reasons: list[str]) -> str:
     if "DATA_QUALITY_FAIL" in reasons:
         return "INVALID_DATA"
     sample = {"N_TOO_SMALL", "N_EFF_TOO_SMALL", "CENSORED_EXCESSIVE",
-              "NO_VALIDATION_METRICS", "N_EFF_PROXY"}
+              "NO_VALIDATION_METRICS", "N_EFF_PROXY", "DEGENERATE_RETURNS",
+              "INVALID_NON_FINITE_INPUT"}
     if any(r in sample for r in reasons):
         return "NEED_MORE_DATA"
     hard = {"EV_NOT_POSITIVE", "PF_TOO_LOW", "DRAWDOWN_EXCESSIVE",
@@ -1138,14 +1496,18 @@ def exposure_matched_baseline(bars: list[dict], spec: dict, val_trades: list[dic
         by_session[_session(bars[i]["ts"])].append(i)
     means = []
     placed_counts: list[int] = []
+    per_seed: list[dict] = []
     for seed in range(n_seeds):
         rng = random.Random(10_000 + seed)
         used: set[int] = set()
         rets = []
+        reject_reasons: dict[str, int] = {}
         for hold, sess in profile:
             pool = by_session.get(sess) or []
             placed = False
-            for _ in range(40):
+            if not pool:
+                reject_reasons["NO_POOL_FOR_SESSION"] =                     reject_reasons.get("NO_POOL_FOR_SESSION", 0) + 1
+            for _ in range(200):
                 if not pool:
                     break
                 i = pool[rng.randrange(len(pool))]
@@ -1163,12 +1525,30 @@ def exposure_matched_baseline(bars: list[dict], spec: dict, val_trades: list[dic
                 placed = True
                 break
             if not placed:
-                continue
+                reject_reasons["NO_FREE_WINDOW"] =                     reject_reasons.get("NO_FREE_WINDOW", 0) + 1
+        per_seed.append({"seed": 10_000 + seed, "requested": len(profile),
+                         "placed": len(rets),
+                         "rejected": len(profile) - len(rets),
+                         "rejection_reasons": reject_reasons})
         if rets:
             means.append(st.mean(rets))
             placed_counts.append(len(rets))
+    # FAIL-CLOSED: the baseline is only comparable when EVERY seed placed the
+    # candidate's EXACT exposure profile. A partial baseline is weaker by
+    # construction and must never silently pass as a benchmark.
+    incomplete = [d for d in per_seed if d["placed"] != d["requested"]]
+    if incomplete:
+        return {"status": "BASELINE_INCOMPLETE", "mean_EV": None,
+                "requested": len(profile),
+                "min_placed": min((d["placed"] for d in per_seed), default=0),
+                "mean_placed_per_seed": round(st.mean(placed_counts), 2)
+                if placed_counts else 0.0,
+                "seeds_incomplete": len(incomplete), "n_seeds": n_seeds,
+                "per_seed": per_seed[:5], "side": spec["side"],
+                "holdout_blocked": True}
     if not means:
-        return {"status": "NO_VALID_WINDOWS", "mean_EV": None}
+        return {"status": "NO_VALID_WINDOWS", "mean_EV": None,
+                "per_seed": per_seed[:5], "holdout_blocked": True}
     means_sorted = sorted(means)
 
     def pct(p: float) -> float:
@@ -1178,8 +1558,10 @@ def exposure_matched_baseline(bars: list[dict], spec: dict, val_trades: list[dic
     return {"status": "OK", "mean_EV": round(st.mean(means), 8),
             "sd_across_seeds": round(sd_seeds, 8),
             "p25": pct(0.25), "p50": pct(0.50), "p75": pct(0.75),
+            "upper_bound": round(st.mean(means) + 1.65 * sd_seeds, 8),
             "lower_bound": round(st.mean(means) - 1.65 * sd_seeds, 8),
             "n_seeds": len(means), "matched_entries": len(profile),
+            "per_seed": per_seed[:5],
             "mean_placed_per_seed": round(st.mean(placed_counts), 2),
             "hold_distribution_matched": True,
             "sessions_matched": True,
@@ -1257,82 +1639,147 @@ def buy_and_hold_net(bars, i_start, i_end, costs) -> float | None:
 # EXPERIMENT LEDGER (append-only; includes every rejected strategy)
 # ==========================================================================
 
-RUNNER_VERSION = "edge_discovery_v10_45_4"
+RUNNER_VERSION = "edge_discovery_v10_45_5"
 _PROVENANCE_FILES = ("edge_discovery_engine_v10_45_1.py",
                      "multi_ai_orchestrator_v10_45_1.py",
                      "public_data_backfill_v10_45_1.py",
                      "ai_providers_v10_45_1.py")
 
 
-def code_tree_hash() -> dict[str, Any]:
-    """SHA256 over the exact source files that produce results, plus a
-    worktree-dirty flag: results are attributable to CONTENT, not to whatever
-    commit hash happened to be HEAD when the run started."""
+def _git(*args) -> str | None:
     import subprocess
+    try:
+        out = subprocess.run(["git", *args], capture_output=True, text=True,
+                             timeout=10, cwd=str(CE._repo_root()))
+        return out.stdout.strip() or None
+    except Exception:
+        return None
+
+
+def code_identity() -> dict[str, Any]:
+    """Code identity that is STABLE across LF/CRLF checkouts, git archive and
+    clean worktrees. Primary identity = Git commit + tree OID + the blob OIDs
+    of the relevant sources (git stores LF-normalized content); a secondary
+    SEMANTIC hash re-derives the same value from working-tree bytes with line
+    endings normalized. Raw working-tree bytes are never the identity."""
     base = Path(__file__).parent
-    per_file = {}
+    per_file_semantic = {}
     h = hashlib.sha256()
     for name in _PROVENANCE_FILES:
         try:
-            data = (base / name).read_bytes()
+            data = (base / name).read_bytes().replace(b"\r\n", b"\n")
         except OSError:
             data = b""
         digest = hashlib.sha256(data).hexdigest()
-        per_file[name] = digest[:16]
+        per_file_semantic[name] = digest[:16]
         h.update(digest.encode())
+    blob_oids = {}
+    for name in _PROVENANCE_FILES:
+        oid = _git("hash-object", "--path", f"app/labs/{name}",
+                   str(base / name))
+        if oid:
+            blob_oids[name] = oid[:16]
     dirty = None
-    try:
-        out = subprocess.run(["git", "status", "--porcelain"],
-                             capture_output=True, text=True, timeout=5,
-                             cwd=str(CE._repo_root()))
-        dirty = bool(out.stdout.strip())
-    except Exception:
-        pass
-    return {"code_tree_hash": h.hexdigest()[:32], "files": per_file,
+    st_ = _git("status", "--porcelain", "-uno")
+    dirty = bool(st_) if st_ is not None else (
+        False if _git("rev-parse", "HEAD") else None)
+    return {"repo_commit": _git("rev-parse", "HEAD"),
+            "git_tree_oid": _git("rev-parse", "HEAD^{tree}"),
+            "relevant_blob_oids": blob_oids,
+            "semantic_code_hash": h.hexdigest()[:32],
+            "code_tree_hash": h.hexdigest()[:32],
+            "files": per_file_semantic,
             "runner_version": RUNNER_VERSION, "dirty_worktree": dirty}
 
 
-def write_commit_seal(expected_commit: str | None = None) -> dict[str, Any]:
-    """Versioned, committed seal generator (replaces any ad-hoc script): binds
-    the results directory to the EXACT source content and repo commit. `match`
-    is true only when HEAD equals the expected commit AND the worktree is
-    clean, so a seal can never claim results for code that wasn't committed."""
-    import subprocess
-    head = None
-    dirty_tracked = None
-    try:
-        out = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True,
-                             text=True, timeout=5, cwd=str(CE._repo_root()))
-        head = out.stdout.strip() or None
-        # match considers TRACKED files only: known-untracked docs cannot
-        # invalidate a seal, but any modified tracked source does
-        st_ = subprocess.run(["git", "status", "--porcelain", "-uno"],
-                             capture_output=True, text=True, timeout=5,
-                             cwd=str(CE._repo_root()))
-        dirty_tracked = bool(st_.stdout.strip())
-    except Exception:
-        pass
-    prov = code_tree_hash()
+def code_tree_hash() -> dict[str, Any]:
+    """Back-compatible alias: identity now comes from code_identity()."""
+    return code_identity()
+
+
+def write_output_manifest(manifest_id: str, extra: dict | None = None
+                          ) -> dict[str, Any]:
+    """Versioned OUTPUT manifest: hashes every published artifact in the
+    results directory plus the dataset/registry/ledger/code identity, then
+    commits an atomic CURRENT_OUTPUT_MANIFEST pointer {id, sha}. Reports
+    reference the manifest by its pre-chosen id (stable before hashing); the
+    pointer + seal carry the hash."""
+    from . import public_data_backfill_v10_45_1 as BF
+    out = _out()
+    artifacts = {}
+    for p in sorted(out.iterdir()):
+        if not p.is_file() or p.name.startswith("output_manifest_")                 or p.name == "CURRENT_OUTPUT_MANIFEST.json"                 or p.name.endswith(".lock") or p.name.endswith(".part"):
+            continue
+        artifacts[p.name] = hashlib.sha256(p.read_bytes()).hexdigest()
+    ident = code_identity()
+    manifest = {"output_manifest_id": manifest_id,
+                "tool_version": TOOL_VERSION,
+                "created_at": _now(),
+                "code": ident,
+                "registry_file": REGISTRY_FILE,
+                "registry_sha256": registry_sha(),
+                "artifacts": artifacts,
+                "environment_fingerprint": {
+                    "python": ".".join(map(str, __import__("sys")
+                                           .version_info[:3])),
+                    "platform": __import__("platform").system()},
+                "extra": _json_finite(extra or {}),
+                "research_only": True, "can_send_real_orders": False,
+                "final_recommendation": FINAL_RECOMMENDATION_NO_LIVE}
+    body = json.dumps(manifest, indent=2, default=str).encode("utf-8")
+    sha = BF.safe_atomic_write(out / f"output_manifest_{manifest_id}.json",
+                               body)
+    BF.safe_atomic_write(out / "CURRENT_OUTPUT_MANIFEST.json",
+                         json.dumps({"output_manifest_id": manifest_id,
+                                     "output_manifest_sha256": sha},
+                                    indent=2).encode("utf-8"))
+    return {**manifest, "output_manifest_sha256": sha}
+
+
+def write_commit_seal(expected_commit: str | None = None,
+                      output_manifest_sha: str | None = None
+                      ) -> dict[str, Any]:
+    """Versioned seal: certifies the CODE identity (commit + tree OID + blob
+    OIDs + semantic hash) AND the published artifacts via the output manifest
+    hash — never the code alone. `match` is true only when HEAD equals the
+    expected commit AND no tracked file is modified."""
+    from . import public_data_backfill_v10_45_1 as BF
+    ident = code_identity()
+    head = ident["repo_commit"]
+    dirty_tracked = ident["dirty_worktree"]
+    if output_manifest_sha is None:
+        ptr = _out() / "CURRENT_OUTPUT_MANIFEST.json"
+        if ptr.is_file():
+            try:
+                output_manifest_sha = json.loads(
+                    ptr.read_text(encoding="utf-8")).get(
+                        "output_manifest_sha256")
+            except Exception:
+                output_manifest_sha = None
     seal = {"sealed_at": _now(), "tool_version": TOOL_VERSION,
             "runner_version": RUNNER_VERSION,
             "repo_commit_head": head,
             "expected_commit": expected_commit,
-            "code_tree_hash": prov["code_tree_hash"],
-            "files": prov["files"],
-            "dirty_worktree": prov["dirty_worktree"],
+            "git_tree_oid": ident["git_tree_oid"],
+            "relevant_blob_oids": ident["relevant_blob_oids"],
+            "semantic_code_hash": ident["semantic_code_hash"],
+            "files": ident["files"],
             "dirty_tracked_files": dirty_tracked,
-            "ledger_file": "experiment_ledger_v10_45_4.jsonl",
+            "output_manifest_sha256": output_manifest_sha,
+            "certifies": ["code_identity", "output_manifest",
+                          "published_artifacts_via_manifest"],
+            "ledger_file": "experiment_ledger_v10_45_5.jsonl",
             "registry_file": REGISTRY_FILE,
             "registry_sha256": registry_sha(),
             "match": bool(head and (expected_commit is None or
                                     head == expected_commit)
-                          and dirty_tracked is False),
+                          and dirty_tracked is False
+                          and output_manifest_sha is not None),
             "research_only": True, "can_send_real_orders": False,
             "final_recommendation": FINAL_RECOMMENDATION_NO_LIVE}
-    p = _out() / "commit_seal_v10_45_4.json"
-    tmp = p.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(seal, indent=2, default=str), encoding="utf-8")
-    os.replace(tmp, p)
+    BF.safe_atomic_write(_out() / "commit_seal_v10_45_5.json",
+                         json.dumps(seal, indent=2, default=str)
+                         .encode("utf-8"))
     return seal
 
 
@@ -1348,10 +1795,10 @@ def ledger_append(entry: dict) -> None:
     """Append-only, reproducible: every entry carries the full run provenance
     (run_id, commit, dataset SHA, symbol, timeframe, splits, cost config,
     data quality) so any result can be re-derived. Failures included."""
-    p = _out() / "experiment_ledger_v10_45_4.jsonl"
+    p = _out() / "experiment_ledger_v10_45_5.jsonl"
     with open(p, "a", encoding="utf-8") as f:
-        f.write(json.dumps({"at": _now(), **RUN_CONTEXT, **entry},
-                           default=str) + "\n")
+        f.write(json.dumps(_json_finite({"at": _now(), **RUN_CONTEXT,
+                                         **entry}), default=str) + chr(10))
 
 
 # ==========================================================================
@@ -1400,7 +1847,7 @@ def resample_bars(bars: list[dict], factor: int,
 
 VALID_EXIT_REASONS = ("TP", "SL", "BE_STOP", "TRAIL", "TIME", "TP1")
 CENSORED_REASONS = ("END_CENSORED",)
-INVALID_EXECUTION_REASONS = ("STALE_EXIT", "INVALID_BAR_FILL")
+INVALID_EXECUTION_REASONS = ("STALE_EXIT", "INVALID_BAR_FILL", "INVALID_NON_FINITE")
 
 
 def dataset_quality(bars: list[dict], bar_ms: int | None = None) -> dict[str, Any]:
@@ -1466,6 +1913,91 @@ def cost_attribution(bars, feats, spec, i_start, i_end, costs=None,
             "net_EV": evs.get("net_full")}
 
 
+def assert_finite_dataset(bars: list[dict], feats: list[dict]) -> None:
+    """One-shot NON-FINITE validation for a whole funnel dataset: every OHLC
+    value and every numeric feature must be finite. Raises ValueError with a
+    structured status; funnel replays then run with validated=True."""
+    isf = math.isfinite
+    for i, b in enumerate(bars):
+        if not (isf(b["open"]) and isf(b["high"]) and isf(b["low"])
+                and isf(b["close"]) and isf(b.get("volume", 0.0))):
+            raise ValueError(f"INVALID_NON_FINITE_INPUT: bar {i}")
+    for i, fr in enumerate(feats):
+        for k, v in fr.items():
+            if isinstance(v, float) and not isf(v):
+                raise ValueError(f"INVALID_NON_FINITE_INPUT: feature {k}@{i}")
+
+
+def _trial_record(spec: dict, kind: str, symbol: str, timeframe: str,
+                  variant: str | None = None,
+                  parent_signature: str | None = None,
+                  strategy_id: str | None = None,
+                  signature: str | None = "AUTO",
+                  seed=None) -> dict:
+    return {"symbol": symbol, "timeframe": timeframe,
+            "side": spec.get("side"),
+            "strategy_id": strategy_id or spec.get("strategy_id"),
+            "signature": (spec.get("signature")
+                          if signature == "AUTO" else signature),
+            "kind": kind, "variant": variant,
+            "parent_signature": parent_signature, "seed": seed,
+            "model": spec.get("model"), "prompt_sha": spec.get("prompt_sha"),
+            "origin": spec.get("origin")}
+
+
+STRESS_VARIANTS = ("cost_plus_25", "cost_plus_50", "spread_x2", "slip_x2",
+                   "nonfill10_latency")
+
+
+def enumerate_trial_members(compiled: list[dict], symbol: str,
+                            timeframe: str) -> list[dict]:
+    """PHASE-1 enumeration of every definitive trial for one timeframe:
+    discovery, all four perturbation children, the screening cost check, the
+    validation evaluation, all stress variants, the exposure-matched baseline
+    and the shared baselines. Registered BEFORE any replay runs."""
+    members: list[dict] = []
+    for spec in compiled:
+        members.append(_trial_record(spec, "discovery", symbol, timeframe))
+        for ms in (0.8, 1.2):
+            for mt in (0.8, 1.2):
+                members.append(_trial_record(
+                    spec, "perturbation", symbol, timeframe,
+                    variant=f"stop{int(ms*100)}_tp{int(mt*100)}",
+                    parent_signature=spec.get("signature"),
+                    strategy_id=(f"{spec['strategy_id']}"
+                                 f"_p{int(ms*100)}s{int(mt*100)}t"),
+                    signature=None))
+        members.append(_trial_record(spec, "screening_cost25", symbol,
+                                     timeframe, variant="cost25"))
+        members.append(_trial_record(spec, "validation", symbol, timeframe))
+        for v in STRESS_VARIANTS:
+            members.append(_trial_record(spec, "stress", symbol, timeframe,
+                                         variant=v))
+        members.append(_trial_record(spec, "baseline_matched", symbol,
+                                     timeframe, variant="seeds20",
+                                     seed=10_000))
+    for b in baseline_specs():
+        members.append(_trial_record(b, "baseline", symbol, timeframe,
+                                     signature=None))
+    members.append(_trial_record({"side": "LONG",
+                                  "strategy_id": "baseline_random"},
+                                 "baseline_random", symbol, timeframe,
+                                 signature=None, seed=99))
+    members.append(_trial_record({"side": "LONG",
+                                  "strategy_id": "baseline_buy_hold"},
+                                 "baseline_buy_hold", symbol, timeframe,
+                                 signature=None))
+    return members
+
+
+def _require_registered(reg_members: set, record: dict) -> None:
+    mid = trial_member_id(record)
+    if mid not in reg_members:
+        raise ValueError(f"TRIAL_NOT_REGISTERED: {record.get('kind')}:"
+                         f"{record.get('strategy_id')} (registry closed "
+                         "before this trial was enumerated)")
+
+
 def run_funnel_phase_a(bars_dv: list[dict], feats_dv: list[dict],
                        compiled: list[dict], seg: dict,
                        costs: dict | None = None,
@@ -1479,6 +2011,19 @@ def run_funnel_phase_a(bars_dv: list[dict], feats_dv: list[dict],
     v0, v1 = seg["validation"]
     results: list[dict] = []
     n_universe = len(compiled)
+    # ---- TWO-PHASE REGISTRY CONTRACT: no replay before the CLOSE ----------
+    sprint_id = RUN_CONTEXT.get("sprint_id")
+    if not sprint_id or not registry_is_closed(sprint_id):
+        raise ValueError("REGISTRY_NOT_CLOSED: phase A requires every trial "
+                         "pre-registered and the sprint registry CLOSED")
+    if not RUN_CONTEXT.get("registry_sha_at_close"):
+        raise ValueError("LEDGER_WITHOUT_REGISTRY_SHA: the run context must "
+                         "pin the closed registry SHA before any trial runs")
+    reg_members = registry_members(sprint_id)
+    sym_r = RUN_CONTEXT.get("symbol")
+    tf_r = RUN_CONTEXT.get("timeframe")
+    # ---- NON-FINITE inputs blocked once for the whole funnel --------------
+    assert_finite_dataset(bars_dv, feats_dv)
     dq = dataset_quality(bars_dv)
     quality_pass = bool(dq.get("quality_pass")) and bool(promotion_allowed)
     dq["promotion_allowed"] = bool(promotion_allowed)
@@ -1490,15 +2035,24 @@ def run_funnel_phase_a(bars_dv: list[dict], feats_dv: list[dict],
         stt, cb = compile_strategy(b, seen_b)
         if stt != "OK":
             continue
-        rb = replay(bars_dv, feats_dv, cb, costs=costs, i_start=v0, i_end=v1)
+        _require_registered(reg_members, _trial_record(
+            cb, "baseline", sym_r, tf_r, signature=None))
+        rb = replay(bars_dv, feats_dv, cb, costs=costs, i_start=v0, i_end=v1,
+                    validated=True)
         m_b = metrics(rb["trades"])
         base_out[cb["strategy_id"]] = m_b
         if m_b.get("net_EV_lower_bound") is not None:
             base_lbs.append(m_b["net_EV_lower_bound"])
+    _require_registered(reg_members, _trial_record(
+        {"side": "LONG", "strategy_id": "baseline_random"}, "baseline_random",
+        sym_r, tf_r, signature=None, seed=99))
     base_out["baseline_random"] = run_random_baseline(
         bars_dv, feats_dv, v0, v1, costs, freq=0.02)
     if base_out["baseline_random"].get("net_EV_lower_bound") is not None:
         base_lbs.append(base_out["baseline_random"]["net_EV_lower_bound"])
+    _require_registered(reg_members, _trial_record(
+        {"side": "LONG", "strategy_id": "baseline_buy_hold"},
+        "baseline_buy_hold", sym_r, tf_r, signature=None))
     base_out["baseline_buy_hold_total_return"] = buy_and_hold_net(
         bars_dv, v0, v1, costs)
     base_out["baseline_no_trade"] = 0.0
@@ -1506,7 +2060,10 @@ def run_funnel_phase_a(bars_dv: list[dict], feats_dv: list[dict],
     # ---------- DISCOVERY ----------
     survivors = []
     for k, spec in enumerate(compiled):
-        r = replay(bars_dv, feats_dv, spec, costs=costs, i_start=d0, i_end=d1)
+        _require_registered(reg_members, _trial_record(
+            spec, "discovery", sym_r, tf_r))
+        r = replay(bars_dv, feats_dv, spec, costs=costs, i_start=d0, i_end=d1,
+                   validated=True)
         m = metrics(r["trades"], n_tests=1)
         entry = {"phase": "discovery", "strategy_id": spec["strategy_id"],
                  "origin": spec.get("origin"), "signature": spec["signature"],
@@ -1538,8 +2095,13 @@ def run_funnel_phase_a(bars_dv: list[dict], feats_dv: list[dict],
                                         f"_p{int(mult_stop*100)}s{int(mult_tp*100)}t")
                 child["parent_strategy_id"] = spec["strategy_id"]
                 child["signature"] = semantic_signature(child)
+                _require_registered(reg_members, _trial_record(
+                    spec, "perturbation", sym_r, tf_r,
+                    variant=f"stop{int(mult_stop*100)}_tp{int(mult_tp*100)}",
+                    parent_signature=spec.get("signature"),
+                    strategy_id=child["strategy_id"], signature=None))
                 r = replay(bars_dv, feats_dv, child, costs=costs,
-                           i_start=d0, i_end=d1)
+                           i_start=d0, i_end=d1, validated=True)
                 m = metrics(r["trades"])
                 perturb_total += 1
                 perturbation_children += 1
@@ -1553,7 +2115,10 @@ def run_funnel_phase_a(bars_dv: list[dict], feats_dv: list[dict],
         c25 = {**DEFAULT_COSTS, **(costs or {})}
         c25 = {k2: (v2 * 1.25 if k2 != "funding_bps_per_8h" else v2)
                for k2, v2 in c25.items()}
-        r25 = replay(bars_dv, feats_dv, spec, costs=c25, i_start=d0, i_end=d1)
+        _require_registered(reg_members, _trial_record(
+            spec, "screening_cost25", sym_r, tf_r, variant="cost25"))
+        r25 = replay(bars_dv, feats_dv, spec, costs=c25, i_start=d0, i_end=d1,
+                     validated=True)
         m25 = metrics(r25["trades"])
         ok = perturb_ok >= max(2, int(perturb_total * 0.5)) and (m25["net_EV"] or 0) > 0
         entry = {"phase": "screening", "strategy_id": spec["strategy_id"],
@@ -1577,11 +2142,12 @@ def run_funnel_phase_a(bars_dv: list[dict], feats_dv: list[dict],
             "replays_run": n_universe + 5 * len(survivors)}
 
 
-def run_funnel_phase_b(state: dict, sealed: "SealedHoldout",
+def run_funnel_phase_b(state: dict, sealed: dict,
                        m_global: int, log=print) -> dict[str, Any]:
-    """Phase B: validation with the SPRINT-GLOBAL multiple-testing total,
-    exposure-matched baselines, token-gated access to the sealed holdout,
-    fail-closed gates and cost attribution."""
+    """Phase B: validation with the SPRINT-GLOBAL pre-registered total,
+    exposure-matched baselines (exact placement required), HMAC one-use
+    token-gated access to the ON-DISK sealed holdout, fail-closed gates and
+    cost attribution. `sealed` is the opaque descriptor from seal_holdout."""
     bars_dv, feats_dv = state["bars_dv"], state["feats_dv"]
     seg, costs = state["seg"], state["costs"]
     v0, v1 = seg["validation"]
@@ -1596,12 +2162,18 @@ def run_funnel_phase_b(state: dict, sealed: "SealedHoldout",
     m_effective = max(int(m_global), m_raw, 1)
     replays_run = state["replays_run"]
     base_c = {**DEFAULT_COSTS, **(costs or {})}
+    reg_members = registry_members(RUN_CONTEXT.get("sprint_id"))
+    sym_r = RUN_CONTEXT.get("symbol")
+    tf_r = RUN_CONTEXT.get("timeframe")
     validated = []
     m_val_by_id: dict[str, dict] = {}
     finals = []
     for spec in screened:
         sid = spec["strategy_id"]
-        r = replay(bars_dv, feats_dv, spec, costs=costs, i_start=v0, i_end=v1)
+        _require_registered(reg_members, _trial_record(
+            spec, "validation", sym_r, tf_r))
+        r = replay(bars_dv, feats_dv, spec, costs=costs, i_start=v0, i_end=v1,
+                   validated=True)
         m = metrics(r["trades"], n_tests=m_effective)
         replays_run += 1
         m_val_by_id[sid] = m
@@ -1614,20 +2186,33 @@ def run_funnel_phase_b(state: dict, sealed: "SealedHoldout",
             "slip_x2": {**base_c, "slippage_bps": base_c["slippage_bps"] * 2},
         }
         for name, cs in variants.items():
-            rs = replay(bars_dv, feats_dv, spec, costs=cs, i_start=v0, i_end=v1)
+            _require_registered(reg_members, _trial_record(
+                spec, "stress", sym_r, tf_r, variant=name))
+            rs = replay(bars_dv, feats_dv, spec, costs=cs, i_start=v0,
+                        i_end=v1, validated=True)
             stress[name] = metrics(rs["trades"])["net_EV"]
+        _require_registered(reg_members, _trial_record(
+            spec, "stress", sym_r, tf_r, variant="nonfill10_latency"))
         rl = replay(bars_dv, feats_dv, spec, costs=base_c, i_start=v0, i_end=v1,
-                    entry_fill_prob=0.9, extra_entry_slip_bps=2.0, rng_seed=13)
+                    entry_fill_prob=0.9, extra_entry_slip_bps=2.0, rng_seed=13,
+                    validated=True)
         stress["nonfill10_latency"] = metrics(rl["trades"])["net_EV"]
         stress_ok = all((x or 0) > 0 for x in stress.values())
         replays_run += 5
-        # ---- exposure-matched baseline (full hold distribution + sessions)
+        # ---- exposure-matched baseline: EXACT placement or fail-closed
+        _require_registered(reg_members, _trial_record(
+            spec, "baseline_matched", sym_r, tf_r, variant="seeds20",
+            seed=10_000))
         matched = exposure_matched_baseline(bars_dv, spec, r["trades"], v0, v1,
                                             costs=costs)
+        matched_ev = matched.get("mean_EV")             if matched.get("status") == "OK" else None
         # merit (proxy-independent) for reporting; token (access) is stricter
         eligible, reasons = validation_eligible_for_holdout(
             m, stress_ok, quality_pass, baseline_best_lb,
-            matched.get("mean_EV"), execution_proxies=())
+            matched_ev, execution_proxies=())
+        if matched.get("status") == "BASELINE_INCOMPLETE":
+            reasons = ["BASELINE_INCOMPLETE"] + reasons
+            eligible = False
         val_hash = hashlib.sha1(json.dumps(m, sort_keys=True, default=str)
                                 .encode("utf-8")).hexdigest()[:16]
         entry = {"phase": "validation", "strategy_id": sid,
@@ -1643,10 +2228,25 @@ def run_funnel_phase_b(state: dict, sealed: "SealedHoldout",
         results.append(entry)
         if eligible:
             validated.append(spec)
-        # ---- token-gated holdout access (proxies/baselines block access)
+        # ---- HMAC one-use token bound to strategy/metrics/dataset/registry
+        spec_sha = hashlib.sha256(json.dumps(
+            {k: spec.get(k) for k in ("strategy_id", "signature", "side")},
+            sort_keys=True, default=str).encode()).hexdigest()[:24]
+        bindings = holdout_bindings(
+            run_id=RUN_CONTEXT.get("run_id"),
+            sprint_id=RUN_CONTEXT.get("sprint_id"),
+            strategy_id=sid, compiled_spec_sha=spec_sha,
+            validation_metrics_sha=val_hash,
+            dataset_generation_id=(sealed.get("generation_id")
+                                   if isinstance(sealed, dict) else None),
+            holdout_descriptor_sha=(sealed.get("descriptor_sha256")
+                                    if isinstance(sealed, dict) else None),
+            registry_sha256=RUN_CONTEXT.get("registry_sha_at_close"))
         token, treasons = issue_holdout_token(
             sid, m, stress_ok, quality_pass, baseline_best_lb,
-            matched.get("mean_EV"))
+            matched_ev, bindings=bindings)
+        if matched.get("status") == "BASELINE_INCOMPLETE" and token is None:
+            treasons = ["BASELINE_INCOMPLETE"] + treasons
         if token is None:
             ledger_append({"phase": "holdout_access", "strategy_id": sid,
                            "holdout_accessed": False,
@@ -1657,15 +2257,16 @@ def run_funnel_phase_b(state: dict, sealed: "SealedHoldout",
         ledger_append({"phase": "holdout_access", "strategy_id": sid,
                        "holdout_accessed": True,
                        "validation_metrics_sha1": val_hash,
+                       "token_nonce": token.get("nonce"),
                        "reason": "all_gates_passed_token_issued"})
-        bars_full, feats_full, _refh, h0, h1 = sealed.open(token)
-        rh = replay(bars_full, feats_full, spec, costs=costs,
-                    i_start=h0, i_end=h1)
+        bars_ctx, feats_ctx, h0, h1 = open_holdout(sealed, token, bindings)
+        rh = replay(bars_ctx, feats_ctx, spec, costs=costs,
+                    i_start=h0, i_end=h1, validated=True)
         mh = metrics(rh["trades"], n_tests=m_effective)
         replays_run += 1
         state_final = gate(m, mh, stress_ok, data_quality_pass=quality_pass,
                            baseline_best_lb=baseline_best_lb,
-                           matched_baseline_ev=matched.get("mean_EV"))
+                           matched_baseline_ev=matched_ev)
         # holdout-side stability/outlier gates (at least as strict as val)
         if state_final in ("SHADOW_CANDIDATE_RESEARCH_ONLY",
                            "PAPER_CANDIDATE_RESEARCH_ONLY"):
@@ -1769,18 +2370,46 @@ def run_funnel(bars: list[dict], feats: list[dict], compiled: list[dict],
                costs: dict | None = None, n_trials_total: int | None = None,
                promotion_allowed: bool = True,
                log=print) -> dict[str, Any]:
-    """Compatibility wrapper: phase A + phase B on a single dataset with the
-    single-run m scaled by the sprint run count (small-int n_trials_total).
-    The holdout segment goes through the SAME sealed/token machinery."""
+    """Compatibility wrapper honouring the FULL two-phase contract on a
+    single dataset: every trial is enumerated and the registry is OPENED
+    and CLOSED before phase A runs; the holdout is sealed to an on-disk
+    artifact and the full bar list is dropped from the run state."""
+    import uuid as _uuid
     seg = split_indices(len(bars))
     v1 = seg["validation"][1]
     h0, h1 = seg["holdout"]
     bars_dv = bars[:v1]
     feats_dv = feats[:v1]
-    sealed = SealedHoldout(bars, None, h0, h1)
+    symbol = RUN_CONTEXT.get("symbol") or bars[0].get("symbol") or "TEST"
+    timeframe = RUN_CONTEXT.get("timeframe") or "1m"
+    sprint_id = (RUN_CONTEXT.get("sprint_id")
+                 or f"adhoc_{_uuid.uuid4().hex[:10]}")
+    dataset_sha = RUN_CONTEXT.get("dataset_sha256") or hashlib.sha256(
+        f"{bars[0]['ts']}|{bars[-1]['ts']}|{len(bars)}".encode()).hexdigest()
+    generation_id = (RUN_CONTEXT.get("dataset_generation_id")
+                     or dataset_sha[:16])
+    sealed = seal_holdout(bars, None, h0, h1,
+                          dataset_generation_id=generation_id,
+                          dataset_sha256=dataset_sha,
+                          symbol=symbol, timeframe=timeframe)
+    del bars                                    # holdout leaves run memory
+    members = enumerate_trial_members(compiled, symbol, timeframe)
+    registry_open(sprint_id, members)
+    closed = registry_close(sprint_id, len(members),
+                            [RUN_CONTEXT.get("run_id") or sprint_id])
+    RUN_CONTEXT.setdefault("run_id", sprint_id)
+    RUN_CONTEXT["sprint_id"] = sprint_id
+    RUN_CONTEXT["symbol"] = symbol
+    RUN_CONTEXT["timeframe"] = timeframe
+    RUN_CONTEXT["dataset_generation_id"] = generation_id
+    RUN_CONTEXT["holdout_descriptor_sha"] = sealed["descriptor_sha256"]
+    RUN_CONTEXT["registry_sha_at_close"] = closed["registry_sha256"]
     state = run_funnel_phase_a(bars_dv, feats_dv, compiled, seg, costs=costs,
                                promotion_allowed=promotion_allowed, log=log)
-    sprint_runs = max(int(n_trials_total or 1), 1) \
-        if (n_trials_total or 0) <= 24 else 1
-    m_global = state["m_partial"] * sprint_runs
-    return run_funnel_phase_b(state, sealed, m_global, log=log)
+    m_global = closed["m_global"]
+    if n_trials_total and n_trials_total > m_global:
+        m_global = int(n_trials_total)          # caller may only INCREASE m
+    out = run_funnel_phase_b(state, sealed, m_global, log=log)
+    out["sprint_id"] = sprint_id
+    out["registry_sha256"] = closed["registry_sha256"]
+    return out
