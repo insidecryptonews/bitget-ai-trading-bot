@@ -37,9 +37,9 @@ from typing import Any
 from . import FINAL_RECOMMENDATION_NO_LIVE
 from . import continuous_edge_factory_v10_38 as CE
 
-TOOL_VERSION = "v10.45.3"
+TOOL_VERSION = "v10.45.4"
 CACHE_SUBDIR = ("external_data", "staging", "ai_cache_v10_45_1")
-OUTPUT_SUBDIR = ("reports", "research", "v10_45_3_edge_discovery")
+OUTPUT_SUBDIR = ("reports", "research", "v10_45_4_edge_discovery")
 
 OLLAMA_BASE = "http://localhost:11434"
 GROQ_BASE = "https://api.groq.com/openai/v1"
@@ -70,15 +70,19 @@ def _safety() -> dict[str, Any]:
 MAX_RETRY_AFTER_S = 120.0     # never sleep hours because of a malicious header
 
 _SANITIZE_PATTERNS = (
+    # Authorization / Bearer headers FIRST: "Authorization: Bearer X" must
+    # redact X (the field rule alone would stop at the scheme word)
+    (re.compile(r"(bearer|basic)\s+\S+", re.I), r"\1 <redacted>"),
     # JSON credential fields: "api_key": "...", "token": '...', "secret": ...
     (re.compile(r'("?(?:api[_-]?key|apikey|token|secret|password|passwd|pwd|'
                 r'authorization|auth|credential[s]?|access[_-]?key)"?\s*[:=]\s*)'
                 r'("[^"]*"|\'[^\']*\'|\S+)', re.I), r"\1<redacted>"),
-    # Authorization / Bearer headers in any case
-    (re.compile(r"(bearer|basic)\s+\S+", re.I), r"\1 <redacted>"),
     # query strings: ?key=...&token=... (any case)
     (re.compile(r"([?&](?:key|apikey|api_key|token|secret|signature|sign|"
                 r"password)=)[^&\s\"']+", re.I), r"\1<redacted>"),
+    # URL-ENCODED assignments: api_key%3Dvalue, token%3dvalue, %26-joined
+    (re.compile(r"((?:api[_-]?key|apikey|token|secret|password|signature|"
+                r"sign|key)%3[Dd])(?:[^&\s\"']|%26)+", re.I), r"\1<redacted>"),
     # long opaque blobs (keys are long); keep after targeted rules
     (re.compile(r"[A-Za-z0-9_\-]{28,}"), "<redacted>"),
 )
@@ -93,6 +97,44 @@ def sanitize_error(msg: str) -> str:
     for pat, repl in _SANITIZE_PATTERNS:
         s = pat.sub(repl, s)
     return s
+
+
+_SENSITIVE_KEYS = re.compile(
+    r"^(api[_-]?key|apikey|key|token|access[_-]?token|refresh[_-]?token|"
+    r"secret|client[_-]?secret|password|passwd|pwd|authorization|auth|"
+    r"credential[s]?|private[_-]?key|session)$", re.I)
+
+
+def sanitize_obj(obj):
+    """STRUCTURAL sanitization for nested dicts/lists: any key that names a
+    credential is redacted regardless of value length or case; strings pass
+    through sanitize_error. Successful responses are sanitized BEFORE caching
+    — the cache can never store a sensitive field even if a provider echoes
+    one back."""
+    if isinstance(obj, dict):
+        return {k: ("<redacted>" if _SENSITIVE_KEYS.match(str(k))
+                    else sanitize_obj(v))
+                for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [sanitize_obj(x) for x in obj]
+    if isinstance(obj, str):
+        return sanitize_error(obj) if len(obj) > 20 or "=" in obj or ":" in obj \
+            else obj
+    return obj
+
+
+def sanitize_response_text(text: str) -> str:
+    """Sanitize a provider response before it touches the cache: JSON is
+    sanitized structurally; non-JSON falls back to pattern redaction."""
+    try:
+        obj = json.loads(text)
+        clean = sanitize_obj(obj)
+        # byte-identical when nothing needed redaction: cache provenance
+        # stays exact for clean responses
+        return text if clean == obj else json.dumps(clean)
+    except Exception:
+        return sanitize_error(text) if any(
+            p.search(text) for p, _ in _SANITIZE_PATTERNS[:3]) else text
 
 
 def parse_retry_after(value: str | None) -> float | None:
@@ -144,7 +186,10 @@ def cache_put(provider: str, model: str, prompt: str, response: str) -> None:
         p.write_text(json.dumps({"provider": provider, "model": model,
                                  "cached_at": datetime.now(timezone.utc).isoformat(),
                                  "prompt_sha": _cache_key(provider, model, prompt),
-                                 "response": response}), encoding="utf-8")
+                                 # sanitized BEFORE storage: the cache never
+                                 # holds a credential a provider echoed back
+                                 "response": sanitize_response_text(response)}),
+                     encoding="utf-8")
     except Exception:
         pass
 

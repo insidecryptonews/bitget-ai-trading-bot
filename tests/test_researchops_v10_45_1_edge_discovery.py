@@ -315,8 +315,8 @@ def test_funnel_on_pure_noise_promotes_nothing(tmp_path, monkeypatch):
              if e["state"] == "PAPER_CANDIDATE_RESEARCH_ONLY"]
     # on 3000 bars of pure noise nothing should clear validation+holdout+stress
     assert len(paper) == 0
-    ledger = (tmp_path / "reports" / "research" / "v10_45_3_edge_discovery" /
-              "experiment_ledger_v10_45_3.jsonl")
+    ledger = (tmp_path / "reports" / "research" / "v10_45_4_edge_discovery" /
+              "experiment_ledger_v10_45_4.jsonl")
     assert ledger.is_file()
     lines = ledger.read_text(encoding="utf-8").strip().splitlines()
     assert len(lines) >= len(compiled)                       # every result logged
@@ -348,10 +348,15 @@ def test_planted_edge_is_found_by_funnel(tmp_path, monkeypatch):
         take_profit_policy={"type": "fixed", "value": 0.008},
         time_exit=4, cooldown=3), seen)
     out = ENG.run_funnel(bars, feats, [spec], log=lambda *a: None)
+    # the engine DETECTS the real signal (merit gates pass) ...
     assert out["validation_survivors"] >= 1
-    assert out["finalists"][0]["state"] in (
-        "SHADOW_CANDIDATE_RESEARCH_ONLY", "PAPER_CANDIDATE_RESEARCH_ONLY",
-        "WATCHLIST_RESEARCH_ONLY")
+    val = [e for e in out["results"] if e["phase"] == "validation"][0]
+    assert val["state"] == "SURVIVED_VALIDATION"
+    # ... but V10.45.4 execution proxies BLOCK holdout access entirely, so no
+    # finalist exists and the access denial is logged (honest cap)
+    assert out["holdout_accesses"] == 0
+    denials = [e for e in out["results"] if e.get("phase") == "holdout_access"]
+    assert denials == [] or all(not d["holdout_accessed"] for d in denials)
 
 
 # --------------------------------------------------------------------------

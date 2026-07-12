@@ -27,11 +27,12 @@ from . import FINAL_RECOMMENDATION_NO_LIVE
 from . import continuous_edge_factory_v10_38 as CE
 from .ai_providers_v10_45_1 import _http_json, sanitize_error
 
-TOOL_VERSION = "v10.45.3"
-DOWNLOADER_VERSION = ("v10.45.3 (pagination end=batch_min live-probed; window "
+TOOL_VERSION = "v10.45.4"
+DOWNLOADER_VERSION = ("v10.45.4 (pagination end=batch_min live-probed; window "
                       "trim to requested range; download completeness contract; "
-                      "raw per-candle validation; symlink containment)")
-DATA_SUBDIR = ("external_data", "staging", "klines_v10_45_3")
+                      "raw per-candle validation; symlink+hardlink containment; "
+                      "atomic fsync writes)")
+DATA_SUBDIR = ("external_data", "staging", "klines_v10_45_4")
 COMPLETENESS_TOLERANCE_BARS = 3   # last candle may still be open + boundary jitter
 BITGET_BASE = "https://api.bitget.com"
 BYBIT_BASE = "https://api.bybit.com"
@@ -225,6 +226,75 @@ def raw_quality_report(rows: list[list]) -> dict[str, Any]:
             "raw_quality_pass": bool(ts_q["quality_pass"] and invalid == 0)}
 
 
+def verify_dataset(venue: str, symbol: str) -> dict[str, Any]:
+    """FAIL-CLOSED dataset verification, mandatory before resampling or
+    feature construction. Structured statuses, never silent trimming."""
+    try:
+        csv_path = _contained_path(venue, symbol, ".csv")
+        man_path = _contained_path(venue, symbol, "_manifest.json")
+    except ValueError as exc:
+        return {"ok": False, "status": "INVALID_DATA_PATH",
+                "detail": str(exc)[:120]}
+    if not man_path.is_file():
+        return {"ok": False, "status": "INVALID_DATA_MANIFEST_MISSING"}
+    try:
+        manifest = json.loads(man_path.read_text(encoding="utf-8"))
+    except Exception:
+        return {"ok": False, "status": "INVALID_DATA_MANIFEST_CORRUPT"}
+    if not csv_path.is_file():
+        return {"ok": False, "status": "INVALID_DATA_CSV_MISSING"}
+    sha = hashlib.sha256(csv_path.read_bytes()).hexdigest()
+    if sha != manifest.get("sha256"):
+        return {"ok": False, "status": "INVALID_DATA_SHA_MISMATCH",
+                "manifest_sha": str(manifest.get("sha256"))[:16],
+                "actual_sha": sha[:16]}
+    if manifest.get("download_complete") is not True:
+        return {"ok": False, "status": "INVALID_DATA_DOWNLOAD_INCOMPLETE",
+                "coverage_ratio": manifest.get("coverage_ratio")}
+    if manifest.get("raw_quality_pass") is not True:
+        return {"ok": False, "status": "INVALID_DATA_RAW_QUALITY",
+                "invalid_candles": manifest.get("invalid_candles")}
+    if (manifest.get("gap_count") or 0) > 0:
+        return {"ok": False, "status": "INVALID_DATA_GAPS",
+                "gap_count": manifest.get("gap_count")}
+    if (manifest.get("duplicates") or 0) > 0 or \
+            (manifest.get("out_of_order") or 0) > 0 or \
+            (manifest.get("irregular_deltas") or 0) > 0:
+        return {"ok": False, "status": "INVALID_DATA_IRREGULAR"}
+    return {"ok": True, "status": "DATASET_VERIFIED", "sha256": sha,
+            "manifest": manifest}
+
+
+def safe_atomic_write(path, data: bytes) -> str:
+    """Containment-validated atomic write: temp file inside the validated
+    root, flush + fsync, atomic replace, post-write SHA verification. Refuses
+    to overwrite hardlinked destinations and never opens the final path for
+    destructive writing directly."""
+    path = Path(path)
+    base = Path(os.path.realpath(str(path.parent)))
+    repo_real = Path(os.path.realpath(str(CE._repo_root())))
+    if repo_real != base and repo_real not in base.parents:
+        raise ValueError("write target escapes repository root")
+    if path.exists():
+        st_ = os.stat(path)
+        if getattr(st_, "st_nlink", 1) > 1:
+            raise ValueError("refusing to overwrite a hardlinked file")
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    with open(tmp, "wb") as f:
+        f.write(data)
+        f.flush()
+        try:
+            os.fsync(f.fileno())
+        except OSError:
+            pass
+    os.replace(tmp, path)
+    sha = hashlib.sha256(path.read_bytes()).hexdigest()
+    expected = hashlib.sha256(data).hexdigest()
+    if sha != expected:
+        raise IOError("post-write SHA verification failed")
+    return sha
+
+
 def _repo_commit() -> str:
     try:
         out = subprocess.run(["git", "rev-parse", "--short", "HEAD"],
@@ -250,12 +320,13 @@ def save_dataset(venue: str, symbol: str, rows: list[list],
             if requested_start_ms <= int(r[0]) < requested_end_ms]
     raw_q = raw_quality_report(rows)
     path = _contained_path(venue, symbol, ".csv")
-    with open(path, "w", newline="", encoding="utf-8") as f:
-        w = csv.writer(f)
-        w.writerow(["ts", "open", "high", "low", "close", "volume", "turnover"])
-        for r in rows:
-            w.writerow(r)
-    sha = hashlib.sha256(path.read_bytes()).hexdigest()
+    import io
+    buf = io.StringIO()
+    w = csv.writer(buf, lineterminator="\n")
+    w.writerow(["ts", "open", "high", "low", "close", "volume", "turnover"])
+    for r in rows:
+        w.writerow(r)
+    sha = safe_atomic_write(path, buf.getvalue().encode("utf-8"))
     ts_list = [r[0] for r in rows]
     expected_bars = max(0, (requested_end_ms - requested_start_ms) // BAR_MS)
     coverage_ratio = (len(rows) / expected_bars) if expected_bars else 0.0
@@ -271,6 +342,8 @@ def save_dataset(venue: str, symbol: str, rows: list[list],
         "timezone": "UTC (epoch ms)",
         "downloaded_at": datetime.now(timezone.utc).isoformat(),
         "requested_days": requested_days,
+        "requested_start_ms": int(requested_start_ms),
+        "requested_end_ms": int(requested_end_ms),
         "requested_start": datetime.fromtimestamp(
             requested_start_ms / 1000, timezone.utc).isoformat(),
         "requested_end": datetime.fromtimestamp(
@@ -303,7 +376,8 @@ def save_dataset(venue: str, symbol: str, rows: list[list],
         "path": str(path).replace("\\", "/"),
         **_safety()}
     mpath = _contained_path(venue, symbol, "_manifest.json")
-    mpath.write_text(json.dumps(manifest, indent=2, default=str), encoding="utf-8")
+    safe_atomic_write(mpath, json.dumps(manifest, indent=2,
+                                        default=str).encode("utf-8"))
     return manifest
 
 
@@ -367,8 +441,8 @@ def run_backfill(symbols_bitget: list[str], symbols_bybit: list[str],
     summary = {"tool_version": TOOL_VERSION,
                "ran_at": datetime.now(timezone.utc).isoformat(),
                "datasets": manifests, **_safety()}
-    out = CE._repo_root().joinpath("reports", "research", "v10_45_3_edge_discovery")
+    out = CE._repo_root().joinpath("reports", "research", "v10_45_4_edge_discovery")
     out.mkdir(parents=True, exist_ok=True)
-    (out / "data_backfill_manifest_v10_45_3.json").write_text(
+    (out / "data_backfill_manifest_v10_45_4.json").write_text(
         json.dumps(summary, indent=2, default=str), encoding="utf-8")
     return summary

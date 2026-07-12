@@ -209,8 +209,8 @@ def test_holdout_never_touched_when_nothing_eligible(monkeypatch, tmp_path):
     # slice must never have been replayed
     assert out["validation_survivors"] == 0
     assert touched == []
-    ledger = (tmp_path / "reports" / "research" / "v10_45_3_edge_discovery" /
-              "experiment_ledger_v10_45_3.jsonl")
+    ledger = (tmp_path / "reports" / "research" / "v10_45_4_edge_discovery" /
+              "experiment_ledger_v10_45_4.jsonl")
     entries = [json.loads(l) for l in ledger.read_text(encoding="utf-8").splitlines()]
     accesses = [e for e in entries if e.get("phase") == "holdout_access"]
     assert all(e["holdout_accessed"] is False for e in accesses)
@@ -376,7 +376,7 @@ def test_symlinked_data_dir_rejected(monkeypatch, tmp_path):
 
     def fake_realpath(p):
         rp = real(p)
-        if "klines_v10_45_3" in str(p):
+        if "klines_v10_45_4" in str(p):
             return str(outside)
         return rp
     monkeypatch.setattr(BF.os.path, "realpath", fake_realpath)
@@ -451,7 +451,9 @@ def _trade(entry_i, exit_i, ret, reason="TP"):
 
 def test_overlapping_trades_shrink_n_eff():
     # 20 trades all crammed into overlapping windows: occupancy >> 1
-    trades = [_trade(i, i + 50, 0.001 * (1 if i % 2 else -1))
+    # (returns genuinely alternate: range(0,40,2) is always even, so i%2
+    # would silently make every return identical)
+    trades = [_trade(i, i + 50, 0.001 * (1 if (i // 2) % 2 else -1) * (1 + i * 0.01))
               for i in range(0, 40, 2)]
     m = ENG.metrics(trades)
     assert m["n_eff"] < m["n_trades"]
@@ -507,8 +509,8 @@ def test_code_tree_hash_and_ledger_provenance(tmp_path, monkeypatch):
                         runner_version=prov["runner_version"],
                         dirty_worktree=prov["dirty_worktree"])
     ENG.ledger_append({"phase": "test", "state": "OK"})
-    ledger = (tmp_path / "reports" / "research" / "v10_45_3_edge_discovery" /
-              "experiment_ledger_v10_45_3.jsonl")
+    ledger = (tmp_path / "reports" / "research" / "v10_45_4_edge_discovery" /
+              "experiment_ledger_v10_45_4.jsonl")
     e = json.loads(ledger.read_text(encoding="utf-8").splitlines()[-1])
     assert e["code_tree_hash"] == prov["code_tree_hash"]
     assert e["runner_version"] == ENG.RUNNER_VERSION
@@ -548,9 +550,13 @@ def test_exposure_matched_baseline_matches_profile():
     mb = ENG.exposure_matched_baseline(bars, spec, trades, 300, 1900)
     assert mb["status"] == "OK"
     assert mb["matched_entries"] == 20
-    assert mb["matched_hold_bars"] == 10
+    assert mb["hold_distribution_matched"] is True
+    assert mb["sessions_matched"] is True
+    assert mb["no_duplicate_timestamps"] is True
     assert mb["side"] == "LONG"
     assert isinstance(mb["mean_EV"], float)
+    assert isinstance(mb["p50"], float)
+    assert mb["lower_bound"] <= mb["mean_EV"]
     # deterministic across calls (seeded)
     mb2 = ENG.exposure_matched_baseline(bars, spec, trades, 300, 1900)
     assert mb["mean_EV"] == mb2["mean_EV"]

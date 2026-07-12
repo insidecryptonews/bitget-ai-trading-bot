@@ -404,8 +404,8 @@ def test_ledger_entries_carry_run_provenance(tmp_path, monkeypatch):
                         timeframe="1m", cost_config=dict(ENG.DEFAULT_COSTS))
     ENG.ledger_append({"phase": "compile", "state": "INVALID",
                        "strategy_id": "x"})
-    ledger = (tmp_path / "reports" / "research" / "v10_45_3_edge_discovery" /
-              "experiment_ledger_v10_45_3.jsonl")
+    ledger = (tmp_path / "reports" / "research" / "v10_45_4_edge_discovery" /
+              "experiment_ledger_v10_45_4.jsonl")
     entry = json.loads(ledger.read_text(encoding="utf-8").splitlines()[-1])
     for k in ("run_id", "repo_commit", "dataset_sha256", "symbol",
               "timeframe", "cost_config", "at", "phase", "state"):

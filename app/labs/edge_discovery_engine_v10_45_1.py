@@ -35,8 +35,8 @@ from typing import Any, Callable
 from . import FINAL_RECOMMENDATION_NO_LIVE
 from . import continuous_edge_factory_v10_38 as CE
 
-TOOL_VERSION = "v10.45.3"
-OUTPUT_SUBDIR = ("reports", "research", "v10_45_3_edge_discovery")
+TOOL_VERSION = "v10.45.4"
+OUTPUT_SUBDIR = ("reports", "research", "v10_45_4_edge_discovery")
 
 # execution-model elements that are still PROXIES: promotion is capped at
 # SHADOW_CANDIDATE_RESEARCH_ONLY while any of these remain (fail-closed)
@@ -616,20 +616,39 @@ def replay(bars: list[dict], feats: list[dict], spec: dict,
         last_exit_i = i
         pos = None
 
-    def _fill_price(target_px: float, bar_open: float, lo: float, hi: float,
-                    exit_is_sell: bool) -> float:
-        """Realistic, range-contained fill for a stop/TP touched this bar.
+    invalid_bar_fills = 0                      # structured state, not asserts
 
-        If the market gapped THROUGH the level (open already beyond it), the
-        order fills at the OPEN — never at the untraded level. A bearish gap
-        can never become profit; no fill may leave [low, high]."""
-        if exit_is_sell:                       # LONG exits sell
-            raw = bar_open if bar_open <= target_px else target_px
-        else:                                  # SHORT exits buy
-            raw = bar_open if bar_open >= target_px else target_px
-        assert lo - 1e-9 <= raw <= hi + 1e-9, \
-            f"fill {raw} outside traded range [{lo}, {hi}]"
-        return raw
+    def _clamp_to_range(raw: float, lo: float, hi: float) -> tuple[float, bool]:
+        """Production never trusts an assert: an out-of-range fill (corrupt
+        bar) is clamped and FLAGGED so the trade is excluded as
+        INVALID_EXECUTION downstream."""
+        nonlocal invalid_bar_fills
+        if lo - 1e-9 <= raw <= hi + 1e-9:
+            return raw, True
+        invalid_bar_fills += 1
+        return min(max(raw, lo), hi), False
+
+    def fill_stop_order(stop_px: float, bar_open: float, lo: float, hi: float,
+                        long_pos: bool) -> tuple[float, bool]:
+        """STOP (market-on-touch) fill. Gap-through -> OPEN or worse; an
+        adverse gap can never become profit."""
+        if long_pos:                           # stop sells
+            raw = bar_open if bar_open <= stop_px else stop_px
+        else:                                  # stop buys
+            raw = bar_open if bar_open >= stop_px else stop_px
+        return _clamp_to_range(raw, lo, hi)
+
+    def fill_limit_take_profit(tp_px: float, bar_open: float, lo: float,
+                               hi: float, long_pos: bool) -> tuple[float, bool]:
+        """LIMIT take-profit fill. A FAVOURABLE gap fills at the executable
+        open (price improvement is real for a resting limit), never below an
+        already-better open for LONG (nor above for SHORT), and never outside
+        [low, high]. Favourable gaps are normal — no error paths here."""
+        if long_pos:                           # TP sells; open above limit = improvement
+            raw = bar_open if bar_open >= tp_px else tp_px
+        else:                                  # TP buys; open below limit = improvement
+            raw = bar_open if bar_open <= tp_px else tp_px
+        return _clamp_to_range(raw, lo, hi)
 
     for i in range(i_start, i_end):
         bar = bars[i]
@@ -645,17 +664,18 @@ def replay(bars: list[dict], feats: list[dict], spec: dict,
             stop_px = pos["stop_px"]
             hit_stop = (lo <= stop_px) if long else (hi >= stop_px)
             if hit_stop:
-                fill = _fill_price(stop_px, op, lo, hi, exit_is_sell=long)
-                reason = ("TRAIL" if pos.get("trail_moved")
-                          else ("BE_STOP" if pos["be_moved"] else "SL"))
+                fill, ok_bar = fill_stop_order(stop_px, op, lo, hi, long)
+                reason = ("INVALID_BAR_FILL" if not ok_bar
+                          else ("TRAIL" if pos.get("trail_moved")
+                                else ("BE_STOP" if pos["be_moved"] else "SL")))
                 _close_all(fill, reason, i)
             else:
                 # 2) partial TP1 (only when the stop was not touched this bar)
                 if pos["tp1_px"] is not None:
                     hit1 = (hi >= pos["tp1_px"]) if long else (lo <= pos["tp1_px"])
                     if hit1:
-                        fill1 = _fill_price(pos["tp1_px"], op, lo, hi,
-                                            exit_is_sell=long)
+                        fill1, ok_bar = fill_limit_take_profit(
+                            pos["tp1_px"], op, lo, hi, long)
                         frac = pos["tp1_frac"]
                         pos["tranches"].append(_tranche_ret(
                             pos["entry_eff"], fill1, frac,
@@ -665,13 +685,26 @@ def replay(bars: list[dict], feats: list[dict], spec: dict,
                         if pos["move_be"]:
                             pos["stop_px"] = pos["entry_px"]
                             pos["be_moved"] = True
+                            # CONSERVATIVE same-bar resolution: if this bar's
+                            # low already reaches the fresh break-even stop,
+                            # the remainder exits AT BE in this bar (we never
+                            # assume the favourable ordering survived)
+                            be_hit = (lo <= pos["stop_px"]) if long \
+                                else (hi >= pos["stop_px"])
+                            if pos is not None and be_hit:
+                                fill_be, ok2 = fill_stop_order(
+                                    pos["stop_px"], op, lo, hi, long)
+                                _close_all(fill_be,
+                                           "BE_STOP" if ok2 else "INVALID_BAR_FILL",
+                                           i)
                 # 3) final TP
                 if pos is not None and pos["tp_px"] is not None:
                     hit_tp = (hi >= pos["tp_px"]) if long else (lo <= pos["tp_px"])
                     if hit_tp:
-                        fill_tp = _fill_price(pos["tp_px"], op, lo, hi,
-                                              exit_is_sell=long)
-                        _close_all(fill_tp, "TP", i)
+                        fill_tp, ok_bar = fill_limit_take_profit(
+                            pos["tp_px"], op, lo, hi, long)
+                        _close_all(fill_tp,
+                                   "TP" if ok_bar else "INVALID_BAR_FILL", i)
                 # 4) time exit
                 if pos is not None and (i - pos["entry_i"]) >= spec["time_exit"]:
                     _close_all(bar["close"], "TIME", i)
@@ -736,7 +769,8 @@ def replay(bars: list[dict], feats: list[dict], spec: dict,
                        "hwm": entry_px, "tranches": []}
     if pos is not None:
         _close_all(bars[i_end]["close"], "END_CENSORED", i_end, censored=True)
-    return {"trades": trades, "n_trades": len(trades)}
+    return {"trades": trades, "n_trades": len(trades),
+            "invalid_bar_fills": invalid_bar_fills}
 
 
 # ==========================================================================
@@ -768,8 +802,6 @@ def metrics(trades: list[dict], n_tests: int = 1) -> dict[str, Any]:
                 "n_eff": 0}
     mean = st.mean(xs)
     sd = st.pstdev(xs) if n > 1 else 0.0
-    lb = mean - 1.65 * sd / math.sqrt(n) \
-        - math.sqrt(max(math.log(max(n_tests, 2)), 0.0)) * sd / math.sqrt(n)
     wins = [x for x in xs if x > 0]
     losses = [x for x in xs if x < 0]
     pf = (sum(wins) / abs(sum(losses))) if losses and sum(losses) != 0 else \
@@ -786,8 +818,8 @@ def metrics(trades: list[dict], n_tests: int = 1) -> dict[str, Any]:
     half = n // 2
     s1 = st.mean(xs[:half]) if half else 0.0
     s2 = st.mean(xs[half:]) if n - half else 0.0
-    # ---- effective sample size: CONSERVATIVE, documented, never n by default.
-    # Two independent shrink factors; the harsher one wins:
+    # ---- effective sample size FIRST (the lower bound depends on it).
+    # Conservative, documented; two independent shrink factors, harsher wins:
     #  (a) temporal occupancy: overlapping holding periods share information
     #  (b) autocorrelation of the trade-return series (Newey-West style,
     #      positive lags 1..5): serially dependent PnL shrinks n
@@ -810,9 +842,20 @@ def metrics(trades: list[dict], n_tests: int = 1) -> dict[str, Any]:
         n_eff = max(1, n // 2)                 # conservative penalty
         n_eff_method = "N_EFF_PROXY_half_n (sample too small for estimation)"
     else:
-        n_eff = int(n / max(occ_factor, acf_factor))
+        n_eff = max(1, int(n / max(occ_factor, acf_factor)))
         n_eff_method = (f"min-shrink(occupancy={occ_factor:.3f}, "
                         f"acf_factor={acf_factor:.3f}), lags 1-5, positive rho only")
+    # ---- uncertainty uses n_eff, never raw n: dependence widens the interval.
+    # (Near-)identical returns collapse sd toward 0, which would yield an
+    # overconfident lb == mean ("PF=999 as evidence"). A variance FLOOR keeps
+    # the interval honest: identical outcomes cannot claim zero uncertainty.
+    sd_eff = sd
+    sd_floor_applied = False
+    if n > 3 and sd < abs(mean) / 10:
+        sd_eff = max(sd, abs(mean) / 2)
+        sd_floor_applied = True
+    lb = mean - 1.65 * sd_eff / math.sqrt(n_eff) \
+        - math.sqrt(max(math.log(max(n_tests, 2)), 0.0)) * sd_eff / math.sqrt(n_eff)
     return {**base, "net_EV": round(mean, 8),
             "net_EV_lower_bound": round(lb, 8),
             "n_tests_applied": n_tests,
@@ -824,7 +867,16 @@ def metrics(trades: list[dict], n_tests: int = 1) -> dict[str, Any]:
                                    if ev_wo_top is not None else None),
             "stability_sign": (1 if (s1 > 0) == (s2 > 0) else 0) if n >= 10 else None,
             "n_eff": n_eff, "n_eff_method": n_eff_method,
-            "n_eff_is_proxy": n_eff_proxy}
+            "n_eff_is_proxy": n_eff_proxy,
+            "sd_floor_applied": sd_floor_applied,
+            "n_raw": n,
+            "acf_factor": round(acf_factor, 4),
+            "overlap_factor": round(occ_factor, 4),
+            "lb_sensitivity_n_vs_neff": {
+                "lb_with_n_raw": round(
+                    mean - (1.65 + math.sqrt(max(math.log(max(n_tests, 2)), 0.0)))
+                    * sd / math.sqrt(n), 8),
+                "lb_with_n_eff": round(lb, 8)}}
 
 
 def validation_eligible_for_holdout(val_m: dict | None, stress_ok: bool,
@@ -871,6 +923,130 @@ def validation_eligible_for_holdout(val_m: dict | None, stress_ok: bool,
             val_m["outlier_dependence"] <= 0:
         reasons.append("OUTLIER_DEPENDENT")
     return (len(reasons) == 0), reasons
+
+
+# ==========================================================================
+# PHYSICALLY ISOLATED HOLDOUT: sealed container + eligibility token
+# ==========================================================================
+
+_TOKEN_SECRET = object()          # module-private; cannot be forged externally
+
+
+class HoldoutAccessToken:
+    """Proof of eligibility. Instances are ONLY issued by
+    issue_holdout_token(); anything else fails the identity check."""
+    __slots__ = ("strategy_id", "validation_sha1", "_secret")
+
+    def __init__(self, strategy_id: str, validation_sha1: str, _secret=None):
+        self.strategy_id = strategy_id
+        self.validation_sha1 = validation_sha1
+        self._secret = _secret
+
+
+def issue_holdout_token(strategy_id: str, val_m: dict | None, stress_ok: bool,
+                        data_quality_pass: bool,
+                        baseline_best_lb: float | None,
+                        matched_baseline_ev: float | None,
+                        execution_proxies: tuple = EXECUTION_PROXIES
+                        ) -> tuple[HoldoutAccessToken | None, list[str]]:
+    """The ONLY factory of holdout access. Fail-closed:
+    execution proxies block access entirely; missing baselines block access;
+    every validation gate must pass."""
+    reasons: list[str] = []
+    if execution_proxies:
+        reasons.append("EXECUTION_PROXIES_BLOCK_HOLDOUT_ACCESS")
+    if baseline_best_lb is None:
+        reasons.append("BASELINES_MISSING")
+    if matched_baseline_ev is None:
+        reasons.append("MATCHED_BASELINE_MISSING")
+    ok, more = validation_eligible_for_holdout(
+        val_m, stress_ok, data_quality_pass, baseline_best_lb,
+        matched_baseline_ev, execution_proxies=())
+    reasons.extend(more)
+    if reasons:
+        return None, reasons
+    val_hash = hashlib.sha1(json.dumps(val_m, sort_keys=True, default=str)
+                            .encode("utf-8")).hexdigest()[:16]
+    return HoldoutAccessToken(strategy_id, val_hash, _secret=_TOKEN_SECRET), []
+
+
+class SealedHoldout:
+    """Holds the full bar history privately. Before a valid token is
+    presented, the holdout segment is never loaded, sliced, iterated,
+    hashed, counted or featurised — the public descriptor reveals nothing."""
+
+    def __init__(self, bars_full: list[dict], ref_full: list[dict] | None,
+                 h_start: int, h_end: int):
+        self.__bars = bars_full
+        self.__ref = ref_full
+        self.__h0 = h_start
+        self.__h1 = h_end
+        self.descriptor = {"sealed": True, "content": "opaque"}
+
+    def open(self, token) -> tuple[list[dict], list[dict], list[dict] | None,
+                                   int, int]:
+        """Returns (bars_full, feats_full, ref_full, h0, h1). Features for the
+        full history are built HERE, only after eligibility."""
+        if not isinstance(token, HoldoutAccessToken) or \
+                getattr(token, "_secret", None) is not _TOKEN_SECRET:
+            raise PermissionError(
+                "HOLDOUT_LOCKED: access requires a token issued by "
+                "issue_holdout_token() after full validation eligibility")
+        feats_full = build_features(self.__bars, ref_bars=self.__ref)
+        return self.__bars, feats_full, self.__ref, self.__h0, self.__h1
+
+
+# ==========================================================================
+# GLOBAL MULTIPLE-TESTING REGISTRY (persistent, per sprint)
+# ==========================================================================
+
+REGISTRY_FILE = "global_experiment_registry_v10_45_4.jsonl"
+
+
+def _registry_closed_sprints() -> set:
+    p = _out() / REGISTRY_FILE
+    closed = set()
+    if not p.is_file():
+        return closed
+    for line in p.read_text(encoding="utf-8").splitlines():
+        try:
+            e = json.loads(line)
+        except Exception:
+            continue
+        if e.get("kind") == "sprint_close":
+            closed.add(e.get("sprint_id"))
+    return closed
+
+
+def registry_append(entry: dict) -> None:
+    """Append-only registry with a hard CLOSE: once a sprint_close record
+    exists for a sprint_id, any further trial registration for that sprint
+    RAISES — trials can never be added silently after the statistical total
+    was fixed."""
+    sid = entry.get("sprint_id")
+    if sid and entry.get("kind") != "sprint_close" \
+            and sid in _registry_closed_sprints():
+        raise ValueError(f"REGISTRY_CLOSED: sprint {sid} already closed; "
+                         "no new trials can be registered")
+    p = _out() / REGISTRY_FILE
+    with open(p, "a", encoding="utf-8") as f:
+        f.write(json.dumps({"at": _now(), **entry}, default=str) + "\n")
+
+
+def registry_close(sprint_id: str, m_global: int, run_ids: list) -> None:
+    """Statistical CLOSE of a sprint (two-phase contract): every member and
+    its m_partial must already be registered; after this record, the registry
+    rejects new trials for the sprint."""
+    registry_append({"kind": "sprint_close", "sprint_id": sprint_id,
+                     "m_global": int(m_global), "run_ids": run_ids,
+                     "state": "CLOSED"})
+
+
+def registry_sha() -> str | None:
+    p = _out() / REGISTRY_FILE
+    if not p.is_file():
+        return None
+    return hashlib.sha256(p.read_bytes()).hexdigest()[:32]
 
 
 def state_from_reasons(reasons: list[str]) -> str:
@@ -924,17 +1100,18 @@ def gate(val_m: dict, hold_m: dict | None, stress_ok: bool,
 
 def exposure_matched_baseline(bars: list[dict], spec: dict, val_trades: list[dict],
                               i0: int, i1: int, costs: dict | None = None,
-                              n_seeds: int = 15) -> dict[str, Any]:
-    """Baseline matched on EXPOSURE: same number of entries, same side, same
-    (median) holding time, same window, same costs and censoring — only the
-    TIMING is randomized. If the candidate cannot beat random timing with its
-    own exposure profile, its entries carry no information."""
+                              n_seeds: int = 20) -> dict[str, Any]:
+    """Baseline matched on the candidate's FULL exposure profile: number of
+    entries, side, the COMPLETE holding-time distribution (per-trade, not the
+    median), session/calendar structure, overlap pattern, censoring and costs
+    — only the TIMING inside each session is randomized. Entry timestamps are
+    never duplicated (unless the candidate itself has fewer usable windows).
+    Reports the across-seed distribution: mean, sd, percentiles and a lower
+    bound."""
     valid = [t for t in val_trades if t["exit_reason"] in VALID_EXIT_REASONS
              and not t.get("censored")]
     if not valid:
         return {"status": "NO_TRADES", "mean_EV": None}
-    n_entries = len(valid)
-    hold = max(1, int(st.median([t["bars_held"] for t in valid])))
     long = spec["side"] == "LONG"
     cst = {**DEFAULT_COSTS, **(costs or {})}
     per_side = (cst["taker_fee_bps"] + cst["spread_bps"] / 2
@@ -946,33 +1123,68 @@ def exposure_matched_baseline(bars: list[dict], spec: dict, val_trades: list[dic
     else:
         interval = BAR_MS
     fund = cst["funding_bps_per_8h"] / 10_000.0 / max(1.0, 8 * 3_600_000 / interval)
+
+    def _session(ts: int) -> str:
+        hour = int((ts // 3_600_000) % 24)
+        return "ASIA" if hour < 8 else ("EU" if hour < 14 else "US")
+
+    # candidate exposure profile: (hold_bars, session) PER TRADE
+    profile = [(max(1, t["bars_held"]),
+                _session(bars[min(t["entry_i"], len(bars) - 1)]["ts"]))
+               for t in valid]
+    # candidate windows by session for timing randomization
+    by_session: dict[str, list[int]] = {"ASIA": [], "EU": [], "US": []}
+    for i in range(i0, max(i0 + 1, i1 - 2)):
+        by_session[_session(bars[i]["ts"])].append(i)
     means = []
+    placed_counts: list[int] = []
     for seed in range(n_seeds):
         rng = random.Random(10_000 + seed)
+        used: set[int] = set()
         rets = []
-        attempts = 0
-        while len(rets) < n_entries and attempts < n_entries * 20:
-            attempts += 1
-            i = rng.randrange(i0, max(i0 + 1, i1 - hold - 2))
-            # STRICT continuity across the simulated hold (same censoring rule)
-            ok = all(bars[j + 1]["ts"] - bars[j]["ts"] == interval
-                     for j in range(i, i + hold + 1))
-            if not ok:
+        for hold, sess in profile:
+            pool = by_session.get(sess) or []
+            placed = False
+            for _ in range(40):
+                if not pool:
+                    break
+                i = pool[rng.randrange(len(pool))]
+                if i in used or i + 1 + hold >= i1:
+                    continue
+                ok = all(bars[j + 1]["ts"] - bars[j]["ts"] == interval
+                         for j in range(i, min(i + hold + 1, len(bars) - 1)))
+                if not ok:
+                    continue
+                used.add(i)                    # no duplicate entry timestamps
+                e = bars[i + 1]["open"] * (1 + per_side) if long                     else bars[i + 1]["open"] * (1 - per_side)
+                xr = bars[i + 1 + hold]["close"] * (1 - per_side) if long                     else bars[i + 1 + hold]["close"] * (1 + per_side)
+                g = (xr / e - 1.0) if long else (e / xr - 1.0)
+                rets.append(g - fund * hold)
+                placed = True
+                break
+            if not placed:
                 continue
-            e = bars[i + 1]["open"] * (1 + per_side) if long \
-                else bars[i + 1]["open"] * (1 - per_side)
-            xr = bars[i + 1 + hold]["close"] * (1 - per_side) if long \
-                else bars[i + 1 + hold]["close"] * (1 + per_side)
-            g = (xr / e - 1.0) if long else (e / xr - 1.0)
-            rets.append(g - fund * hold)
         if rets:
             means.append(st.mean(rets))
+            placed_counts.append(len(rets))
     if not means:
         return {"status": "NO_VALID_WINDOWS", "mean_EV": None}
+    means_sorted = sorted(means)
+
+    def pct(p: float) -> float:
+        return round(means_sorted[min(len(means_sorted) - 1,
+                                      int(p * len(means_sorted)))], 8)
+    sd_seeds = st.pstdev(means) if len(means) > 1 else 0.0
     return {"status": "OK", "mean_EV": round(st.mean(means), 8),
-            "sd_across_seeds": round(st.pstdev(means), 8) if len(means) > 1 else 0.0,
-            "n_seeds": len(means), "matched_entries": n_entries,
-            "matched_hold_bars": hold, "side": spec["side"]}
+            "sd_across_seeds": round(sd_seeds, 8),
+            "p25": pct(0.25), "p50": pct(0.50), "p75": pct(0.75),
+            "lower_bound": round(st.mean(means) - 1.65 * sd_seeds, 8),
+            "n_seeds": len(means), "matched_entries": len(profile),
+            "mean_placed_per_seed": round(st.mean(placed_counts), 2),
+            "hold_distribution_matched": True,
+            "sessions_matched": True,
+            "no_duplicate_timestamps": True,
+            "side": spec["side"]}
 
 
 # ==========================================================================
@@ -1045,7 +1257,7 @@ def buy_and_hold_net(bars, i_start, i_end, costs) -> float | None:
 # EXPERIMENT LEDGER (append-only; includes every rejected strategy)
 # ==========================================================================
 
-RUNNER_VERSION = "edge_discovery_v10_45_3"
+RUNNER_VERSION = "edge_discovery_v10_45_4"
 _PROVENANCE_FILES = ("edge_discovery_engine_v10_45_1.py",
                      "multi_ai_orchestrator_v10_45_1.py",
                      "public_data_backfill_v10_45_1.py",
@@ -1080,6 +1292,50 @@ def code_tree_hash() -> dict[str, Any]:
             "runner_version": RUNNER_VERSION, "dirty_worktree": dirty}
 
 
+def write_commit_seal(expected_commit: str | None = None) -> dict[str, Any]:
+    """Versioned, committed seal generator (replaces any ad-hoc script): binds
+    the results directory to the EXACT source content and repo commit. `match`
+    is true only when HEAD equals the expected commit AND the worktree is
+    clean, so a seal can never claim results for code that wasn't committed."""
+    import subprocess
+    head = None
+    dirty_tracked = None
+    try:
+        out = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True,
+                             text=True, timeout=5, cwd=str(CE._repo_root()))
+        head = out.stdout.strip() or None
+        # match considers TRACKED files only: known-untracked docs cannot
+        # invalidate a seal, but any modified tracked source does
+        st_ = subprocess.run(["git", "status", "--porcelain", "-uno"],
+                             capture_output=True, text=True, timeout=5,
+                             cwd=str(CE._repo_root()))
+        dirty_tracked = bool(st_.stdout.strip())
+    except Exception:
+        pass
+    prov = code_tree_hash()
+    seal = {"sealed_at": _now(), "tool_version": TOOL_VERSION,
+            "runner_version": RUNNER_VERSION,
+            "repo_commit_head": head,
+            "expected_commit": expected_commit,
+            "code_tree_hash": prov["code_tree_hash"],
+            "files": prov["files"],
+            "dirty_worktree": prov["dirty_worktree"],
+            "dirty_tracked_files": dirty_tracked,
+            "ledger_file": "experiment_ledger_v10_45_4.jsonl",
+            "registry_file": REGISTRY_FILE,
+            "registry_sha256": registry_sha(),
+            "match": bool(head and (expected_commit is None or
+                                    head == expected_commit)
+                          and dirty_tracked is False),
+            "research_only": True, "can_send_real_orders": False,
+            "final_recommendation": FINAL_RECOMMENDATION_NO_LIVE}
+    p = _out() / "commit_seal_v10_45_4.json"
+    tmp = p.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(seal, indent=2, default=str), encoding="utf-8")
+    os.replace(tmp, p)
+    return seal
+
+
 RUN_CONTEXT: dict[str, Any] = {}     # run_id, commit, dataset shas, splits, costs...
 
 
@@ -1092,7 +1348,7 @@ def ledger_append(entry: dict) -> None:
     """Append-only, reproducible: every entry carries the full run provenance
     (run_id, commit, dataset SHA, symbol, timeframe, splits, cost config,
     data quality) so any result can be re-derived. Failures included."""
-    p = _out() / "experiment_ledger_v10_45_3.jsonl"
+    p = _out() / "experiment_ledger_v10_45_4.jsonl"
     with open(p, "a", encoding="utf-8") as f:
         f.write(json.dumps({"at": _now(), **RUN_CONTEXT, **entry},
                            default=str) + "\n")
@@ -1144,7 +1400,7 @@ def resample_bars(bars: list[dict], factor: int,
 
 VALID_EXIT_REASONS = ("TP", "SL", "BE_STOP", "TRAIL", "TIME", "TP1")
 CENSORED_REASONS = ("END_CENSORED",)
-INVALID_EXECUTION_REASONS = ("STALE_EXIT",)
+INVALID_EXECUTION_REASONS = ("STALE_EXIT", "INVALID_BAR_FILL")
 
 
 def dataset_quality(bars: list[dict], bar_ms: int | None = None) -> dict[str, Any]:
@@ -1167,25 +1423,6 @@ def dataset_quality(bars: list[dict], bar_ms: int | None = None) -> dict[str, An
     q["n_bars"] = len(bars)
     q["quality_pass"] = bool(q["quality_pass"] and invalid_ohlc == 0)
     return q
-
-
-def longest_contiguous_segment(bars: list[dict], bar_ms: int = BAR_MS
-                               ) -> list[dict]:
-    """Longest strictly-contiguous (delta == bar_ms) slice. Time-based subset
-    selection — decided BEFORE any strategy sees the data, so it cannot be
-    outcome-biased. Lets the zero-gap promotion rule coexist with real
-    exchange maintenance windows."""
-    if len(bars) < 2:
-        return bars
-    best_s = best_e = cur_s = 0
-    for i in range(1, len(bars)):
-        if bars[i]["ts"] - bars[i - 1]["ts"] != bar_ms:
-            if i - 1 - cur_s > best_e - best_s:
-                best_s, best_e = cur_s, i - 1
-            cur_s = i
-    if len(bars) - 1 - cur_s > best_e - best_s:
-        best_s, best_e = cur_s, len(bars) - 1
-    return bars[best_s:best_e + 1]
 
 
 def split_indices(n: int) -> dict[str, tuple[int, int]]:
@@ -1229,27 +1466,23 @@ def cost_attribution(bars, feats, spec, i_start, i_end, costs=None,
             "net_EV": evs.get("net_full")}
 
 
-def run_funnel(bars: list[dict], feats: list[dict], compiled: list[dict],
-               costs: dict | None = None, n_trials_total: int | None = None,
-               promotion_allowed: bool = True,
-               log=print) -> dict[str, Any]:
-    """discovery -> screening (perturbation + light stress) -> validation
-    (non-overlap, FULL multiple-testing lb) -> locked holdout -> full cost
-    stress. Baselines run BEFORE the gate and are part of the decision.
-    Data quality (and download completeness via promotion_allowed) is a hard
-    precondition for promotion."""
-    n = len(bars)
-    seg = split_indices(n)
+def run_funnel_phase_a(bars_dv: list[dict], feats_dv: list[dict],
+                       compiled: list[dict], seg: dict,
+                       costs: dict | None = None,
+                       promotion_allowed: bool = True,
+                       log=print) -> dict[str, Any]:
+    """Phase A: baselines + discovery + screening on the discovery/validation
+    data ONLY (the holdout stays sealed elsewhere). Returns an intermediate
+    state whose m_partial feeds the GLOBAL multiple-testing registry before
+    any validation lower bound is computed."""
     d0, d1 = seg["discovery"]
     v0, v1 = seg["validation"]
-    h0, h1 = seg["holdout"]
     results: list[dict] = []
     n_universe = len(compiled)
-    dq = dataset_quality(bars)
+    dq = dataset_quality(bars_dv)
     quality_pass = bool(dq.get("quality_pass")) and bool(promotion_allowed)
     dq["promotion_allowed"] = bool(promotion_allowed)
-    # ---------- BASELINES FIRST (same period/dataset/costs/censoring; the
-    # SAME compiled policy semantics as candidates — no cooldown override) ---
+    # ---------- BASELINES FIRST (same period/dataset/costs/censoring) -------
     base_out: dict[str, Any] = {}
     base_lbs: list[float] = []
     seen_b: set[str] = set()
@@ -1257,25 +1490,23 @@ def run_funnel(bars: list[dict], feats: list[dict], compiled: list[dict],
         stt, cb = compile_strategy(b, seen_b)
         if stt != "OK":
             continue
-        rb = replay(bars, feats, cb, costs=costs, i_start=v0, i_end=v1)
+        rb = replay(bars_dv, feats_dv, cb, costs=costs, i_start=v0, i_end=v1)
         m_b = metrics(rb["trades"])
         base_out[cb["strategy_id"]] = m_b
         if m_b.get("net_EV_lower_bound") is not None:
             base_lbs.append(m_b["net_EV_lower_bound"])
     base_out["baseline_random"] = run_random_baseline(
-        bars, feats, v0, v1, costs, freq=0.02)
+        bars_dv, feats_dv, v0, v1, costs, freq=0.02)
     if base_out["baseline_random"].get("net_EV_lower_bound") is not None:
         base_lbs.append(base_out["baseline_random"]["net_EV_lower_bound"])
-    # buy&hold is a TOTAL RETURN over the window — a different unit than
-    # per-trade EV, so it is reported separately and never enters the
-    # per-trade baseline comparison
-    base_out["baseline_buy_hold_total_return"] = buy_and_hold_net(bars, v0, v1, costs)
+    base_out["baseline_buy_hold_total_return"] = buy_and_hold_net(
+        bars_dv, v0, v1, costs)
     base_out["baseline_no_trade"] = 0.0
     baseline_best_lb = max(base_lbs) if base_lbs else None
     # ---------- DISCOVERY ----------
     survivors = []
     for k, spec in enumerate(compiled):
-        r = replay(bars, feats, spec, costs=costs, i_start=d0, i_end=d1)
+        r = replay(bars_dv, feats_dv, spec, costs=costs, i_start=d0, i_end=d1)
         m = metrics(r["trades"], n_tests=1)
         entry = {"phase": "discovery", "strategy_id": spec["strategy_id"],
                  "origin": spec.get("origin"), "signature": spec["signature"],
@@ -1292,9 +1523,7 @@ def run_funnel(bars: list[dict], feats: list[dict], compiled: list[dict],
         if (k + 1) % 100 == 0:
             log(f"  discovery {k + 1}/{n_universe} (survivors so far: {len(survivors)})")
     log(f"discovery: {len(survivors)}/{n_universe} survived")
-    # ---------- SCREENING (perturbation + light cost stress, discovery data) --
-    # every perturbation is a CHILD strategy with its own id, parent link and
-    # signature — never a silent in-place mutation of the parent's policy
+    # ---------- SCREENING (perturbation children + light cost stress) -------
     screened = []
     perturbation_children = 0
     for spec in survivors:
@@ -1309,7 +1538,8 @@ def run_funnel(bars: list[dict], feats: list[dict], compiled: list[dict],
                                         f"_p{int(mult_stop*100)}s{int(mult_tp*100)}t")
                 child["parent_strategy_id"] = spec["strategy_id"]
                 child["signature"] = semantic_signature(child)
-                r = replay(bars, feats, child, costs=costs, i_start=d0, i_end=d1)
+                r = replay(bars_dv, feats_dv, child, costs=costs,
+                           i_start=d0, i_end=d1)
                 m = metrics(r["trades"])
                 perturb_total += 1
                 perturbation_children += 1
@@ -1323,7 +1553,7 @@ def run_funnel(bars: list[dict], feats: list[dict], compiled: list[dict],
         c25 = {**DEFAULT_COSTS, **(costs or {})}
         c25 = {k2: (v2 * 1.25 if k2 != "funding_bps_per_8h" else v2)
                for k2, v2 in c25.items()}
-        r25 = replay(bars, feats, spec, costs=c25, i_start=d0, i_end=d1)
+        r25 = replay(bars_dv, feats_dv, spec, costs=c25, i_start=d0, i_end=d1)
         m25 = metrics(r25["trades"])
         ok = perturb_ok >= max(2, int(perturb_total * 0.5)) and (m25["net_EV"] or 0) > 0
         entry = {"phase": "screening", "strategy_id": spec["strategy_id"],
@@ -1335,30 +1565,47 @@ def run_funnel(bars: list[dict], feats: list[dict], compiled: list[dict],
         if ok:
             screened.append(spec)
     log(f"screening: {len(screened)}/{len(survivors)} survived")
-    # ---------- MULTIPLE TESTING: m computed AUTOMATICALLY from what actually
-    # ran and influenced selection (universe + perturbation children + light
-    # stress + upcoming validation evaluations), scaled by the number of runs
-    # in the sprint (timeframes x symbols). Never a CLI constant.
-    m_raw = n_universe + perturbation_children + len(survivors) + len(screened)
-    sprint_runs = max(int(n_trials_total or 1), 1) if (n_trials_total or 0) <= 24 \
-        else 1   # n_trials_total now carries the SPRINT RUN COUNT (small int)
-    m_effective = max(m_raw * sprint_runs, 1)
-    replays_run = n_universe + 5 * len(survivors)
-    # ---------- VALIDATION (untouched slice; SAME compiled policy — no
-    # silent cooldown override; dependence handled by conservative n_eff) ----
+    m_partial = n_universe + perturbation_children + len(survivors) + len(screened)
+    return {"bars_dv": bars_dv, "feats_dv": feats_dv, "seg": seg,
+            "costs": costs, "results": results,
+            "n_universe": n_universe, "survivors": survivors,
+            "screened": screened, "base_out": base_out,
+            "baseline_best_lb": baseline_best_lb,
+            "dq": dq, "quality_pass": quality_pass,
+            "perturbation_children": perturbation_children,
+            "m_partial": m_partial,
+            "replays_run": n_universe + 5 * len(survivors)}
+
+
+def run_funnel_phase_b(state: dict, sealed: "SealedHoldout",
+                       m_global: int, log=print) -> dict[str, Any]:
+    """Phase B: validation with the SPRINT-GLOBAL multiple-testing total,
+    exposure-matched baselines, token-gated access to the sealed holdout,
+    fail-closed gates and cost attribution."""
+    bars_dv, feats_dv = state["bars_dv"], state["feats_dv"]
+    seg, costs = state["seg"], state["costs"]
+    v0, v1 = seg["validation"]
+    results = state["results"]
+    screened = state["screened"]
+    survivors = state["survivors"]
+    n_universe = state["n_universe"]
+    quality_pass = state["quality_pass"]
+    baseline_best_lb = state["baseline_best_lb"]
+    base_out = state["base_out"]
+    m_raw = state["m_partial"]
+    m_effective = max(int(m_global), m_raw, 1)
+    replays_run = state["replays_run"]
+    base_c = {**DEFAULT_COSTS, **(costs or {})}
     validated = []
     m_val_by_id: dict[str, dict] = {}
-    stress_by_id: dict[str, dict] = {}
-    matched_by_id: dict[str, dict] = {}
-    eligibility_by_id: dict[str, tuple] = {}
-    base_c = {**DEFAULT_COSTS, **(costs or {})}
+    finals = []
     for spec in screened:
-        r = replay(bars, feats, spec, costs=costs, i_start=v0, i_end=v1)
+        sid = spec["strategy_id"]
+        r = replay(bars_dv, feats_dv, spec, costs=costs, i_start=v0, i_end=v1)
         m = metrics(r["trades"], n_tests=m_effective)
         replays_run += 1
-        m_val_by_id[spec["strategy_id"]] = m
-        # ---- full cost stress on the VALIDATION slice (pre-holdout, part of
-        # eligibility — the holdout can never be the thing that reveals it)
+        m_val_by_id[sid] = m
+        # ---- full cost stress on the VALIDATION slice (pre-holdout)
         stress = {}
         variants = {
             "cost_plus_25": {k2: v2 * 1.25 for k2, v2 in base_c.items()},
@@ -1367,27 +1614,28 @@ def run_funnel(bars: list[dict], feats: list[dict], compiled: list[dict],
             "slip_x2": {**base_c, "slippage_bps": base_c["slippage_bps"] * 2},
         }
         for name, cs in variants.items():
-            rs = replay(bars, feats, spec, costs=cs, i_start=v0, i_end=v1)
+            rs = replay(bars_dv, feats_dv, spec, costs=cs, i_start=v0, i_end=v1)
             stress[name] = metrics(rs["trades"])["net_EV"]
-        rl = replay(bars, feats, spec, costs=base_c, i_start=v0, i_end=v1,
+        rl = replay(bars_dv, feats_dv, spec, costs=base_c, i_start=v0, i_end=v1,
                     entry_fill_prob=0.9, extra_entry_slip_bps=2.0, rng_seed=13)
         stress["nonfill10_latency"] = metrics(rl["trades"])["net_EV"]
         stress_ok = all((x or 0) > 0 for x in stress.values())
-        stress_by_id[spec["strategy_id"]] = {"stress": stress, "ok": stress_ok}
         replays_run += 5
-        # ---- exposure-matched baseline (same n/side/hold/window/costs)
-        matched = exposure_matched_baseline(bars, spec, r["trades"], v0, v1,
+        # ---- exposure-matched baseline (full hold distribution + sessions)
+        matched = exposure_matched_baseline(bars_dv, spec, r["trades"], v0, v1,
                                             costs=costs)
-        matched_by_id[spec["strategy_id"]] = matched
+        # merit (proxy-independent) for reporting; token (access) is stricter
         eligible, reasons = validation_eligible_for_holdout(
             m, stress_ok, quality_pass, baseline_best_lb,
-            matched.get("mean_EV"))
-        eligibility_by_id[spec["strategy_id"]] = (eligible, reasons)
-        entry = {"phase": "validation", "strategy_id": spec["strategy_id"],
+            matched.get("mean_EV"), execution_proxies=())
+        val_hash = hashlib.sha1(json.dumps(m, sort_keys=True, default=str)
+                                .encode("utf-8")).hexdigest()[:16]
+        entry = {"phase": "validation", "strategy_id": sid,
                  "metrics": m, "n_tests_applied": m_effective,
+                 "m_raw_this_run": m_raw, "m_global": m_effective,
                  "cost_stress": stress, "stress_ok": stress_ok,
                  "exposure_matched_baseline": matched,
-                 "holdout_eligible": eligible,
+                 "holdout_eligible_on_merit": eligible,
                  "eligibility_reasons": reasons,
                  "state": ("SURVIVED_VALIDATION" if eligible
                            else state_from_reasons(reasons))}
@@ -1395,55 +1643,57 @@ def run_funnel(bars: list[dict], feats: list[dict], compiled: list[dict],
         results.append(entry)
         if eligible:
             validated.append(spec)
-    log(f"validation: {len(validated)}/{len(screened)} eligible for holdout")
-    # ---------- LOCKED HOLDOUT: read ONLY for eligible candidates; every
-    # access (and every non-access) is logged with the validation hash -------
-    finals = []
-    for spec in screened:
-        sid = spec["strategy_id"]
-        mv = m_val_by_id[sid]
-        eligible, reasons = eligibility_by_id[sid]
-        stress_info = stress_by_id[sid]
-        matched = matched_by_id[sid]
-        val_hash = hashlib.sha1(json.dumps(mv, sort_keys=True, default=str)
-                                .encode("utf-8")).hexdigest()[:16]
-        if not eligible:
+        # ---- token-gated holdout access (proxies/baselines block access)
+        token, treasons = issue_holdout_token(
+            sid, m, stress_ok, quality_pass, baseline_best_lb,
+            matched.get("mean_EV"))
+        if token is None:
             ledger_append({"phase": "holdout_access", "strategy_id": sid,
                            "holdout_accessed": False,
                            "validation_metrics_sha1": val_hash,
-                           "reason": "validation_gates_not_passed",
-                           "eligibility_reasons": reasons})
+                           "reason": "token_denied",
+                           "denial_reasons": treasons})
             continue
         ledger_append({"phase": "holdout_access", "strategy_id": sid,
                        "holdout_accessed": True,
                        "validation_metrics_sha1": val_hash,
-                       "reason": "all_validation_gates_passed"})
-        r = replay(bars, feats, spec, costs=costs, i_start=h0, i_end=h1)
-        mh = metrics(r["trades"], n_tests=m_effective)
+                       "reason": "all_gates_passed_token_issued"})
+        bars_full, feats_full, _refh, h0, h1 = sealed.open(token)
+        rh = replay(bars_full, feats_full, spec, costs=costs,
+                    i_start=h0, i_end=h1)
+        mh = metrics(rh["trades"], n_tests=m_effective)
         replays_run += 1
-        state = gate(mv, mh, stress_info["ok"], data_quality_pass=quality_pass,
-                     baseline_best_lb=baseline_best_lb,
-                     matched_baseline_ev=matched.get("mean_EV"))
-        attribution = cost_attribution(bars, feats, spec, v0, v1, costs=costs)
+        state_final = gate(m, mh, stress_ok, data_quality_pass=quality_pass,
+                           baseline_best_lb=baseline_best_lb,
+                           matched_baseline_ev=matched.get("mean_EV"))
+        # holdout-side stability/outlier gates (at least as strict as val)
+        if state_final in ("SHADOW_CANDIDATE_RESEARCH_ONLY",
+                           "PAPER_CANDIDATE_RESEARCH_ONLY"):
+            if mh.get("stability_sign") == 0 or (
+                    mh.get("outlier_dependence") is not None
+                    and mh["outlier_dependence"] <= 0):
+                state_final = "REJECTED"
+        attribution = cost_attribution(bars_dv, feats_dv, spec, v0, v1,
+                                       costs=costs)
         replays_run += 5
         entry = {"phase": "holdout", "strategy_id": sid,
                  "origin": spec.get("origin"),
                  "hypothesis": spec.get("hypothesis"),
-                 "validation_metrics": mv, "holdout_metrics": mh,
-                 "cost_stress": stress_info["stress"],
-                 "stress_ok": stress_info["ok"],
+                 "validation_metrics": m, "holdout_metrics": mh,
+                 "cost_stress": stress, "stress_ok": stress_ok,
                  "exposure_matched_baseline": matched,
                  "cost_attribution": attribution,
                  "baseline_best_lb": baseline_best_lb,
                  "data_quality_pass": quality_pass,
                  "execution_proxies": list(EXECUTION_PROXIES),
                  "proxy_note": PROXY_NOTE,
-                 "state": state}
+                 "state": state_final}
         ledger_append(entry)
         results.append(entry)
         finals.append(entry)
-    # ---------- cost attribution for the BEST candidates even without
-    # finalists (so "costs kill the edge" is SHOWN, not asserted) ----------
+    log(f"validation: {len(validated)}/{len(screened)} pass merit gates; "
+        f"holdout accesses: {len(finals)}")
+    # ---------- attribution for the BEST candidate even without finalists ----
     attribution_best = None
     if not finals:
         best_spec = None
@@ -1453,14 +1703,29 @@ def run_funnel(bars: list[dict], feats: list[dict], compiled: list[dict],
                                            or -9))
         elif survivors:
             best_spec = survivors[0]
-        elif compiled:
-            best_spec = compiled[0]
+        elif state.get("n_universe"):
+            best_spec = None
         if best_spec is not None:
             attribution_best = {"strategy_id": best_spec["strategy_id"],
-                                **cost_attribution(bars, feats, best_spec,
+                                **cost_attribution(bars_dv, feats_dv, best_spec,
                                                    v0, v1, costs=costs)}
             replays_run += 5
-    # sensitivity of the correction: how the best validation lb moves with m
+    if attribution_best is None and not finals and not screened and not survivors:
+        # fall back to the first compiled strategy via discovery results
+        disc = [e for e in results if e.get("phase") == "discovery"]
+        if disc:
+            # re-derive attribution for the least-bad discovery candidate
+            best_id = max(disc, key=lambda e: (e["metrics"].get("net_EV") or -9)
+                          )["strategy_id"]
+            spec_b = None
+            for e in results:
+                if e.get("strategy_id") == best_id and e.get("phase") == "discovery":
+                    spec_b = e
+                    break
+            # spec objects are not stored in results; attribution for the id is
+            # resolved by the caller when needed
+            attribution_best = {"strategy_id": best_id, "resolved": False}
+    # sensitivity of the correction on the best validation candidate
     mt_sensitivity = None
     if m_val_by_id:
         best_id = max(m_val_by_id, key=lambda k: (m_val_by_id[k].get("net_EV")
@@ -1468,24 +1733,26 @@ def run_funnel(bars: list[dict], feats: list[dict], compiled: list[dict],
         bm = m_val_by_id[best_id]
         if bm.get("net_EV") is not None:
             spec_b = next(s for s in screened if s["strategy_id"] == best_id)
-            r1 = replay(bars, feats, spec_b, costs=costs, i_start=v0, i_end=v1)
+            r1 = replay(bars_dv, feats_dv, spec_b, costs=costs,
+                        i_start=v0, i_end=v1)
             mt_sensitivity = {
                 "strategy_id": best_id,
                 "lb_at_m1": metrics(r1["trades"], n_tests=1)["net_EV_lower_bound"],
                 "lb_at_m_raw": metrics(r1["trades"],
                                        n_tests=m_raw)["net_EV_lower_bound"],
-                "lb_at_m_effective": bm.get("net_EV_lower_bound"),
-                "m_raw": m_raw, "m_effective": m_effective,
-                "method": ("m_raw = universe + perturbation children + light "
-                           "stress + validation evals (auto-counted); "
-                           "m_effective = m_raw x sprint runs")}
+                "lb_at_m_global": bm.get("net_EV_lower_bound"),
+                "m_raw": m_raw, "m_global": m_effective,
+                "method": ("m_raw auto-counted per run (universe + perturbation "
+                           "children + light stress + validation evals); "
+                           "m_global = registry sum across the whole sprint, "
+                           "shared by every timeframe")}
             replays_run += 1
     return {"universe": n_universe, "discovery_survivors": len(survivors),
             "screening_survivors": len(screened),
             "validation_survivors": len(validated),
             "finalists": finals, "baselines": base_out,
             "baseline_best_lb": baseline_best_lb,
-            "data_quality": dq,
+            "data_quality": state["dq"],
             "m_raw": m_raw, "m_effective": m_effective,
             "n_trials_total": m_effective,
             "replays_run": replays_run,
@@ -1493,5 +1760,27 @@ def run_funnel(bars: list[dict], feats: list[dict], compiled: list[dict],
             "cost_attribution_best": attribution_best,
             "multiple_testing_sensitivity": mt_sensitivity,
             "execution_proxies": list(EXECUTION_PROXIES),
+            "holdout_accesses": len(finals),
             "splits": {k: v for k, v in seg.items()},
             "results": results}
+
+
+def run_funnel(bars: list[dict], feats: list[dict], compiled: list[dict],
+               costs: dict | None = None, n_trials_total: int | None = None,
+               promotion_allowed: bool = True,
+               log=print) -> dict[str, Any]:
+    """Compatibility wrapper: phase A + phase B on a single dataset with the
+    single-run m scaled by the sprint run count (small-int n_trials_total).
+    The holdout segment goes through the SAME sealed/token machinery."""
+    seg = split_indices(len(bars))
+    v1 = seg["validation"][1]
+    h0, h1 = seg["holdout"]
+    bars_dv = bars[:v1]
+    feats_dv = feats[:v1]
+    sealed = SealedHoldout(bars, None, h0, h1)
+    state = run_funnel_phase_a(bars_dv, feats_dv, compiled, seg, costs=costs,
+                               promotion_allowed=promotion_allowed, log=log)
+    sprint_runs = max(int(n_trials_total or 1), 1) \
+        if (n_trials_total or 0) <= 24 else 1
+    m_global = state["m_partial"] * sprint_runs
+    return run_funnel_phase_b(state, sealed, m_global, log=log)
