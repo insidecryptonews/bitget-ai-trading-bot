@@ -184,9 +184,15 @@ def run_tournament(bars: list[dict], *, symbol: str, venue: str,
                         "calibrated_probability": 0.5}
         else:
             def decide_fn(feats, eid, dt, cluster, _pol=pol, _lr=learner):
+                use_pol = _pol
                 if _lr is not None:
                     _lr.predict(feats.get("features") or {}, eid)  # log first
-                return POL.decide(_pol, feats, event_id=eid,
+                    # PREQUENTIAL: decide with the model as trained on labels
+                    # matured SO FAR (all earlier, causal). Champion is never
+                    # touched — only this challenger's live weights are used.
+                    if _lr.model.n > 0:
+                        use_pol = {**_pol, "weights": list(_lr.model.w)}
+                return POL.decide(use_pol, feats, event_id=eid,
                                   decision_time_ms=dt, **common)
 
         on_label = None
