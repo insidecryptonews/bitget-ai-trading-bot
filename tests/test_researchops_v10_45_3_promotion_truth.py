@@ -209,8 +209,8 @@ def test_holdout_never_touched_when_nothing_eligible(monkeypatch, tmp_path):
     # slice must never have been replayed
     assert out["validation_survivors"] == 0
     assert touched == []
-    ledger = (tmp_path / "reports" / "research" / "v10_45_5_edge_discovery" /
-              "experiment_ledger_v10_45_5.jsonl")
+    ledger = (tmp_path / "reports" / "research" / "v10_45_6_edge_discovery" /
+              "experiment_ledger_v10_45_6.jsonl")
     entries = [json.loads(l) for l in ledger.read_text(encoding="utf-8").splitlines()]
     accesses = [e for e in entries if e.get("phase") == "holdout_access"]
     assert all(e["holdout_accessed"] is False for e in accesses)
@@ -509,8 +509,8 @@ def test_code_tree_hash_and_ledger_provenance(tmp_path, monkeypatch):
                         runner_version=prov["runner_version"],
                         dirty_worktree=prov["dirty_worktree"])
     ENG.ledger_append({"phase": "test", "state": "OK"})
-    ledger = (tmp_path / "reports" / "research" / "v10_45_5_edge_discovery" /
-              "experiment_ledger_v10_45_5.jsonl")
+    ledger = (tmp_path / "reports" / "research" / "v10_45_6_edge_discovery" /
+              "experiment_ledger_v10_45_6.jsonl")
     e = json.loads(ledger.read_text(encoding="utf-8").splitlines()[-1])
     assert e["code_tree_hash"] == prov["code_tree_hash"]
     assert e["runner_version"] == ENG.RUNNER_VERSION

@@ -37,9 +37,9 @@ from typing import Any
 from . import FINAL_RECOMMENDATION_NO_LIVE
 from . import continuous_edge_factory_v10_38 as CE
 
-TOOL_VERSION = "v10.45.5"
+TOOL_VERSION = "v10.45.6"
 CACHE_SUBDIR = ("external_data", "staging", "ai_cache_v10_45_1")
-OUTPUT_SUBDIR = ("reports", "research", "v10_45_5_edge_discovery")
+OUTPUT_SUBDIR = ("reports", "research", "v10_45_6_edge_discovery")
 
 OLLAMA_BASE = "http://localhost:11434"
 GROQ_BASE = "https://api.groq.com/openai/v1"
@@ -118,11 +118,35 @@ def sanitize_obj(obj):
     if isinstance(obj, list):
         return [sanitize_obj(x) for x in obj]
     if isinstance(obj, str):
-        out = obj
-        for pat, repl in _SANITIZE_PATTERNS[:-1]:
-            out = pat.sub(repl, out)
-        return out
+        return _sanitize_cache_string(obj)
     return obj
+
+
+_MAX_DECODE_DEPTH = 3
+
+
+def _sanitize_cache_string(s: str) -> str:
+    """Targeted redaction with REPEATED-ENCODING detection: the string is
+    URL-decoded up to a bounded depth and the targeted credential rules are
+    applied at EVERY level. If any level matches, the whole value is replaced
+    by a hash placeholder (ambiguous values are never stored verbatim).
+    Benign long identifiers pass through untouched — the generic long-blob
+    rule is never applied to structured JSON strings."""
+    import urllib.parse as _up
+    cur = s
+    for _ in range(_MAX_DECODE_DEPTH):
+        red = cur
+        for pat, repl in _SANITIZE_PATTERNS[:-1]:
+            red = pat.sub(repl, red)
+        if red != cur:
+            digest = hashlib.sha256(
+                s.encode("utf-8", errors="replace")).hexdigest()[:16]
+            return f"<redacted-hash:{digest}>"
+        nxt = _up.unquote(cur)
+        if nxt == cur:
+            break
+        cur = nxt
+    return s
 
 
 def sanitize_response_text(text: str) -> str:

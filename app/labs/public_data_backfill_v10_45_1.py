@@ -32,7 +32,7 @@ from . import FINAL_RECOMMENDATION_NO_LIVE
 from . import continuous_edge_factory_v10_38 as CE
 from .ai_providers_v10_45_1 import _http_json, sanitize_error
 
-TOOL_VERSION = "v10.45.5"
+TOOL_VERSION = "v10.45.6"
 DOWNLOADER_VERSION = ("v10.45.5 (pagination end=batch_min live-probed; "
                       "content-addressed CSV+manifest generations with atomic "
                       "CURRENT marker; CSV-derived verification; strict "
@@ -50,6 +50,44 @@ WINDOWS_RESERVED = {"CON", "PRN", "AUX", "NUL"} | {f"COM{i}" for i in range(1, 1
     | {f"LPT{i}" for i in range(1, 10)}
 CSV_HEADER = ["ts", "open", "high", "low", "close", "volume", "turnover"]
 CURRENT_MARKER = "CURRENT.json"
+SCHEMA_VERSION = "klines_schema_v1"
+# fields of the manifest that form the VERIFIABLE CONTRACT (volatile fields
+# like downloaded_at / repo_commit are provenance, not contract)
+CONTRACT_FIELDS = ("venue", "symbol", "timeframe", "schema_version", "source",
+                   "requested_start_ms", "requested_end_ms", "requested_days",
+                   "expected_bars", "actual_bars", "n_bars", "coverage_ratio",
+                   "gap_count", "duplicates", "out_of_order",
+                   "irregular_deltas", "invalid_candles", "raw_quality_pass",
+                   "download_complete", "actual_start_ms", "actual_end_ms",
+                   "completeness_tolerance_bars", "sha256")
+
+
+def manifest_contract_sha(manifest: dict) -> str:
+    contract = {k: manifest.get(k) for k in CONTRACT_FIELDS}
+    return hashlib.sha256(json.dumps(contract, sort_keys=True,
+                                     separators=(",", ":"),
+                                     default=str).encode("utf-8")).hexdigest()
+
+
+def compute_generation_id(csv_sha: str, contract_sha: str, source: str,
+                          symbol: str, timeframe: str) -> str:
+    return hashlib.sha256(
+        f"{csv_sha}|{contract_sha}|{SCHEMA_VERSION}|{source}|{symbol}|"
+        f"{timeframe}".encode()).hexdigest()[:16]
+
+
+def _fsync_dir(path) -> None:
+    """Directory fsync (durability of the directory entry). On Windows,
+    opening a directory handle via os.open is not supported by CPython, so
+    this is BEST-EFFORT there and documented as such; on POSIX it is real."""
+    try:
+        fd = os.open(str(path), os.O_RDONLY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    except OSError:
+        pass
 
 
 def validate_symbol(symbol: str) -> str:
@@ -96,7 +134,12 @@ def validated_dir(*parts: str) -> Path:
     reparse point anywhere in the chain, no traversal metacharacters, and the
     final real path must stay inside the repository root. mkdir never follows
     a link because the parent was validated first."""
-    root = Path(os.path.realpath(str(CE._repo_root())))
+    logical_root = Path(str(CE._repo_root()))
+    # the LOGICAL root itself must not be a link/junction: resolving it first
+    # and validating the resolved path would silently follow the link
+    if _is_link_like(logical_root):
+        raise ValueError("repository root is a symlink/junction/reparse point")
+    root = Path(os.path.realpath(str(logical_root)))
     if not root.is_dir():
         raise ValueError("repository root is not a directory")
     cur = root
@@ -129,6 +172,12 @@ def _dataset_dir(venue: str, symbol: str) -> Path:
 # EXCLUSIVE TEMP FILES + ATOMIC, VERIFIED WRITES
 # ==========================================================================
 
+def _between_write_and_replace(path) -> None:
+    """Deterministic test seam for the TOCTOU window between the last
+    hardlink check and os.replace. No-op in production."""
+    return None
+
+
 def safe_atomic_write(path, data: bytes) -> str:
     """Atomic write with an EXCLUSIVE random-named temp file:
 
@@ -142,8 +191,11 @@ def safe_atomic_write(path, data: bytes) -> str:
     * the temp file is removed on ANY exception."""
     path = Path(path)
     parent = path.parent
+    logical_root = Path(str(CE._repo_root()))
+    if _is_link_like(logical_root):
+        raise ValueError("repository root is a symlink/junction/reparse point")
     base = Path(os.path.realpath(str(parent)))
-    repo_real = Path(os.path.realpath(str(CE._repo_root())))
+    repo_real = Path(os.path.realpath(str(logical_root)))
     if repo_real != base and repo_real not in base.parents:
         raise ValueError("write target escapes repository root")
     if _is_link_like(parent):
@@ -165,11 +217,24 @@ def safe_atomic_write(path, data: bytes) -> str:
             raise ValueError("temp file is hardlinked")
         os.write(fd, data)
         os.fsync(fd)                          # failure RAISES: no fake success
+        st_fd = os.fstat(fd)
+        if getattr(st_fd, "st_nlink", 1) > 1:
+            raise ValueError("temp file was hardlinked during write")
         os.close(fd)
         fd_open = False
         if hashlib.sha256(tmp.read_bytes()).hexdigest() != expected:
             raise IOError("temp content verification failed")
+        _between_write_and_replace(path)      # test seam (no-op in prod)
+        # ---- TOCTOU recheck IMMEDIATELY before the replace: an alias or
+        # link created after the first check must never receive the swap
+        if os.path.lexists(path):
+            if _is_link_like(path):
+                raise ValueError("destination became a link before replace")
+            st_now = os.stat(path)
+            if getattr(st_now, "st_nlink", 1) > 1:
+                raise ValueError("destination was hardlinked before replace")
         os.replace(tmp, path)
+        _fsync_dir(base)                      # durability of the dir entry
     except BaseException:
         if fd_open:
             try:
@@ -426,19 +491,19 @@ def save_dataset(venue: str, symbol: str, rows: list[list],
         w.writerow(r)
     csv_bytes = buf.getvalue().encode("utf-8")
     csv_sha = hashlib.sha256(csv_bytes).hexdigest()
-    generation_id = csv_sha[:16]               # content-addressed
     ts_list = [int(r[0]) for r in rows]
     expected_bars = max(0, (requested_end_ms - requested_start_ms) // BAR_MS)
     coverage_ratio = (len(rows) / expected_bars) if expected_bars else 0.0
     download_complete = (expected_bars - len(rows)) <= COMPLETENESS_TOLERANCE_BARS \
         and raw_q["raw_quality_pass"]
+    source = ("bitget public /api/v2/mix/market/history-candles"
+              if venue == "bitget" else "bybit public /v5/market/kline")
     manifest = {
         "tool_version": TOOL_VERSION,
         "downloader_version": DOWNLOADER_VERSION,
         "repo_commit": _repo_commit(),
-        "generation_id": generation_id,
-        "source": ("bitget public /api/v2/mix/market/history-candles"
-                   if venue == "bitget" else "bybit public /v5/market/kline"),
+        "schema_version": SCHEMA_VERSION,
+        "source": source,
         "venue": venue, "symbol": symbol, "timeframe": "1m",
         "timezone": "UTC (epoch ms)",
         "downloaded_at": datetime.now(timezone.utc).isoformat(),
@@ -471,17 +536,43 @@ def save_dataset(venue: str, symbol: str, rows: list[list],
         "license_note": ("public market-data endpoint, no auth, used for "
                          "personal research within venue API ToS rate limits"),
         **_safety()}
+    # generation identity depends on CSV bytes AND the manifest CONTRACT AND
+    # schema/source/symbol/timeframe — a different contract can never reuse
+    # (or overwrite) an existing generation directory
+    contract_sha = manifest_contract_sha(manifest)
+    generation_id = compute_generation_id(csv_sha, contract_sha, source,
+                                          symbol, "1m")
+    manifest["generation_id"] = generation_id
+    manifest["contract_sha256"] = contract_sha
     dsdir = _dataset_dir(venue, symbol)
     recover_staging(venue, symbol)
-    gdir = validated_dir(*DATA_SUBDIR, f"{venue}_{symbol}_1m",
-                         f"gen_{generation_id}")
-    written_csv_sha = safe_atomic_write(gdir / "data.csv", csv_bytes)
+    gdir_path = dsdir / f"gen_{generation_id}"
     man_bytes = json.dumps(manifest, indent=2, default=str).encode("utf-8")
-    written_man_sha = safe_atomic_write(gdir / "manifest.json", man_bytes)
+    if gdir_path.exists():
+        # IMMUTABLE generations: reuse only if byte/contract-identical
+        try:
+            ex_csv = hashlib.sha256(
+                (gdir_path / "data.csv").read_bytes()).hexdigest()
+            ex_man = json.loads((gdir_path / "manifest.json")
+                                .read_text(encoding="utf-8"))
+        except OSError:
+            raise IOError(f"GENERATION_CONFLICT: gen_{generation_id} exists "
+                          "but is unreadable; refusing to overwrite")
+        if ex_csv != csv_sha or manifest_contract_sha(ex_man) != contract_sha:
+            raise IOError(f"GENERATION_CONFLICT: gen_{generation_id} exists "
+                          "with different content; generations are immutable")
+        written_csv_sha = ex_csv
+        written_man_sha = hashlib.sha256(
+            (gdir_path / "manifest.json").read_bytes()).hexdigest()
+        gdir = gdir_path
+    else:
+        gdir = validated_dir(*DATA_SUBDIR, f"{venue}_{symbol}_1m",
+                             f"gen_{generation_id}")
+        written_csv_sha = safe_atomic_write(gdir / "data.csv", csv_bytes)
+        written_man_sha = safe_atomic_write(gdir / "manifest.json", man_bytes)
+        _fsync_dir(gdir)
     # staging re-verification of BOTH artifacts before the commit marker
-    if hashlib.sha256((gdir / "data.csv").read_bytes()).hexdigest() != csv_sha \
-            or hashlib.sha256((gdir / "manifest.json").read_bytes()).hexdigest() \
-            != written_man_sha:
+    if hashlib.sha256((gdir / "data.csv").read_bytes()).hexdigest() != csv_sha:
         raise IOError("staging verification failed; generation NOT committed")
     marker = {"generation_id": generation_id,
               "csv_sha256": written_csv_sha,
@@ -490,7 +581,8 @@ def save_dataset(venue: str, symbol: str, rows: list[list],
               "tool_version": TOOL_VERSION}
     safe_atomic_write(dsdir / CURRENT_MARKER,
                       json.dumps(marker, indent=2).encode("utf-8"))
-    return {**manifest, "path": str(gdir / "data.csv").replace("\\", "/")}
+    _fsync_dir(dsdir)                          # durability of CURRENT swap
+    return {**manifest, "path": str(gdir / "data.csv").replace(chr(92), "/")}
 
 
 def load_manifest(venue: str, symbol: str) -> dict[str, Any] | None:
@@ -691,6 +783,11 @@ def verify_dataset(venue: str, symbol: str,
                   if expected_bars else 0.0}
     contract_checks = (
         ("n_bars", n_rows), ("actual_bars", n_rows),
+        ("expected_bars", expected_bars),
+        ("coverage_ratio", round(n_rows / expected_bars, 6)
+         if expected_bars else 0.0),
+        ("schema_version", SCHEMA_VERSION),
+        ("completeness_tolerance_bars", COMPLETENESS_TOLERANCE_BARS),
         ("gap_count", 0), ("duplicates", 0), ("out_of_order", 0),
         ("irregular_deltas", 0), ("invalid_candles", 0),
         ("raw_quality_pass", True), ("download_complete", True),
@@ -701,6 +798,16 @@ def verify_dataset(venue: str, symbol: str,
             return _fail("INVALID_MANIFEST_CONTRACT",
                          detail=f"{key}: manifest={manifest.get(key)!r} "
                                 f"recomputed={truth!r}")
+    # the generation id itself must re-derive from CSV + contract + schema:
+    # a marker pointing at a directory whose id does not match its content
+    # is a forged or corrupted generation
+    recomputed_gid = compute_generation_id(
+        sha, manifest_contract_sha(manifest), manifest.get("source", ""),
+        symbol, expected_timeframe)
+    if recomputed_gid != cur["generation_id"]:
+        return _fail("INVALID_MANIFEST_CONTRACT",
+                     detail=f"generation_id: marker={cur['generation_id']} "
+                            f"recomputed={recomputed_gid}")
     return {"ok": True, "status": "DATASET_VERIFIED", "sha256": sha,
             "generation_id": cur["generation_id"],
             "recomputed": recomputed, "manifest": manifest,

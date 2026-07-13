@@ -35,10 +35,10 @@ from typing import Any, Callable
 from . import FINAL_RECOMMENDATION_NO_LIVE
 from . import continuous_edge_factory_v10_38 as CE
 
-TOOL_VERSION = "v10.45.5"
-OUTPUT_SUBDIR = ("reports", "research", "v10_45_5_edge_discovery")
-HOLDOUT_SUBDIR = ("external_data", "staging", "holdout_v10_45_5")
-GATE_VERSION = "v10.45.5"
+TOOL_VERSION = "v10.45.6"
+OUTPUT_SUBDIR = ("reports", "research", "v10_45_6_edge_discovery")
+HOLDOUT_SUBDIR = ("external_data", "staging", "holdout_v10_45_6")
+GATE_VERSION = "v10.45.6"
 CLUSTER_BLOCK_BARS = 30           # conservative temporal grouping (no event_id)
 
 # execution-model elements that are still PROXIES: promotion is capped at
@@ -105,6 +105,15 @@ def _json_finite(obj):
     return obj
 
 
+def canonical_sha256(obj) -> str:
+    """FULL SHA-256 over canonical JSON: sorted keys, compact separators,
+    UTF-8, non-finite floats normalized to null, no volatile fields removed
+    here (callers strip them). Any change to any field changes the hash."""
+    return hashlib.sha256(json.dumps(_json_finite(obj), sort_keys=True,
+                                     separators=(",", ":"), ensure_ascii=False,
+                                     default=str).encode("utf-8")).hexdigest()
+
+
 # ==========================================================================
 # FEATURE ENGINE (all ex-ante: row i uses bars[0..i] only)
 # ==========================================================================
@@ -122,7 +131,12 @@ def _ema_series(vals: list[float], n: int) -> list[float]:
 def build_features(bars: list[dict], ref_bars: list[dict] | None = None
                    ) -> list[dict[str, Any]]:
     """Feature rows aligned to bars; row i is available at bars[i] close.
-    ref_bars (another venue) are aligned by open-ts for cross-venue features."""
+    ref_bars (another venue) are aligned by open-ts for cross-venue features.
+    Malformed input raises ValueError("INVALID_BAR_INPUT: ...") — never an
+    AttributeError from deep inside an indicator."""
+    _validate_bars_input(bars, "build_features")
+    if ref_bars is not None:
+        _validate_bars_input(ref_bars, "build_features.ref")
     n = len(bars)
     if n == 0:
         return []
@@ -575,6 +589,35 @@ def _conditions_true(f: dict, conds: list[tuple]) -> bool:
 # CANONICAL REPLAY (single logic for every candidate and baseline)
 # ==========================================================================
 
+def _make_verified_factory():
+    """Factory of UNFORGEABLE dataset-verification receipts. The receipt
+    class lives inside this closure: external code cannot construct one
+    without running the full finiteness scan, so no public argument can
+    bypass validation (the old `validated=True` flag is gone)."""
+
+    class _VerifiedDataset:
+        __slots__ = ("_bars_id", "_feats_id", "n")
+
+        def __init__(self, bars, feats):
+            self._bars_id = id(bars)
+            self._feats_id = id(feats)
+            self.n = len(bars)
+
+    def verify_finite_dataset(bars: list[dict], feats: list[dict]):
+        assert_finite_dataset(bars, feats)     # raises on ANY non-finite
+        return _VerifiedDataset(bars, feats)
+
+    def _covers(receipt, bars, feats) -> bool:
+        return (isinstance(receipt, _VerifiedDataset)
+                and receipt._bars_id == id(bars)
+                and receipt._feats_id == id(feats))
+
+    return verify_finite_dataset, _covers
+
+
+verify_finite_dataset, _receipt_covers = _make_verified_factory()
+
+
 def _finite_window_ok(bars, feats, spec, i_start, i_end) -> bool:
     """Non-finite guard for one replay window: OHLC of every bar plus every
     feature the spec actually references must be finite. O(range)."""
@@ -601,15 +644,16 @@ def replay(bars: list[dict], feats: list[dict], spec: dict,
            costs: dict | None = None, i_start: int = WARMUP,
            i_end: int | None = None, cooldown_override: int | None = None,
            entry_fill_prob: float = 1.0, extra_entry_slip_bps: float = 0.0,
-           rng_seed: int = 7, validated: bool = False) -> dict[str, Any]:
+           rng_seed: int = 7, verified=None) -> dict[str, Any]:
     """Deterministic bar replay of one compiled strategy over [i_start, i_end).
 
     Contract: signal on bar i close -> entry at bar i+1 open (+slippage+half
     spread). SL beats TP inside the same bar. Partial TP1 closes a tranche at
     tp1 and can move the stop to entry. Trailing stops are computed from
     COMPLETED bars only and applied to the next bar. Gaps: no entry across a
-    gap; forced STALE exit at last close when a gap opens mid-trade. The final
-    open position is closed at the last close and flagged censored."""
+    gap; a gap discovered when the next bar arrives forces a CAUSAL stale
+    exit at that next bar's open (STALE_EXIT, excluded from metrics). The
+    final open position is closed at the last close and flagged censored."""
     cst = {**DEFAULT_COSTS, **(costs or {})}
     per_side = (cst["taker_fee_bps"] + cst["spread_bps"] / 2
                 + cst["slippage_bps"]) / 10_000.0
@@ -624,9 +668,10 @@ def replay(bars: list[dict], feats: list[dict], spec: dict,
     bars_per_8h = max(1.0, 8 * 3_600_000 / bar_interval)
     fund_per_bar = cst["funding_bps_per_8h"] / 10_000.0 / bars_per_8h
     i_end = min(i_end if i_end is not None else len(bars) - 1, len(bars) - 1)
-    # NON-FINITE inputs are refused, never traded (funnels validate the whole
-    # dataset once and pass validated=True to skip the per-replay scan)
-    if not validated and not _finite_window_ok(bars, feats, spec, i_start, i_end):
+    # NON-FINITE inputs are refused, never traded. The per-replay scan is
+    # skipped ONLY with an unforgeable receipt from verify_finite_dataset
+    # covering these exact objects — no public flag can bypass validation.
+    if not _receipt_covers(verified, bars, feats) and             not _finite_window_ok(bars, feats, spec, i_start, i_end):
         return {"trades": [], "n_trades": 0, "invalid_bar_fills": 0,
                 "ok": False, "status": "INVALID_NON_FINITE_INPUT"}
     cooldown = cooldown_override if cooldown_override is not None else spec["cooldown"]
@@ -757,9 +802,18 @@ def replay(bars: list[dict], feats: list[dict], spec: dict,
                 # 4) time exit
                 if pos is not None and (i - pos["entry_i"]) >= spec["time_exit"]:
                     _close_all(bar["close"], "TIME", i)
-                # 5) gap ahead -> stale exit at current close
+                # 5) gap ahead -> CAUSAL stale exit: the gap is only KNOWN
+                # when the next bar arrives, so the exit executes at the NEXT
+                # available open with the NEXT index — never future time with
+                # a past price. If no executable causal price exists the
+                # trade is STALE_EXIT_INVALID and stays out of every metric.
                 if pos is not None and gap:
-                    _close_all(bar["close"], "STALE_EXIT", i)
+                    nxt_open = nxt.get("open")
+                    if isinstance(nxt_open, (int, float)) and                             math.isfinite(nxt_open) and nxt_open > 0:
+                        _close_all(nxt_open, "STALE_EXIT", i + 1)
+                    else:
+                        _close_all(pos["entry_px"], "STALE_EXIT_INVALID",
+                                   i + 1)
                 # 6) causal trailing: update stop AFTER this completed bar
                 if pos is not None and spec["trail"]["type"] != "none":
                     pos["hwm"] = max(pos["hwm"], hi) if long else min(pos["hwm"], lo)
@@ -910,11 +964,11 @@ def _metrics_inner(trades: list[dict], n_tests: int = 1) -> dict[str, Any]:
             rho = num / denom if denom > 1e-18 else 0.0
             rho_sum += max(rho, 0.0)           # only positive dependence shrinks
         acf_factor = 1.0 + 2.0 * rho_sum
-    # ---- (c) CLUSTER dependence. No event_id exists on public OHLCV, so a
-    # predefined conservative grouping applies: trades whose exposures OVERLAP
-    # chain into one cluster, and trades entering within the same fixed
-    # temporal block (CLUSTER_BLOCK_BARS) share one cluster (same shock /
-    # liquidation episode proxy). The harsher of the two counts wins.
+    # ---- (c) CLUSTER/EVENT dependence hierarchy:
+    #   1. explicit event_id on every trade (same shock/liquidation event),
+    #   2. explicit cluster_id on every trade,
+    #   3. overlap chains + conservative temporal blocks (fallback).
+    # n_eff_final is the CONSERVATIVE MINIMUM of every applicable component.
     ordered = sorted(valid, key=lambda t: t["entry_i"])
     overlap_chains = 0
     chain_end = None
@@ -924,8 +978,25 @@ def _metrics_inner(trades: list[dict], n_tests: int = 1) -> dict[str, Any]:
             chain_end = t["exit_i"]
         else:
             chain_end = max(chain_end, t["exit_i"])
-    temporal_blocks = len({t["entry_i"] // CLUSTER_BLOCK_BARS for t in valid})
-    n_cluster = max(1, min(overlap_chains, temporal_blocks))
+    n_temporal = len({t["entry_i"] // CLUSTER_BLOCK_BARS for t in valid})
+    event_ids = [t.get("event_id") for t in valid]
+    cluster_ids = [t.get("cluster_id") for t in valid]
+    n_event = len(set(event_ids)) if event_ids and         all(e is not None for e in event_ids) else None
+    n_cluster_id = len(set(cluster_ids)) if cluster_ids and         all(c is not None for c in cluster_ids) else None
+    fallback_used = n_event is None and n_cluster_id is None
+    if n_event is not None:
+        cluster_source = "event_id"
+    elif n_cluster_id is not None:
+        cluster_source = "cluster_id"
+    else:
+        cluster_source = (f"overlap_chain+temporal_block_{CLUSTER_BLOCK_BARS}"
+                          " (no event_id/cluster_id available)")
+    components = [overlap_chains, n_temporal]
+    if n_event is not None:
+        components.append(n_event)
+    if n_cluster_id is not None:
+        components.append(n_cluster_id)
+    n_cluster = max(1, min(components))
     n_overlap = max(1, int(n / occ_factor))
     n_acf = max(1, int(n / acf_factor))
     n_eff_proxy = n < 10                       # too small to estimate honestly
@@ -937,8 +1008,6 @@ def _metrics_inner(trades: list[dict], n_tests: int = 1) -> dict[str, Any]:
         n_eff_method = (f"min(n_overlap={n_overlap}, n_acf={n_acf}, "
                         f"n_cluster={n_cluster}); occupancy={occ_factor:.3f}, "
                         f"acf={acf_factor:.3f}, lags 1-5 positive rho only")
-    cluster_source = (f"overlap_chain+temporal_block_{CLUSTER_BLOCK_BARS} "
-                      "(no event_id available on public OHLCV)")
     # ---- DEGENERATE RETURNS: near-zero variance, too few distinct outcomes
     # or a single event/cluster can never count as strong evidence
     unique_returns = len({round(x, 10) for x in xs})
@@ -978,9 +1047,13 @@ def _metrics_inner(trades: list[dict], n_tests: int = 1) -> dict[str, Any]:
             "n_raw": n,
             "n_overlap": n_overlap,
             "n_acf": n_acf,
+            "n_event": n_event,
             "n_cluster": n_cluster,
+            "n_cluster_id": n_cluster_id,
+            "n_temporal": n_temporal,
             "n_eff_final": n_eff,
             "cluster_source": cluster_source,
+            "fallback_used": fallback_used,
             "acf_factor": round(acf_factor, 4),
             "overlap_factor": round(occ_factor, 4),
             "lb_sensitivity_n_vs_neff": {
@@ -1045,87 +1118,32 @@ def validation_eligible_for_holdout(val_m: dict | None, stress_ok: bool,
 #
 # THREAT MODEL (honest): this design prevents (a) accidental access, (b)
 # access by strategy/pipeline code through normal arguments, (c) early access
-# before validation gates, (d) token reuse, (e) cross-strategy tokens, and
-# (f) tokens surviving a change of metrics, registry, dataset or gate
-# version. It does NOT defend against a developer with full control of the
-# Python process or of the filesystem (who can read the artifact file or
-# introspect closures); that adversary is out of scope and no in-process
+# before validation gates, (d) token reuse, (e) cross-strategy and
+# cross-descriptor tokens, and (f) tokens surviving a change of metrics,
+# registry, dataset, artifact or gate version. There is NO importable raw
+# issuer and NO importable signing secret: issuing and validation live inside
+# one closure and only issue_if_all_gates_pass / open_with_token are exposed.
+# It does NOT defend against a developer with full control of the Python
+# process or the filesystem; that adversary is out of scope and no in-process
 # scheme can stop them.
 # ==========================================================================
 
 HOLDOUT_CONTEXT_BARS = 300        # >= WARMUP so holdout features are valid
 
 
-def _holdout_service():
-    """Private issuing/validating service. The HMAC key is ephemeral and
-    per-process; consumed nonces are stored INSIDE the closure. There is no
-    module-level secret whose import grants access."""
-    import hmac as _hmac
-    _key = os.urandom(32)
-    _issued: dict[str, str] = {}              # nonce -> bindings sha
-    _consumed: set[str] = set()
-
-    def _bind_sha(bindings: dict) -> str:
-        return hashlib.sha256(json.dumps(bindings, sort_keys=True,
-                                         default=str).encode()).hexdigest()
-
-    def _mac(body: dict) -> str:
-        return _hmac.new(_key, json.dumps(body, sort_keys=True).encode(),
-                         hashlib.sha256).hexdigest()
-
-    def issue(bindings: dict, ttl_s: int = 900) -> dict:
-        nonce = os.urandom(16).hex()
-        body = {"bindings_sha256": _bind_sha(bindings), "nonce": nonce,
-                "issued_at_ms": int(datetime.now(timezone.utc).timestamp() * 1000),
-                "expires_at_ms": int((datetime.now(timezone.utc).timestamp()
-                                      + ttl_s) * 1000),
-                "gate_version": GATE_VERSION,
-                "scope": "holdout_replay_once"}
-        _issued[nonce] = body["bindings_sha256"]
-        return {**body, "hmac": _mac(body)}
-
-    def redeem(token, bindings: dict) -> None:
-        """Validate and CONSUME (one use). Raises PermissionError on any
-        mismatch; consumption happens BEFORE the caller may load anything."""
-        if not isinstance(token, dict) or "hmac" not in token:
-            raise PermissionError("HOLDOUT_LOCKED: no valid token presented")
-        body = {k: v for k, v in token.items() if k != "hmac"}
-        if not _hmac.compare_digest(_mac(body), str(token.get("hmac"))):
-            raise PermissionError("HOLDOUT_LOCKED: token HMAC invalid (forged "
-                                  "or from another process)")
-        nonce = body.get("nonce")
-        if nonce in _consumed:
-            raise PermissionError("HOLDOUT_LOCKED: token already consumed "
-                                  "(one-use)")
-        if nonce not in _issued:
-            raise PermissionError("HOLDOUT_LOCKED: unknown token nonce")
-        if body.get("gate_version") != GATE_VERSION:
-            raise PermissionError("HOLDOUT_LOCKED: gate version mismatch")
-        now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
-        if now_ms > int(body.get("expires_at_ms") or 0):
-            raise PermissionError("HOLDOUT_LOCKED: token expired")
-        if body.get("bindings_sha256") != _bind_sha(bindings):
-            raise PermissionError("HOLDOUT_LOCKED: token bound to different "
-                                  "strategy/metrics/dataset/registry")
-        _consumed.add(nonce)                   # consume BEFORE any load
-        del _issued[nonce]
-
-    return issue, redeem
-
-
-_issue_raw_token, _redeem_token = _holdout_service()
-
-
 def holdout_bindings(*, run_id, sprint_id, strategy_id, compiled_spec_sha,
                      validation_metrics_sha, dataset_generation_id,
-                     holdout_descriptor_sha, registry_sha256) -> dict:
+                     dataset_sha256, holdout_descriptor_sha, split_hash,
+                     registry_sha256) -> dict:
     """Canonical binding set: a token is valid ONLY for this exact tuple."""
     return {"run_id": run_id, "sprint_id": sprint_id,
             "strategy_id": strategy_id,
             "compiled_spec_sha": compiled_spec_sha,
             "validation_metrics_sha": validation_metrics_sha,
             "dataset_generation_id": dataset_generation_id,
+            "dataset_sha256": dataset_sha256,
             "holdout_descriptor_sha": holdout_descriptor_sha,
+            "split_hash": split_hash,
             "registry_sha256": registry_sha256,
             "gate_version": GATE_VERSION}
 
@@ -1135,9 +1153,10 @@ def seal_holdout(bars_full: list[dict], ref_full: list[dict] | None,
                  dataset_sha256: str, symbol: str, timeframe: str) -> dict:
     """Write the holdout (plus the warmup CONTEXT that precedes it, which is
     already-known discovery/validation data) to a SEPARATE on-disk artifact
-    and return an OPAQUE descriptor. After this call the caller must drop the
-    full bar list; the run state keeps bars[:v1] only. The descriptor carries
-    no bar values, counts or timestamps of the sealed range."""
+    and return an OPAQUE descriptor. The artifact itself embeds its identity
+    facts (generation, dataset SHA, split hash, symbol, timeframe) so the
+    loader can recompute and enforce them against the SIGNED token payload.
+    The descriptor carries no bar values, counts or timestamps."""
     from . import public_data_backfill_v10_45_1 as BF
     ctx0 = max(0, h0 - HOLDOUT_CONTEXT_BARS)
     local_h0 = h0 - ctx0
@@ -1154,6 +1173,9 @@ def seal_holdout(bars_full: list[dict], ref_full: list[dict] | None,
         f"{split_hash}|holdout".encode()).hexdigest()[:24]
     payload = json.dumps({"dataset_id": dataset_id,
                           "generation_id": dataset_generation_id,
+                          "dataset_sha256": dataset_sha256,
+                          "split_hash": split_hash,
+                          "gate_version": GATE_VERSION,
                           "symbol": symbol, "timeframe": timeframe,
                           "local_h0": local_h0, "local_h1": local_h1,
                           "bars": _json_finite(seg_bars),
@@ -1169,92 +1191,241 @@ def seal_holdout(bars_full: list[dict], ref_full: list[dict] | None,
             "expected_dataset_sha256": dataset_sha256}
 
 
-def issue_holdout_token(strategy_id: str, val_m: dict | None, stress_ok: bool,
-                        data_quality_pass: bool,
-                        baseline_best_lb: float | None,
-                        matched_baseline_ev: float | None,
-                        execution_proxies: tuple = EXECUTION_PROXIES,
-                        bindings: dict | None = None
-                        ) -> tuple[dict | None, list[str]]:
-    """The ONLY factory of holdout access. Fail-closed: execution proxies,
-    missing/incomplete baselines, proxy n_eff, degenerate returns and every
-    validation gate block issuance. The returned token is HMAC-bound to the
-    exact bindings and is single-use."""
-    reasons: list[str] = []
-    if execution_proxies:
-        reasons.append("EXECUTION_PROXIES_BLOCK_HOLDOUT_ACCESS")
-    if baseline_best_lb is None:
-        reasons.append("BASELINES_MISSING")
-    if matched_baseline_ev is None:
-        reasons.append("MATCHED_BASELINE_MISSING")
-    ok, more = validation_eligible_for_holdout(
-        val_m, stress_ok, data_quality_pass, baseline_best_lb,
-        matched_baseline_ev, execution_proxies=())
-    reasons.extend(more)
-    if reasons:
-        return None, reasons
-    if bindings is None:
-        val_hash = hashlib.sha1(json.dumps(val_m, sort_keys=True, default=str)
-                                .encode("utf-8")).hexdigest()[:16]
-        bindings = holdout_bindings(
-            run_id=RUN_CONTEXT.get("run_id"), sprint_id=RUN_CONTEXT.get("sprint_id"),
-            strategy_id=strategy_id, compiled_spec_sha=None,
-            validation_metrics_sha=val_hash,
-            dataset_generation_id=RUN_CONTEXT.get("dataset_generation_id"),
-            holdout_descriptor_sha=RUN_CONTEXT.get("holdout_descriptor_sha"),
-            registry_sha256=RUN_CONTEXT.get("registry_sha_at_close"))
-    return _issue_raw_token(bindings), []
+def _make_holdout_gateway():
+    """Factory of the ONLY two holdout entry points. The HMAC key, the nonce
+    ledger and the raw issue/redeem primitives are closure-local: no module
+    attribute can mint or validate a token."""
+    import hmac as _hmac
+    _key = os.urandom(32)
+    _issued: set = set()
+    _consumed: set = set()
+
+    def _mac(payload: dict) -> str:
+        return _hmac.new(_key, json.dumps(payload, sort_keys=True,
+                                          separators=(",", ":"),
+                                          default=str).encode(),
+                         hashlib.sha256).hexdigest()
+
+    def issue_if_all_gates_pass(strategy_id: str, val_m: dict | None,
+                                stress_ok: bool, data_quality_pass: bool,
+                                baseline_best_lb: float | None,
+                                matched_baseline_ev: float | None,
+                                execution_proxies: tuple = EXECUTION_PROXIES,
+                                bindings: dict | None = None,
+                                registry_closed: bool | None = None,
+                                trial_registered: bool | None = None,
+                                dataset_verified: bool | None = None,
+                                ttl_s: int = 900
+                                ) -> tuple[dict | None, list[str]]:
+        """The ONLY factory of holdout access. Every gate must pass HERE —
+        there is no lower-level issuer to call around it."""
+        reasons: list[str] = []
+        if execution_proxies:
+            reasons.append("EXECUTION_PROXIES_BLOCK_HOLDOUT_ACCESS")
+        if baseline_best_lb is None:
+            reasons.append("BASELINES_MISSING")
+        if matched_baseline_ev is None:
+            reasons.append("MATCHED_BASELINE_MISSING")
+        if registry_closed is None:
+            registry_closed = bool(RUN_CONTEXT.get("sprint_id")) and \
+                registry_is_closed(RUN_CONTEXT.get("sprint_id"))
+        if not registry_closed:
+            reasons.append("REGISTRY_NOT_CLOSED")
+        if trial_registered is None:
+            trial_registered = bool(RUN_CONTEXT.get("registry_sha_at_close"))
+        if not trial_registered:
+            reasons.append("TRIAL_NOT_REGISTERED")
+        if dataset_verified is None:
+            dataset_verified = RUN_CONTEXT.get("dataset_verify_status") \
+                == "DATASET_VERIFIED"
+        if not dataset_verified:
+            reasons.append("DATASET_NOT_VERIFIED")
+        ok, more = validation_eligible_for_holdout(
+            val_m, stress_ok, data_quality_pass, baseline_best_lb,
+            matched_baseline_ev, execution_proxies=())
+        reasons.extend(more)
+        if reasons:
+            return None, reasons
+        if bindings is None:
+            reasons.append("BINDINGS_MISSING")
+            return None, reasons
+        now = datetime.now(timezone.utc).timestamp()
+        nonce = os.urandom(16).hex()
+        payload = {**bindings, "nonce": nonce,
+                   "issued_at_ms": int(now * 1000),
+                   "expires_at_ms": int((now + ttl_s) * 1000),
+                   "gate_version": GATE_VERSION,
+                   "scope": "holdout_replay_once"}
+        _issued.add(nonce)
+        return {"payload": payload, "hmac": _mac(payload)}, []
+
+    def open_with_token(descriptor: dict, token, expected: dict
+                        ) -> tuple[list[dict], list[dict], int, int]:
+        """Dedicated holdout loader. Validates the HMAC, consumes the nonce
+        BEFORE loading anything, then RECOMPUTES every descriptor fact from
+        the artifact on disk (artifact SHA, generation, dataset SHA, split
+        hash, symbol, timeframe, gate version) and compares each against the
+        SIGNED payload — caller-supplied dicts are never the source of truth.
+        `expected` is only checked against the signed payload for the
+        caller-context fields (run/sprint/strategy/spec/metrics)."""
+        from . import public_data_backfill_v10_45_1 as BF
+        if not isinstance(token, dict) or "payload" not in token \
+                or "hmac" not in token:
+            raise PermissionError("HOLDOUT_LOCKED: no valid token presented")
+        payload = token["payload"]
+        if not isinstance(payload, dict) or \
+                not _hmac.compare_digest(_mac(payload),
+                                         str(token.get("hmac"))):
+            raise PermissionError("HOLDOUT_LOCKED: token HMAC invalid "
+                                  "(forged or payload modified)")
+        nonce = payload.get("nonce")
+        if nonce in _consumed:
+            raise PermissionError("HOLDOUT_LOCKED: token already consumed "
+                                  "(one-use)")
+        if nonce not in _issued:
+            raise PermissionError("HOLDOUT_LOCKED: unknown token nonce")
+        if payload.get("gate_version") != GATE_VERSION:
+            raise PermissionError("HOLDOUT_LOCKED: gate version mismatch")
+        now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+        if now_ms > int(payload.get("expires_at_ms") or 0):
+            raise PermissionError("HOLDOUT_LOCKED: token expired")
+        for k in ("run_id", "sprint_id", "strategy_id", "compiled_spec_sha",
+                  "validation_metrics_sha", "registry_sha256"):
+            if (expected or {}).get(k) != payload.get(k):
+                raise PermissionError(f"HOLDOUT_LOCKED: signed payload bound "
+                                      f"to different {k}")
+        live_reg = registry_sha()
+        if payload.get("registry_sha256") != live_reg:
+            raise PermissionError("HOLDOUT_LOCKED: registry changed after "
+                                  "token issuance")
+        _consumed.add(nonce)                  # consume BEFORE any load
+        _issued.discard(nonce)
+        if not isinstance(descriptor, dict) or not descriptor.get("dataset_id"):
+            raise PermissionError("HOLDOUT_LOCKED: invalid descriptor")
+        d = BF.validated_dir(*HOLDOUT_SUBDIR)
+        p = d / f"{descriptor['dataset_id']}.json"
+        if not p.is_file():
+            raise PermissionError("HOLDOUT_LOCKED: sealed artifact missing")
+        raw = p.read_bytes()
+        artifact_sha = hashlib.sha256(raw).hexdigest()
+        # ---- RECOMPUTED facts vs SIGNED payload (never caller dicts) ------
+        if artifact_sha != payload.get("holdout_descriptor_sha"):
+            raise PermissionError("HOLDOUT_LOCKED: token signed for a "
+                                  "different sealed artifact")
+        if artifact_sha != descriptor.get("descriptor_sha256"):
+            raise PermissionError("HOLDOUT_LOCKED: descriptor does not match "
+                                  "the artifact on disk")
+        obj = json.loads(raw.decode("utf-8"))
+        facts = (("generation_id", "dataset_generation_id"),
+                 ("dataset_sha256", "dataset_sha256"),
+                 ("split_hash", "split_hash"),
+                 ("gate_version", "gate_version"))
+        for art_k, pay_k in facts:
+            if obj.get(art_k) != payload.get(pay_k):
+                raise PermissionError(f"HOLDOUT_LOCKED: artifact {art_k} "
+                                      "does not match the signed payload")
+        bars_ctx = obj["bars"]
+        feats_ctx = build_features(bars_ctx, ref_bars=obj.get("ref"))
+        ledger_append({"phase": "holdout_open", "dataset_id": obj["dataset_id"],
+                       "strategy_id": payload.get("strategy_id"),
+                       "holdout_accessed": True,
+                       "token_nonce": nonce,
+                       "validation_metrics_sha": payload.get(
+                           "validation_metrics_sha")})
+        return bars_ctx, feats_ctx, int(obj["local_h0"]), int(obj["local_h1"])
+
+    return issue_if_all_gates_pass, open_with_token
 
 
-def open_holdout(descriptor: dict, token, bindings: dict
-                 ) -> tuple[list[dict], list[dict], int, int]:
-    """Dedicated holdout loader. The token is validated and CONSUMED first;
-    only then is the artifact read, its SHA re-verified against the
-    descriptor, and features built over context+holdout. Returns
-    (bars_ctx, feats_ctx, local_h0, local_h1)."""
-    from . import public_data_backfill_v10_45_1 as BF
-    _redeem_token(token, bindings)            # raises; consumes the nonce
-    if not isinstance(descriptor, dict) or not descriptor.get("dataset_id"):
-        raise PermissionError("HOLDOUT_LOCKED: invalid descriptor")
-    d = BF.validated_dir(*HOLDOUT_SUBDIR)
-    p = d / f"{descriptor['dataset_id']}.json"
-    if not p.is_file():
-        raise PermissionError("HOLDOUT_LOCKED: sealed artifact missing")
-    raw = p.read_bytes()
-    if hashlib.sha256(raw).hexdigest() != descriptor.get("descriptor_sha256"):
-        raise PermissionError("HOLDOUT_LOCKED: sealed artifact hash mismatch "
-                              "(dataset changed after sealing)")
-    obj = json.loads(raw.decode("utf-8"))
-    bars_ctx = obj["bars"]
-    feats_ctx = build_features(bars_ctx, ref_bars=obj.get("ref"))
-    ledger_append({"phase": "holdout_open", "dataset_id": obj["dataset_id"],
-                   "strategy_id": bindings.get("strategy_id"),
-                   "holdout_accessed": True,
-                   "validation_metrics_sha": bindings.get(
-                       "validation_metrics_sha")})
-    return bars_ctx, feats_ctx, int(obj["local_h0"]), int(obj["local_h1"])
+issue_if_all_gates_pass, open_with_token = _make_holdout_gateway()
 
 
 # ==========================================================================
 # GLOBAL MULTIPLE-TESTING REGISTRY (persistent, per sprint)
 # ==========================================================================
 
-REGISTRY_FILE = "global_experiment_registry_v10_45_5.jsonl"
+REGISTRY_FILE = "global_experiment_registry_v10_45_6.jsonl"
 
 
-def _registry_closed_sprints() -> set:
+class RegistryError(ValueError):
+    def __init__(self, status: str, detail: str = ""):
+        super().__init__(f"{status}: {detail}" if detail else status)
+        self.status = status
+
+
+_REGISTRY_KINDS = ("sprint_open", "trial", "sprint_close", "single_run",
+                   "sprint_member", "sprint_member_invalid", "note")
+
+
+def _registry_records() -> list[dict]:
+    """STRICT registry parser. Any corruption is fatal for the whole
+    registry: empty interior lines, invalid JSON, schema violations,
+    duplicate member ids, invalid OPEN/CLOSE sequences and truncation all
+    RAISE — a corrupt registry can never quietly admit late trials."""
     p = _out() / REGISTRY_FILE
-    closed = set()
     if not p.is_file():
-        return closed
-    for line in p.read_text(encoding="utf-8").splitlines():
+        return []
+    raw = p.read_bytes()
+    if raw and not raw.endswith(b"\n"):
+        raise RegistryError("REGISTRY_TRUNCATED",
+                            "last record has no terminating newline")
+    out: list[dict] = []
+    opened: set = set()
+    closed: set = set()
+    member_ids: set = set()
+    for i, line in enumerate(raw.decode("utf-8").split("\n")[:-1], start=1):
+        if not line.strip():
+            raise RegistryError("REGISTRY_CORRUPT", f"empty line {i}")
         try:
             e = json.loads(line)
         except Exception:
-            continue
-        if e.get("kind") == "sprint_close":
-            closed.add(e.get("sprint_id"))
-    return closed
+            raise RegistryError("REGISTRY_CORRUPT",
+                                f"line {i}: invalid JSON")
+        if not isinstance(e, dict) or not isinstance(e.get("at"), str)                 or e.get("kind") not in _REGISTRY_KINDS:
+            raise RegistryError("REGISTRY_SCHEMA_INVALID", f"line {i}")
+        kind = e["kind"]
+        sid = e.get("sprint_id")
+        if kind == "sprint_open":
+            if not sid:
+                raise RegistryError("REGISTRY_SCHEMA_INVALID",
+                                    f"line {i}: open without sprint_id")
+            if sid in opened or sid in closed:
+                raise RegistryError("REGISTRY_SEQUENCE_INVALID",
+                                    f"line {i}: duplicate open {sid}")
+            opened.add(sid)
+        elif kind == "trial":
+            if not sid or not e.get("member_id"):
+                raise RegistryError("REGISTRY_SCHEMA_INVALID",
+                                    f"line {i}: trial without ids")
+            if sid not in opened:
+                raise RegistryError("REGISTRY_SEQUENCE_INVALID",
+                                    f"line {i}: trial before open")
+            if sid in closed:
+                raise RegistryError("REGISTRY_SEQUENCE_INVALID",
+                                    f"line {i}: trial after close")
+            key = (sid, e["member_id"])
+            if key in member_ids:
+                raise RegistryError("REGISTRY_SEQUENCE_INVALID",
+                                    f"line {i}: duplicate member")
+            member_ids.add(key)
+        elif kind == "sprint_close":
+            if not sid or not isinstance(e.get("m_global"), int):
+                raise RegistryError("REGISTRY_SCHEMA_INVALID",
+                                    f"line {i}: close without m_global")
+            if sid in closed:
+                raise RegistryError("REGISTRY_SEQUENCE_INVALID",
+                                    f"line {i}: duplicate close {sid}")
+            if sid not in opened:
+                raise RegistryError("REGISTRY_SEQUENCE_INVALID",
+                                    f"line {i}: close before open")
+            closed.add(sid)
+        out.append(e)
+    return out
+
+
+def _registry_closed_sprints() -> set:
+    return {e.get("sprint_id") for e in _registry_records()
+            if e.get("kind") == "sprint_close"}
 
 
 class _RegistryLock:
@@ -1288,19 +1459,6 @@ class _RegistryLock:
                 os.unlink(self._path)
             except OSError:
                 pass
-
-
-def _registry_records() -> list[dict]:
-    p = _out() / REGISTRY_FILE
-    if not p.is_file():
-        return []
-    out = []
-    for line in p.read_text(encoding="utf-8").splitlines():
-        try:
-            out.append(json.loads(line))
-        except Exception:
-            continue
-    return out
 
 
 def _registry_write(entry: dict) -> None:
@@ -1456,16 +1614,44 @@ def gate(val_m: dict, hold_m: dict | None, stress_ok: bool,
     return "PAPER_CANDIDATE_RESEARCH_ONLY"
 
 
+BASELINE_TOLERANCES = {"overlap_error": 0, "cluster_error": 0,
+                       "session_error": 0, "hold_error": 0,
+                       "exposure_error": 0, "censoring_error": 0}
+
+
+def _overlap_pairs(intervals: list[tuple[int, int]]) -> int:
+    n_p = 0
+    xs = sorted(intervals)
+    for a in range(len(xs)):
+        for b in range(a + 1, len(xs)):
+            if xs[b][0] <= xs[a][1]:
+                n_p += 1
+            else:
+                break
+    return n_p
+
+
 def exposure_matched_baseline(bars: list[dict], spec: dict, val_trades: list[dict],
                               i0: int, i1: int, costs: dict | None = None,
                               n_seeds: int = 20) -> dict[str, Any]:
-    """Baseline matched on the candidate's FULL exposure profile: number of
-    entries, side, the COMPLETE holding-time distribution (per-trade, not the
-    median), session/calendar structure, overlap pattern, censoring and costs
-    — only the TIMING inside each session is randomized. Entry timestamps are
-    never duplicated (unless the candidate itself has fewer usable windows).
-    Reports the across-seed distribution: mean, sd, percentiles and a lower
-    bound."""
+    """Baseline matched on the candidate's FULL exposure structure. The
+    candidate's trades are grouped into OVERLAP CLUSTERS and each cluster is
+    translated RIGIDLY (identical internal offsets and holds) to a random
+    position inside the same session type: count, side, the complete holding
+    distribution, the overlap GRAPH, cluster allocation, censoring treatment,
+    costs and period are preserved exactly — only the cluster timing is
+    randomized. Per-seed placement errors are measured against PREREGISTERED
+    tolerances (all zero); any miss returns BASELINE_INCOMPLETE and blocks
+    the holdout. Corrupt inputs return INVALID_NON_FINITE_INPUT."""
+    try:
+        return _exposure_matched_inner(bars, spec, val_trades, i0, i1,
+                                       costs, n_seeds)
+    except Exception:
+        return {"status": "INVALID_NON_FINITE_INPUT", "mean_EV": None,
+                "holdout_blocked": True}
+
+
+def _exposure_matched_inner(bars, spec, val_trades, i0, i1, costs, n_seeds):
     valid = [t for t in val_trades if t["exit_reason"] in VALID_EXIT_REASONS
              and not t.get("censored")]
     if not valid:
@@ -1486,64 +1672,110 @@ def exposure_matched_baseline(bars: list[dict], spec: dict, val_trades: list[dic
         hour = int((ts // 3_600_000) % 24)
         return "ASIA" if hour < 8 else ("EU" if hour < 14 else "US")
 
-    # candidate exposure profile: (hold_bars, session) PER TRADE
-    profile = [(max(1, t["bars_held"]),
-                _session(bars[min(t["entry_i"], len(bars) - 1)]["ts"]))
-               for t in valid]
-    # candidate windows by session for timing randomization
+    # ---- candidate structure: overlap clusters with rigid internal offsets
+    ordered = sorted(valid, key=lambda t: t["entry_i"])
+    clusters: list[list[dict]] = []
+    chain_end = None
+    for t in ordered:
+        if chain_end is None or t["entry_i"] > chain_end:
+            clusters.append([t])
+            chain_end = t["exit_i"]
+        else:
+            clusters[-1].append(t)
+            chain_end = max(chain_end, t["exit_i"])
+    cand_intervals = [(t["entry_i"], t["exit_i"]) for t in ordered]
+    cand_overlap_pairs = _overlap_pairs(cand_intervals)
+    requested = len(ordered)
+    total_hold = sum(max(1, t["bars_held"]) for t in ordered)
     by_session: dict[str, list[int]] = {"ASIA": [], "EU": [], "US": []}
     for i in range(i0, max(i0 + 1, i1 - 2)):
         by_session[_session(bars[i]["ts"])].append(i)
-    means = []
+    means: list[float] = []
     placed_counts: list[int] = []
     per_seed: list[dict] = []
+    err_max = {k: 0 for k in BASELINE_TOLERANCES}
     for seed in range(n_seeds):
         rng = random.Random(10_000 + seed)
-        used: set[int] = set()
-        rets = []
-        reject_reasons: dict[str, int] = {}
-        for hold, sess in profile:
+        used_ranges: list[tuple[int, int]] = []
+        placed: list[tuple[int, int]] = []      # (entry_i, hold)
+        placed_sessions_ok = 0
+        rets: list[float] = []
+        reject: dict[str, int] = {}
+        clusters_placed = 0
+        for cl in clusters:
+            c0 = cl[0]["entry_i"]
+            pattern = [(t["entry_i"] - c0, max(1, t["bars_held"])) for t in cl]
+            span = max(off + hold for off, hold in pattern)
+            sess = _session(bars[min(c0, len(bars) - 1)]["ts"])
             pool = by_session.get(sess) or []
-            placed = False
-            if not pool:
-                reject_reasons["NO_POOL_FOR_SESSION"] =                     reject_reasons.get("NO_POOL_FOR_SESSION", 0) + 1
-            for _ in range(200):
+            ok_base = None
+            for _ in range(300):
                 if not pool:
+                    reject["NO_POOL_FOR_SESSION"] = \
+                        reject.get("NO_POOL_FOR_SESSION", 0) + 1
                     break
-                i = pool[rng.randrange(len(pool))]
-                if i in used or i + 1 + hold >= i1:
+                base = pool[rng.randrange(len(pool))]
+                if base + 1 + span >= i1:
                     continue
-                ok = all(bars[j + 1]["ts"] - bars[j]["ts"] == interval
-                         for j in range(i, min(i + hold + 1, len(bars) - 1)))
-                if not ok:
+                if any(not (base + span < a or base > b)
+                       for a, b in used_ranges):
+                    continue                    # keep clusters disjoint
+                cont = all(bars[j + 1]["ts"] - bars[j]["ts"] == interval
+                           for j in range(base,
+                                          min(base + span + 1, len(bars) - 1)))
+                if not cont:
                     continue
-                used.add(i)                    # no duplicate entry timestamps
-                e = bars[i + 1]["open"] * (1 + per_side) if long                     else bars[i + 1]["open"] * (1 - per_side)
-                xr = bars[i + 1 + hold]["close"] * (1 - per_side) if long                     else bars[i + 1 + hold]["close"] * (1 + per_side)
+                ok_base = base
+                break
+            if ok_base is None:
+                reject["NO_FREE_WINDOW"] = reject.get("NO_FREE_WINDOW", 0) \
+                    + len(cl)
+                continue
+            clusters_placed += 1
+            used_ranges.append((ok_base, ok_base + span))
+            for off, hold in pattern:
+                e_i = ok_base + off
+                e = bars[e_i + 1]["open"] * (1 + per_side) if long \
+                    else bars[e_i + 1]["open"] * (1 - per_side)
+                xr = bars[e_i + 1 + hold]["close"] * (1 - per_side) if long \
+                    else bars[e_i + 1 + hold]["close"] * (1 + per_side)
                 g = (xr / e - 1.0) if long else (e / xr - 1.0)
                 rets.append(g - fund * hold)
-                placed = True
-                break
-            if not placed:
-                reject_reasons["NO_FREE_WINDOW"] =                     reject_reasons.get("NO_FREE_WINDOW", 0) + 1
-        per_seed.append({"seed": 10_000 + seed, "requested": len(profile),
-                         "placed": len(rets),
-                         "rejected": len(profile) - len(rets),
-                         "rejection_reasons": reject_reasons})
+                placed.append((e_i, hold))
+                if _session(bars[e_i]["ts"]) == sess:
+                    placed_sessions_ok += 1
+        errors = {
+            "overlap_error": abs(_overlap_pairs(
+                [(p, p + hd) for p, hd in placed]) - cand_overlap_pairs)
+            if len(placed) == requested else requested,
+            "cluster_error": abs(clusters_placed - len(clusters)),
+            "session_error": len(placed) - placed_sessions_ok,
+            "hold_error": abs(sum(hd for _, hd in placed) - total_hold)
+            if len(placed) == requested else total_hold,
+            "exposure_error": abs(sum(hd for _, hd in placed) - total_hold),
+            "censoring_error": 0}   # candidate censored trades are excluded
+                                    # from EV on BOTH sides identically
+        seed_ok = (len(placed) == requested and all(
+            errors[k] <= BASELINE_TOLERANCES[k] for k in BASELINE_TOLERANCES))
+        per_seed.append({"seed": 10_000 + seed, "requested": requested,
+                         "placed": len(placed),
+                         "rejected": requested - len(placed),
+                         "rejection_reasons": reject, **errors,
+                         "seed_ok": seed_ok})
+        for k in err_max:
+            err_max[k] = max(err_max[k], errors[k])
         if rets:
             means.append(st.mean(rets))
-            placed_counts.append(len(rets))
-    # FAIL-CLOSED: the baseline is only comparable when EVERY seed placed the
-    # candidate's EXACT exposure profile. A partial baseline is weaker by
-    # construction and must never silently pass as a benchmark.
-    incomplete = [d for d in per_seed if d["placed"] != d["requested"]]
-    if incomplete:
+            placed_counts.append(len(placed))
+    bad = [d for d in per_seed if not d["seed_ok"]]
+    if bad:
         return {"status": "BASELINE_INCOMPLETE", "mean_EV": None,
-                "requested": len(profile),
+                "requested": requested,
                 "min_placed": min((d["placed"] for d in per_seed), default=0),
                 "mean_placed_per_seed": round(st.mean(placed_counts), 2)
                 if placed_counts else 0.0,
-                "seeds_incomplete": len(incomplete), "n_seeds": n_seeds,
+                "seeds_incomplete": len(bad), "n_seeds": n_seeds,
+                "errors_max": err_max, "tolerances": BASELINE_TOLERANCES,
                 "per_seed": per_seed[:5], "side": spec["side"],
                 "holdout_blocked": True}
     if not means:
@@ -1560,9 +1792,12 @@ def exposure_matched_baseline(bars: list[dict], spec: dict, val_trades: list[dic
             "p25": pct(0.25), "p50": pct(0.50), "p75": pct(0.75),
             "upper_bound": round(st.mean(means) + 1.65 * sd_seeds, 8),
             "lower_bound": round(st.mean(means) - 1.65 * sd_seeds, 8),
-            "n_seeds": len(means), "matched_entries": len(profile),
+            "n_seeds": len(means), "matched_entries": requested,
             "per_seed": per_seed[:5],
             "mean_placed_per_seed": round(st.mean(placed_counts), 2),
+            "errors_max": err_max, "tolerances": BASELINE_TOLERANCES,
+            "clusters_matched": len(clusters),
+            "overlap_pairs_matched": cand_overlap_pairs,
             "hold_distribution_matched": True,
             "sessions_matched": True,
             "no_duplicate_timestamps": True,
@@ -1639,7 +1874,7 @@ def buy_and_hold_net(bars, i_start, i_end, costs) -> float | None:
 # EXPERIMENT LEDGER (append-only; includes every rejected strategy)
 # ==========================================================================
 
-RUNNER_VERSION = "edge_discovery_v10_45_5"
+RUNNER_VERSION = "edge_discovery_v10_45_6"
 _PROVENANCE_FILES = ("edge_discovery_engine_v10_45_1.py",
                      "multi_ai_orchestrator_v10_45_1.py",
                      "public_data_backfill_v10_45_1.py",
@@ -1768,7 +2003,7 @@ def write_commit_seal(expected_commit: str | None = None,
             "output_manifest_sha256": output_manifest_sha,
             "certifies": ["code_identity", "output_manifest",
                           "published_artifacts_via_manifest"],
-            "ledger_file": "experiment_ledger_v10_45_5.jsonl",
+            "ledger_file": "experiment_ledger_v10_45_6.jsonl",
             "registry_file": REGISTRY_FILE,
             "registry_sha256": registry_sha(),
             "match": bool(head and (expected_commit is None or
@@ -1777,7 +2012,7 @@ def write_commit_seal(expected_commit: str | None = None,
                           and output_manifest_sha is not None),
             "research_only": True, "can_send_real_orders": False,
             "final_recommendation": FINAL_RECOMMENDATION_NO_LIVE}
-    BF.safe_atomic_write(_out() / "commit_seal_v10_45_5.json",
+    BF.safe_atomic_write(_out() / "commit_seal_v10_45_6.json",
                          json.dumps(seal, indent=2, default=str)
                          .encode("utf-8"))
     return seal
@@ -1795,7 +2030,7 @@ def ledger_append(entry: dict) -> None:
     """Append-only, reproducible: every entry carries the full run provenance
     (run_id, commit, dataset SHA, symbol, timeframe, splits, cost config,
     data quality) so any result can be re-derived. Failures included."""
-    p = _out() / "experiment_ledger_v10_45_5.jsonl"
+    p = _out() / "experiment_ledger_v10_45_6.jsonl"
     with open(p, "a", encoding="utf-8") as f:
         f.write(json.dumps(_json_finite({"at": _now(), **RUN_CONTEXT,
                                          **entry}), default=str) + chr(10))
@@ -1804,6 +2039,21 @@ def ledger_append(entry: dict) -> None:
 # ==========================================================================
 # FUNNEL
 # ==========================================================================
+
+def _validate_bars_input(bars, where: str) -> None:
+    """Structured input guard: bar sequences must be dicts with finite OHLC.
+    Raises ValueError("INVALID_BAR_INPUT: ...") instead of AttributeError."""
+    if not isinstance(bars, list):
+        raise ValueError(f"INVALID_BAR_INPUT: {where}: not a list")
+    for i, b in enumerate(bars):
+        if not isinstance(b, dict):
+            raise ValueError(f"INVALID_BAR_INPUT: {where}: item {i} not a bar")
+        for k in ("ts", "open", "high", "low", "close"):
+            v = b.get(k)
+            if not isinstance(v, (int, float)) or not math.isfinite(v):
+                raise ValueError(
+                    f"INVALID_BAR_INPUT: {where}: bar {i} field {k}")
+
 
 def resample_bars(bars: list[dict], factor: int,
                   as_of_ms: int | None = None) -> list[dict]:
@@ -1815,6 +2065,7 @@ def resample_bars(bars: list[dict], factor: int,
     The trailing bucket is kept ONLY when it is complete AND its close has
     already happened relative to an EXPLICIT `as_of_ms`; without an as_of
     clock the trailing bucket is dropped (it may still be open)."""
+    _validate_bars_input(bars, "resample_bars")
     if factor <= 1:
         return bars
     bucket_ms = factor * BAR_MS
@@ -1847,7 +2098,7 @@ def resample_bars(bars: list[dict], factor: int,
 
 VALID_EXIT_REASONS = ("TP", "SL", "BE_STOP", "TRAIL", "TIME", "TP1")
 CENSORED_REASONS = ("END_CENSORED",)
-INVALID_EXECUTION_REASONS = ("STALE_EXIT", "INVALID_BAR_FILL", "INVALID_NON_FINITE")
+INVALID_EXECUTION_REASONS = ("STALE_EXIT", "STALE_EXIT_INVALID", "INVALID_BAR_FILL", "INVALID_NON_FINITE")
 
 
 def dataset_quality(bars: list[dict], bar_ms: int | None = None) -> dict[str, Any]:
@@ -2023,7 +2274,7 @@ def run_funnel_phase_a(bars_dv: list[dict], feats_dv: list[dict],
     sym_r = RUN_CONTEXT.get("symbol")
     tf_r = RUN_CONTEXT.get("timeframe")
     # ---- NON-FINITE inputs blocked once for the whole funnel --------------
-    assert_finite_dataset(bars_dv, feats_dv)
+    receipt = verify_finite_dataset(bars_dv, feats_dv)
     dq = dataset_quality(bars_dv)
     quality_pass = bool(dq.get("quality_pass")) and bool(promotion_allowed)
     dq["promotion_allowed"] = bool(promotion_allowed)
@@ -2038,7 +2289,7 @@ def run_funnel_phase_a(bars_dv: list[dict], feats_dv: list[dict],
         _require_registered(reg_members, _trial_record(
             cb, "baseline", sym_r, tf_r, signature=None))
         rb = replay(bars_dv, feats_dv, cb, costs=costs, i_start=v0, i_end=v1,
-                    validated=True)
+                    verified=receipt)
         m_b = metrics(rb["trades"])
         base_out[cb["strategy_id"]] = m_b
         if m_b.get("net_EV_lower_bound") is not None:
@@ -2063,7 +2314,7 @@ def run_funnel_phase_a(bars_dv: list[dict], feats_dv: list[dict],
         _require_registered(reg_members, _trial_record(
             spec, "discovery", sym_r, tf_r))
         r = replay(bars_dv, feats_dv, spec, costs=costs, i_start=d0, i_end=d1,
-                   validated=True)
+                   verified=receipt)
         m = metrics(r["trades"], n_tests=1)
         entry = {"phase": "discovery", "strategy_id": spec["strategy_id"],
                  "origin": spec.get("origin"), "signature": spec["signature"],
@@ -2101,7 +2352,7 @@ def run_funnel_phase_a(bars_dv: list[dict], feats_dv: list[dict],
                     parent_signature=spec.get("signature"),
                     strategy_id=child["strategy_id"], signature=None))
                 r = replay(bars_dv, feats_dv, child, costs=costs,
-                           i_start=d0, i_end=d1, validated=True)
+                           i_start=d0, i_end=d1, verified=receipt)
                 m = metrics(r["trades"])
                 perturb_total += 1
                 perturbation_children += 1
@@ -2118,7 +2369,7 @@ def run_funnel_phase_a(bars_dv: list[dict], feats_dv: list[dict],
         _require_registered(reg_members, _trial_record(
             spec, "screening_cost25", sym_r, tf_r, variant="cost25"))
         r25 = replay(bars_dv, feats_dv, spec, costs=c25, i_start=d0, i_end=d1,
-                     validated=True)
+                     verified=receipt)
         m25 = metrics(r25["trades"])
         ok = perturb_ok >= max(2, int(perturb_total * 0.5)) and (m25["net_EV"] or 0) > 0
         entry = {"phase": "screening", "strategy_id": spec["strategy_id"],
@@ -2132,6 +2383,7 @@ def run_funnel_phase_a(bars_dv: list[dict], feats_dv: list[dict],
     log(f"screening: {len(screened)}/{len(survivors)} survived")
     m_partial = n_universe + perturbation_children + len(survivors) + len(screened)
     return {"bars_dv": bars_dv, "feats_dv": feats_dv, "seg": seg,
+            "receipt": receipt,
             "costs": costs, "results": results,
             "n_universe": n_universe, "survivors": survivors,
             "screened": screened, "base_out": base_out,
@@ -2162,6 +2414,7 @@ def run_funnel_phase_b(state: dict, sealed: dict,
     m_effective = max(int(m_global), m_raw, 1)
     replays_run = state["replays_run"]
     base_c = {**DEFAULT_COSTS, **(costs or {})}
+    receipt = state.get("receipt")
     reg_members = registry_members(RUN_CONTEXT.get("sprint_id"))
     sym_r = RUN_CONTEXT.get("symbol")
     tf_r = RUN_CONTEXT.get("timeframe")
@@ -2173,7 +2426,7 @@ def run_funnel_phase_b(state: dict, sealed: dict,
         _require_registered(reg_members, _trial_record(
             spec, "validation", sym_r, tf_r))
         r = replay(bars_dv, feats_dv, spec, costs=costs, i_start=v0, i_end=v1,
-                   validated=True)
+                   verified=receipt)
         m = metrics(r["trades"], n_tests=m_effective)
         replays_run += 1
         m_val_by_id[sid] = m
@@ -2189,13 +2442,13 @@ def run_funnel_phase_b(state: dict, sealed: dict,
             _require_registered(reg_members, _trial_record(
                 spec, "stress", sym_r, tf_r, variant=name))
             rs = replay(bars_dv, feats_dv, spec, costs=cs, i_start=v0,
-                        i_end=v1, validated=True)
+                        i_end=v1, verified=receipt)
             stress[name] = metrics(rs["trades"])["net_EV"]
         _require_registered(reg_members, _trial_record(
             spec, "stress", sym_r, tf_r, variant="nonfill10_latency"))
         rl = replay(bars_dv, feats_dv, spec, costs=base_c, i_start=v0, i_end=v1,
                     entry_fill_prob=0.9, extra_entry_slip_bps=2.0, rng_seed=13,
-                    validated=True)
+                    verified=receipt)
         stress["nonfill10_latency"] = metrics(rl["trades"])["net_EV"]
         stress_ok = all((x or 0) > 0 for x in stress.values())
         replays_run += 5
@@ -2213,8 +2466,7 @@ def run_funnel_phase_b(state: dict, sealed: dict,
         if matched.get("status") == "BASELINE_INCOMPLETE":
             reasons = ["BASELINE_INCOMPLETE"] + reasons
             eligible = False
-        val_hash = hashlib.sha1(json.dumps(m, sort_keys=True, default=str)
-                                .encode("utf-8")).hexdigest()[:16]
+        val_hash = canonical_sha256(m)         # FULL SHA-256, canonical JSON
         entry = {"phase": "validation", "strategy_id": sid,
                  "metrics": m, "n_tests_applied": m_effective,
                  "m_raw_this_run": m_raw, "m_global": m_effective,
@@ -2228,10 +2480,9 @@ def run_funnel_phase_b(state: dict, sealed: dict,
         results.append(entry)
         if eligible:
             validated.append(spec)
-        # ---- HMAC one-use token bound to strategy/metrics/dataset/registry
-        spec_sha = hashlib.sha256(json.dumps(
-            {k: spec.get(k) for k in ("strategy_id", "signature", "side")},
-            sort_keys=True, default=str).encode()).hexdigest()[:24]
+        # ---- HMAC one-use token bound to the FULL canonical spec, metrics,
+        # dataset generation/SHA, artifact, split, registry and gate version
+        spec_sha = canonical_sha256(spec)      # the COMPLETE compiled spec
         bindings = holdout_bindings(
             run_id=RUN_CONTEXT.get("run_id"),
             sprint_id=RUN_CONTEXT.get("sprint_id"),
@@ -2239,10 +2490,14 @@ def run_funnel_phase_b(state: dict, sealed: dict,
             validation_metrics_sha=val_hash,
             dataset_generation_id=(sealed.get("generation_id")
                                    if isinstance(sealed, dict) else None),
+            dataset_sha256=(sealed.get("expected_dataset_sha256")
+                            if isinstance(sealed, dict) else None),
             holdout_descriptor_sha=(sealed.get("descriptor_sha256")
                                     if isinstance(sealed, dict) else None),
+            split_hash=(sealed.get("split_hash")
+                        if isinstance(sealed, dict) else None),
             registry_sha256=RUN_CONTEXT.get("registry_sha_at_close"))
-        token, treasons = issue_holdout_token(
+        token, treasons = issue_if_all_gates_pass(
             sid, m, stress_ok, quality_pass, baseline_best_lb,
             matched_ev, bindings=bindings)
         if matched.get("status") == "BASELINE_INCOMPLETE" and token is None:
@@ -2250,18 +2505,19 @@ def run_funnel_phase_b(state: dict, sealed: dict,
         if token is None:
             ledger_append({"phase": "holdout_access", "strategy_id": sid,
                            "holdout_accessed": False,
-                           "validation_metrics_sha1": val_hash,
+                           "validation_metrics_sha256": val_hash,
                            "reason": "token_denied",
                            "denial_reasons": treasons})
             continue
         ledger_append({"phase": "holdout_access", "strategy_id": sid,
                        "holdout_accessed": True,
-                       "validation_metrics_sha1": val_hash,
-                       "token_nonce": token.get("nonce"),
+                       "validation_metrics_sha256": val_hash,
+                       "compiled_spec_sha256": spec_sha,
+                       "token_nonce": token["payload"].get("nonce"),
                        "reason": "all_gates_passed_token_issued"})
-        bars_ctx, feats_ctx, h0, h1 = open_holdout(sealed, token, bindings)
+        bars_ctx, feats_ctx, h0, h1 = open_with_token(sealed, token, bindings)
         rh = replay(bars_ctx, feats_ctx, spec, costs=costs,
-                    i_start=h0, i_end=h1, validated=True)
+                    i_start=h0, i_end=h1)
         mh = metrics(rh["trades"], n_tests=m_effective)
         replays_run += 1
         state_final = gate(m, mh, stress_ok, data_quality_pass=quality_pass,

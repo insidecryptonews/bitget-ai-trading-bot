@@ -266,8 +266,8 @@ def test_ledger_serializes_non_finite_as_null(tmp_path, monkeypatch):
     ENG.set_run_context(run_id="r1")
     ENG.ledger_append({"phase": "test", "value": float("nan"),
                        "nested": {"x": float("inf")}})
-    line = (tmp_path / "reports" / "research" / "v10_45_5_edge_discovery" /
-            "experiment_ledger_v10_45_5.jsonl").read_text(
+    line = (tmp_path / "reports" / "research" / "v10_45_6_edge_discovery" /
+            "experiment_ledger_v10_45_6.jsonl").read_text(
                 encoding="utf-8").strip()
     obj = json.loads(line)                                # valid JSON always
     assert obj["value"] is None and obj["nested"]["x"] is None
@@ -443,8 +443,10 @@ def test_zero_variance_pf999_is_never_evidence():
     assert m["profit_factor"] == 999.0
     assert m["degenerate_returns"] is True
     assert m["promotion_allowed"] is False
-    token, reasons = ENG.issue_holdout_token(
-        "s", m, True, True, 0.0001, 0.0001, execution_proxies=())
+    token, reasons = ENG.issue_if_all_gates_pass(
+        "s", m, True, True, 0.0001, 0.0001, execution_proxies=(),
+        bindings=None, registry_closed=True, trial_registered=True,
+        dataset_verified=True)
     assert token is None and "DEGENERATE_RETURNS" in reasons
 
 
@@ -483,22 +485,22 @@ def test_output_manifest_binds_artifacts_and_detects_tamper(tmp_path,
                                                             monkeypatch):
     monkeypatch.setattr(ENG.CE, "_repo_root", lambda: tmp_path)
     out = ENG._out()
-    (out / "edge_discovery_report_v10_45_5.md").write_text(
+    (out / "edge_discovery_report_v10_45_6.md").write_text(
         "# report", encoding="utf-8")
     man = ENG.write_output_manifest("test_manifest_1",
                                     extra={"note": "unit"})
     assert man["output_manifest_id"] == "test_manifest_1"
     arts = man["artifacts"]
-    assert "edge_discovery_report_v10_45_5.md" in arts
+    assert "edge_discovery_report_v10_45_6.md" in arts
     ptr = json.loads((out / "CURRENT_OUTPUT_MANIFEST.json")
                      .read_text(encoding="utf-8"))
     assert ptr["output_manifest_sha256"] == man["output_manifest_sha256"]
     # tampering any published artifact is detectable against the manifest
-    (out / "edge_discovery_report_v10_45_5.md").write_text(
+    (out / "edge_discovery_report_v10_45_6.md").write_text(
         "# tampered", encoding="utf-8")
     now_sha = hashlib.sha256(
-        (out / "edge_discovery_report_v10_45_5.md").read_bytes()).hexdigest()
-    assert now_sha != arts["edge_discovery_report_v10_45_5.md"]
+        (out / "edge_discovery_report_v10_45_6.md").read_bytes()).hexdigest()
+    assert now_sha != arts["edge_discovery_report_v10_45_6.md"]
     # and the seal certifies code + manifest, never code alone
     seal = ENG.write_commit_seal(
         output_manifest_sha=man["output_manifest_sha256"])

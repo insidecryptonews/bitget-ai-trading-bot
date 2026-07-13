@@ -29,7 +29,7 @@ from . import FINAL_RECOMMENDATION_NO_LIVE
 from . import ai_providers_v10_45_1 as PROV
 from . import edge_discovery_engine_v10_45_1 as ENG
 
-TOOL_VERSION = "v10.45.5"
+TOOL_VERSION = "v10.45.6"
 
 ROLES_GENERATION = (
     ("HYPOTHESIS_GENERATOR",
@@ -130,12 +130,21 @@ def generate_hypotheses(providers: dict[str, PROV.BaseProvider],
                   + SCHEMA_INSTRUCTIONS)
         prompt_sha = _hl.sha256(prompt.encode("utf-8")).hexdigest()[:16]
         r = prov.generate(prompt, temperature=0.8)
+        resp_sha = (_hl.sha256(str(r.get("text", "")).encode(
+            "utf-8", errors="replace")).hexdigest() if r.get("ok") else None)
+        cache_key = PROV._cache_key(prov.name,
+                                    getattr(prov, "model", "") or "", prompt)
         role_meta[role] = {"provider": prov.name,
                            "model": getattr(prov, "model", None),
-                           "prompt_sha": prompt_sha}
+                           "prompt_sha": prompt_sha,
+                           "response_sha256": resp_sha,
+                           "cache_key": cache_key}
         calls.append({"role": role, "provider": prov.name,
                       "model": getattr(prov, "model", None),
                       "prompt_sha": prompt_sha,
+                      "raw_output_sha256": resp_sha,
+                      "response_sha256": resp_sha,
+                      "cache_key": cache_key,
                       "ok": bool(r.get("ok")), "cached": r.get("cached"),
                       "latency_s": r.get("latency_s"),
                       "error": r.get("error")})
@@ -502,6 +511,15 @@ def _prepare_run(symbol: str, timeframe: str, use_ai: bool, run_id: str,
         except Exception:
             pass
     # ---------- compile ----------
+    # OFFICIAL ledger rows are NEVER written before the registry closes:
+    # everything from preparation is buffered and flushed post-close with the
+    # pinned registry SHA in the run context
+    pending_ledger: list[dict] = []
+    for call in ai_meta.get("calls", []):
+        pending_ledger.append({"phase": "ai_call", **call,
+                               "error": PROV.sanitize_error(
+                                   str(call.get("error")))
+                               if call.get("error") else None})
     seen: set[str] = set()
     compiled: list[dict] = []
     n_invalid = n_dup = 0
@@ -520,23 +538,25 @@ def _prepare_run(symbol: str, timeframe: str, use_ai: bool, run_id: str,
                          "prompt_sha": rm.get("prompt_sha")}
         if state == "OK":
             compiled.append(spec)
-            ENG.ledger_append({"phase": "compile", "state": "OK",
-                               "strategy_id": spec["strategy_id"],
-                               "signature": spec["signature"],
-                               "origin": origin, **prov_meta,
-                               "strategy_raw": s, "strategy_compiled": spec})
+            pending_ledger.append({"phase": "compile", "state": "OK",
+                                   "strategy_id": spec["strategy_id"],
+                                   "signature": spec["signature"],
+                                   "spec_sha256": ENG.canonical_sha256(spec),
+                                   "origin": origin, **prov_meta,
+                                   "strategy_raw": s,
+                                   "strategy_compiled": spec})
         elif state == "DUPLICATE":
             n_dup += 1
-            ENG.ledger_append({"phase": "compile", "state": "DUPLICATE",
-                               "origin": origin, **prov_meta,
-                               "strategy_id": s.get("strategy_id"),
-                               "strategy_raw": s})
+            pending_ledger.append({"phase": "compile", "state": "DUPLICATE",
+                                   "origin": origin, **prov_meta,
+                                   "strategy_id": s.get("strategy_id"),
+                                   "strategy_raw": s})
         else:
             n_invalid += 1
-            ENG.ledger_append({"phase": "compile", "state": "INVALID",
-                               "origin": origin, **prov_meta,
-                               "strategy_id": str(s.get("strategy_id"))[:60],
-                               "strategy_raw": s})
+            pending_ledger.append({"phase": "compile", "state": "INVALID",
+                                   "origin": origin, **prov_meta,
+                                   "strategy_id": str(s.get("strategy_id"))[:60],
+                                   "strategy_raw": s})
     log(f"universe: {len(raw)} raw ({n_procedural} procedural + "
         f"{ai_meta['ideas']} AI{' reused' if ai_meta['reused'] else ''}) "
         f"-> {len(compiled)} compiled, {n_dup} dup, {n_invalid} invalid")
@@ -545,7 +565,7 @@ def _prepare_run(symbol: str, timeframe: str, use_ai: bool, run_id: str,
     if use_ai and providers and generated_here:
         critiques = cross_critique(providers, compiled, log=log)
         for cnote in critiques:
-            ENG.ledger_append({"phase": "critique", **cnote})
+            pending_ledger.append({"phase": "critique", **cnote})
     return {"status": "OK", "bars_dv": bars_dv, "n_bars_total": n_bars_total,
             "feats": feats, "seg": seg, "sealed": sealed, "manifest": manifest,
             "dataset_sha256": ver["sha256"],
@@ -558,6 +578,7 @@ def _prepare_run(symbol: str, timeframe: str, use_ai: bool, run_id: str,
             "providers": providers or {}, "compiled": compiled,
             "n_dup": n_dup, "n_invalid": n_invalid, "critiques": critiques,
             "run_context": dict(ENG.RUN_CONTEXT),
+            "pending_ledger": pending_ledger,
             "symbol": symbol, "timeframe": timeframe}
 
 
@@ -573,6 +594,11 @@ def _execute_member(ctx: dict, sprint_id: str, registry_sha: str,
     ENG.RUN_CONTEXT["registry_sha_at_close"] = registry_sha
     ENG.RUN_CONTEXT["m_global_sprint"] = m_global
     ENG.RUN_CONTEXT["output_manifest_id"] = manifest_id
+    # flush the buffered preparation rows NOW: every official ledger row
+    # carries the closed registry SHA (none precedes the close)
+    for row in ctx.get("pending_ledger", []):
+        ENG.ledger_append(row)
+    ctx["pending_ledger"] = []
     log(f"[{sprint_id}] phase A {ctx['timeframe']} ...")
     state = ENG.run_funnel_phase_a(
         ctx["bars_dv"], ctx["feats"], ctx["compiled"], ctx["seg"],
@@ -698,7 +724,7 @@ def run_sprint(symbol: str = "BTCUSDT",
     if write_reports:
         from . import public_data_backfill_v10_45_1 as BF
         out = ENG._out()
-        BF.safe_atomic_write(out / "sprint_summary_v10_45_5.json",
+        BF.safe_atomic_write(out / "sprint_summary_v10_45_6.json",
                              json.dumps(sprint, indent=2,
                                         default=str).encode("utf-8"))
         manifest = ENG.write_output_manifest(
@@ -794,7 +820,7 @@ def _write_reports(summary: dict, funnel: dict, log=print) -> None:
     tf = summary.get("timeframe", "1m")
     sfx = "" if tf == "1m" else f"_{tf}"
     BF.safe_atomic_write(
-        out / f"edge_discovery_summary_v10_45_5{sfx}.json",
+        out / f"edge_discovery_summary_v10_45_6{sfx}.json",
         json.dumps(ENG._json_finite(summary), indent=2,
                    default=str).encode("utf-8"))
     # strategy scoreboard (every phase result)
@@ -809,7 +835,7 @@ def _write_reports(summary: dict, funnel: dict, log=print) -> None:
                     e.get("state"), m.get("n_trades"), m.get("net_EV"),
                     m.get("net_EV_lower_bound"), m.get("profit_factor"),
                     m.get("win_rate"), m.get("max_drawdown")])
-    BF.safe_atomic_write(out / f"strategy_scoreboard_v10_45_5{sfx}.csv",
+    BF.safe_atomic_write(out / f"strategy_scoreboard_v10_45_6{sfx}.csv",
                          buf.getvalue().encode("utf-8"))
     # cost stress scoreboard (finalists)
     buf = _io.StringIO()
@@ -825,10 +851,10 @@ def _write_reports(summary: dict, funnel: dict, log=print) -> None:
                     cs.get("cost_plus_25"), cs.get("cost_plus_50"),
                     cs.get("spread_x2"), cs.get("slip_x2"),
                     cs.get("nonfill10_latency"), e.get("stress_ok")])
-    BF.safe_atomic_write(out / f"cost_stress_scoreboard_v10_45_5{sfx}.csv",
+    BF.safe_atomic_write(out / f"cost_stress_scoreboard_v10_45_6{sfx}.csv",
                          buf.getvalue().encode("utf-8"))
     md = _memo(summary)
-    BF.safe_atomic_write(out / f"edge_discovery_report_v10_45_5{sfx}.md",
+    BF.safe_atomic_write(out / f"edge_discovery_report_v10_45_6{sfx}.md",
                          md.encode("utf-8"))
     log(f"reports -> {out}")
 
@@ -837,7 +863,7 @@ def _memo(s: dict) -> str:
     ca = s.get("cost_attribution_best") or {}
     mt = s.get("multiple_testing_sensitivity") or {}
     lines = [
-        "# V10.45.5 Multi-AI Edge Discovery — RESEARCH ONLY, NO LIVE", "",
+        "# V10.45.6 Multi-AI Edge Discovery — RESEARCH ONLY, NO LIVE", "",
         f"- ran_at: {s['ran_at']} · runtime: {s['runtime_s']}s · "
         f"run_id: {s.get('run_id')} · sprint_id: {s.get('sprint_id')} · "
         f"output_manifest_id: {s.get('output_manifest_id')}",

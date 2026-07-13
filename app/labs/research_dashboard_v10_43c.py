@@ -463,16 +463,37 @@ def _panel_ai_copilot(d: dict) -> str:
 
 
 def _panel_edge_discovery(d: dict) -> str:
-    rd = CE._repo_root().joinpath("reports", "research", "v10_45_5_edge_discovery")
-    s = _read_json(rd / "edge_discovery_summary_v10_45_5.json") or {}
+    rd = CE._repo_root().joinpath("reports", "research", "v10_45_6_edge_discovery")
+    s = _read_json(rd / "edge_discovery_summary_v10_45_6.json") or {}
     conn = _read_json(rd / "provider_connectivity_v10_45_1.json") or {}
     provs = ", ".join(f"{p.get('provider')}={'OK' if p.get('available') else 'DOWN'}"
                       for p in (conn.get("providers") or [])) or "NOT_RUN"
     counts = s.get("state_counts") or {}
     top = (s.get("top_candidates") or [{}])[0] if s.get("top_candidates") else {}
     hm = top.get("holdout_metrics") or {}
+    sp = _read_json(rd / "sprint_summary_v10_45_6.json") or {}
+    seal = _read_json(rd / "commit_seal_v10_45_6.json") or {}
+    ptr = _read_json(rd / "CURRENT_OUTPUT_MANIFEST.json") or {}
+    tf_rows = "".join(
+        f'<div class="sub">{r.get("timeframe")}: funnel={r.get("funnel")} '
+        f'holdout_accesses={r.get("holdout_accesses")}</div>'
+        for r in (sp.get("runs") or []))
     return (
         A._kv("Engine last run", s.get("ran_at") or "NOT_RUN") +
+        A._kv("Sprint / m_global",
+              f"{sp.get('sprint_id')} / m={sp.get('m_global')} "
+              f"[{sp.get('registry_state')}]") +
+        A._kv("Commit / tree",
+              f"{str(seal.get('repo_commit_head'))[:12]} / "
+              f"{str(seal.get('git_tree_oid'))[:12]} · "
+              f"dirty={seal.get('dirty_tracked_files')}") +
+        A._kv("Output manifest",
+              f"{str(ptr.get('output_manifest_id'))[:24]} · "
+              f"sha={str(ptr.get('output_manifest_sha256'))[:12]}") +
+        A._kv("Seal", "MATCH" if seal.get("match") else "NO_MATCH",
+              A._state_kind("OK" if seal.get("match") else "WAITING_DATA")) +
+        A._kv("Sprint verdict", (sp.get("verdict") or "N/A")[:80]) +
+        tf_rows +
         A._kv("Providers", provs) +
         A._kv("Data", s.get("data_note") or "N/A") +
         A._kv("Hypotheses (proc + AI)",

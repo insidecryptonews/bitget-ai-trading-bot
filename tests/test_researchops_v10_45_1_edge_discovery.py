@@ -319,8 +319,8 @@ def test_funnel_on_pure_noise_promotes_nothing(tmp_path, monkeypatch):
              if e["state"] == "PAPER_CANDIDATE_RESEARCH_ONLY"]
     # on 3000 bars of pure noise nothing should clear validation+holdout+stress
     assert len(paper) == 0
-    ledger = (tmp_path / "reports" / "research" / "v10_45_5_edge_discovery" /
-              "experiment_ledger_v10_45_5.jsonl")
+    ledger = (tmp_path / "reports" / "research" / "v10_45_6_edge_discovery" /
+              "experiment_ledger_v10_45_6.jsonl")
     assert ledger.is_file()
     lines = ledger.read_text(encoding="utf-8").strip().splitlines()
     assert len(lines) >= len(compiled)                       # every result logged

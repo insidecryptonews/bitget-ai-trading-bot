@@ -64,10 +64,10 @@ def _compile(seen=None, **kw):
     return spec
 
 
-def _trade(entry_i, exit_i, ret, reason="TP"):
+def _trade(entry_i, exit_i, ret, reason="TP", **kw):
     return {"entry_i": entry_i, "exit_i": exit_i, "net_return": ret,
             "exit_reason": reason, "bars_held": exit_i - entry_i,
-            "censored": False, "tranches": 1}
+            "censored": False, "tranches": 1, **kw}
 
 
 def _rows_1m(days=3, t_end=T0 + 4320 * BAR, drop=(), bad_ohlc=()):
@@ -299,41 +299,80 @@ def test_sealed_holdout_blocks_without_or_with_forged_token(
     bindings = ENG.holdout_bindings(
         run_id="r", sprint_id="s", strategy_id="x", compiled_spec_sha="c",
         validation_metrics_sha="v", dataset_generation_id="g1",
+        dataset_sha256="d" * 64,
         holdout_descriptor_sha=desc["descriptor_sha256"],
-        registry_sha256="rs")
+        split_hash=desc["split_hash"], registry_sha256="rs")
     with pytest.raises(PermissionError):
-        ENG.open_holdout(desc, None, bindings)        # no token
-    forged = {"bindings_sha256": "x" * 64, "nonce": "f" * 32,
-              "issued_at_ms": 0, "expires_at_ms": 10 ** 18,
-              "gate_version": ENG.GATE_VERSION,
-              "scope": "holdout_replay_once", "hmac": "0" * 64}
+        ENG.open_with_token(desc, None, bindings)     # no token
+    forged = {"payload": {**bindings, "nonce": "f" * 32,
+                          "issued_at_ms": 0, "expires_at_ms": 10 ** 18,
+                          "gate_version": ENG.GATE_VERSION,
+                          "scope": "holdout_replay_once"},
+              "hmac": "0" * 64}
     with pytest.raises(PermissionError):
-        ENG.open_holdout(desc, forged, bindings)      # forged HMAC
+        ENG.open_with_token(desc, forged, bindings)   # forged HMAC
 
 
 def _good_metrics():
     rng = random.Random(5)                            # aperiodic: no ACF shrink
     trades = [_trade(100 + i * 30, 100 + i * 30 + 10,
-                     0.003 + rng.uniform(0.0, 0.002))
+                     0.003 + rng.uniform(0.0, 0.002),
+                     event_id=f"ev{i}")
               for i in range(30)]
     return ENG.metrics(trades)
 
 
+def _bindings_for(desc, strategy_id="s1", registry_sha="rs", metrics_sha="v"):
+    return ENG.holdout_bindings(
+        run_id="r", sprint_id="s", strategy_id=strategy_id,
+        compiled_spec_sha="c", validation_metrics_sha=metrics_sha,
+        dataset_generation_id=desc["generation_id"],
+        dataset_sha256=desc["expected_dataset_sha256"],
+        holdout_descriptor_sha=desc["descriptor_sha256"],
+        split_hash=desc["split_hash"], registry_sha256=registry_sha)
+
+
+def _issue_ok(desc, m, strategy_id="s1", registry_sha="rs"):
+    b = _bindings_for(desc, strategy_id=strategy_id, registry_sha=registry_sha)
+    token, reasons = ENG.issue_if_all_gates_pass(
+        strategy_id, m, stress_ok=True, data_quality_pass=True,
+        baseline_best_lb=0.0001, matched_baseline_ev=0.0001,
+        execution_proxies=(), bindings=b, registry_closed=True,
+        trial_registered=True, dataset_verified=True)
+    return token, reasons, b
+
+
 def test_execution_proxies_block_holdout_token():
     m = _good_metrics()
-    token, reasons = ENG.issue_holdout_token(
+    token, reasons = ENG.issue_if_all_gates_pass(
         "s1", m, stress_ok=True, data_quality_pass=True,
-        baseline_best_lb=0.0001, matched_baseline_ev=0.0001)
+        baseline_best_lb=0.0001, matched_baseline_ev=0.0001,
+        bindings=None, registry_closed=True, trial_registered=True,
+        dataset_verified=True)
     assert token is None
     assert "EXECUTION_PROXIES_BLOCK_HOLDOUT_ACCESS" in reasons
+    # an unclosed registry, unregistered trial or unverified dataset each
+    # block issuance on their own
+    for kw, reason in ((dict(registry_closed=False), "REGISTRY_NOT_CLOSED"),
+                       (dict(trial_registered=False), "TRIAL_NOT_REGISTERED"),
+                       (dict(dataset_verified=False), "DATASET_NOT_VERIFIED")):
+        base = dict(registry_closed=True, trial_registered=True,
+                    dataset_verified=True)
+        base.update(kw)
+        t2, r2 = ENG.issue_if_all_gates_pass(
+            "s1", m, stress_ok=True, data_quality_pass=True,
+            baseline_best_lb=0.0001, matched_baseline_ev=0.0001,
+            execution_proxies=(), bindings=None, **base)
+        assert t2 is None and reason in r2
 
 
 def test_missing_baselines_block_holdout_token():
     m = _good_metrics()
-    token, reasons = ENG.issue_holdout_token(
+    token, reasons = ENG.issue_if_all_gates_pass(
         "s1", m, stress_ok=True, data_quality_pass=True,
         baseline_best_lb=None, matched_baseline_ev=None,
-        execution_proxies=())
+        execution_proxies=(), bindings=None, registry_closed=True,
+        trial_registered=True, dataset_verified=True)
     assert token is None
     assert "BASELINES_MISSING" in reasons
     assert "MATCHED_BASELINE_MISSING" in reasons
@@ -347,40 +386,63 @@ def test_token_granted_without_proxies_opens_sealed_holdout(
                             dataset_generation_id="g1",
                             dataset_sha256="d" * 64,
                             symbol="X", timeframe="1m")
-    bindings = ENG.holdout_bindings(
-        run_id="r", sprint_id="s", strategy_id="s1", compiled_spec_sha="c",
-        validation_metrics_sha="v", dataset_generation_id="g1",
-        holdout_descriptor_sha=desc["descriptor_sha256"],
-        registry_sha256="rs")
     m = _good_metrics()
-    token, reasons = ENG.issue_holdout_token(
-        "s1", m, stress_ok=True, data_quality_pass=True,
-        baseline_best_lb=0.0001, matched_baseline_ev=0.0001,
-        execution_proxies=(), bindings=bindings)
+    live_reg = ENG.registry_sha()                     # None in empty tmp repo
+    token, reasons, b = _issue_ok(desc, m, registry_sha=live_reg)
     assert reasons == [] and token is not None
-    bars_ctx, feats_ctx, h0, h1 = ENG.open_holdout(desc, token, bindings)
+    bars_ctx, feats_ctx, h0, h1 = ENG.open_with_token(desc, token, b)
     # context = 300 pre-holdout bars (already-known data) + the holdout
     assert (h0, h1) == (300, 500)
     assert len(bars_ctx) == len(feats_ctx) == 500
     # ONE-USE: the same token can never open the holdout again
     with pytest.raises(PermissionError):
-        ENG.open_holdout(desc, token, bindings)
-    # a fresh token for ANOTHER strategy is invalid for these bindings
-    other = dict(bindings, strategy_id="s2")
-    token2, _ = ENG.issue_holdout_token(
-        "s2", m, stress_ok=True, data_quality_pass=True,
-        baseline_best_lb=0.0001, matched_baseline_ev=0.0001,
-        execution_proxies=(), bindings=other)
+        ENG.open_with_token(desc, token, b)
+    # a token for ANOTHER strategy fails against these expected bindings
+    token2, _, b2 = _issue_ok(desc, m, strategy_id="s2",
+                              registry_sha=live_reg)
     with pytest.raises(PermissionError):
-        ENG.open_holdout(desc, token2, bindings)
-    # changed validation metrics invalidate too
-    token3, _ = ENG.issue_holdout_token(
-        "s1", m, stress_ok=True, data_quality_pass=True,
-        baseline_best_lb=0.0001, matched_baseline_ev=0.0001,
-        execution_proxies=(), bindings=bindings)
+        ENG.open_with_token(desc, token2, b)
+    # changed validation metrics in expected -> signed payload mismatch
+    token3, _, b3 = _issue_ok(desc, m, registry_sha=live_reg)
     with pytest.raises(PermissionError):
-        ENG.open_holdout(desc, token3,
-                         dict(bindings, validation_metrics_sha="CHANGED"))
+        ENG.open_with_token(desc, token3,
+                            dict(b3, validation_metrics_sha="CHANGED"))
+
+
+def test_cross_descriptor_token_is_rejected(tmp_path, monkeypatch):
+    """A token issued (and signed) for descriptor A can NEVER open
+    descriptor B: the loader recomputes the artifact facts from disk and
+    compares them against the SIGNED payload, not against caller dicts."""
+    monkeypatch.setattr(ENG.CE, "_repo_root", lambda: tmp_path)
+    bars_a = _bars(600, seed=3)
+    bars_b = _bars(600, seed=99)
+    desc_a = ENG.seal_holdout(bars_a, None, 400, 600,
+                              dataset_generation_id="gA",
+                              dataset_sha256="a" * 64,
+                              symbol="X", timeframe="1m")
+    desc_b = ENG.seal_holdout(bars_b, None, 400, 600,
+                              dataset_generation_id="gB",
+                              dataset_sha256="b" * 64,
+                              symbol="Y", timeframe="1m")
+    m = _good_metrics()
+    live_reg = ENG.registry_sha()
+    token_a, _, bind_a = _issue_ok(desc_a, m, registry_sha=live_reg)
+    # descriptor B with token A: artifact facts != signed payload
+    with pytest.raises(PermissionError):
+        ENG.open_with_token(desc_b, token_a, bind_a)
+    # even lying with B-shaped expected bindings cannot help: the payload
+    # was signed for A and expected must match the SIGNED payload
+    token_a2, _, _ = _issue_ok(desc_a, m, registry_sha=live_reg)
+    bind_b = _bindings_for(desc_b, registry_sha=live_reg)
+    with pytest.raises(PermissionError):
+        ENG.open_with_token(desc_b, token_a2, bind_b)
+    # tampering the artifact after sealing is caught by the recomputed SHA
+    token_a3, _, bind_a3 = _issue_ok(desc_a, m, registry_sha=live_reg)
+    art = (tmp_path / "external_data" / "staging" / "holdout_v10_45_6" /
+           f"{desc_a['dataset_id']}.json")
+    art.write_bytes(art.read_bytes().replace(b'"X"', b'"Z"', 1))
+    with pytest.raises(PermissionError):
+        ENG.open_with_token(desc_a, token_a3, bind_a3)
 
 
 def test_funnel_with_no_survivor_reports_zero_holdout_accesses(
@@ -436,14 +498,16 @@ def test_unstable_holdout_is_never_promoted(tmp_path, monkeypatch):
     monkeypatch.setattr(ENG.CE, "_repo_root", lambda: tmp_path)
     bars = _planted_bars(reverse_from=6200)           # holdout starts at 6440
     feats = ENG.build_features(bars)
-    real_issue = ENG.issue_holdout_token
+    real_issue = ENG.issue_if_all_gates_pass
 
     def waive_proxies(sid, m, stress_ok, dqp, blb, mbe,
-                      execution_proxies=None, bindings=None):
+                      execution_proxies=None, bindings=None, **kw):
         return real_issue(sid, m, stress_ok, dqp, blb, mbe,
-                          execution_proxies=(), bindings=bindings)
+                          execution_proxies=(), bindings=bindings,
+                          registry_closed=True, trial_registered=True,
+                          dataset_verified=True)
 
-    monkeypatch.setattr(ENG, "issue_holdout_token", waive_proxies)
+    monkeypatch.setattr(ENG, "issue_if_all_gates_pass", waive_proxies)
     ENG.set_run_context()
     out = ENG.run_funnel(bars, feats, [_planted_spec()], log=lambda *a: None)
     assert out["validation_survivors"] >= 1           # DV edge is real
@@ -573,24 +637,29 @@ def test_baseline_matches_full_hold_distribution_not_median():
     assert mb == mb2                                  # seeded, deterministic
 
 
-def test_baseline_never_duplicates_entry_timestamps():
-    """20 identical-profile trades but only a handful of legal windows: the
-    used-set forbids duplicated entry timestamps, so far fewer than 20 get
-    placed per seed."""
+def test_baseline_duplicate_timestamps_only_when_candidate_has_them():
+    """V10.45.6 contract: the baseline replicates the candidate's exposure
+    pattern RIGIDLY — duplicated entry timestamps appear ONLY because the
+    candidate itself has them (equivalent repetition), and an impossible
+    window yields BASELINE_INCOMPLETE, never a silent partial placement."""
     bars = _bars(2000, seed=31)
     spec = _compile(time_exit=10, cooldown=20)
     trades = [_trade(300 + (i % 3), 300 + (i % 3) + 10, 0.001)
               for i in range(20)]
-    mb = ENG.exposure_matched_baseline(bars, spec, trades, 300, 316)
-    # V10.45.5 FAIL-CLOSED: the used-set forbids duplicated timestamps, so
-    # only a handful can be placed -> the baseline must declare itself
-    # INCOMPLETE and block the holdout, never degrade silently
-    assert mb["status"] == "BASELINE_INCOMPLETE"
-    assert mb["holdout_blocked"] is True
-    assert mb["mean_EV"] is None
-    assert mb["requested"] == 20
-    assert mb["min_placed"] < 20
-    seed0 = mb["per_seed"][0]
+    # wide window: the 20-trade overlapping cluster is replicated EXACTLY
+    mb = ENG.exposure_matched_baseline(bars, spec, trades, 250, 1900)
+    assert mb["status"] == "OK"
+    assert mb["matched_entries"] == 20
+    assert mb["errors_max"]["overlap_error"] == 0     # same overlap graph
+    assert mb["errors_max"]["cluster_error"] == 0
+    # window too small for the rigid cluster -> fail-closed, blocks holdout
+    mb2 = ENG.exposure_matched_baseline(bars, spec, trades, 300, 310)
+    assert mb2["status"] == "BASELINE_INCOMPLETE"
+    assert mb2["holdout_blocked"] is True
+    assert mb2["mean_EV"] is None
+    assert mb2["requested"] == 20
+    assert mb2["min_placed"] < 20
+    seed0 = mb2["per_seed"][0]
     assert seed0["requested"] == 20 and seed0["placed"] < 20
     assert seed0["rejected"] == 20 - seed0["placed"]
     assert "NO_FREE_WINDOW" in seed0["rejection_reasons"]
@@ -755,8 +824,8 @@ def test_last_closed_5m_bucket_kept_only_with_as_of():
 def test_write_commit_seal_is_fail_closed_and_versioned(tmp_path, monkeypatch):
     monkeypatch.setattr(ENG.CE, "_repo_root", lambda: tmp_path)
     seal = ENG.write_commit_seal(expected_commit="deadbeef" * 5)
-    p = (tmp_path / "reports" / "research" / "v10_45_5_edge_discovery" /
-         "commit_seal_v10_45_5.json")
+    p = (tmp_path / "reports" / "research" / "v10_45_6_edge_discovery" /
+         "commit_seal_v10_45_6.json")
     assert p.is_file()
     on_disk = json.loads(p.read_text(encoding="utf-8"))
     assert on_disk["match"] is False        # no git, no output manifest here
@@ -766,6 +835,6 @@ def test_write_commit_seal_is_fail_closed_and_versioned(tmp_path, monkeypatch):
               "tool_version"):
         assert k in on_disk
     assert "output_manifest" in on_disk["certifies"]
-    assert on_disk["tool_version"] == "v10.45.5"
+    assert on_disk["tool_version"] == "v10.45.6"
     assert on_disk["can_send_real_orders"] is False
     assert seal["final_recommendation"].startswith("NO LIVE")
