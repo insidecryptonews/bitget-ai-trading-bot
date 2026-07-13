@@ -2026,14 +2026,88 @@ def set_run_context(**kw) -> None:
     RUN_CONTEXT.update(kw)
 
 
+LEDGER_FILE = "experiment_ledger_v10_45_6.jsonl"
+_LEDGER_TXN: list[dict] | None = None     # active transaction buffer, else None
+
+
+def _ledger_linkage(entry: dict) -> dict:
+    """Explicit member/trial linkage for a ledger row. Every field is either
+    populated or the whole block is marked NOT_APPLICABLE — never ambiguous."""
+    ctx = RUN_CONTEXT
+    sid = entry.get("strategy_id")
+    reg = ctx.get("registry_sha_at_close")
+    if not reg or not ctx.get("sprint_id"):
+        return {"linkage_status": "NOT_APPLICABLE"}
+    trial_id = None
+    if sid:
+        trial_id = hashlib.sha256(
+            f"{ctx.get('sprint_id')}|{sid}|{entry.get('phase')}|"
+            f"{entry.get('signature')}".encode()).hexdigest()[:24]
+    return {"linkage_status": "LINKED" if sid else "NOT_APPLICABLE",
+            "trial_id": trial_id,
+            "member_id": entry.get("member_id"),
+            "strategy_id": sid,
+            "timeframe": ctx.get("timeframe"),
+            "run_id": ctx.get("run_id"),
+            "sprint_id": ctx.get("sprint_id"),
+            "registry_sha256": reg,
+            "repo_commit": ctx.get("repo_commit"),
+            "tree_oid": ctx.get("git_tree_oid"),
+            "dataset_generation_id": ctx.get("dataset_generation_id")}
+
+
+def ledger_begin() -> None:
+    """Open a LEDGER TRANSACTION: subsequent ledger_append calls buffer in
+    memory instead of touching the file, so a crash mid-run leaves the
+    previous official ledger fully intact. Seeds the buffer with any existing
+    rows so commit rewrites a complete file."""
+    global _LEDGER_TXN
+    buf: list[dict] = []
+    p = _out() / LEDGER_FILE
+    if p.is_file():
+        for line in p.read_text(encoding="utf-8").splitlines():
+            try:
+                buf.append(json.loads(line))
+            except Exception:
+                pass
+    _LEDGER_TXN = buf
+
+
+def ledger_abort() -> None:
+    """Discard the transaction buffer; the on-disk ledger is untouched."""
+    global _LEDGER_TXN
+    _LEDGER_TXN = None
+
+
+def ledger_commit() -> str | None:
+    """Publish the WHOLE buffered ledger atomically (staging temp -> SHA ->
+    fsync -> replace). Complete or not published; the previous ledger is
+    preserved on any failure. Returns the ledger SHA-256."""
+    global _LEDGER_TXN
+    from . import public_data_backfill_v10_45_1 as BF
+    if _LEDGER_TXN is None:
+        return None
+    body = ("".join(json.dumps(_json_finite(r), default=str) + chr(10)
+                    for r in _LEDGER_TXN)).encode("utf-8")
+    sha = BF.safe_atomic_write(_out() / LEDGER_FILE, body)
+    _LEDGER_TXN = None
+    return sha
+
+
 def ledger_append(entry: dict) -> None:
     """Append-only, reproducible: every entry carries the full run provenance
     (run_id, commit, dataset SHA, symbol, timeframe, splits, cost config,
-    data quality) so any result can be re-derived. Failures included."""
-    p = _out() / "experiment_ledger_v10_45_6.jsonl"
+    data quality) plus explicit member/trial linkage. Inside a ledger
+    transaction rows buffer in memory and are published atomically on commit;
+    otherwise the row is appended directly (back-compatible)."""
+    row = _json_finite({"at": _now(), **RUN_CONTEXT, **entry,
+                        "linkage": _ledger_linkage(entry)})
+    if _LEDGER_TXN is not None:
+        _LEDGER_TXN.append(row)
+        return
+    p = _out() / LEDGER_FILE
     with open(p, "a", encoding="utf-8") as f:
-        f.write(json.dumps(_json_finite({"at": _now(), **RUN_CONTEXT,
-                                         **entry}), default=str) + chr(10))
+        f.write(json.dumps(row, default=str) + chr(10))
 
 
 # ==========================================================================

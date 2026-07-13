@@ -183,6 +183,8 @@ def cross_critique(providers: dict[str, PROV.BaseProvider],
         gen_prov = s["origin"].split(":")[1]
         critics = [p for p in real if p != gen_prov] or real
         by_provider.setdefault(critics[0], []).append(s)
+    import hashlib as _hl
+    spec_sha = {s["strategy_id"]: ENG.canonical_sha256(s) for s in batch}
     for critic_name, strats in by_provider.items():
         prov = providers[critic_name]
         listing = json.dumps([{ "strategy_id": s["strategy_id"],
@@ -200,14 +202,36 @@ def cross_critique(providers: dict[str, PROV.BaseProvider],
             "[{\"strategy_id\": str, \"kill_reasons\": [str], "
             "\"overfit_risk\": \"LOW|MEDIUM|HIGH\", \"note\": str}]}. "
             f"STRATEGIES: {listing}")
+        prompt_sha = _hl.sha256(prompt.encode("utf-8")).hexdigest()
+        cache_key = PROV._cache_key(critic_name,
+                                    getattr(prov, "model", "") or "", prompt)
         r = prov.generate(prompt, temperature=0.4)
+        resp_sha = (_hl.sha256(str(r.get("text", "")).encode(
+            "utf-8", errors="replace")).hexdigest() if r.get("ok") else None)
+        # FULL provenance for every critique — no secrets, no raw body
+        base_prov = {"provider": critic_name, "role": "SKEPTIC_OVERFIT",
+                     "model": getattr(prov, "model", None),
+                     "prompt_sha256": prompt_sha,
+                     "raw_output_sha256": resp_sha,
+                     "response_sha256": resp_sha,
+                     "cache_key": cache_key,
+                     "cache_hit": bool(r.get("cached")),
+                     "policy_version": ENG.GATE_VERSION,
+                     "at": datetime.now(timezone.utc).isoformat(),
+                     "error": PROV.sanitize_error(str(r.get("error")))
+                     if r.get("error") else None}
         if not r.get("ok"):
             log(f"  critic {critic_name}: FAILED {r.get('error')}")
+            notes.append({**base_prov, "critic_provider": critic_name,
+                          "strategy_id": None, "critique_status": "FAILED"})
             continue
         obj = _extract_json(r["text"]) or {}
         for cnote in (obj.get("critiques") or []):
             if isinstance(cnote, dict) and cnote.get("strategy_id"):
                 cnote["critic_provider"] = critic_name
+                cnote["target_spec_sha256"] = spec_sha.get(
+                    cnote["strategy_id"])
+                cnote.update(base_prov)
                 notes.append(cnote)
         log(f"  critic {critic_name} ({getattr(prov,'model',None)}): "
             f"{len(obj.get('critiques') or [])} critiques")
@@ -638,9 +662,17 @@ def run_edge_discovery(symbol: str = "BTCUSDT", use_ai: bool = True,
     m_global = closed["m_global"]
     if n_trials_total and int(n_trials_total) > m_global:
         m_global = int(n_trials_total)         # callers may only INCREASE m
-    return _execute_member(ctx, run_id, closed["registry_sha256"], m_global,
-                           started, iteration, write_reports,
-                           manifest_id=run_id, log=log)
+    ENG.ledger_begin()                         # transactional official ledger
+    try:
+        summary = _execute_member(ctx, run_id, closed["registry_sha256"],
+                                  m_global, started, iteration, write_reports,
+                                  manifest_id=run_id, log=log)
+        ledger_sha = ENG.ledger_commit()       # complete-or-nothing publish
+    except BaseException:
+        ENG.ledger_abort()                     # previous ledger preserved
+        raise
+    summary["ledger_sha256"] = ledger_sha
+    return summary
 
 
 def run_sprint(symbol: str = "BTCUSDT",
@@ -689,11 +721,20 @@ def run_sprint(symbol: str = "BTCUSDT",
     log(f"[{sprint_id}] registry CLOSED with m_global={m_global} "
         f"({len(members_all)} pre-registered trials) sha={registry_sha[:12]}")
     manifest_id = sprint_id
+    # ONE transactional ledger spans the WHOLE sprint (all timeframes): the
+    # official ledger is published complete-or-nothing AFTER every member,
+    # BEFORE the output manifest hashes it.
+    ENG.ledger_begin()
     summaries: list[dict] = []
-    for ctx in ctxs:
-        summaries.append(_execute_member(
-            ctx, sprint_id, registry_sha, m_global, started, 1,
-            write_reports, manifest_id, log=log))
+    try:
+        for ctx in ctxs:
+            summaries.append(_execute_member(
+                ctx, sprint_id, registry_sha, m_global, started, 1,
+                write_reports, manifest_id, log=log))
+        ledger_sha = ENG.ledger_commit()
+    except BaseException:
+        ENG.ledger_abort()
+        raise
     promoted = sum(1 for s in summaries
                    for e in (s.get("top_candidates") or [])
                    if e.get("state") in ("SHADOW_CANDIDATE_RESEARCH_ONLY",
@@ -714,6 +755,7 @@ def run_sprint(symbol: str = "BTCUSDT",
         "registry_file": ENG.REGISTRY_FILE,
         "registry_sha256": registry_sha,
         "registry_state": "CLOSED",
+        "ledger_sha256": ledger_sha,
         "skipped": skipped,
         "runs": [{"timeframe": s.get("timeframe"), "run_id": s.get("run_id"),
                   "funnel": s.get("funnel"),

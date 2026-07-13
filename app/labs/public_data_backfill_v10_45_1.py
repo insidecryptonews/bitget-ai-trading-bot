@@ -50,6 +50,7 @@ WINDOWS_RESERVED = {"CON", "PRN", "AUX", "NUL"} | {f"COM{i}" for i in range(1, 1
     | {f"LPT{i}" for i in range(1, 10)}
 CSV_HEADER = ["ts", "open", "high", "low", "close", "volume", "turnover"]
 CURRENT_MARKER = "CURRENT.json"
+GEN_COMPLETE_MARKER = "_COMPLETE.json"   # written LAST inside a generation dir
 SCHEMA_VERSION = "klines_schema_v1"
 # fields of the manifest that form the VERIFIABLE CONTRACT (volatile fields
 # like downloaded_at / repo_commit are provenance, not contract)
@@ -225,8 +226,21 @@ def safe_atomic_write(path, data: bytes) -> str:
         if hashlib.sha256(tmp.read_bytes()).hexdigest() != expected:
             raise IOError("temp content verification failed")
         _between_write_and_replace(path)      # test seam (no-op in prod)
-        # ---- TOCTOU recheck IMMEDIATELY before the replace: an alias or
-        # link created after the first check must never receive the swap
+        # ---- TOCTOU recheck IMMEDIATELY before the replace ----------------
+        # (a) revalidate the TEMP itself: it was verified earlier, but the
+        # seam is exactly where an attacker could hardlink it. Its link
+        # count, size, SHA and existence must be unchanged or we abort.
+        if _is_link_like(tmp):
+            raise ValueError("temp became a link before replace")
+        st_tmp = os.stat(tmp)                 # raises FileNotFoundError if gone
+        if getattr(st_tmp, "st_nlink", 1) > 1:
+            raise ValueError("temp was hardlinked before replace")
+        if st_tmp.st_size != len(data):
+            raise IOError("temp size changed before replace")
+        if hashlib.sha256(tmp.read_bytes()).hexdigest() != expected:
+            raise IOError("temp content changed before replace")
+        # (b) an alias or link created on the DESTINATION after the first
+        # check must never receive the swap
         if os.path.lexists(path):
             if _is_link_like(path):
                 raise ValueError("destination became a link before replace")
@@ -410,11 +424,54 @@ def _repo_commit() -> str:
         return "unknown"
 
 
+def _gen_complete(gdir: Path) -> dict | None:
+    """Return the verified COMPLETE receipt of a generation dir, or None when
+    the generation is INCOMPLETE (no marker, marker corrupt, or the marker's
+    hashes do not match the files on disk). A generation is only immutable and
+    reusable once it carries a valid COMPLETE marker."""
+    mk = gdir / GEN_COMPLETE_MARKER
+    csv_p, man_p = gdir / "data.csv", gdir / "manifest.json"
+    if not mk.is_file() or not csv_p.is_file() or not man_p.is_file():
+        return None
+    try:
+        rec = json.loads(mk.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    if rec.get("state") != "COMPLETE":
+        return None
+    if hashlib.sha256(csv_p.read_bytes()).hexdigest() != rec.get("csv_sha256"):
+        return None
+    if hashlib.sha256(man_p.read_bytes()).hexdigest() != rec.get("manifest_sha256"):
+        return None
+    return rec
+
+
+def _remove_incomplete_gen(gdir: Path) -> bool:
+    """Safely delete an INCOMPLETE generation dir (never one with a valid
+    COMPLETE marker). Returns True if removed."""
+    if _gen_complete(gdir) is not None:
+        return False
+    try:
+        for p in sorted(gdir.iterdir(), reverse=True):
+            if p.is_file() or _is_link_like(p):
+                p.unlink()
+        gdir.rmdir()
+        return True
+    except OSError:
+        return False
+
+
 def recover_staging(venue: str, symbol: str) -> dict[str, Any]:
-    """Startup/publish recovery: remove orphan exclusive temps, NEVER touch
-    the generation referenced by a valid CURRENT marker, never delete data.
-    Orphan generation directories are kept (they are never 'current') and
-    reported for later cleanup."""
+    """Startup/publish recovery, idempotent and fail-safe:
+
+    * remove orphan exclusive temp files (*.part);
+    * remove INCOMPLETE generation directories (no valid COMPLETE marker),
+      EXCEPT the one the current CURRENT marker points at, which is never
+      touched;
+    * never delete a COMPLETE generation and never delete the current one.
+
+    After a crash mid-publish, this lets an identical retry re-create the
+    generation cleanly instead of hitting a spurious GENERATION_CONFLICT."""
     d = _dataset_dir(venue, symbol)
     removed_tmp = 0
     for p in d.rglob("*.part"):
@@ -424,15 +481,21 @@ def recover_staging(venue: str, symbol: str) -> dict[str, Any]:
         except OSError:
             pass
     cur = _read_current(d)
-    orphans = []
-    for g in d.glob("gen_*"):
+    cur_gid = (cur or {}).get("generation_id")
+    orphans, removed_incomplete = [], []
+    for g in sorted(d.glob("gen_*")):
         if not g.is_dir():
             continue
-        if cur and g.name == f"gen_{cur.get('generation_id')}":
+        gid = g.name[len("gen_"):]
+        if gid == cur_gid:
             continue
-        orphans.append(g.name)
+        if _gen_complete(g) is not None:
+            orphans.append(g.name)                 # complete but not current
+        elif _remove_incomplete_gen(g):
+            removed_incomplete.append(g.name)      # partial: cleaned up
     return {"removed_temp_files": removed_tmp, "orphan_generations": orphans,
-            "current_generation": (cur or {}).get("generation_id")}
+            "removed_incomplete_generations": removed_incomplete,
+            "current_generation": cur_gid}
 
 
 def _read_current(dsdir: Path) -> dict | None:
@@ -545,35 +608,48 @@ def save_dataset(venue: str, symbol: str, rows: list[list],
     manifest["generation_id"] = generation_id
     manifest["contract_sha256"] = contract_sha
     dsdir = _dataset_dir(venue, symbol)
-    recover_staging(venue, symbol)
+    recover_staging(venue, symbol)             # clean any incomplete staging
     gdir_path = dsdir / f"gen_{generation_id}"
     man_bytes = json.dumps(manifest, indent=2, default=str).encode("utf-8")
-    if gdir_path.exists():
-        # IMMUTABLE generations: reuse only if byte/contract-identical
-        try:
-            ex_csv = hashlib.sha256(
-                (gdir_path / "data.csv").read_bytes()).hexdigest()
-            ex_man = json.loads((gdir_path / "manifest.json")
-                                .read_text(encoding="utf-8"))
-        except OSError:
-            raise IOError(f"GENERATION_CONFLICT: gen_{generation_id} exists "
-                          "but is unreadable; refusing to overwrite")
-        if ex_csv != csv_sha or manifest_contract_sha(ex_man) != contract_sha:
-            raise IOError(f"GENERATION_CONFLICT: gen_{generation_id} exists "
-                          "with different content; generations are immutable")
-        written_csv_sha = ex_csv
-        written_man_sha = hashlib.sha256(
-            (gdir_path / "manifest.json").read_bytes()).hexdigest()
+    complete = _gen_complete(gdir_path) if gdir_path.exists() else None
+    if complete is not None:
+        # A COMPLETE, immutable generation already exists under this id. By
+        # construction the id derives from content, so it must be identical;
+        # a content difference (impossible normally) is a hard conflict.
+        if complete.get("csv_sha256") != csv_sha \
+                or complete.get("contract_sha256") != contract_sha:
+            raise IOError(f"GENERATION_CONFLICT: gen_{generation_id} is "
+                          "COMPLETE with different content; immutable")
+        written_csv_sha = complete["csv_sha256"]
+        written_man_sha = complete["manifest_sha256"]
         gdir = gdir_path
     else:
+        # No complete generation (fresh, or a partial left by a prior crash
+        # that recover_staging just removed). Write CSV + manifest, verify,
+        # then stamp the COMPLETE marker LAST — CURRENT is only updated after.
+        if gdir_path.exists():
+            _remove_incomplete_gen(gdir_path)
         gdir = validated_dir(*DATA_SUBDIR, f"{venue}_{symbol}_1m",
                              f"gen_{generation_id}")
         written_csv_sha = safe_atomic_write(gdir / "data.csv", csv_bytes)
         written_man_sha = safe_atomic_write(gdir / "manifest.json", man_bytes)
         _fsync_dir(gdir)
-    # staging re-verification of BOTH artifacts before the commit marker
-    if hashlib.sha256((gdir / "data.csv").read_bytes()).hexdigest() != csv_sha:
-        raise IOError("staging verification failed; generation NOT committed")
+        # staging re-verification of BOTH artifacts before COMPLETE
+        if hashlib.sha256((gdir / "data.csv").read_bytes()).hexdigest() != csv_sha \
+                or hashlib.sha256((gdir / "manifest.json").read_bytes()) \
+                .hexdigest() != written_man_sha:
+            raise IOError("staging verification failed; generation NOT "
+                          "committed")
+        complete_rec = {"state": "COMPLETE", "generation_id": generation_id,
+                        "csv_sha256": written_csv_sha,
+                        "manifest_sha256": written_man_sha,
+                        "contract_sha256": contract_sha,
+                        "completed_at": datetime.now(timezone.utc).isoformat(),
+                        "tool_version": TOOL_VERSION}
+        safe_atomic_write(gdir / GEN_COMPLETE_MARKER,
+                          json.dumps(complete_rec, indent=2).encode("utf-8"))
+        _fsync_dir(gdir)
+    # CURRENT is swapped ONLY after the generation is COMPLETE on disk
     marker = {"generation_id": generation_id,
               "csv_sha256": written_csv_sha,
               "manifest_sha256": written_man_sha,
@@ -662,6 +738,25 @@ def _fail(status: str, **kw) -> dict[str, Any]:
     return {"ok": False, "status": status, **kw}
 
 
+# machine-readable reason for every contractual discrepancy (the granular
+# status is kept for backward compatibility; `reason` is the canonical field)
+_CONTRACT_REASON = {
+    "n_bars": "ACTUAL_BARS_MISMATCH", "actual_bars": "ACTUAL_BARS_MISMATCH",
+    "expected_bars": "EXPECTED_BARS_MISMATCH",
+    "coverage_ratio": "COVERAGE_MISMATCH",
+    "schema_version": "SCHEMA_MISMATCH",
+    "completeness_tolerance_bars": "TOLERANCE_MISMATCH",
+    "gap_count": "GAP_COUNT_MISMATCH", "duplicates": "DUPLICATES_MISMATCH",
+    "out_of_order": "IRREGULARITY_MISMATCH",
+    "irregular_deltas": "IRREGULARITY_MISMATCH",
+    "invalid_candles": "IRREGULARITY_MISMATCH",
+    "raw_quality_pass": "IRREGULARITY_MISMATCH",
+    "download_complete": "COVERAGE_MISMATCH",
+    "actual_start_ms": "TIMESTAMP_RANGE_MISMATCH",
+    "actual_end_ms": "TIMESTAMP_RANGE_MISMATCH",
+    "generation_id": "GENERATION_ID_MISMATCH"}
+
+
 def verify_dataset(venue: str, symbol: str,
                    expected_timeframe: str = "1m") -> dict[str, Any]:
     """FAIL-CLOSED verification computed FROM THE CSV. The manifest states the
@@ -694,18 +789,18 @@ def verify_dataset(venue: str, symbol: str,
     csv_bytes = csv_p.read_bytes()
     sha = hashlib.sha256(csv_bytes).hexdigest()
     if sha != cur["csv_sha256"]:
-        return _fail("INVALID_SHA", detail="csv hash != CURRENT marker",
-                     actual_sha=sha[:16])
+        return _fail("INVALID_SHA", reason="CSV_SHA_MISMATCH",
+                     detail="csv hash != CURRENT marker", actual_sha=sha[:16])
     if sha != manifest.get("sha256"):
-        return _fail("INVALID_SHA", detail="csv hash != manifest contract",
-                     actual_sha=sha[:16])
+        return _fail("INVALID_SHA", reason="CSV_SHA_MISMATCH",
+                     detail="csv hash != manifest contract", actual_sha=sha[:16])
     # ---- 2) identity contract
     if manifest.get("venue") != venue:
-        return _fail("INVALID_VENUE", manifest_venue=manifest.get("venue"))
+        return _fail("INVALID_VENUE", reason="VENUE_MISMATCH", manifest_venue=manifest.get("venue"))
     if manifest.get("symbol") != symbol:
-        return _fail("INVALID_SYMBOL", manifest_symbol=manifest.get("symbol"))
+        return _fail("INVALID_SYMBOL", reason="SYMBOL_MISMATCH", manifest_symbol=manifest.get("symbol"))
     if manifest.get("timeframe") != expected_timeframe:
-        return _fail("INVALID_TIMEFRAME",
+        return _fail("INVALID_TIMEFRAME", reason="TIMEFRAME_MISMATCH",
                      manifest_timeframe=manifest.get("timeframe"))
     # ---- 3) parse EVERY row strictly, in file order, recomputing everything
     n_rows = 0
@@ -761,18 +856,19 @@ def verify_dataset(venue: str, symbol: str,
             or req_end <= req_start:
         return _fail("INVALID_MANIFEST_CONTRACT", detail="requested window")
     if req_end % BAR_MS != 0:
-        return _fail("INVALID_AS_OF", detail="as_of not bar-aligned")
+        return _fail("INVALID_AS_OF", reason="AS_OF_MISMATCH",
+                     detail="as_of not bar-aligned")
     if first_ts < req_start or last_ts >= req_end:
-        return _fail("INVALID_COVERAGE",
+        return _fail("INVALID_COVERAGE", reason="TIMESTAMP_RANGE_MISMATCH",
                      detail=f"rows outside requested window "
                             f"[{req_start},{req_end})")
     if last_ts + BAR_MS > req_end:
-        return _fail("INVALID_AS_OF",
+        return _fail("INVALID_AS_OF", reason="AS_OF_MISMATCH",
                      detail="last bar closes after as_of")
     expected_bars = (req_end - req_start) // BAR_MS
     missing = expected_bars - n_rows
     if missing > COMPLETENESS_TOLERANCE_BARS:
-        return _fail("INVALID_COVERAGE",
+        return _fail("INVALID_COVERAGE", reason="COVERAGE_MISMATCH",
                      detail=f"{n_rows}/{expected_bars} rows")
     # ---- 5) manifest contract must MATCH the recomputed truth
     recomputed = {"n_rows": n_rows, "first_ts": first_ts, "last_ts": last_ts,
@@ -796,6 +892,7 @@ def verify_dataset(venue: str, symbol: str,
     for key, truth in contract_checks:
         if manifest.get(key) != truth:
             return _fail("INVALID_MANIFEST_CONTRACT",
+                         reason=_CONTRACT_REASON.get(key, "SCHEMA_MISMATCH"),
                          detail=f"{key}: manifest={manifest.get(key)!r} "
                                 f"recomputed={truth!r}")
     # the generation id itself must re-derive from CSV + contract + schema:
@@ -805,7 +902,7 @@ def verify_dataset(venue: str, symbol: str,
         sha, manifest_contract_sha(manifest), manifest.get("source", ""),
         symbol, expected_timeframe)
     if recomputed_gid != cur["generation_id"]:
-        return _fail("INVALID_MANIFEST_CONTRACT",
+        return _fail("INVALID_MANIFEST_CONTRACT", reason="GENERATION_ID_MISMATCH",
                      detail=f"generation_id: marker={cur['generation_id']} "
                             f"recomputed={recomputed_gid}")
     return {"ok": True, "status": "DATASET_VERIFIED", "sha256": sha,

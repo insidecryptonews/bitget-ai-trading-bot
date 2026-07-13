@@ -729,9 +729,12 @@ def test_failure_between_csv_and_manifest_leaves_no_valid_pair(
     assert v["status"] == "INVALID_MANIFEST_CONTRACT"
     assert v["detail"] == "NO_CURRENT_GENERATION"
     assert BF.load_klines("bitget", "BTCUSDT") == []
+    # V10.46: the partial (never-COMPLETE) generation is recovered/cleaned,
+    # never left as a valid pair, and CURRENT stays absent
     rec = BF.recover_staging("bitget", "BTCUSDT")
     assert rec["current_generation"] is None
-    assert len(rec["orphan_generations"]) == 1        # kept, never current
+    assert len(rec["removed_incomplete_generations"]) == 1
+    assert rec["orphan_generations"] == []
 
 
 # ==========================================================================

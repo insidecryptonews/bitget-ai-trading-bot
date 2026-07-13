@@ -182,15 +182,25 @@ def test_generation_reuse_and_conflict(tmp_path, monkeypatch):
     probe["sha256"] = csv_sha2
     gid2 = BF.compute_generation_id(csv_sha2, BF.manifest_contract_sha(probe),
                                     probe["source"], "BTCUSDT", "1m")
+    # V10.46: only a COMPLETE generation blocks; a planted COMPLETE dir whose
+    # content differs from what save_dataset(rows2) would produce must raise
+    # GENERATION_CONFLICT and never be overwritten. (An INCOMPLETE planted dir
+    # would instead be recovered/cleaned — the idempotency contract.)
     evil = d / f"gen_{gid2}"
     evil.mkdir()
-    (evil / "data.csv").write_text("planted", encoding="utf-8")
-    (evil / "manifest.json").write_text("{}", encoding="utf-8")
+    planted_csv = b"planted"
+    (evil / "data.csv").write_bytes(planted_csv)
+    (evil / "manifest.json").write_bytes(b"{}")
+    (evil / BF.GEN_COMPLETE_MARKER).write_text(json.dumps({
+        "state": "COMPLETE", "generation_id": gid2,
+        "csv_sha256": hashlib.sha256(planted_csv).hexdigest(),
+        "manifest_sha256": hashlib.sha256(b"{}").hexdigest(),
+        "contract_sha256": "DIFFERENT_CONTRACT"}), encoding="utf-8")
     with pytest.raises(IOError, match="GENERATION_CONFLICT"):
         BF.save_dataset("bitget", "BTCUSDT", rows2, 3,
                         requested_start_ms=T0,
                         requested_end_ms=T0 + 4320 * BAR)
-    assert (evil / "data.csv").read_text(encoding="utf-8") == "planted"
+    assert (evil / "data.csv").read_bytes() == planted_csv
 
 
 def test_crash_before_current_keeps_previous_generation(tmp_path, monkeypatch):
