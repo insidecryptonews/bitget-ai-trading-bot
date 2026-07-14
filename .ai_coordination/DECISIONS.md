@@ -51,3 +51,16 @@
   one-to-one baseline with corrected multiple testing; complete causal MTF buckets;
   append-only ATR risk; real-state deterministic manifest and seal.
 - **Owner:** TEMPORARY BUILDER (Codex) - **Status:** IN_PROGRESS.
+
+### D007 - V10.47.19-22 may only claim implementation ready for Work re-audit
+- **Date (UTC):** 2026-07-14
+- **Context:** The focused failures were reproduced in RED and repaired, but the
+  builder is not the independent certifier.
+- **Decision:** The maximum status is `IMPLEMENTATION_COMPLETE_FOR_WORK_REAUDIT` /
+  `CERTIFICATION=PENDING_WORK_REAUDIT`. The real-state manifest proves integrity and
+  reproducibility only; it cannot emit scientific PASS or promote a strategy.
+- **Evidence contract:** one clean HEAD/tree, one unique pytest collection, one full
+  execution, physically sealed holdout, exact paired baseline, corrected testing,
+  append-only risk ledger and mutation-sensitive coverage.
+- **Trading state:** NO_CONFIRMED_EDGE; SHADOW_CANDIDATES=0; HOLDOUT=SEALED; NO LIVE.
+- **Owner:** TEMPORARY BUILDER (Codex) - **Status:** RESOLVED; independent Work review OPEN.

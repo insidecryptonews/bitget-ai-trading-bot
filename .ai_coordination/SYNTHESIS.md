@@ -21,3 +21,18 @@ in-memory convention, baseline pairs are permissive, MTF accepts incomplete 4h
 buckets, ATR risk is missing from the ledger, and the manifest does not verify the
 real current state. V10.47.19-22 must repair and regenerate all evidence before a
 new independent Work re-audit. No confirmed edge; no candidate; no live.
+
+## V10.47.22 bounded repair synthesis
+
+The implementation now enforces the contracts that V10.47.18 falsified. Validation
+short-circuits WF, discovery never receives holdout rows, the external capability is
+one-use and unavailable to discovery, baseline matching is exact and corrected for
+the global registry, incomplete MTF buckets fail closed, and ATR risk evolution is
+hash-bound in the ledger. Real-state evidence is deterministic and re-verifies Git,
+datasets, manifests, specs, registry, commitment, policies, outputs, reports,
+dashboard, audits, hub, collection, execution and nodeids from disk.
+
+This repairs implementation, not market edge. The regenerated result remains zero
+shadow candidates and all apparent positive selection rows fail validation and/or
+the exact baseline contract. MTF still lacks two years of data. The only honest next
+step is `WORK_REAUDIT_V10_47_22`; certification remains pending and live remains off.

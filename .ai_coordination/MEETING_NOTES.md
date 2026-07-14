@@ -23,3 +23,14 @@
   MTF completeness, ATR ledger and real-state sealing were closed.
 - Opened the bounded V10.47.19-22 adversarial repair. The conservative trading
   conclusion is unchanged: zero candidates, no confirmed edge, NO LIVE.
+
+## 2026-07-14 - V10.47.22 implementation ready for independent re-audit
+- All focused Work falsifications were captured as RED evidence before repair.
+- Validation now short-circuits WF and holdout data is physically outside discovery.
+- Exact one-to-one baseline, corrected multiple testing, complete MTF buckets and
+  append-only ATR risk are enforced by adversarial tests.
+- A deterministic real-state manifest and one-run pytest evidence chain were added.
+- Twelve combinations were regenerated: no candidate reached shadow; holdout stayed
+  SEALED and the external loader was not imported.
+- Builder status is not scientific PASS. Work owns the next and only action:
+  `WORK_REAUDIT_V10_47_22`.

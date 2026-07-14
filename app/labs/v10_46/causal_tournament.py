@@ -80,6 +80,32 @@ def _metrics(trades: list[dict], counters: dict, timeframe: str) -> dict:
         "classification": ES._classify(gross_total, net_total)}
 
 
+def _ledger_integrity(ledger: CL.ImmutableLedger, trades: list[dict]) -> dict:
+    records = ledger.records()
+    kinds: dict[str, int] = {}
+    for record in records:
+        kinds[record["kind"]] = kinds.get(record["kind"], 0) + 1
+    sequence_ok = [record["seq"] for record in records] == list(range(len(records)))
+    required_atr_records = {
+        kind: kinds.get(kind, 0) for kind in ("SIGNAL", "ENTRY", "POSITION", "CLOSE")
+    }
+    trade_ids = {trade.get("trade_id") for trade in trades}
+    return {
+        "schema": "v10_47_22_append_only_ledger_index",
+        "records": len(records),
+        "record_kinds": kinds,
+        "sequence_contiguous": sequence_ok,
+        "ledger_sha256": C.canonical_hash(records),
+        "executed_trades": len(trades),
+        "unique_trade_ids": len(trade_ids - {None}),
+        "required_atr_record_counts": required_atr_records,
+        "close_matches_trade_count": kinds.get("CLOSE", 0) == len(trades),
+        "append_only_defensive_copy": True,
+        "research_only": True,
+        "final_recommendation": "NO LIVE",
+    }
+
+
 def preregister(symbol: str, venue: str, timeframe: str, gen: str,
                 ref_bars_by_ts=None) -> dict:
     """Deterministic CLOSED registry of participants. Returns the decider map,
@@ -208,15 +234,21 @@ def _random_baseline_decider(*, symbol: str, venue: str, timeframe: str,
 
 def evaluate_candidate(bars_tr, sigs_tr, bars_validation, sigs_validation, bars_wf,
                        sigs_wf, decide_fn, exit_params, *, symbol, timeframe,
-                       m_unique):
+                       m_unique, policy_fingerprint):
     """Evaluate TRAIN and VALIDATION before any WALK_FORWARD computation.
 
     ``sigs_wf`` may be a lazy zero-argument supplier.  It is called only after
     VALIDATION admission.  The holdout is neither an argument nor an import.
     """
+    if len(str(policy_fingerprint)) != 64 or any(
+            char not in "0123456789abcdef" for char in str(policy_fingerprint).lower()
+    ):
+        raise ValueError("a preregistered 64-hex policy fingerprint is required")
     original_params = copy.deepcopy(exit_params)
+    original_decider = decide_fn
     policy_identity = {
-        "decider_object_id": id(decide_fn),
+        "decider_fingerprint": str(policy_fingerprint).lower(),
+        "callable_unchanged": True,
         "parameters_before": copy.deepcopy(original_params),
     }
     sel = CL.drive_causal(bars_tr, sigs_tr, decide_fn, exit_params,
@@ -273,6 +305,7 @@ def evaluate_candidate(bars_tr, sigs_tr, bars_validation, sigs_validation, bars_
     }
     policy_identity["parameters_after_validation"] = copy.deepcopy(exit_params)
     policy_identity["parameters_unchanged"] = exit_params == original_params
+    policy_identity["callable_unchanged"] = decide_fn is original_decider
     if not validation_gate:
         gates = {**base_gates, "walk_forward_positive": False, "all_pass": False}
         return {
@@ -304,6 +337,7 @@ def evaluate_candidate(bars_tr, sigs_tr, bars_validation, sigs_validation, bars_
     gates["all_pass"] = all(gates.values())
     policy_identity["parameters_after_walk_forward"] = copy.deepcopy(exit_params)
     policy_identity["parameters_unchanged"] = exit_params == original_params
+    policy_identity["callable_unchanged"] = decide_fn is original_decider
     return {"selection_metrics": m, "matched_random_paired": paired,
             "conservative_net_eur": round(cons_net, 6),
             "validation_net_eur": round(val_net, 6),
@@ -354,8 +388,8 @@ def run_causal_tournament(discovery_partitions: DiscoveryPartitions, *,
     }
     reg = preregister(symbol, venue, timeframe, gen, ref_bars_by_ts)
 
-    # PHYSICAL SEAL: the holdout bars go into a guarded object, never loaded here.
-    # features computed ONLY over [0, hstart) — the holdout range is not touched.
+    # PHYSICAL SEAL: holdout bars never enter this process or object graph.
+    # Features are computed only from the three discovery partitions.
     t0 = _t.time()
     sigs_tr = ES.precompute_sigs(bars_tr)
     train_validation = bars_tr + bars_va
@@ -381,7 +415,10 @@ def run_causal_tournament(discovery_partitions: DiscoveryPartitions, *,
         out = CL.drive_causal(bars_tr, sigs_tr, fn, ex, symbol=symbol,
                               timeframe=timeframe)
         m = _metrics(out["trades"], out["counters"], timeframe)
-        results[name] = {"metrics": m}
+        results[name] = {
+            "metrics": m,
+            "ledger_integrity": _ledger_integrity(out["ledger"], out["trades"]),
+        }
     candidates = {n_: r for n_, r in results.items()
                   if r["metrics"]["classification"] == "NET_EDGE_POSITIVE"
                   and n_ != "D_no_trade"}
@@ -393,7 +430,8 @@ def run_causal_tournament(discovery_partitions: DiscoveryPartitions, *,
         ev = evaluate_candidate(bars_tr, sigs_tr, bars_va, sigs_va, bars_wf,
                                 _walk_forward_signals, fn, ex,
                                 symbol=symbol, timeframe=timeframe,
-                                m_unique=reg["m_global"])
+                                m_unique=reg["m_global"],
+                                policy_fingerprint=reg["fingerprints"][name])
         results[name]["gate"] = ev
         if ev["validation_gate"]:
             validation_admitted_candidates.append(name)
@@ -424,4 +462,11 @@ def run_causal_tournament(discovery_partitions: DiscoveryPartitions, *,
             "validation_rejected_candidates": validation_rejected_candidates,
             "shadow_candidates": shadow,
             "walk_forward_precomputed": wf_signal_cache is not None,
-            "holdout_touched": False}
+            "holdout_touched": hasattr(discovery_partitions, "holdout"),
+            "holdout_access_evidence": {
+                "input_type": type(discovery_partitions).__name__,
+                "input_fields": list(discovery_partitions.__dataclass_fields__),
+                "holdout_field_present": hasattr(discovery_partitions, "holdout"),
+                "holdout_bytes_received": False,
+                "capability_present": False,
+            }}

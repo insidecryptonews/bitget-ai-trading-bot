@@ -17,9 +17,8 @@ from dataclasses import dataclass
 from pathlib import Path, PurePath
 from typing import Any
 
-
-class HoldoutAccessDenied(RuntimeError):
-    """Fail-closed holdout access violation."""
+from .holdout_contract import HoldoutAccessDenied
+from .sealed_holdout import load_commitment
 
 
 def _canonical(value: Any) -> bytes:
@@ -30,7 +29,7 @@ def _sha_bytes(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
 
 
-@dataclass
+@dataclass(frozen=True)
 class HoldoutCapability:
     capability_id: str
     root: str
@@ -38,7 +37,6 @@ class HoldoutCapability:
     audit_ref: str
     reason: str
     signature: str
-    consumed: bool = False
 
 
 class ExternalHoldoutAuthority:
@@ -53,15 +51,7 @@ class ExternalHoldoutAuthority:
         root = supplied.resolve(strict=True)
         if not root.is_dir():
             raise HoldoutAccessDenied("sealed root is not a directory")
-        commitment_path = root / "commitment.json"
-        if commitment_path.is_symlink():
-            raise HoldoutAccessDenied("commitment symlink is forbidden")
-        try:
-            commitment = json.loads(commitment_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
-            raise HoldoutAccessDenied(f"invalid commitment: {exc}") from exc
-        if commitment.get("state") != "SEALED":
-            raise HoldoutAccessDenied("holdout commitment is not SEALED")
+        commitment = load_commitment(root / "commitment.json")
         if not isinstance(secret, bytes) or not secret:
             raise HoldoutAccessDenied("external authority secret is required")
         if _sha_bytes(secret) != commitment.get("authority_key_sha256"):
@@ -149,7 +139,11 @@ class ExternalHoldoutAuthority:
         if not isinstance(capability, HoldoutCapability):
             self._append("denied_invalid_capability_type")
             raise HoldoutAccessDenied("an external HoldoutCapability is required")
-        if capability.consumed:
+        consumed_ids = {
+            record.get("capability_id") for record in self.access_log()
+            if record.get("kind") == "capability_consumed"
+        }
+        if capability.capability_id in consumed_ids:
             self._append("denied_already_consumed",
                          capability_id=capability.capability_id)
             raise HoldoutAccessDenied("capability already consumed")
@@ -163,7 +157,6 @@ class ExternalHoldoutAuthority:
                          capability_id=capability.capability_id)
             raise HoldoutAccessDenied("invalid external capability")
         path = self._resolve_data_path(relative_path)
-        capability.consumed = True
         self._append("capability_consumed", capability_id=capability.capability_id,
                      audit_ref=capability.audit_ref)
         payload_bytes = path.read_bytes()

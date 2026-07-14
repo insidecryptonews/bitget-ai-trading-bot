@@ -27,3 +27,18 @@
 - BLK-R4 (P1): manifest/seal does not verify current Git/dataset/spec/policy state.
 - BLK-R5 (P2): incomplete 4h buckets can become regime-ready; DET_* is smoke-only.
 - BLK-R6 (P2): ATR and initial stop are not append-only ledger facts.
+
+## V10.47.22 implementation disposition (not independent certification)
+- BLK-R1: IMPLEMENTATION_REPAIRED - validation rejection now prevents all WF work.
+- BLK-R2: IMPLEMENTATION_REPAIRED - discovery and sealed holdout are physically
+  separate; no tournament imports the holdout loader or has an opening capability.
+- BLK-R3: IMPLEMENTATION_REPAIRED - one exact baseline simulation per opportunity,
+  immutable pair IDs, explicit incompatibilities and corrected paired gate.
+- BLK-R4: IMPLEMENTATION_REPAIRED - deterministic real-state manifest hashes and
+  re-reads Git plus every required evidence category.
+- BLK-R5: IMPLEMENTATION_REPAIRED - complete causal 4h buckets and an independent
+  `DETERMINISTIC_MTF_1H_4H` smoke; scientific status remains INSUFFICIENT_DATA.
+- BLK-R6: IMPLEMENTATION_REPAIRED - SIGNAL/ENTRY/POSITION/CLOSE ATR risk records are
+  append-only and initial stop is immutable.
+- BLK-R7: OPEN - Work must independently attempt to falsify all six repairs and the
+  final manifest/seal. Until then `CERTIFICATION=PENDING_WORK_REAUDIT`.

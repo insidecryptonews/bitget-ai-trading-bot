@@ -20,3 +20,18 @@ Implemented on the canonical infra (no new engine):
 Reproduced all findings with failing tests first, then fixed each; regenerated the
 twelve tournaments WITHOUT opening the holdout; bound the manifest/seal. Green tests
 are correctness checks, NOT evidence of edge.
+
+## Temporary official builder repair (Codex, V10.47.19-22)
+- Preserved Work's V10.47.18 audit and notes byte-for-byte and committed the FAIL.
+- Converted the focused falsifications into RED evidence before changing behavior.
+- Added physical discovery/holdout partitions, neutral commitment helpers and a
+  separate external loader with immutable, log-backed, one-use capability.
+- Implemented validation admission before lazy WF evaluation.
+- Replaced averaged/permissive baseline comparison with one exact immutable pair,
+  conservative n_eff, block-bootstrap lower bound and Bonferroni gate.
+- Added complete causal MTF aggregation and independent MTF experiment registry.
+- Added ATR and stop facts to the append-only ledger with next-bar trailing.
+- Added deterministic real-state manifest, SEAL.txt, certified test runner, evidence
+  generator and mutation-sensitive tests.
+- Regenerated 12 tournaments without importing or parsing holdout rows: zero shadow
+  candidates. This is `IMPLEMENTATION_COMPLETE_FOR_WORK_REAUDIT`, not certification.

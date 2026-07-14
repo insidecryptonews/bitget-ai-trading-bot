@@ -39,19 +39,23 @@ def test_split_has_validation_and_holdout_reserved():
 
 
 def _sealed_fixture(tmp_path):
+    SH = importlib.import_module("app.labs.v10_46.sealed_holdout")
     root = tmp_path / "sealed_holdout"
     data = root / "encrypted_or_sealed_data"
     data.mkdir(parents=True)
     payload = b'[{"ts":0,"open":1,"high":1,"low":1,"close":1,"volume":1}]'
     (data / "bars.json.sealed").write_bytes(payload)
     secret = b"synthetic-external-secret"
-    (root / "commitment.json").write_text(json.dumps({
-        "schema": "v10_47_20_holdout_commitment", "state": "SEALED",
-        "data_file": "encrypted_or_sealed_data/bars.json.sealed",
-        "commitment_sha256": hashlib.sha256(payload).hexdigest(),
-        "authority_key_sha256": hashlib.sha256(secret).hexdigest(),
-        "n_bars": 1,
-    }), encoding="utf-8")
+    commitment = SH.commitment_document(
+        symbol="SYNTHETIC", timeframe="1m",
+        data_file="encrypted_or_sealed_data/bars.json.sealed",
+        data_sha256=hashlib.sha256(payload).hexdigest(),
+        authority_key_sha256=hashlib.sha256(secret).hexdigest(),
+        n_bars=1, index_range=(0, 1),
+    )
+    (root / "commitment.json").write_text(
+        json.dumps(commitment), encoding="utf-8"
+    )
     return root, secret
 
 

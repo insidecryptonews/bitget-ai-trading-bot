@@ -96,6 +96,7 @@ def _evaluate(CT):
         stage("train"), [None], stage("validation"), [None],
         stage("walk_forward"), [None], decider, exit_params,
         symbol="X", timeframe="1m", m_unique=10,
+        policy_fingerprint="a" * 64,
     )
     return result, exit_params, decider
 
@@ -142,8 +143,33 @@ def test_candidate_parameters_are_not_refit_after_validation(monkeypatch):
     CT, _ = _install_stage_driver(monkeypatch, validation_net=1.0)
     result, exit_params, decider = _evaluate(CT)
     assert exit_params == {"stop_frac": 0.01, "tp_frac": 0.02, "time_exit": 2}
-    assert result["policy_identity"]["decider_object_id"] == id(decider)
+    assert result["policy_identity"]["decider_fingerprint"] == "a" * 64
+    assert result["policy_identity"]["callable_unchanged"] is True
+    assert "decider_object_id" not in result["policy_identity"]
     assert result["policy_identity"]["parameters_unchanged"] is True
+
+
+def test_candidate_requires_preregistered_policy_fingerprint(monkeypatch):
+    CT, _ = _install_stage_driver(monkeypatch, validation_net=1.0)
+    with pytest.raises(ValueError, match="preregistered 64-hex"):
+        CT.evaluate_candidate(
+            [{"stage": "train"}], [None],
+            [{"stage": "validation"}], [None],
+            [{"stage": "walk_forward"}], [None],
+            lambda *a, **k: {},
+            {"stop_frac": 0.01, "tp_frac": 0.02, "time_exit": 2},
+            symbol="X", timeframe="1m", m_unique=10,
+            policy_fingerprint="not-a-registry-fingerprint",
+        )
+
+
+def test_policy_identity_output_is_deterministic(monkeypatch):
+    CT, _ = _install_stage_driver(monkeypatch, validation_net=1.0)
+    first, _, _ = _evaluate(CT)
+    second, _, _ = _evaluate(CT)
+    assert json.dumps(first["policy_identity"], sort_keys=True) == json.dumps(
+        second["policy_identity"], sort_keys=True
+    )
 
 
 def test_tournament_accepts_discovery_partitions_not_full_series():
@@ -172,14 +198,15 @@ def _make_isolated_tree(tmp_path: Path):
     payload = b'[{"ts":4,"open":1,"high":1,"low":1,"close":1,"volume":1}]'
     (data / "bars.json.sealed").write_bytes(payload)
     secret = b"synthetic-external-authority-key"
-    commitment = {
-        "schema": "v10_47_20_holdout_commitment",
-        "state": "SEALED",
-        "data_file": "encrypted_or_sealed_data/bars.json.sealed",
-        "commitment_sha256": hashlib.sha256(payload).hexdigest(),
-        "authority_key_sha256": hashlib.sha256(secret).hexdigest(),
-        "n_bars": 1,
-    }
+    from app.labs.v10_46.sealed_holdout import commitment_document
+
+    commitment = commitment_document(
+        symbol="SYNTHETIC", timeframe="1m",
+        data_file="encrypted_or_sealed_data/bars.json.sealed",
+        data_sha256=hashlib.sha256(payload).hexdigest(),
+        authority_key_sha256=hashlib.sha256(secret).hexdigest(),
+        n_bars=1, index_range=(3, 4),
+    )
     (sealed / "commitment.json").write_text(
         json.dumps(commitment), encoding="utf-8"
     )
