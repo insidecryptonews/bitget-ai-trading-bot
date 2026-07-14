@@ -7,6 +7,8 @@ reproduction evidence) and pass after V10.47.16–18. Research only, NO LIVE."""
 from __future__ import annotations
 
 import importlib
+import hashlib
+import json
 import os
 import random
 
@@ -36,37 +38,51 @@ def test_split_has_validation_and_holdout_reserved():
     assert sp["holdout_start_index"] >= sp["walk_forward"][1]
 
 
-def test_sealed_holdout_module_exists_and_denies_by_default():
+def _sealed_fixture(tmp_path):
+    root = tmp_path / "sealed_holdout"
+    data = root / "encrypted_or_sealed_data"
+    data.mkdir(parents=True)
+    payload = b'[{"ts":0,"open":1,"high":1,"low":1,"close":1,"volume":1}]'
+    (data / "bars.json.sealed").write_bytes(payload)
+    secret = b"synthetic-external-secret"
+    (root / "commitment.json").write_text(json.dumps({
+        "schema": "v10_47_20_holdout_commitment", "state": "SEALED",
+        "data_file": "encrypted_or_sealed_data/bars.json.sealed",
+        "commitment_sha256": hashlib.sha256(payload).hexdigest(),
+        "authority_key_sha256": hashlib.sha256(secret).hexdigest(),
+        "n_bars": 1,
+    }), encoding="utf-8")
+    return root, secret
+
+
+def test_sealed_holdout_module_contains_metadata_not_rows(tmp_path):
     SH = importlib.import_module("app.labs.v10_46.sealed_holdout")
-    h = SH.SealedHoldout(symbol="X", timeframe="1m",
-                         holdout_bars=[{"ts": 0, "open": 1, "high": 1, "low": 1,
-                                        "close": 1, "volume": 1}])
-    assert h.state == "SEALED"
-    with pytest.raises(SH.HoldoutAccessDenied):
-        h.load()                                          # denied without auth
+    root, _ = _sealed_fixture(tmp_path)
+    commitment = SH.load_commitment(root / "commitment.json")
+    assert commitment["state"] == "SEALED"
+    assert not hasattr(SH, "SealedHoldout")
 
 
-def test_sealed_holdout_one_time_authorization_and_second_use_fails():
-    SH = importlib.import_module("app.labs.v10_46.sealed_holdout")
-    h = SH.SealedHoldout(symbol="X", timeframe="1m",
-                         holdout_bars=[{"ts": 0, "open": 1, "high": 1, "low": 1,
-                                        "close": 1, "volume": 1}])
-    tok = h.authorize_once(reason="test", audit_ref="AUD-1")
-    _ = h.load(token=tok)
-    assert h.state == "CONSUMED"
-    with pytest.raises(SH.HoldoutAccessDenied):
-        h.load(token=tok)                                 # second use fails
-    # every attempt is logged append-only
-    assert len(h.access_log()) >= 3
+def test_holdout_external_capability_is_single_use(tmp_path):
+    HL = importlib.import_module("app.labs.v10_46.holdout_loader")
+    root, secret = _sealed_fixture(tmp_path)
+    authority = HL.ExternalHoldoutAuthority(root, secret=secret)
+    capability = authority.issue_capability(reason="test", audit_ref="AUD-1")
+    assert authority.load_once(capability)[0]["ts"] == 0
+    with pytest.raises(HL.HoldoutAccessDenied):
+        authority.load_once(capability)
+    assert len(authority.access_log()) >= 3
 
 
-def test_sealed_holdout_path_traversal_and_bad_token_fail():
-    SH = importlib.import_module("app.labs.v10_46.sealed_holdout")
-    h = SH.SealedHoldout(symbol="X", timeframe="1m",
-                         holdout_bars=[{"ts": 0, "open": 1, "high": 1, "low": 1,
-                                        "close": 1, "volume": 1}])
-    with pytest.raises(SH.HoldoutAccessDenied):
-        h.load(token="forged")
+def test_sealed_holdout_path_traversal_and_bad_capability_fail(tmp_path):
+    HL = importlib.import_module("app.labs.v10_46.holdout_loader")
+    root, secret = _sealed_fixture(tmp_path)
+    authority = HL.ExternalHoldoutAuthority(root, secret=secret)
+    with pytest.raises(HL.HoldoutAccessDenied):
+        authority.load_once("forged")
+    capability = authority.issue_capability(reason="test", audit_ref="AUD-1")
+    with pytest.raises(HL.HoldoutAccessDenied):
+        authority.load_once(capability, relative_path="../escaped.json")
 
 
 # --------------------------------------------------------------------------- #
@@ -204,20 +220,12 @@ def test_manifest_regeneration_is_stable(tmp_path):
     assert a["output_root_hash"] == b["output_root_hash"]      # same files -> same
 
 
-def test_holdout_denied_from_selection_module():
-    SH = importlib.import_module("app.labs.v10_46.sealed_holdout")
-    h = SH.SealedHoldout(symbol="X", timeframe="1m",
-                         holdout_bars=[{"ts": 0, "open": 1, "high": 1, "low": 1,
-                                        "close": 1, "volume": 1}])
-    tok = h.authorize_once(reason="t", audit_ref="A")
-
-    # simulate a call originating from a selection module frame
-    def _fake_causal_tournament_caller():
-        return h.load(token=tok)
-    _fake_causal_tournament_caller.__globals__["__name__"] = \
-        "app.labs.v10_46.causal_tournament"
-    with pytest.raises(SH.HoldoutAccessDenied):
-        _fake_causal_tournament_caller()
+def test_discovery_tournament_has_no_holdout_loader_import():
+    import inspect
+    CT = importlib.import_module("app.labs.v10_46.causal_tournament")
+    source = inspect.getsource(CT)
+    assert "holdout_loader" not in source
+    assert "authorize_once" not in source
 
 
 def test_registry_semantic_dedup_reports_results():

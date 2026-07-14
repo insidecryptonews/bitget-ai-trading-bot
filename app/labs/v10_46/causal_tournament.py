@@ -20,7 +20,8 @@ SHADOW_CANDIDATES=0.
 
 from __future__ import annotations
 
-import os
+import copy
+from collections.abc import Callable
 from typing import Any
 
 from . import contracts as C
@@ -29,7 +30,7 @@ from . import causal_stats as CS
 from . import event_clock as EC
 from . import families as FAM
 from . import edge_search as ES
-from . import sealed_holdout as SH
+from .discovery_dataset import DiscoveryPartitions
 
 
 # ------------------------------------------------------- pre-registered split
@@ -139,14 +140,16 @@ SHADOW_GATES_V2 = {"min_n_eff": 30, "min_net_pnl_eur": 0.0,
 def evaluate_candidate(bars_tr, sigs_tr, bars_validation, sigs_validation, bars_wf,
                        sigs_wf, decide_fn, exit_params, *, symbol, timeframe,
                        m_unique):
-    """Full repaired gate for a candidate selected on TRAIN. It must:
-    - be net-positive on TRAIN with sufficient real n_eff and top-3 robustness;
-    - beat an EXACTLY-PAIRED exposure/holding-matched random baseline (paired LB>0
-      with a COMPLETE match, else BASELINE_MATCH_INCOMPLETE -> GATE_FAIL);
-    - survive conservative costs on TRAIN;
-    - be net-positive on VALIDATION (a strictly-later region than TRAIN);
-    - be net-positive on WALK-FORWARD (later still).
-    The sealed HOLDOUT is never touched here."""
+    """Evaluate TRAIN and VALIDATION before any WALK_FORWARD computation.
+
+    ``sigs_wf`` may be a lazy zero-argument supplier.  It is called only after
+    VALIDATION admission.  The holdout is neither an argument nor an import.
+    """
+    original_params = copy.deepcopy(exit_params)
+    policy_identity = {
+        "decider_object_id": id(decide_fn),
+        "parameters_before": copy.deepcopy(original_params),
+    }
     sel = CL.drive_causal(bars_tr, sigs_tr, decide_fn, exit_params,
                           symbol=symbol, timeframe=timeframe)
     m = _metrics(sel["trades"], sel["counters"], timeframe)
@@ -159,11 +162,17 @@ def evaluate_candidate(bars_tr, sigs_tr, bars_validation, sigs_validation, bars_
     cons_net = float(sum(t["net_eur"] for t in cons["trades"]))
     val = CL.drive_causal(bars_validation, sigs_validation, decide_fn, exit_params,
                           symbol=symbol, timeframe=timeframe)
-    val_net = float(sum(t["net_eur"] for t in val["trades"]))
-    wf = CL.drive_causal(bars_wf, sigs_wf, decide_fn, exit_params,
-                         symbol=symbol, timeframe=timeframe)
-    wf_net = float(sum(t["net_eur"] for t in wf["trades"]))
-    gates = {
+    val_metrics = _metrics(val["trades"], val["counters"], timeframe)
+    val_net = float(val_metrics["net_pnl_eur"])
+    validation_reason = None
+    if not val["trades"]:
+        validation_reason = "NO_VALIDATION_TRADES"
+    elif val_net <= 0:
+        validation_reason = "VALIDATION_NET_NOT_POSITIVE"
+    elif val_metrics["n_eff_final"] < SHADOW_GATES_V2["min_n_eff"]:
+        validation_reason = "VALIDATION_N_EFF_INSUFFICIENT"
+    validation_gate = validation_reason is None
+    base_gates = {
         "net_positive_selection": m["net_pnl_eur"] > 0,
         "n_eff_sufficient": m["n_eff_final"] >= SHADOW_GATES_V2["min_n_eff"],
         "top3_robust": m["net_without_top3_eur"] >= 0,
@@ -171,62 +180,115 @@ def evaluate_candidate(bars_tr, sigs_tr, bars_validation, sigs_validation, bars_
         "beats_matched_random_paired": paired["beats_matched_random"],
         "conservative_survives": cons_net > 0,
         "validation_positive": val_net > 0,
-        "walk_forward_positive": wf_net > 0,
+        "validation_n_eff_sufficient": (
+            val_metrics["n_eff_final"] >= SHADOW_GATES_V2["min_n_eff"]
+        ),
     }
+    policy_identity["parameters_after_validation"] = copy.deepcopy(exit_params)
+    policy_identity["parameters_unchanged"] = exit_params == original_params
+    if not validation_gate:
+        gates = {**base_gates, "walk_forward_positive": False, "all_pass": False}
+        return {
+            "selection_metrics": m,
+            "matched_random_paired": paired,
+            "conservative_net_eur": round(cons_net, 6),
+            "validation_net_eur": round(val_net, 6),
+            "validation_trades": len(val["trades"]),
+            "validation_metrics": val_metrics,
+            "validation_gate": False,
+            "validation_rejection_reason": validation_reason,
+            "walk_forward_called": False,
+            "walk_forward_metrics": None,
+            "walk_forward_net_eur": None,
+            "status": "REJECTED_AT_VALIDATION",
+            "next_stage": "NONE",
+            "paired_lower_bound_eur": paired["paired_lower_bound_eur"],
+            "baseline_coverage": paired["coverage"],
+            "policy_identity": policy_identity,
+            "gates": gates,
+            "is_shadow_candidate": False,
+        }
+    wf_signals = sigs_wf() if isinstance(sigs_wf, Callable) else sigs_wf
+    wf = CL.drive_causal(bars_wf, wf_signals, decide_fn, exit_params,
+                         symbol=symbol, timeframe=timeframe)
+    wf_metrics = _metrics(wf["trades"], wf["counters"], timeframe)
+    wf_net = float(wf_metrics["net_pnl_eur"])
+    gates = {**base_gates, "walk_forward_positive": wf_net > 0}
     gates["all_pass"] = all(gates.values())
+    policy_identity["parameters_after_walk_forward"] = copy.deepcopy(exit_params)
+    policy_identity["parameters_unchanged"] = exit_params == original_params
     return {"selection_metrics": m, "matched_random_paired": paired,
             "conservative_net_eur": round(cons_net, 6),
             "validation_net_eur": round(val_net, 6),
             "validation_trades": len(val["trades"]),
+            "validation_metrics": val_metrics,
+            "validation_gate": True,
+            "validation_rejection_reason": None,
+            "walk_forward_called": True,
+            "walk_forward_metrics": wf_metrics,
             "walk_forward_net_eur": round(wf_net, 6),
+            "status": "WALK_FORWARD_EVALUATED",
+            "next_stage": "SHADOW_GATE" if gates["all_pass"] else "NONE",
             "paired_lower_bound_eur": paired["paired_lower_bound_eur"],
             "baseline_coverage": paired["coverage"],
+            "policy_identity": policy_identity,
             "gates": gates, "is_shadow_candidate": gates["all_pass"]}
 
 
-def run_causal_tournament(bars: list[dict], *, symbol: str, venue: str,
-                          timeframe: str, gen: str, ref_bars_by_ts=None,
-                          holdout_commitment_dir: str | None = None,
-                          log=lambda *a: None) -> dict:
-    """Run the full repaired tournament for one (symbol, timeframe).
+def run_causal_tournament(discovery_partitions: DiscoveryPartitions, *,
+                          symbol: str, venue: str, timeframe: str, gen: str,
+                          holdout_commitment: dict,
+                          ref_bars_by_ts=None, log=lambda *a: None) -> dict:
+    """Run discovery without ever receiving or loading holdout observations.
 
-    The time axis is split TRAIN/VALIDATION/WALK-FORWARD/HOLDOUT. Features are
-    precomputed ONLY over the non-holdout region (the holdout bars are never fed
-    to feature computation). Selection happens on TRAIN; candidates are confirmed
-    on VALIDATION and WALK-FORWARD. The HOLDOUT is wrapped in a physically SEALED
-    object that is never loaded; a guard asserts no selection index enters it."""
+    VALIDATION admission is the boundary that makes WALK_FORWARD computation
+    reachable.  Only commitment metadata is present in this process.
+    """
     import time as _t
-    n = len(bars)
-    sp = split_indices(n)
-    a_tr, b_tr = sp["train"]
-    a_va, b_va = sp["validation"]
-    a_wf, b_wf = sp["walk_forward"]
-    hstart = sp["holdout_start_index"]
+    if not isinstance(discovery_partitions, DiscoveryPartitions):
+        raise TypeError("discovery_partitions must come from DiscoveryDatasetLoader")
+    if holdout_commitment.get("state") != "SEALED" \
+            or len(str(holdout_commitment.get("commitment_sha256", ""))) != 64:
+        raise ValueError("a valid SEALED holdout commitment is required")
+    bars_tr, bars_va, bars_wf = discovery_partitions.as_mutable()
+    n_discovery = len(bars_tr) + len(bars_va) + len(bars_wf)
+    n_holdout = int(holdout_commitment.get("n_bars", 0))
+    n = n_discovery + n_holdout
+    tr_end = len(bars_tr)
+    val_end = tr_end + len(bars_va)
+    wf_end = val_end + len(bars_wf)
+    sp = {
+        "train": (0, tr_end),
+        "validation": (tr_end, val_end),
+        "walk_forward": (val_end, wf_end),
+        "holdout": tuple(holdout_commitment.get("index_range", (wf_end, n))),
+        "selection_end_index": tr_end,
+        "holdout_start_index": wf_end,
+    }
     reg = preregister(symbol, venue, timeframe, gen, ref_bars_by_ts)
 
     # PHYSICAL SEAL: the holdout bars go into a guarded object, never loaded here.
-    holdout = SH.SealedHoldout(symbol=symbol, timeframe=timeframe,
-                               holdout_bars=bars[hstart:],
-                               index_range=(hstart, n))
-    if holdout_commitment_dir:
-        holdout.write_commitment(os.path.join(
-            holdout_commitment_dir, f"{symbol}_{timeframe}.commitment.json"))
-
     # features computed ONLY over [0, hstart) — the holdout range is not touched.
-    work_bars = bars[:hstart]
     t0 = _t.time()
-    sigs_work = ES.precompute_sigs(work_bars)
-    sigs = sigs_work + [None] * (n - hstart)          # holdout sigs stay None
-    SH.assert_not_selecting_on_holdout(hstart, range(a_tr, b_va))
-    SH.assert_not_selecting_on_holdout(hstart, range(a_wf, b_wf))
-    log(f"  [sigs] {hstart}/{n} bars (holdout {n-hstart} NOT precomputed) in "
-        f"{round(_t.time()-t0,1)}s | m_nominal={reg['m_nominal']} "
-        f"m_unique_results={reg['m_unique_results']} "
-        f"holdout_state={holdout.state}")
+    sigs_tr = ES.precompute_sigs(bars_tr)
+    train_validation = bars_tr + bars_va
+    sigs_train_validation = ES.precompute_sigs(train_validation)
+    sigs_va = sigs_train_validation[len(bars_tr):]
+    log(
+        f"  [sigs] {n_discovery}/{n} discovery bars "
+        f"(holdout {n_holdout} PHYSICALLY ABSENT) in {round(_t.time()-t0, 1)}s "
+        f"| m_nominal={reg['m_nominal']} "
+        f"m_unique_results={reg['m_unique_results']} holdout_state=SEALED"
+    )
+    wf_signal_cache: list | None = None
 
-    bars_tr, sigs_tr = bars[a_tr:b_tr], sigs[a_tr:b_tr]
-    bars_va, sigs_va = bars[a_va:b_va], sigs[a_va:b_va]
-    bars_wf, sigs_wf = bars[a_wf:b_wf], sigs[a_wf:b_wf]
+    def _walk_forward_signals():
+        nonlocal wf_signal_cache
+        if wf_signal_cache is None:
+            all_discovery = bars_tr + bars_va + bars_wf
+            all_signals = ES.precompute_sigs(all_discovery)
+            wf_signal_cache = all_signals[len(bars_tr) + len(bars_va):]
+        return wf_signal_cache
     results: dict = {}
     for name, (fn, ex) in reg["deciders"].items():
         out = CL.drive_causal(bars_tr, sigs_tr, fn, ex, symbol=symbol,
@@ -237,12 +299,19 @@ def run_causal_tournament(bars: list[dict], *, symbol: str, venue: str,
                   if r["metrics"]["classification"] == "NET_EDGE_POSITIVE"
                   and n_ != "D_no_trade"}
     shadow = []
+    validation_admitted_candidates: list[str] = []
+    validation_rejected_candidates: list[str] = []
     for name in candidates:
         fn, ex = reg["deciders"][name]
         ev = evaluate_candidate(bars_tr, sigs_tr, bars_va, sigs_va, bars_wf,
-                                sigs_wf, fn, ex, symbol=symbol, timeframe=timeframe,
+                                _walk_forward_signals, fn, ex,
+                                symbol=symbol, timeframe=timeframe,
                                 m_unique=reg["m_unique_hypotheses"])
         results[name]["gate"] = ev
+        if ev["validation_gate"]:
+            validation_admitted_candidates.append(name)
+        else:
+            validation_rejected_candidates.append(name)
         if ev["is_shadow_candidate"]:
             shadow.append(name)
         log(f"   gate {name}: shadow={ev['is_shadow_candidate']} "
@@ -254,10 +323,14 @@ def run_causal_tournament(bars: list[dict], *, symbol: str, venue: str,
             "registry": {k: reg[k] for k in ("m_nominal", "m_unique_hypotheses",
                          "m_unique_results", "duplicated_runs", "registry_hash",
                          "correction", "closed")},
-            "holdout": {"state": holdout.state,
-                        "commitment_sha256": holdout.commitment_hash(),
-                        "index_range": [hstart, n], "n_bars": n - hstart,
-                        "access_log": holdout.access_log()},
+            "holdout": {"state": "SEALED",
+                        "commitment_sha256": holdout_commitment["commitment_sha256"],
+                        "index_range": list(sp["holdout"]), "n_bars": n_holdout,
+                        "access_log": [], "physically_loaded": False,
+                        "capability_present": False},
             "results": results, "n_net_positive": len(candidates),
+            "validation_admitted_candidates": validation_admitted_candidates,
+            "validation_rejected_candidates": validation_rejected_candidates,
             "shadow_candidates": shadow,
-            "holdout_touched": holdout.state != "SEALED"}
+            "walk_forward_precomputed": wf_signal_cache is not None,
+            "holdout_touched": False}

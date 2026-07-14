@@ -229,8 +229,21 @@ def test_tournament_no_shadow_on_noise_and_holdout_sealed():
                      "low": min(price, new) * 0.9995, "close": new,
                      "volume": 10.0})
         price = new
-    out = CT.run_causal_tournament(bars, symbol="BTCUSDT", venue="bitget",
-                                   timeframe="1m", gen="g", log=lambda *a: None)
+    from app.labs.v10_46.discovery_dataset import DiscoveryPartitions
+    sp = CT.split_indices(len(bars))
+    train = tuple(bars[slice(*sp["train"])])
+    validation = tuple(bars[slice(*sp["validation"])])
+    walk_forward = tuple(bars[slice(*sp["walk_forward"])])
+    discovery = DiscoveryPartitions(train, validation, walk_forward, "synthetic")
+    holdout = {
+        "state": "SEALED", "commitment_sha256": "0" * 64,
+        "n_bars": sp["holdout"][1] - sp["holdout"][0],
+        "index_range": list(sp["holdout"]),
+    }
+    out = CT.run_causal_tournament(
+        discovery, symbol="BTCUSDT", venue="bitget", timeframe="1m", gen="g",
+        holdout_commitment=holdout, log=lambda *a: None,
+    )
     assert out["shadow_candidates"] == []
     assert out["holdout_touched"] is False
     assert out["registry"]["closed"] is True
