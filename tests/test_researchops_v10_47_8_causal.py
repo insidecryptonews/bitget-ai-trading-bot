@@ -6,6 +6,7 @@ from __future__ import annotations
 from app.labs.v10_46 import edge_search as ES
 from app.labs.v10_46 import causal_ledger as CL
 from app.labs.v10_46 import causal_stats as CS
+from app.labs.v10_46 import causal_tournament as CT
 from app.labs.v10_46 import event_clock as EC
 from app.labs.v10_46 import families as FAM
 
@@ -178,3 +179,85 @@ def test_timeframe_intervals_distinct():
     import pytest
     with pytest.raises(ValueError):
         EC.interval_ms_for("2m")
+
+
+def test_trailing_next_bar_effect():
+    """A trailing level derived from bar N's high cannot stop us out inside bar N;
+    it can only act from bar N+1."""
+    from app.labs.v10_46 import sim_oms as S
+    # LONG entry at 100. Bar0 spikes up to 110 (sets a trailing stop ~104.5 for
+    # 5% trail) then closes; Bar0's own low (99) is BELOW that trailing level but
+    # must NOT trigger it. Bar1 dips to 104 -> now the trailing stop is active.
+    entry = {"ts": 0, "open": 100.0, "high": 100.0, "low": 100.0, "close": 100.0}
+    b0 = {"ts": 60_000, "open": 100.0, "high": 110.0, "low": 99.0, "close": 108.0}
+    b1 = {"ts": 120_000, "open": 108.0, "high": 108.0, "low": 104.0, "close": 104.0}
+    b2 = {"ts": 180_000, "open": 104.0, "high": 104.0, "low": 104.0, "close": 104.0}
+    res = S.simulate_trade(side="LONG", entry_bar=entry, exit_bars=[b0, b1, b2],
+                           entry_ts_ms=0, stop_frac=0.5, tp_frac=0.5, time_exit=3,
+                           trailing_frac=0.05, interval_ms=60_000)
+    # if the trailing had (wrongly) acted intrabar on b0, exit_ts would be b0's;
+    # correct behaviour exits on b1 or later
+    assert res["exit_ts_ms"] >= b1["ts"]
+
+
+def test_split_reserves_sealed_holdout():
+    sp = CT.split_indices(1200)
+    assert sp["train"] == (0, 600)
+    assert sp["selection_end_index"] == 600
+    assert sp["holdout"][1] == 1200 and sp["holdout"][0] == sp["holdout_start_index"]
+    # selection region ends strictly before the holdout begins
+    assert sp["train"][1] <= sp["holdout_start_index"]
+
+
+def test_registry_closed_and_multiple_testing():
+    reg = CT.preregister("BTCUSDT", "bitget", "1m", "g")
+    assert reg["closed"] is True
+    assert reg["m_nominal"] >= reg["m_unique_hypotheses"]
+    assert isinstance(reg["registry_hash"], str) and len(reg["registry_hash"]) == 64
+    assert "D_no_trade" in reg["deciders"]
+
+
+def test_tournament_no_shadow_on_noise_and_holdout_sealed():
+    import random
+    rng = random.Random(9)
+    price, bars = 100.0, []
+    T0, BAR2 = 1_700_000_400_000, 60_000
+    for i in range(1400):                     # pure noise: no edge should survive
+        new = price * (1 + rng.uniform(-0.001, 0.001))
+        bars.append({"ts": T0 + i * BAR2, "open": price,
+                     "high": max(price, new) * 1.0005,
+                     "low": min(price, new) * 0.9995, "close": new,
+                     "volume": 10.0})
+        price = new
+    out = CT.run_causal_tournament(bars, symbol="BTCUSDT", venue="bitget",
+                                   timeframe="1m", gen="g", log=lambda *a: None)
+    assert out["shadow_candidates"] == []
+    assert out["holdout_touched"] is False
+    assert out["registry"]["closed"] is True
+
+
+def test_p08_truth_label():
+    t = FAM.strategy_truth("P08")
+    assert t["canonical_id"] == "P08_OI_FUNDING_DIVERGENCE"
+    assert t["implementation_id"] == "P08_FUNDING_HOUR_RETURN_REVERSAL_PROXY"
+    assert t["uses_real_oi"] is False and t["uses_real_funding"] is False
+    assert t["uses_funding_timestamp_only"] is True
+    assert t["does_not_validate_canonical_p08"] is True
+    matrix = FAM.strategy_matrix()
+    assert any(r["family"] == "P08" for r in matrix) and len(matrix) == 12
+
+
+def test_cost_truth_not_observed():
+    from app.labs.v10_46 import cost_truth as COST
+    ct = COST.cost_truth("observed")
+    assert ct["components"]["fee"]["status"] == "MODELLED"
+    assert ct["components"]["spread"]["status"] == "MODELLED"
+    assert ct["components"]["real_open_interest"]["status"] == "UNAVAILABLE"
+    assert ct["summary"]["observed"] == 0
+
+
+def test_bootstrap_lb_below_mean():
+    xs = [0.1, -0.05, 0.2, -0.1, 0.15, -0.2, 0.05, 0.0, 0.3, -0.15] * 4
+    r = CS.block_bootstrap_mean_lb(xs, reps=500)
+    assert r["mean_lb"] <= r["mean"] + 1e-9
+    assert r["n"] == len(xs)

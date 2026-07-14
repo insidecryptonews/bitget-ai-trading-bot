@@ -233,6 +233,49 @@ FAMILIES = {
 }
 
 
+# ------------------------------------------------------------------ P08 truth
+# V10.47.8: the executed P08 is a PROXY, not the canonical OI/Funding divergence.
+# It reacts only to the funding-HOUR (a timestamp), reverting on the hourly
+# return. It uses NO real open interest and NO real funding rate/sign, so it does
+# NOT validate the canonical hypothesis. This must be stated everywhere P08 is
+# reported so it is never mistaken for real OI/funding, nor described vaguely as
+# "mean reversion" without naming the exact mechanism.
+P08_TRUTH = {
+    "canonical_id": "P08_OI_FUNDING_DIVERGENCE",
+    "implementation_id": "P08_FUNDING_HOUR_RETURN_REVERSAL_PROXY",
+    "mechanism": "revert the hourly return around funding-hour timestamps",
+    "proxy_of": "P08_OI_FUNDING_DIVERGENCE",
+    "uses_real_oi": False,
+    "uses_real_funding": False,
+    "uses_funding_timestamp_only": True,
+    "does_not_validate_canonical_p08": True,
+}
+
+
+def strategy_truth(fid: str) -> dict:
+    """Return the truth label for a family: canonical vs implemented id, whether
+    it is a proxy and what real data it does/doesn't use. Reports must use this."""
+    fam = FAMILIES.get(fid, {})
+    if fid == "P08":
+        return dict(P08_TRUTH, status="PROXY")
+    status = fam.get("status", "UNKNOWN")
+    proxy = status == "PROXY"
+    return {"canonical_id": fid, "implementation_id": fid,
+            "mechanism": fam.get("name", fid),
+            "proxy_of": (fid if proxy else None),
+            "uses_real_oi": False if proxy else None,
+            "uses_real_funding": False if proxy else None,
+            "uses_funding_timestamp_only": False,
+            "does_not_validate_canonical_p08": False,
+            "status": status, "data": fam.get("data")}
+
+
+def strategy_matrix() -> list[dict]:
+    """The full strategy matrix (P01-P12) with truth labels + exit params."""
+    return [dict(strategy_truth(fid), family=fid, name=FAMILIES[fid]["name"],
+                 exit=FAMILIES[fid]["exit"]) for fid in FAMILIES]
+
+
 # ------------------------------------------------ Trend Rider variants A–J
 def _tr_confirm_dir(s):
     if s["slope"] > 0.00005 and s["up_frac"] >= 0.58:
