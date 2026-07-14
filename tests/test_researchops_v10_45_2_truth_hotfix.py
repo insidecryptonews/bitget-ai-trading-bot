@@ -261,10 +261,17 @@ def test_gate_all_pass_caps_at_shadow_while_proxies_exist():
 # 7. PATH CONTAINMENT
 # ==========================================================================
 
+# V10.47.18: explicit, guaranteed-unique ids so no two cases collide under any
+# pytest id-rendering (e.g. the case-only pair "%2E%2E"/"%2e%2e"). Fixes Work
+# audit P2.1 (2896 invocations vs 2895 unique nodeids).
 @pytest.mark.parametrize("bad", [
     "../evil", "..\\evil", "BTC/USDT", "BTC\\USDT", "C:ABSOLUTE",
     "%2E%2E", "%2e%2e", "..", "", "A" * 25, "btcusdt", "CON", "NUL",
-    "LPT1", "BTC USDT", "BTC;USDT", "BTC..USDT"])
+    "LPT1", "BTC USDT", "BTC;USDT", "BTC..USDT"], ids=[
+    "fwd_dotdot_evil", "bwd_dotdot_evil", "fwd_slash", "bwd_slash", "drive_abs",
+    "pct2E_upper", "pct2e_lower", "dotdot", "empty", "too_long", "lowercase",
+    "reserved_CON", "reserved_NUL", "reserved_LPT1", "space", "semicolon",
+    "embedded_dotdot"])
 def test_symbol_whitelist_rejects_traversal(bad):
     with pytest.raises(ValueError):
         BF.validate_symbol(bad)

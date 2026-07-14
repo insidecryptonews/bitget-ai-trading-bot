@@ -2,13 +2,10 @@
 
 There must be exactly ONE next action.
 
-- [ ] NEXT: Fix the P1 certification blockers first — evaluate VALIDATION in an
-  explicit gate, physically seal the holdout (deny-by-default guard + one-time
-  authorization + append-only access log; state stays SEALED), rebuild the matched
-  baseline to preserve single-position/holding/censoring with explicit paired
-  candidate−random deltas, implement the pre-registered 4h→1h regime with dynamic
-  2 ATR stops and 1R trailing, and bind the manifest/seal to HEAD/tree/dataset/spec/
-  registry provenance. Add the falsification tests, fix the duplicate pytest nodeid,
-  regenerate the twelve tournaments WITHOUT opening the holdout, and re-run Work's
-  audit before declaring anything "complete". Only after certification passes,
-  resume acquiring ≥2 years of 1h/4h OHLCV.
+- [ ] NEXT: Route the certification repair (V10.47.16–18) back to Work for an
+  independent RE-AUDIT — verify VALIDATION participation, the physically sealed
+  holdout (state SEALED, guard, commitment), the exactly-paired baseline with
+  coverage + paired lower bound, the real 4h→1h + 2-ATR deterministic strategies,
+  the provenance-bound manifest/seal, and the unique-test count. Keep the holdout
+  SEALED. Only if the re-audit PASSES, resume acquiring ≥2 years of verified 1h/4h
+  OHLCV to run EXP-DET-EMA-ADX / EXP-DET-DONCHIAN under the closed registry.

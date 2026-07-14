@@ -1,28 +1,28 @@
 # CURRENT STATE  (auto-refreshed)
 
 **Branch:** local-v10-47-8-scientific-repair
-**Certification:** **CERTIFICATION=FAIL** (independent Work audit of V10.47.14)
-**Official state:** SCIENTIFIC_REPAIR_IMPLEMENTED_BUT_NOT_CERTIFIED
+**Certification:** REPAIRED (V10.47.16–18) — re-audit pending
+**Official state:** CERTIFICATION_REPAIR_IMPLEMENTED — AWAITING RE-AUDIT
 **SHADOW_CANDIDATES = 0 · NO_CONFIRMED_EDGE · HOLD**
 **Safety:** PAPER_TRADING=True · LIVE_TRADING=False · DRY_RUN=True · can_send_real_orders=false · FINAL_RECOMMENDATION=NO LIVE
-**Holdout:** SEALED (not opened; being physically sealed in the certification repair)
+**Holdout:** SEALED in all 12 combos (never opened)
 
-## Why certification FAILED (Work audit — kept verbatim in reviews/V10_47_14_WORK_FINAL_AUDIT.md)
-- VALIDATION defined but never evaluated in any gate.
-- The "sealed" holdout is precomputed with the whole series; `holdout_touched=False`
-  is a hard-coded literal with no guard — not a verifiable seal.
-- The matched random baseline does not preserve realised holding/censoring or the
-  single-position path, and its lower bound is versus zero (not paired vs random).
-- Deterministic strategies are not the pre-registered 4h→1h with 2 ATR stops / 1R trailing.
-- The output manifest is stale and the seal binds only output path:hash, not
-  HEAD/tree/dataset/spec/registry provenance.
-- 2896 pytest invocations but only 2895 unique nodeids (one duplicate id).
+## What the certification repair fixed (Work audit V10.47.14 FAIL → addressed)
+- P1.1 VALIDATION now evaluated in the gate; holdout physically SEALED (guarded
+  object, deny-by-default, one-time token, access log, commitment hash, state
+  machine) and EXCLUDED from feature precompute.
+- P1.2 exactly-paired exposure/holding-matched baseline with explicit pairs,
+  coverage and paired lower bound; incomplete match → GATE_FAIL.
+- P1.3 real 4h→1h regime + 2-ATR stops / 1R trailing (still INSUFFICIENT_DATA).
+- P1.4 provenance-bound manifest + seal with independent disk verification.
+- P2.1 unique pytest ids (2912 invocations = 2912 nodeids); P2.2 timeframe-derived
+  bars_to_events; P2.3 semantic dedup; P2.4 justified bootstrap block; P3.1 deep-copy ledger.
 
-## Conservative conclusion (unchanged, supported by the audit)
-The DOGE/XRP sign flip, causal ledger and 12-tournament totals reproduce. No edge,
-no candidate, no live. The FAIL is about the *certification*, not the conclusion.
+## Regenerated evidence (holdout never opened)
+12 tournaments: 564 nominal runs, NO_GROSS 389 / COST_KILLED 154 / NET_POSITIVE 21,
+SHADOW_CANDIDATES=0, holdout SEALED everywhere. Manifest seal binds HEAD/tree/
+dataset/spec/registry/holdout-commitment.
 
-## Repair in progress
-V10.47.16 (validation + physical sealed holdout + paired baselines) →
-V10.47.17 (real 4h→1h + ATR risk) → V10.47.18 (reproducible manifest/seal + unique
-certification + regenerate the 12 tournaments without opening the holdout).
+## Conclusion (unchanged, now certifiably supported)
+No confirmed edge on free/public data. No paper champion, no shadow candidate, no
+live. Next real step remains ≥2 years of 1h/4h data — after re-audit passes.
