@@ -126,8 +126,75 @@ def precompute_det_sig(bars: list[dict]) -> list[dict]:
     return out
 
 
+from . import event_clock as EC
+
+
+def precompute_det_sig_mtf(bars_entry: list[dict], *, entry_tf: str = "1h",
+                           regime_tf: str = "4h") -> list[dict]:
+    """Real multi-timeframe signal: entry features on the entry timeframe, regime
+    from CLOSED higher-timeframe bars mapped ONLY to entry bars that open at/after
+    the higher bar's close (no cross-timeframe lookahead). Each entry bar records
+    `regime_4h_close_ts <= its own ts`. Closes Work audit finding P1.3 (4h→1h)."""
+    entry_ms = EC.interval_ms_for(entry_tf)
+    regime_ms = EC.interval_ms_for(regime_tf)
+    base = precompute_det_sig(bars_entry)                 # entry-tf features
+    # aggregate entry bars into wall-clock regime buckets
+    buckets: dict[int, dict] = {}
+    order: list[int] = []
+    for b in bars_entry:
+        k = int(b["ts"]) // regime_ms
+        if k not in buckets:
+            buckets[k] = {"ts": k * regime_ms, "open": b["open"], "high": b["high"],
+                          "low": b["low"], "close": b["close"]}
+            order.append(k)
+        else:
+            g = buckets[k]
+            g["high"] = max(g["high"], b["high"])
+            g["low"] = min(g["low"], b["low"])
+            g["close"] = b["close"]
+    regime_bars = [buckets[k] for k in order]             # ascending, causal order
+    r_ema50 = _ema([r["close"] for r in regime_bars], 50)
+    r_ema200 = _ema([r["close"] for r in regime_bars], 200)
+    r_atr, r_adx, r_pdi, r_ndi = _atr_adx(regime_bars, 14)
+    # regime published only at bucket close = bucket_start + regime_ms
+    reg_at_close = []
+    for j, r in enumerate(regime_bars):
+        reg_at_close.append({
+            "close_ts": r["ts"] + regime_ms, "ema50": r_ema50[j],
+            "ema200": r_ema200[j], "adx": r_adx[j], "plus_di": r_pdi[j],
+            "minus_di": r_ndi[j], "high": r["high"], "low": r["low"],
+            "ready": j >= 200})
+    out = []
+    ri = -1                                               # last published regime idx
+    for i, b in enumerate(bars_entry):
+        ts = int(b["ts"])
+        # advance ri to the latest regime whose CLOSE <= this bar's open ts
+        while ri + 1 < len(reg_at_close) and reg_at_close[ri + 1]["close_ts"] <= ts:
+            ri += 1
+        s = dict(base[i])
+        s["ts"] = ts
+        if ri >= 0 and reg_at_close[ri]["ready"]:
+            rg = reg_at_close[ri]
+            s.update({"regime_ready": True, "regime_4h_close_ts": rg["close_ts"],
+                      "ema50_4h": rg["ema50"], "ema200_4h": rg["ema200"],
+                      "adx_4h": rg["adx"], "plus_di_4h": rg["plus_di"],
+                      "minus_di_4h": rg["minus_di"],
+                      "don20_4h_hi": max(r["high"] for r in regime_bars[max(0, ri-20):ri]) if ri > 0 else b["high"],
+                      "don20_4h_lo": min(r["low"] for r in regime_bars[max(0, ri-20):ri]) if ri > 0 else b["low"]})
+        else:
+            s.update({"regime_ready": False, "regime_4h_close_ts": 0})
+        out.append(s)
+    return out
+
+
+# ATR-based risk (Work audit P1.3): dynamic 2-ATR stop, trailing from +1R. NO
+# fixed percentage stops. `stop_atr_mult`/`trail_atr_mult` are read by the ledger,
+# which sizes each trade from the causal ATR available before entry.
+DET_EXIT_ATR = {"stop_atr_mult": 2.0, "tp_atr_mult": 6.0, "trail_atr_mult": 2.0,
+                "trail_activate_r": 1.0, "atr_period": 14, "time_exit": 24}
+
 DET_EXIT = {"stop_frac": 0.02, "tp_frac": 0.06, "time_exit": 24,
-            "trailing_frac": 0.02}          # ~2 ATR structural + trailing baseline
+            "trailing_frac": 0.02}          # legacy fixed-fraction (deprecated)
 
 # pre-registered thresholds (one value each; no grid search)
 ADX_MIN = 20.0
@@ -153,10 +220,22 @@ def ema_adx_pullback_decider(*, symbol, venue, timeframe, gen,
             return _mk("ABSTAIN_DATA_QUALITY", "FLAT", 0.5, symbol=symbol,
                        venue=venue, timeframe=timeframe, event_id=event_id,
                        dt=dt, gen=gen, policy_id=pid, reason="WARMUP")
-        up_regime = (s["ema50"] > s["ema200"] and s["close"] > s["ema50"]
-                     and s["adx"] >= ADX_MIN and s["plus_di"] > s["minus_di"])
-        dn_regime = (s["ema50"] < s["ema200"] and s["close"] < s["ema50"]
-                     and s["adx"] >= ADX_MIN and s["minus_di"] > s["plus_di"])
+        # REGIME from the higher timeframe (4h) when the MTF sig provides it;
+        # falls back to the entry timeframe only for a single-series sig.
+        if s.get("regime_ready"):
+            r_ema50, r_ema200 = s["ema50_4h"], s["ema200_4h"]
+            r_adx, r_pdi, r_ndi = s["adx_4h"], s["plus_di_4h"], s["minus_di_4h"]
+        elif "regime_4h_close_ts" in s:          # MTF sig but regime not ready
+            return _mk("ABSTAIN_DATA_QUALITY", "FLAT", 0.5, symbol=symbol,
+                       venue=venue, timeframe=timeframe, event_id=event_id,
+                       dt=dt, gen=gen, policy_id=pid, reason="REGIME_WARMUP")
+        else:
+            r_ema50, r_ema200 = s["ema50"], s["ema200"]
+            r_adx, r_pdi, r_ndi = s["adx"], s["plus_di"], s["minus_di"]
+        up_regime = (r_ema50 > r_ema200 and s["close"] > s["ema50"]
+                     and r_adx >= ADX_MIN and r_pdi > r_ndi)
+        dn_regime = (r_ema50 < r_ema200 and s["close"] < s["ema50"]
+                     and r_adx >= ADX_MIN and r_ndi > r_pdi)
         side = None
         if up_regime and abs(s["dist_ema50_atr"]) <= PULLBACK_ATR \
                 and s["rsi_prev"] < RSI_RECOVER <= s["rsi"]:
@@ -186,14 +265,25 @@ def donchian_breakout_decider(*, symbol, venue, timeframe, gen, direction=None):
                        venue=venue, timeframe=timeframe, event_id=event_id,
                        dt=dt, gen=gen, policy_id=pid, reason="WARMUP")
         c, a = s["close"], s["atr"]
-        long_regime = s["ema50"] > s["ema200"] and s["adx"] >= ADX_MIN \
-            and s["plus_di"] > s["minus_di"]
-        short_regime = s["ema50"] < s["ema200"] and s["adx"] >= ADX_MIN \
-            and s["minus_di"] > s["plus_di"]
+        # 4h regime + 4h Donchian channel when the MTF sig is present
+        if s.get("regime_ready"):
+            e50, e200, adx, pdi, ndi = (s["ema50_4h"], s["ema200_4h"], s["adx_4h"],
+                                        s["plus_di_4h"], s["minus_di_4h"])
+            hi_ch, lo_ch = s.get("don20_4h_hi", s["don20_hi"]), s.get("don20_4h_lo", s["don20_lo"])
+        elif "regime_4h_close_ts" in s:
+            return _mk("ABSTAIN_DATA_QUALITY", "FLAT", 0.5, symbol=symbol,
+                       venue=venue, timeframe=timeframe, event_id=event_id,
+                       dt=dt, gen=gen, policy_id=pid, reason="REGIME_WARMUP")
+        else:
+            e50, e200, adx, pdi, ndi = (s["ema50"], s["ema200"], s["adx"],
+                                        s["plus_di"], s["minus_di"])
+            hi_ch, lo_ch = s["don20_hi"], s["don20_lo"]
+        long_regime = e50 > e200 and adx >= ADX_MIN and pdi > ndi
+        short_regime = e50 < e200 and adx >= ADX_MIN and ndi > pdi
         side = None
-        if long_regime and c >= s["don20_hi"] and (c - s["don20_hi"]) <= a:
+        if long_regime and c >= hi_ch and (c - hi_ch) <= a:
             side = "LONG"
-        elif short_regime and c <= s["don20_lo"] and (s["don20_lo"] - c) <= a:
+        elif short_regime and c <= lo_ch and (lo_ch - c) <= a:
             side = "SHORT"
         if side and direction and side != direction:
             side = None
@@ -209,7 +299,9 @@ def donchian_breakout_decider(*, symbol, venue, timeframe, gen, direction=None):
 
 DET_STRATEGIES = {
     "DET_EMA_ADX_PULLBACK_1H_4H": {"decider": ema_adx_pullback_decider,
-                                   "exit": DET_EXIT, "timeframes": ["1h", "4h"]},
+                                   "exit": DET_EXIT_ATR, "entry_tf": "1h",
+                                   "regime_tf": "4h", "mtf": True},
     "DET_DONCHIAN_BREAKOUT_4H": {"decider": donchian_breakout_decider,
-                                 "exit": DET_EXIT, "timeframes": ["4h"]},
+                                 "exit": DET_EXIT_ATR, "entry_tf": "4h",
+                                 "regime_tf": "4h", "mtf": False},
 }

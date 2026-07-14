@@ -81,4 +81,9 @@ def test_direction_restriction_never_flips_side():
 def test_strategies_registered():
     assert "DET_EMA_ADX_PULLBACK_1H_4H" in DET.DET_STRATEGIES
     assert "DET_DONCHIAN_BREAKOUT_4H" in DET.DET_STRATEGIES
-    assert DET.DET_STRATEGIES["DET_DONCHIAN_BREAKOUT_4H"]["timeframes"] == ["4h"]
+    ema = DET.DET_STRATEGIES["DET_EMA_ADX_PULLBACK_1H_4H"]
+    assert ema["entry_tf"] == "1h" and ema["regime_tf"] == "4h" and ema["mtf"]
+    don = DET.DET_STRATEGIES["DET_DONCHIAN_BREAKOUT_4H"]
+    assert don["entry_tf"] == "4h"
+    # ATR-based risk, not fixed percentage stops
+    assert "stop_atr_mult" in ema["exit"] and "stop_frac" not in ema["exit"]

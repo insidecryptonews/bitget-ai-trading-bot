@@ -41,14 +41,17 @@ for sym in SYMBOLS:
     status = "OK" if span_days >= MIN_DAYS else "INSUFFICIENT_DATA"
     result["symbols"][sym] = {"venue": venue, "span_days": round(span_days, 1),
                               "status": status}
-    for tf, f in FACT.items():
-        bars = ENG.resample_bars(bars1, f, as_of_ms=vr["as_of_ms"])
-        sig = DET.precompute_det_sig(bars)
-        for name, spec in DET.DET_STRATEGIES.items():
-            if tf not in spec["timeframes"]:
-                continue
-            dec = spec["decider"](symbol=sym, venue=venue, timeframe=tf,
-                                  gen=vr["generation_id"])
+    # each strategy runs on its own entry timeframe with a real 4h regime (MTF)
+    resampled = {tf: ENG.resample_bars(bars1, f, as_of_ms=vr["as_of_ms"])
+                 for tf, f in FACT.items()}
+    for name, spec in DET.DET_STRATEGIES.items():
+        tf = spec["entry_tf"]
+        bars = resampled[tf]
+        sig = DET.precompute_det_sig_mtf(bars, entry_tf=spec["entry_tf"],
+                                         regime_tf=spec["regime_tf"])
+        dec = spec["decider"](symbol=sym, venue=venue, timeframe=tf,
+                              gen=vr["generation_id"])
+        if True:
             t = time.time()
             out = CL.drive_causal(bars, sig, dec, spec["exit"], symbol=sym,
                                   timeframe=tf)
