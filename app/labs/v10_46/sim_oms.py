@@ -157,7 +157,8 @@ def simulate_trade(*, side: str, entry_bar: dict, exit_bars: list[dict],
                    entry_ts_ms: int, stop_frac: float, tp_frac: float,
                    time_exit: int, scenario_money: str = "5eur",
                    scenario_cost: str = "observed",
-                   trailing_frac: float | None = None) -> dict:
+                   trailing_frac: float | None = None,
+                   interval_ms: int = BAR_MS) -> dict:
     """Full money-accounted trade lifecycle through the SimOMS.
 
     entry_bar: the bar at which we act (entry = its open + taker costs).
@@ -165,7 +166,13 @@ def simulate_trade(*, side: str, entry_bar: dict, exit_bars: list[dict],
     for stop / TP / trailing / time exit with gap-through realism. Returns a
     dict with gross_pnl_eur, net_pnl_eur, all cost components and MFE/MAE.
     Fees/spread/slippage counted once on entry and once on exit; funding only
-    for settlement instants actually crossed."""
+    for settlement instants actually crossed.
+
+    V10.47.8: `interval_ms` is the timeframe step (60000 for 1m, 900000 for
+    15m, ...). It drives exit timestamps and bars_held so a 15m/1h/4h trade is
+    no longer mis-stamped at a 1-minute cadence. Trailing is strictly causal:
+    an update computed from a COMPLETED bar's high/low takes effect on the NEXT
+    bar, never within the same bar it was derived from."""
     cost = COST_SCENARIOS[scenario_cost]
     ms = MONEY_SCENARIOS[scenario_money]
     long = side == "LONG"
@@ -192,18 +199,21 @@ def simulate_trade(*, side: str, entry_bar: dict, exit_bars: list[dict],
     exit_reason = "TIME"
     exit_ts = entry_ts_ms
     mfe = mae = 0.0
+    # `trail_stop` carries the trailing level derived from ALREADY-COMPLETED
+    # bars; it is applied to `stop_px` at the START of the next bar, so a level
+    # computed from bar k can never be used to test a stop inside bar k itself.
+    trail_stop = None
     for k, b in enumerate(exit_bars):
         hi, lo, op, cl = b["high"], b["low"], b["open"], b["close"]
+        # activate any trailing level derived from a PREVIOUS completed bar
+        if trail_stop is not None:
+            stop_px = max(stop_px, trail_stop) if long else min(stop_px, trail_stop)
         # MFE/MAE tracking (for labels/autopsy, not decisions)
         up = (hi - entry_px_raw) / entry_px_raw if long else (entry_px_raw - lo) / entry_px_raw
         dn = (entry_px_raw - lo) / entry_px_raw if long else (hi - entry_px_raw) / entry_px_raw
         mfe = max(mfe, up)
         mae = max(mae, dn)
-        # trailing update from COMPLETED bar
-        if trailing_frac is not None:
-            hwm = max(hwm, hi) if long else min(hwm, lo)
-            trail = hwm * (1 - trailing_frac) if long else hwm * (1 + trailing_frac)
-            stop_px = max(stop_px, trail) if long else min(stop_px, trail)
+        was_trailing = trailing_frac is not None and trail_stop is not None
         hit_stop = (lo <= stop_px) if long else (hi >= stop_px)
         hit_tp = (hi >= tp_px) if long else (lo <= tp_px)
         if hit_stop:                                   # stop first (conservative)
@@ -212,22 +222,26 @@ def simulate_trade(*, side: str, entry_bar: dict, exit_bars: list[dict],
                 exit_px_raw = op
             else:
                 exit_px_raw = stop_px
-            exit_reason = "TRAIL" if trailing_frac is not None else "SL"
-            exit_ts = b["ts"] + BAR_MS
+            exit_reason = "TRAIL" if was_trailing else "SL"
+            exit_ts = b["ts"] + interval_ms
             break
         if hit_tp:
             exit_px_raw = tp_px if ((long and op < tp_px) or (not long and op > tp_px)) else op
             exit_reason = "TP"
-            exit_ts = b["ts"] + BAR_MS
+            exit_ts = b["ts"] + interval_ms
             break
         if k + 1 >= time_exit:
             exit_px_raw = cl
             exit_reason = "TIME"
-            exit_ts = b["ts"] + BAR_MS
+            exit_ts = b["ts"] + interval_ms
             break
+        # derive trailing from THIS completed bar -> effective from bar k+1
+        if trailing_frac is not None:
+            hwm = max(hwm, hi) if long else min(hwm, lo)
+            trail_stop = hwm * (1 - trailing_frac) if long else hwm * (1 + trailing_frac)
     if exit_px_raw is None:
         exit_px_raw = exit_bars[-1]["close"] if exit_bars else entry_px_raw
-        exit_ts = (exit_bars[-1]["ts"] + BAR_MS) if exit_bars else entry_ts_ms
+        exit_ts = (exit_bars[-1]["ts"] + interval_ms) if exit_bars else entry_ts_ms
         exit_reason = "END"
     exit_px = exit_px_raw * (1 - per_side_px) if long else exit_px_raw * (1 + per_side_px)
     fee_close = notional * taker
@@ -264,7 +278,8 @@ def simulate_trade(*, side: str, entry_bar: dict, exit_bars: list[dict],
             "gross_pnl_eur": round(gross_eur, 8),
             "net_pnl_eur": round(net_eur, 8),
             "mfe_frac": round(mfe, 8), "mae_frac": round(mae, 8),
-            "bars_held": (exit_ts - entry_ts_ms) // BAR_MS}
+            "interval_ms": interval_ms,
+            "bars_held": (exit_ts - entry_ts_ms) // interval_ms}
 
 
 def _zero_money(sm, sc) -> dict:

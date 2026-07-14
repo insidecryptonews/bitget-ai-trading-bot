@@ -21,11 +21,46 @@ from . import contracts as C
 
 BAR_MS = 60_000
 
+# V10.47.8: the clock is timeframe-aware. A fixed 1-minute step (BAR_MS) is only
+# correct for 1m; every other timeframe MUST use its own interval so candle
+# close, causal cutoff, entry/exit timestamps, bars_held, funding-settlement
+# crossing and stale/time exits are computed correctly.
+TF_MS = {"1m": 60_000, "5m": 300_000, "15m": 900_000,
+         "1h": 3_600_000, "4h": 14_400_000}
+
+
+def interval_ms_for(timeframe: str) -> int:
+    """Milliseconds per bar for a timeframe. Raises on an unknown timeframe so a
+    caller can never silently fall back to a wrong (1-minute) step."""
+    if timeframe not in TF_MS:
+        raise ValueError(f"unknown timeframe {timeframe!r}; known={sorted(TF_MS)}")
+    return TF_MS[timeframe]
+
 
 def cluster_id(symbol: str, ts_ms: int, block_ms: int = 30 * BAR_MS) -> str:
     """Deterministic temporal cluster used for cooldown and PAIRED tournament
     comparison: events in the same block on the same symbol share a cluster."""
     return f"{symbol}:{ts_ms // block_ms}"
+
+
+def cluster_block_ms(timeframe: str) -> int:
+    """Timeframe-aware cluster block for cooldown + n_eff: a wall-clock hour for
+    intraday (1m/5m/15m), and one bar for 1h/4h. Never smaller than one bar."""
+    return max(3_600_000, interval_ms_for(timeframe))
+
+
+def cluster_id_tf(symbol: str, ts_ms: int, timeframe: str) -> str:
+    """Timeframe-aware cluster id (see cluster_block_ms)."""
+    return f"{symbol}:{ts_ms // cluster_block_ms(timeframe)}"
+
+
+def session_id(symbol: str, ts_ms: int, session_ms: int = 8 * 3_600_000) -> str:
+    """8-hour funding session block, used for session-level n_eff dependence."""
+    return f"{symbol}:S{ts_ms // session_ms}"
+
+
+def day_id(symbol: str, ts_ms: int) -> str:
+    return f"{symbol}:D{ts_ms // 86_400_000}"
 
 
 def bars_to_events(bars: list[dict], *, symbol: str, venue: str,
