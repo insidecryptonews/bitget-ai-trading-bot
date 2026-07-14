@@ -34,3 +34,16 @@
   SEALED and the external loader was not imported.
 - Builder status is not scientific PASS. Work owns the next and only action:
   `WORK_REAUDIT_V10_47_22`.
+
+## 2026-07-14 - V10.47.23 exact pairing and campaign-wide correction
+- Accepted Work's final V10.47.22 finding that candidate reuse could violate a true
+  one-to-one matched baseline and reproduced it RED before repair.
+- Candidate, baseline and deterministic pair identities are now mandatory and
+  bijective inside each pairing evaluation; identity failure invalidates the gate.
+- The promotion p-value now uses the preregistered full campaign family:
+  4 symbols x 3 timeframes x 47 trials = 564 nominal hypotheses.
+- No semantic-dedup reduction is claimed without a hashed equivalence proof; this
+  campaign therefore remains conservatively corrected with `m_campaign=564`.
+- Builder status remains `CERTIFICATION=PENDING_WORK_REAUDIT`; Work owns
+  `WORK_REAUDIT_V10_47_23_EXACT_PAIRING_AND_CAMPAIGN_FWER`.
+- No confirmed edge, zero shadow candidates, holdout sealed and NO LIVE.

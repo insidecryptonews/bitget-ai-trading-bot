@@ -64,3 +64,16 @@
   append-only risk ledger and mutation-sensitive coverage.
 - **Trading state:** NO_CONFIRMED_EDGE; SHADOW_CANDIDATES=0; HOLDOUT=SEALED; NO LIVE.
 - **Owner:** TEMPORARY BUILDER (Codex) - **Status:** RESOLVED; independent Work review OPEN.
+
+### D008 - V10.47.23 uses exact bijection and campaign-wide nominal FWER
+- **Date (UTC):** 2026-07-14
+- **Context:** Work's V10.47.22 final re-audit falsified candidate-side uniqueness:
+  one candidate ID could be repeated across twelve accepted pairs.
+- **Decision:** reject the complete evaluation on any duplicate/missing/invalid
+  candidate, baseline or pair ID. Pair IDs are canonical SHA-256 evidence. The
+  promotion p-value is Bonferroni-corrected over the complete 4-symbol x 3-timeframe
+  campaign, using nominal `m=564` whenever semantic equivalence is ambiguous.
+- **Certification boundary:** implementation may only claim
+  `IMPLEMENTATION_COMPLETE_FOR_WORK_REAUDIT`; Work remains the certifier.
+- **Trading state:** NO_CONFIRMED_EDGE; SHADOW_CANDIDATES=0; HOLDOUT=SEALED; NO LIVE.
+- **Owner:** TEMPORARY BUILDER (Codex) - **Status:** RESOLVED; Work re-audit OPEN.

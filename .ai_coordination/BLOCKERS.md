@@ -42,3 +42,14 @@
   append-only and initial stop is immutable.
 - BLK-R7: OPEN - Work must independently attempt to falsify all six repairs and the
   final manifest/seal. Until then `CERTIFICATION=PENDING_WORK_REAUDIT`.
+
+## V10.47.23 exact-pairing and campaign-FWER disposition
+- BLK-R8: IMPLEMENTATION_REPAIRED - pairing now requires unique, explicit candidate,
+  baseline and deterministic pair identities; any duplicate, missing, malformed or
+  incompatible identity invalidates the whole pairing evaluation fail-closed.
+- BLK-R9: IMPLEMENTATION_REPAIRED - promotion significance uses the preregistered
+  campaign family of 4 symbols x 3 timeframes x 47 trials (`m_campaign=564`), not
+  the per-tournament family alone. Ambiguous semantic dedup remains nominal.
+- BLK-R10: OPEN - Work must independently re-audit exact bijection, campaign-wide
+  correction, regenerated gates, evidence manifest and seal. Builder completion is
+  not certification and cannot create a shadow candidate.

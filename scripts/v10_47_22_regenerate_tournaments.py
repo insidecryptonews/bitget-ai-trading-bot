@@ -17,6 +17,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 REPORT_ROOT = ROOT / "reports" / "research" / "v10_47_22_real_state_certification"
+RUN_ONE_SCRIPT = ROOT / "scripts" / "v10_47_22_run_one_tournament.py"
 SYMBOLS = ("BTCUSDT", "ETHUSDT", "XRPUSDT", "DOGEUSDT")
 TIMEFRAMES = ("1m", "5m", "15m")
 if hasattr(sys.stdout, "reconfigure"):
@@ -144,7 +145,7 @@ def main(argv: list[str] | None = None) -> int:
                     retry += 1
                 log_path = run_root / f"{symbol}_{timeframe}.retry{retry}.log"
             command = [
-                sys.executable, str(ROOT / "scripts" / "v10_47_22_run_one_tournament.py"),
+                sys.executable, str(RUN_ONE_SCRIPT),
                 "--symbol", symbol, "--timeframe", timeframe,
                 "--output", str(output),
             ]

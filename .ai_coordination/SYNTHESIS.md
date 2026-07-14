@@ -36,3 +36,17 @@ This repairs implementation, not market edge. The regenerated result remains zer
 shadow candidates and all apparent positive selection rows fail validation and/or
 the exact baseline contract. MTF still lacks two years of data. The only honest next
 step is `WORK_REAUDIT_V10_47_22`; certification remains pending and live remains off.
+
+## V10.47.23 synthesis
+
+Work's final V10.47.22 re-audit correctly found that baseline reuse was blocked but
+candidate reuse was not. The production gate could therefore overcount dependent
+rows. V10.47.23 closes that path with a fail-closed identity registry and a
+deterministic pair identity. It also corrects the promotion family from one local
+tournament (`m=47`) to the complete campaign (`m=564`). Local corrected p-values
+remain diagnostic only.
+
+The repair does not create market edge. All prior positive TRAIN labels remain
+subject to validation, exact baseline, costs, lower bounds and campaign FWER. The
+expected recomputation remains 0 shadow candidates, sealed holdout and NO LIVE.
+Only Work may decide whether this implementation clears the independent FAIL.

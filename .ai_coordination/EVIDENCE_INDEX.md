@@ -1,5 +1,26 @@
 # EVIDENCE INDEX
 
+## V10.47.23 exact bijective pairing and campaign-wide FWER
+- reviews/V10_47_22_WORK_FINAL_REAUDIT.md - protected independent Work FAIL.
+- WORK_RESEARCH.md - protected Work research record.
+- reports/research/v10_47_23_exact_pairing/logs/reproduction_before_fix.log - RED
+  reproduction of repeated candidate identity and false paired-baseline success.
+- reports/research/v10_47_23_exact_pairing/tournaments/work_reaudit_v10_47_23/ -
+  twelve regenerated discovery-only tournament outputs and command logs.
+- reports/research/v10_47_23_exact_pairing/evidence/work_reaudit_v10_47_23/ - exact
+  pairing audit, campaign registry, deterministic comparison, reports and dashboard.
+- reports/research/v10_47_23_exact_pairing/certified_tests/work_reaudit_v10_47_23/ -
+  unique collection, nodeids, one full execution and hashes.
+- reports/research/v10_47_23_exact_pairing/manifests/work_reaudit_v10_47_23/ -
+  output_manifest.json, SEAL.txt and verification evidence.
+- tests/test_researchops_v10_47_23_bijective_pairing_campaign.py - adversarial exact
+  identity, bijection, campaign registry and correction contract.
+- scripts/v10_47_23_regenerate_tournaments.py - bounded 12-combination regeneration.
+- scripts/v10_47_23_run_one_tournament.py - isolated V10.47.23 output-root adapter.
+- scripts/v10_47_23_generate_evidence.py - discovery-only evidence and dashboard.
+- scripts/v10_47_23_certified_test_runner.py - one-run certified pytest evidence.
+- scripts/v10_47_23_build_manifest.py - provenance-bound manifest and seal.
+
 ## V10.47.19-22 focused adversarial repair
 - reviews/V10_47_18_WORK_REAUDIT.md - protected independent focused FAIL.
 - WORK_RESEARCH.md - protected Work notes and research conclusions.

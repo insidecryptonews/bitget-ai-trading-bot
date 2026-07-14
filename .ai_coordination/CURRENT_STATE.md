@@ -1,8 +1,8 @@
 # CURRENT STATE
 
 **Branch:** local-v10-47-8-scientific-repair
-**Implementation:** IMPLEMENTATION_COMPLETE_FOR_WORK_REAUDIT (V10.47.19-22)
-**Certification:** PENDING_WORK_REAUDIT; the independent V10.47.18 verdict remains FAIL
+**Implementation:** IMPLEMENTATION_COMPLETE_FOR_WORK_REAUDIT (V10.47.23)
+**Certification:** PENDING_WORK_REAUDIT; the independent V10.47.22 verdict is FAIL
 **WORK_REAUDIT_REQUIRED:** true
 **SHADOW_CANDIDATES:** 0
 **Edge:** NO_CONFIRMED_EDGE
@@ -40,3 +40,18 @@ Canonical post-commit evidence location:
 `reports/research/v10_47_22_real_state_certification/` under run label
 `work_reaudit_v10_47_22_final`. Work must independently re-audit it before any status
 beyond `PENDING_WORK_REAUDIT` is allowed.
+
+## V10.47.23 bounded repair state
+
+- Work found one new P1: a repeated `candidate_trade_id` could be accepted against
+  several distinct baselines inside one evaluation.
+- The protected Work report and notes are committed byte-for-byte, with their
+  original SHA-256 values preserved.
+- Pairing now fails closed on duplicate/missing/invalid candidate, baseline or pair
+  identities; deterministic pair IDs bind both identities and all registry hashes.
+- Promotion now uses the preregistered 12-tournament campaign family. Ambiguous
+  semantic deduplication falls back to the nominal `m_campaign=564`.
+- The 12 tournaments, 311 pairing requests, reports, dashboard, tests and seal are
+  regenerated under `reports/research/v10_47_23_exact_pairing/` without opening
+  holdout data.
+- This builder state is not certification. Work owns the independent re-audit.
