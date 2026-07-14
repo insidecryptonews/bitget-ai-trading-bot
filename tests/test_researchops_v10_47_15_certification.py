@@ -91,21 +91,23 @@ def test_sealed_holdout_path_traversal_and_bad_capability_fail(tmp_path):
 def test_matched_baseline_is_paired_with_explicit_pairs():
     CS = importlib.import_module("app.labs.v10_46.causal_stats")
     assert hasattr(CS, "matched_random_paired")
-    # synthetic trades with entry/exit indices
-    trades = [{"opportunity_bar": i * 5 + 60, "entry_bar": i * 5 + 61,
-               "exit_index": i * 5 + 63, "entry_ts": (i * 5 + 60) * 60000,
-               "cluster": f"X:{i}", "session": "X:S0", "day": "X:D0",
-               "side": "LONG", "net_eur": 0.01 * (1 if i % 2 else -1),
-               "gross_eur": 0.02, "bars_held": 2} for i in range(20)]
-    bars = [{"ts": i * 60000, "open": 100.0, "high": 100.5, "low": 99.5,
-             "close": 100.0, "volume": 10.0} for i in range(300)]
-    r = CS.matched_random_paired(bars, trades, symbol="X", timeframe="1m",
-                                 exit_params={"stop_frac": 0.02, "tp_frac": 0.02,
-                                              "time_exit": 2}, reps=20)
+    common = {field: f"v-{field}" for field in CS.BASELINE_MATCH_FIELDS}
+    common.update({
+        "notional_eur": 5.0, "exposure_eur": 5.0,
+        "leverage_simulated": 1.0, "funding_cost_eur": 0.0,
+        "funding_settlements_crossed": 0, "max_holding_bars": 2,
+        "realised_holding_bars": 2, "end_of_dataset_censored": False,
+    })
+    candidate = {**common, "candidate_trade_id": "C1", "candidate_net_eur": 0.1}
+    baseline = {**common, "baseline_trade_id": "B1", "baseline_net_eur": 0.0}
+    r = CS.matched_random_paired(
+        candidate_trades=[candidate], baseline_trades=[baseline],
+        timeframe="1m", m_global=10,
+    )
     for k in ("pairs_requested", "pairs_found", "coverage", "paired_mean_eur",
               "paired_lower_bound_eur", "match_status"):
         assert k in r
-    assert r["pairs_requested"] == len(trades)
+    assert r["pairs_requested"] == 1
 
 
 # --------------------------------------------------------------------------- #
@@ -239,15 +241,11 @@ def test_registry_semantic_dedup_reports_results():
 
 def test_baseline_incomplete_fails_gate():
     CS = importlib.import_module("app.labs.v10_46.causal_stats")
-    # a trade whose cluster has no usable bar in the (tiny) bar series is impossible
-    trades = [{"opportunity_bar": 5, "entry_bar": 6, "exit_index": 8,
-               "entry_ts": 999_999_999, "cluster": "X:99999", "session": "X:S0",
-               "day": "X:D0", "side": "LONG", "net_eur": 0.5, "gross_eur": 0.6,
-               "bars_held": 2}]
-    bars = [{"ts": i * 60000, "open": 100.0, "high": 100.1, "low": 99.9,
-             "close": 100.0, "volume": 1.0} for i in range(50)]
-    r = CS.matched_random_paired(bars, trades, symbol="X", timeframe="1m",
-                                 exit_params={"stop_frac": 0.02, "tp_frac": 0.02,
-                                              "time_exit": 2}, reps=10)
+    candidate = {field: f"v-{field}" for field in CS.BASELINE_MATCH_FIELDS}
+    candidate.update({"candidate_trade_id": "C1", "candidate_net_eur": 0.5})
+    r = CS.matched_random_paired(
+        candidate_trades=[candidate], baseline_trades=[],
+        timeframe="1m", m_global=10,
+    )
     assert r["match_status"] == "BASELINE_MATCH_INCOMPLETE"
     assert r["beats_matched_random"] is False                 # cannot pass the gate

@@ -129,52 +129,146 @@ def precompute_det_sig(bars: list[dict]) -> list[dict]:
 from . import event_clock as EC
 
 
+def aggregate_complete_regime_bars(bars_entry: list[dict], *,
+                                   entry_tf: str = "1h",
+                                   regime_tf: str = "4h") -> dict:
+    """Aggregate only complete, consecutive, duplicate-free closed buckets."""
+    entry_ms = EC.interval_ms_for(entry_tf)
+    regime_ms = EC.interval_ms_for(regime_tf)
+    expected_count, remainder = divmod(regime_ms, entry_ms)
+    if remainder or expected_count < 1:
+        raise ValueError("regime timeframe must be an integer multiple of entry timeframe")
+    by_bucket: dict[int, list[dict]] = {}
+    invalid_order_buckets: set[int] = set()
+    previous_ts = None
+    for raw in bars_entry:
+        ts = int(raw["ts"])
+        bucket_start = (ts // regime_ms) * regime_ms
+        if previous_ts is not None and ts <= previous_ts:
+            invalid_order_buckets.add(bucket_start)
+        previous_ts = ts
+        by_bucket.setdefault(bucket_start, []).append(raw)
+    complete: list[dict] = []
+    bucket_status: dict[int, dict] = {}
+    diagnostics = {
+        "total_buckets": 0,
+        "complete_buckets": 0,
+        "incomplete_buckets": 0,
+        "gap_buckets": 0,
+        "duplicate_buckets": 0,
+        "out_of_order_buckets": 0,
+    }
+    bucket_starts = []
+    if by_bucket:
+        first_bucket, last_bucket = min(by_bucket), max(by_bucket)
+        bucket_starts = list(range(first_bucket, last_bucket + regime_ms, regime_ms))
+    diagnostics["total_buckets"] = len(bucket_starts)
+    for bucket_start in bucket_starts:
+        rows = by_bucket.get(bucket_start, [])
+        timestamps = [int(row["ts"]) for row in rows]
+        expected = [bucket_start + offset * entry_ms for offset in range(expected_count)]
+        duplicate = len(timestamps) != len(set(timestamps))
+        out_of_order = bucket_start in invalid_order_buckets
+        gap = sorted(set(timestamps)) != expected
+        incomplete = len(rows) != expected_count
+        if duplicate:
+            diagnostics["duplicate_buckets"] += 1
+        if out_of_order:
+            diagnostics["out_of_order_buckets"] += 1
+        if gap:
+            diagnostics["gap_buckets"] += 1
+        if incomplete:
+            diagnostics["incomplete_buckets"] += 1
+        bucket_status[bucket_start] = {
+            "bucket_start": bucket_start,
+            "close_ts": bucket_start + regime_ms,
+            "row_count": len(rows),
+            "duplicate": duplicate,
+            "out_of_order": out_of_order,
+            "gap": gap,
+            "incomplete": incomplete,
+            "complete": not (duplicate or out_of_order or gap or incomplete),
+        }
+        if duplicate or out_of_order or gap or incomplete:
+            continue
+        ordered = sorted(rows, key=lambda row: int(row["ts"]))
+        complete.append({
+            "ts": bucket_start,
+            "close_ts": bucket_start + regime_ms,
+            "open": ordered[0]["open"],
+            "high": max(row["high"] for row in ordered),
+            "low": min(row["low"] for row in ordered),
+            "close": ordered[-1]["close"],
+            "volume": sum(float(row.get("volume", 0.0)) for row in ordered),
+            "component_timestamps": timestamps,
+            "component_count": expected_count,
+            "complete": True,
+        })
+        diagnostics["complete_buckets"] += 1
+    return {"bars": complete, "diagnostics": diagnostics,
+            "bucket_status": bucket_status,
+            "entry_tf": entry_tf, "regime_tf": regime_tf,
+            "expected_components": expected_count}
+
+
 def precompute_det_sig_mtf(bars_entry: list[dict], *, entry_tf: str = "1h",
                            regime_tf: str = "4h") -> list[dict]:
     """Real multi-timeframe signal: entry features on the entry timeframe, regime
     from CLOSED higher-timeframe bars mapped ONLY to entry bars that open at/after
     the higher bar's close (no cross-timeframe lookahead). Each entry bar records
     `regime_4h_close_ts <= its own ts`. Closes Work audit finding P1.3 (4h→1h)."""
-    entry_ms = EC.interval_ms_for(entry_tf)
     regime_ms = EC.interval_ms_for(regime_tf)
     base = precompute_det_sig(bars_entry)                 # entry-tf features
-    # aggregate entry bars into wall-clock regime buckets
-    buckets: dict[int, dict] = {}
-    order: list[int] = []
-    for b in bars_entry:
-        k = int(b["ts"]) // regime_ms
-        if k not in buckets:
-            buckets[k] = {"ts": k * regime_ms, "open": b["open"], "high": b["high"],
-                          "low": b["low"], "close": b["close"]}
-            order.append(k)
-        else:
-            g = buckets[k]
-            g["high"] = max(g["high"], b["high"])
-            g["low"] = min(g["low"], b["low"])
-            g["close"] = b["close"]
-    regime_bars = [buckets[k] for k in order]             # ascending, causal order
+    aggregation = aggregate_complete_regime_bars(
+        bars_entry, entry_tf=entry_tf, regime_tf=regime_tf
+    )
+    regime_bars = aggregation["bars"]
     r_ema50 = _ema([r["close"] for r in regime_bars], 50)
     r_ema200 = _ema([r["close"] for r in regime_bars], 200)
     r_atr, r_adx, r_pdi, r_ndi = _atr_adx(regime_bars, 14)
     # regime published only at bucket close = bucket_start + regime_ms
     reg_at_close = []
+    contiguous_run = 0
+    previous_bucket_start = None
     for j, r in enumerate(regime_bars):
+        if previous_bucket_start is not None \
+                and r["ts"] == previous_bucket_start + regime_ms:
+            contiguous_run += 1
+        else:
+            contiguous_run = 1
+        previous_bucket_start = r["ts"]
         reg_at_close.append({
-            "close_ts": r["ts"] + regime_ms, "ema50": r_ema50[j],
+            "bucket_start": r["ts"],
+            "close_ts": r["close_ts"], "ema50": r_ema50[j],
             "ema200": r_ema200[j], "adx": r_adx[j], "plus_di": r_pdi[j],
             "minus_di": r_ndi[j], "high": r["high"], "low": r["low"],
-            "ready": j >= 200})
+            "contiguous_run": contiguous_run,
+            "ready": contiguous_run >= 201})
+    reg_by_start = {row["bucket_start"]: row for row in reg_at_close}
+    regime_index_by_start = {
+        row["bucket_start"]: index for index, row in enumerate(reg_at_close)
+    }
     out = []
-    ri = -1                                               # last published regime idx
     for i, b in enumerate(bars_entry):
         ts = int(b["ts"])
-        # advance ri to the latest regime whose CLOSE <= this bar's open ts
-        while ri + 1 < len(reg_at_close) and reg_at_close[ri + 1]["close_ts"] <= ts:
-            ri += 1
+        latest_closed_start = (ts // regime_ms) * regime_ms - regime_ms
+        local_status = aggregation["bucket_status"].get(latest_closed_start)
+        rg = reg_by_start.get(latest_closed_start)
         s = dict(base[i])
         s["ts"] = ts
-        if ri >= 0 and reg_at_close[ri]["ready"]:
-            rg = reg_at_close[ri]
+        s["mtf_aggregation_diagnostics"] = {
+            "latest_closed_bucket_start": latest_closed_start,
+            "latest_closed_bucket_status": (
+                "COMPLETE" if local_status and local_status["complete"]
+                else "INCOMPLETE_OR_MISSING"
+            ),
+        }
+        s["incomplete_bucket"] = bool(
+            local_status is not None and not local_status["complete"]
+        )
+        if rg is not None and local_status and local_status["complete"] \
+                and rg["ready"]:
+            ri = regime_index_by_start[latest_closed_start]
             s.update({"regime_ready": True, "regime_4h_close_ts": rg["close_ts"],
                       "ema50_4h": rg["ema50"], "ema200_4h": rg["ema200"],
                       "adx_4h": rg["adx"], "plus_di_4h": rg["plus_di"],
@@ -305,3 +399,28 @@ DET_STRATEGIES = {
                                  "exit": DET_EXIT_ATR, "entry_tf": "4h",
                                  "regime_tf": "4h", "mtf": False},
 }
+
+
+def deterministic_mtf_experiment_registry() -> dict:
+    """Independent preregistration, not part of the twelve intraday tournaments."""
+    participants = [
+        "DET_EMA_ADX_PULLBACK_1H_4H",
+        "DET_DONCHIAN_BREAKOUT_4H",
+        "NO_TRADE",
+        "EXACT_MATCH_BASELINE",
+        "TREND_RIDER_1H_4H",
+    ]
+    return {
+        "experiment_id": "DETERMINISTIC_MTF_1H_4H",
+        "status": "IMPLEMENTED",
+        "scientific_evaluation": "INSUFFICIENT_DATA",
+        "needs_2y_data": True,
+        "participants": participants,
+        "baseline_contract": "V10_47_21_EXACT_ONE_TO_ONE",
+        "same_bar_rule": "STOP_BEFORE_TP",
+        "entry_rule": "NEXT_OPEN",
+        "research_only": True,
+        "paper_ready": False,
+        "live_ready": False,
+        "final_recommendation": "NO LIVE",
+    }

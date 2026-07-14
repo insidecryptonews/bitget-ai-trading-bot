@@ -141,12 +141,15 @@ def drive_causal(bars: list[dict], sigs: list, decide_fn: Callable,
         # ---- risk sizing: real ATR-multiple stop when requested (else fixed) ----
         atr_entry = None
         stop_atr_mult = exit_params.get("stop_atr_mult")
+        atr_period = int(exit_params.get("atr_period", 14))
+        risk_model_id = "ATR_STOP_V1" if stop_atr_mult is not None \
+            else "FIXED_FRACTION_STOP_V1"
         t_stop_frac, t_tp_frac, t_trail_frac, t_trail_act = \
             stop_frac, tp_frac, trailing_frac, None
+        entry_px = float(entry_bar["open"])
         if stop_atr_mult is not None:
             # atr_entry is CAUSAL: computed from bars closed at/before the signal
             atr_entry = float((s or {}).get("atr") or 0.0)
-            entry_px = float(entry_bar["open"])
             if atr_entry <= 0 or entry_px <= 0:
                 ledger.append("skip", bar=i, ts=ts_i, cluster=cluster,
                               reason="ATR_UNAVAILABLE")
@@ -159,6 +162,16 @@ def drive_causal(bars: list[dict], sigs: list, decide_fn: Callable,
                 t_trail_frac = trail_mult * atr_entry / entry_px
                 # trailing engages only after +1R (one stop distance) in favour
                 t_trail_act = float(exit_params.get("trail_activate_r", 1.0)) * t_stop_frac
+        initial_stop = entry_px * (1 - t_stop_frac) if d["side"] == "LONG" \
+            else entry_px * (1 + t_stop_frac)
+        stop_distance = abs(entry_px - initial_stop)
+        ledger.append(
+            "SIGNAL", bar=i, ts=ts_i, cluster=cluster, side=d["side"],
+            atr_entry=atr_entry, atr_period=atr_period,
+            atr_multiplier=float(stop_atr_mult) if stop_atr_mult is not None else None,
+            risk_model_id=risk_model_id, signal_timestamp=ts_i,
+            immutable=True,
+        )
         res = S.simulate_trade(
             side=d["side"], entry_bar=entry_bar, exit_bars=exit_bars,
             entry_ts_ms=int(entry_bar["ts"]), stop_frac=t_stop_frac,
@@ -177,6 +190,11 @@ def drive_causal(bars: list[dict], sigs: list, decide_fn: Callable,
         busy_until_index = exit_index
         entered_clusters[cluster] = i
         n_exec += 1
+        trailing_activation_price = None
+        if t_trail_act is not None:
+            trailing_activation_price = entry_px * (1 + t_trail_act) \
+                if d["side"] == "LONG" else entry_px * (1 - t_trail_act)
+        trade_id = f"{symbol}:{timeframe}:{int(entry_bar['ts'])}:{d['side']}:{n_exec}"
         ledger.append("order", bar=entry_index, ts=int(entry_bar["ts"]),
                       cluster=cluster, side=d["side"])
         ledger.append("entry", bar=entry_index, ts=int(entry_bar["ts"]),
@@ -187,12 +205,73 @@ def drive_causal(bars: list[dict], sigs: list, decide_fn: Callable,
         ledger.append("exit", bar=exit_index, ts=int(res["exit_ts_ms"]),
                       cluster=cluster, reason=res["exit_reason"],
                       exit_price=res["exit_price"])
+        ledger.append(
+            "ENTRY", trade_id=trade_id, bar=entry_index,
+            ts=int(entry_bar["ts"]), cluster=cluster, side=d["side"],
+            entry_price=entry_px, atr_entry=atr_entry, atr_period=atr_period,
+            atr_multiplier=float(stop_atr_mult) if stop_atr_mult is not None else None,
+            initial_stop=initial_stop, stop_distance=stop_distance,
+            stop_distance_pct=stop_distance / entry_px,
+            risk_eur=float(res["planned_max_loss_eur"]),
+            notional_eur=float(res["notional_eur"]),
+            margin_eur=float(res["margin_eur"]),
+            leverage_simulated=float(res["leverage"]), immutable=True,
+        )
+        ledger.append(
+            "POSITION", trade_id=trade_id, cluster=cluster, side=d["side"],
+            immutable_initial_stop=initial_stop, active_stop=initial_stop,
+            trailing_activation_price=trailing_activation_price,
+            trailing_active=False,
+            max_favorable_price=entry_px, state="ENTRY", immutable=True,
+        )
+        for stop_state in res.get("stop_audit", []):
+            ledger.append(
+                "POSITION", trade_id=trade_id, cluster=cluster, side=d["side"],
+                immutable_initial_stop=initial_stop,
+                active_stop=float(stop_state["active_stop"]),
+                trailing_activation_price=trailing_activation_price,
+                trailing_active=bool(stop_state["trailing_active"]),
+                max_favorable_price=float(stop_state["max_favorable_price"]),
+                effective_ts=int(stop_state["effective_ts"]),
+                derived_from_bar_ts=stop_state["derived_from_bar_ts"],
+                pending_stop_next_bar=stop_state["pending_stop_next_bar"],
+                pending_stop_effective_ts=stop_state["pending_stop_effective_ts"],
+                state="BAR_AUDIT", immutable=True,
+            )
+        ledger.append(
+            "CLOSE", trade_id=trade_id, bar=exit_index,
+            ts=int(res["exit_ts_ms"]), cluster=cluster,
+            immutable_initial_stop=initial_stop,
+            final_stop=float(res["stop_price"]),
+            exit_price=float(res["exit_price"]), exit_reason=res["exit_reason"],
+            realised_loss_at_initial_stop_eur=-float(res["planned_max_loss_eur"]),
+            actual_pnl_eur=float(res["net_pnl_eur"]), immutable=True,
+        )
         trade = {
+            "trade_id": trade_id, "candidate_trade_id": trade_id,
             "opportunity_bar": i, "entry_bar": entry_index,
             "exit_index": exit_index, "entry_ts": int(entry_bar["ts"]),
             "exit_ts": int(res["exit_ts_ms"]), "cluster": cluster,
             "session": EC.session_id(symbol, ts_i),
             "day": EC.day_id(symbol, ts_i), "side": d["side"],
+            "symbol": symbol, "timeframe": timeframe,
+            "date": EC.day_id(symbol, ts_i),
+            "opportunity_id": event_id, "cluster_id": cluster,
+            "regime_id": (s or {}).get("regime_id", (s or {}).get("regime", "UNSPECIFIED")),
+            "entry_timestamp": int(entry_bar["ts"]),
+            "entry_availability": int(dt),
+            "max_holding_bars": time_exit,
+            "realised_holding_bars": bars_held,
+            "censoring_type": "END_OF_DATASET" if res["exit_reason"] == "END" else "NONE",
+            "end_of_dataset_censored": res["exit_reason"] == "END",
+            "notional_eur": float(res["notional_eur"]),
+            "exposure_eur": float(res["notional_eur"]),
+            "leverage_simulated": float(res["leverage"]),
+            "fee_model_id": f"{scenario_cost}:TAKER_FEE_V1",
+            "spread_model_id": f"{scenario_cost}:SPREAD_V1",
+            "slippage_model_id": f"{scenario_cost}:SLIPPAGE_V1",
+            "funding_settlements_crossed": int(res["settlements_crossed"]),
+            "funding_cost_eur": float(res["funding_eur"]),
             "net_eur": res["net_pnl_eur"], "gross_eur": res["gross_pnl_eur"],
             "fee_eur": res["fee_eur"], "spread_eur": res["spread_eur"],
             "slippage_eur": res["slippage_eur"], "funding_eur": res["funding_eur"],
@@ -200,11 +279,8 @@ def drive_causal(bars: list[dict], sigs: list, decide_fn: Callable,
             "prob": d.get("calibrated_probability", 0.5),
             "label": 1 if res["net_pnl_eur"] > 0 else 0}
         if atr_entry is not None:
-            entry_px = float(entry_bar["open"])
-            initial_stop = (entry_px - stop_atr_mult * atr_entry) if d["side"] == "LONG" \
-                else (entry_px + stop_atr_mult * atr_entry)
             trade.update({
-                "atr_entry": atr_entry, "atr_period": exit_params.get("atr_period", 14),
+                "atr_entry": atr_entry, "atr_period": atr_period,
                 "stop_atr_mult": stop_atr_mult, "entry_price": entry_px,
                 "initial_stop": initial_stop,
                 "stop_distance": abs(entry_px - initial_stop),

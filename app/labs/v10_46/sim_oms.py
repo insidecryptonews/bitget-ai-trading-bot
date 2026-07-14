@@ -185,6 +185,7 @@ def simulate_trade(*, side: str, entry_bar: dict, exit_bars: list[dict],
     entry_px = entry_px_raw * (1 + per_side_px) if long \
         else entry_px_raw * (1 - per_side_px)
     stop_px = entry_px_raw * (1 - stop_frac) if long else entry_px_raw * (1 + stop_frac)
+    immutable_initial_stop = stop_px
     tp_px = entry_px_raw * (1 + tp_frac) if long else entry_px_raw * (1 - tp_frac)
     plan = plan_position(scenario_money, entry_px_raw, stop_px, side)
     if not plan["allowed"]:
@@ -204,16 +205,39 @@ def simulate_trade(*, side: str, entry_bar: dict, exit_bars: list[dict],
     # bars; it is applied to `stop_px` at the START of the next bar, so a level
     # computed from bar k can never be used to test a stop inside bar k itself.
     trail_stop = None
+    trail_source_ts = None
+    stop_audit: list[dict] = []
     for k, b in enumerate(exit_bars):
         hi, lo, op, cl = b["high"], b["low"], b["open"], b["close"]
         # activate any trailing level derived from a PREVIOUS completed bar
+        previous_active_stop = stop_px
         if trail_stop is not None:
             stop_px = max(stop_px, trail_stop) if long else min(stop_px, trail_stop)
+        stop_row = {
+            "bar_ts": int(b["ts"]),
+            "effective_ts": int(b["ts"]),
+            "derived_from_bar_ts": (
+                int(trail_source_ts) if stop_px != previous_active_stop
+                and trail_source_ts is not None else None
+            ),
+            "immutable_initial_stop": round(immutable_initial_stop, 8),
+            "active_stop": round(stop_px, 8),
+            "trailing_active": bool(
+                stop_px > immutable_initial_stop if long
+                else stop_px < immutable_initial_stop
+            ),
+            "max_favorable_price": round(hwm, 8),
+            "pending_stop_next_bar": None,
+            "pending_stop_effective_ts": None,
+        }
+        stop_audit.append(stop_row)
         # MFE/MAE tracking (for labels/autopsy, not decisions)
         up = (hi - entry_px_raw) / entry_px_raw if long else (entry_px_raw - lo) / entry_px_raw
         dn = (entry_px_raw - lo) / entry_px_raw if long else (hi - entry_px_raw) / entry_px_raw
         mfe = max(mfe, up)
         mae = max(mae, dn)
+        diagnostic_hwm = max(hwm, hi) if long else min(hwm, lo)
+        stop_row["max_favorable_price"] = round(diagnostic_hwm, 8)
         was_trailing = trailing_frac is not None and trail_stop is not None
         hit_stop = (lo <= stop_px) if long else (hi >= stop_px)
         hit_tp = (hi >= tp_px) if long else (lo <= tp_px)
@@ -240,11 +264,15 @@ def simulate_trade(*, side: str, entry_bar: dict, exit_bars: list[dict],
         # If an activation threshold is set (e.g. trailing from +1R), the trail
         # only engages once the favourable excursion has reached it.
         if trailing_frac is not None:
-            hwm = max(hwm, hi) if long else min(hwm, lo)
+            hwm = diagnostic_hwm
             fav = (hwm - entry_px_raw) / entry_px_raw if long \
                 else (entry_px_raw - hwm) / entry_px_raw
             if trailing_activate_frac is None or fav >= trailing_activate_frac:
                 trail_stop = hwm * (1 - trailing_frac) if long else hwm * (1 + trailing_frac)
+                trail_source_ts = int(b["ts"])
+                stop_row["pending_stop_next_bar"] = round(trail_stop, 8)
+                stop_row["pending_stop_effective_ts"] = int(b["ts"]) + interval_ms
+                stop_row["max_favorable_price"] = round(hwm, 8)
     if exit_px_raw is None:
         exit_px_raw = exit_bars[-1]["close"] if exit_bars else entry_px_raw
         exit_ts = (exit_bars[-1]["ts"] + interval_ms) if exit_bars else entry_ts_ms
@@ -272,6 +300,8 @@ def simulate_trade(*, side: str, entry_bar: dict, exit_bars: list[dict],
             "entry_price": round(entry_px_raw, 8),
             "exit_price": round(exit_px_raw, 8),
             "stop_price": round(stop_px, 8), "tp_price": round(tp_px, 8),
+            "immutable_initial_stop": round(immutable_initial_stop, 8),
+            "stop_audit": stop_audit,
             "planned_max_loss_eur": plan["planned_max_loss_eur"],
             "worst_case_loss_eur": plan["worst_case_loss_eur"],
             "fee_open_eur": round(fee_open, 8),

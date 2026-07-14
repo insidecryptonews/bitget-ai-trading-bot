@@ -21,6 +21,7 @@ SHADOW_CANDIDATES=0.
 from __future__ import annotations
 
 import copy
+import hashlib
 from collections.abc import Callable
 from typing import Any
 
@@ -31,6 +32,17 @@ from . import event_clock as EC
 from . import families as FAM
 from . import edge_search as ES
 from .discovery_dataset import DiscoveryPartitions
+
+
+RANDOM_BASELINE_SPEC = {
+    "policy_id": "PREREGISTERED_RANDOM_BASELINE_V10_47_21",
+    "seed_prefix": "v10.47.21",
+    "trade_probability_numerator": 64,
+    "trade_probability_denominator": 256,
+    "side_rule": "sha256_byte_1_lt_128_long_else_short",
+    "simulations_per_candidate": 1,
+    "match_contract": "V10_47_21_EXACT_ONE_TO_ONE",
+}
 
 
 # ------------------------------------------------------- pre-registered split
@@ -92,13 +104,42 @@ def preregister(symbol: str, venue: str, timeframe: str, gen: str,
     for name, fp in fps.items():
         by_fp.setdefault(fp, []).append(name)
     duplicated = {fp: sorted(names) for fp, names in by_fp.items() if len(names) > 1}
-    registry_hash = C.canonical_hash({"specs": specs, "symbol": symbol,
-                                       "timeframe": timeframe, "gen": gen})
+    m_nominal = len(specs)
+    m_unique_hypotheses = len(specs)
+    m_unique_results = len(by_fp)
+    registry_contract = {
+        "specs": specs,
+        "fingerprints": fps,
+        "symbol": symbol,
+        "venue": venue,
+        "timeframe": timeframe,
+        "gen": gen,
+        "m_nominal": m_nominal,
+        "m_unique_hypotheses": m_unique_hypotheses,
+        "m_unique_results": m_unique_results,
+        "m_global": m_unique_hypotheses,
+        "correction": "bonferroni",
+        "alpha": 0.05,
+        "baseline_policy_spec": RANDOM_BASELINE_SPEC,
+        "baseline_tolerance_spec": CS.BASELINE_TOLERANCE_SPEC,
+        "closed_before_metrics": True,
+    }
+    registry_hash = C.canonical_hash(registry_contract)
     return {"deciders": deciders, "specs": specs, "fingerprints": fps,
-            "m_nominal": len(specs), "m_unique_hypotheses": len(specs),
-            "m_unique_results": len(by_fp), "duplicated_runs": duplicated,
-            "registry_hash": registry_hash, "correction": "bonferroni",
-            "closed": True}
+            "m_nominal": m_nominal,
+            "m_unique_hypotheses": m_unique_hypotheses,
+            "m_unique_results": m_unique_results,
+            "m_global": m_unique_hypotheses,
+            "duplicated_runs": duplicated,
+            "registry_hash": registry_hash,
+            "registry_contract": registry_contract,
+            "specs_hash": C.canonical_hash(specs),
+            "baseline_policy_spec": copy.deepcopy(RANDOM_BASELINE_SPEC),
+            "baseline_policy_spec_hash": C.canonical_hash(RANDOM_BASELINE_SPEC),
+            "correction": "bonferroni",
+            "alpha": 0.05, "baseline_tolerance_spec_hash": C.canonical_hash(
+                CS.BASELINE_TOLERANCE_SPEC),
+            "closed": True, "closed_before_metrics": True}
 
 
 def _behavioral_fingerprints(deciders: dict, symbol, venue, timeframe, gen) -> dict:
@@ -137,6 +178,34 @@ SHADOW_GATES_V2 = {"min_n_eff": 30, "min_net_pnl_eur": 0.0,
                    "matched_random_alpha": 0.05, "min_bootstrap_lb_eur": 0.0}
 
 
+def _random_baseline_decider(*, symbol: str, venue: str, timeframe: str,
+                             gen: str):
+    """Single preregistered deterministic random-policy realization.
+
+    It is run once.  Exact pairing later decides whether any baseline trade is
+    compatible; no repeated simulations or outcome-conditioned selection occur.
+    """
+    def decide(feats, event_id, dt, cluster):
+        digest = hashlib.sha256(
+            f"{RANDOM_BASELINE_SPEC['seed_prefix']}|{event_id}".encode(
+                "utf-8"
+            )
+        ).digest()
+        if digest[0] < 64:
+            side = "LONG" if digest[1] < 128 else "SHORT"
+            return FAM._mk(
+                "TRADE", side, 0.5, symbol=symbol, venue=venue,
+                timeframe=timeframe, event_id=event_id, dt=dt, gen_id=gen,
+                reason="PREREGISTERED_RANDOM_BASELINE",
+            )
+        return FAM._mk(
+            "ABSTAIN_LOW_REWARD", "FLAT", 0.5, symbol=symbol, venue=venue,
+            timeframe=timeframe, event_id=event_id, dt=dt, gen_id=gen,
+            reason="PREREGISTERED_RANDOM_BASELINE_NO_TRADE",
+        )
+    return decide
+
+
 def evaluate_candidate(bars_tr, sigs_tr, bars_validation, sigs_validation, bars_wf,
                        sigs_wf, decide_fn, exit_params, *, symbol, timeframe,
                        m_unique):
@@ -153,9 +222,27 @@ def evaluate_candidate(bars_tr, sigs_tr, bars_validation, sigs_validation, bars_
     sel = CL.drive_causal(bars_tr, sigs_tr, decide_fn, exit_params,
                           symbol=symbol, timeframe=timeframe)
     m = _metrics(sel["trades"], sel["counters"], timeframe)
-    paired = CS.matched_random_paired(bars_tr, sel["trades"], symbol=symbol,
-                                      timeframe=timeframe, exit_params=exit_params,
-                                      reps=200)
+    baseline = CL.drive_causal(
+        bars_tr, sigs_tr,
+        _random_baseline_decider(
+            symbol=symbol, venue="research_baseline", timeframe=timeframe,
+            gen="v10_47_21",
+        ),
+        exit_params, symbol=symbol, timeframe=timeframe,
+    )
+    baseline_trades = []
+    for index, trade in enumerate(baseline["trades"]):
+        row = copy.deepcopy(trade)
+        row["baseline_trade_id"] = row.pop(
+            "candidate_trade_id", row.get("trade_id", f"baseline-{index}")
+        )
+        row["baseline_net_eur"] = row["net_eur"]
+        baseline_trades.append(row)
+    paired = CS.matched_random_paired(
+        candidate_trades=sel["trades"], baseline_trades=baseline_trades,
+        timeframe=timeframe, m_global=m_unique,
+        alpha=SHADOW_GATES_V2["matched_random_alpha"],
+    )
     cons = CL.drive_causal(bars_tr, sigs_tr, decide_fn, exit_params,
                            symbol=symbol, timeframe=timeframe,
                            scenario_cost="conservative")
@@ -306,7 +393,7 @@ def run_causal_tournament(discovery_partitions: DiscoveryPartitions, *,
         ev = evaluate_candidate(bars_tr, sigs_tr, bars_va, sigs_va, bars_wf,
                                 _walk_forward_signals, fn, ex,
                                 symbol=symbol, timeframe=timeframe,
-                                m_unique=reg["m_unique_hypotheses"])
+                                m_unique=reg["m_global"])
         results[name]["gate"] = ev
         if ev["validation_gate"]:
             validation_admitted_candidates.append(name)
@@ -321,8 +408,12 @@ def run_causal_tournament(discovery_partitions: DiscoveryPartitions, *,
     return {"symbol": symbol, "venue": venue, "timeframe": timeframe,
             "data_generation_id": gen, "n_bars": n, "split": sp,
             "registry": {k: reg[k] for k in ("m_nominal", "m_unique_hypotheses",
-                         "m_unique_results", "duplicated_runs", "registry_hash",
-                         "correction", "closed")},
+                         "m_unique_results", "m_global", "duplicated_runs",
+                         "registry_hash", "registry_contract",
+                         "specs_hash", "baseline_policy_spec",
+                         "baseline_policy_spec_hash", "correction", "alpha",
+                         "baseline_tolerance_spec_hash",
+                         "closed", "closed_before_metrics")},
             "holdout": {"state": "SEALED",
                         "commitment_sha256": holdout_commitment["commitment_sha256"],
                         "index_range": list(sp["holdout"]), "n_bars": n_holdout,
