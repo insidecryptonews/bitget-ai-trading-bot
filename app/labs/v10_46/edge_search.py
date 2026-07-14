@@ -144,6 +144,152 @@ def _paired(a: dict, b: dict) -> dict:
             "b_better_frac": round(sum(1 for d in diffs if d > 0) / n, 4)}
 
 
+def build_deciders(symbol, venue, timeframe, gen_id, ref_bars_by_ts=None,
+                   directions=(None,)):
+    """Return {name: (decide_fn, exit_params)} for every participant, so a
+    walk-forward can re-run each on OOS folds using the same logic."""
+    out: dict = {}
+    for fid, fam in FAM.FAMILIES.items():
+        for d in directions:
+            suffix = "" if d is None else f"_{d}"
+            out[f"{fid}{suffix}"] = (FAM.family_decider(
+                fid, symbol=symbol, venue=venue, timeframe=timeframe,
+                gen_id=gen_id, direction=d, ref_bars_by_ts=ref_bars_by_ts),
+                fam["exit"])
+    for tid, tv in FAM.TREND_VARIANTS.items():
+        spec_hash = FAM.C.canonical_hash({"variant": tid})
+
+        def mk(_tv=tv, _tid=tid, _sh=spec_hash):
+            def decide_fn(feats, event_id, dt, cluster):
+                s = feats["_sig"]
+                if not s.get("ok"):
+                    return FAM._mk("ABSTAIN_DATA_QUALITY", "FLAT", 0.5,
+                                   symbol=symbol, venue=venue,
+                                   timeframe=timeframe, event_id=event_id,
+                                   dt=dt, gen_id=gen_id,
+                                   reason="ABSTAIN_DATA_QUALITY",
+                                   spec_hash=_sh, policy_id=_tid)
+                ctx = {}
+                if ref_bars_by_ts is not None:
+                    ref = ref_bars_by_ts.get(int(feats.get("ts", 0)))
+                    if ref is not None and s["last"]:
+                        ctx["xv_gap"] = (s["last"] - float(ref)) / s["last"]
+                a, sd, pb = _tv["fn"](s, ctx)
+                return FAM._mk(a, sd, pb, symbol=symbol, venue=venue,
+                               timeframe=timeframe, event_id=event_id, dt=dt,
+                               gen_id=gen_id, reason=a, spec_hash=_sh,
+                               policy_id=_tid)
+            return decide_fn
+        out[tid] = (mk(), FAM.TREND_EXIT)
+    return out
+
+
+def precompute_sigs(bars):
+    """Bounded-window causal signals, one per bar (shared across participants)."""
+    lb = FAM.SIG_LOOKBACK
+    sigs = [None] * len(bars)
+    for i in range(WARMUP, len(bars)):
+        sigs[i] = FAM._sig(bars[max(0, i - lb):i + 1])
+    return sigs
+
+
+def walk_forward(bars, decide_fn, exit_params, symbol, *, n_folds=4,
+                 scenario_cost="observed", sigs=None):
+    """Evaluate a fixed decider across N contiguous OOS folds (no learning, so
+    every fold is out-of-sample for the fixed rule). Reports per-fold net EUR,
+    the fraction of folds net-positive, and the aggregate — the core OOS
+    stability evidence for a Shadow Candidate. `sigs` may be precomputed once
+    per (symbol, timeframe) and reused across candidates."""
+    if sigs is None:
+        sigs = precompute_sigs(bars)
+    fl = len(bars) // n_folds
+    folds = []
+    for k in range(n_folds):
+        a = k * fl + (WARMUP if k == 0 else 0)
+        b = (k + 1) * fl if k < n_folds - 1 else len(bars)
+        sub = bars[a:b]
+        subsig = sigs[a:b]
+        # rebuild bounded sigs local to the fold start so warmup holds
+        pc = _drive_slice(sub, subsig, decide_fn, exit_params, symbol,
+                          scenario_cost=scenario_cost)
+        m = _participant_metrics(pc)
+        folds.append({"fold": k, "net_pnl_eur": m["net_pnl_eur"],
+                      "gross_pnl_eur": m["gross_pnl_eur"], "trades": m["trades"],
+                      "n_eff": m["n_eff"]})
+    net_folds = [f["net_pnl_eur"] for f in folds]
+    pos = sum(1 for x in net_folds if x > 0)
+    return {"folds": folds, "n_folds": n_folds,
+            "folds_net_positive": pos,
+            "fold_pos_frac": round(pos / n_folds, 4),
+            "oos_net_total_eur": round(float(sum(net_folds)), 6),
+            "oos_net_min_fold_eur": round(min(net_folds), 6) if net_folds else 0.0}
+
+
+def _drive_slice(bars, sigs, decide_fn, exit_params, symbol,
+                 scenario_money="5eur", scenario_cost="observed"):
+    per_cluster: dict = {}
+    used: dict = {}
+    time_exit = int(exit_params.get("time_exit", 20))
+    for i in range(WARMUP, len(bars) - 1):
+        if sigs[i] is None:
+            continue
+        ts_i = int(bars[i]["ts"])
+        cluster = EC.cluster_id(symbol, ts_i)
+        if cluster in used and (i - used[cluster]) < 1:
+            continue
+        d = decide_fn({"_sig": sigs[i], "ts": ts_i}, f"{symbol}:{ts_i}",
+                      ts_i + EC.BAR_MS, cluster)
+        if d.get("decision_action") != "TRADE":
+            per_cluster.setdefault(cluster, {"net_eur": 0.0, "traded": False})
+            continue
+        used[cluster] = i
+        res = S.simulate_trade(
+            side=d["side"], entry_bar=bars[i + 1],
+            exit_bars=bars[i + 2:i + 2 + time_exit],
+            entry_ts_ms=int(bars[i + 1]["ts"]),
+            stop_frac=exit_params.get("stop_frac", 0.008),
+            tp_frac=exit_params.get("tp_frac", 0.012), time_exit=time_exit,
+            scenario_money=scenario_money, scenario_cost=scenario_cost)
+        if res["status"] != "OK":
+            per_cluster[cluster] = {"net_eur": 0.0, "traded": False}
+            continue
+        per_cluster[cluster] = {
+            "net_eur": res["net_pnl_eur"], "gross_eur": res["gross_pnl_eur"],
+            "traded": True, "side": d["side"],
+            "prob": d["calibrated_probability"],
+            "label": 1 if res["net_pnl_eur"] > 0 else 0,
+            "fee_eur": res["fee_eur"], "spread_eur": res["spread_eur"],
+            "slippage_eur": res["slippage_eur"], "funding_eur": res["funding_eur"]}
+    return per_cluster
+
+
+SHADOW_GATES = {
+    "min_n_eff": 40, "min_net_pnl_eur": 0.0, "min_gross_ev": 0.0,
+    "min_fold_pos_frac": 0.75, "require_oos_positive": True,
+    "require_top3_robust": True, "require_beats_no_trade": True,
+    "require_beats_random": True, "require_conservative_survives": True,
+}
+
+
+def shadow_candidate_gate(metrics: dict, wf: dict, *, beats_no_trade: bool,
+                          beats_random: bool, net_conservative_eur: float
+                          ) -> dict:
+    """Deterministic SHADOW_CANDIDATE gate. A candidate must clear EVERY gate;
+    beating a losing policy or a single good window is NOT enough."""
+    g = {}
+    g["gross_ev_positive"] = metrics.get("gross_ev_eur", -1) > SHADOW_GATES["min_gross_ev"]
+    g["net_positive"] = metrics.get("net_pnl_eur", -1) > SHADOW_GATES["min_net_pnl_eur"]
+    g["n_eff"] = metrics.get("n_eff", 0) >= SHADOW_GATES["min_n_eff"]
+    g["top3_robust"] = metrics.get("net_without_top3_eur", -1) >= 0
+    g["oos_positive"] = wf.get("oos_net_total_eur", -1) > 0
+    g["oos_stable"] = wf.get("fold_pos_frac", 0) >= SHADOW_GATES["min_fold_pos_frac"]
+    g["beats_no_trade"] = bool(beats_no_trade)
+    g["beats_random"] = bool(beats_random)
+    g["conservative_survives"] = net_conservative_eur > 0
+    g["all_pass"] = all(v for k, v in g.items() if k != "all_pass")
+    return g
+
+
 def run_edge_search(bars: list[dict], *, symbol: str, venue: str,
                     timeframe: str, data_generation_id: str | None,
                     ref_bars_by_ts: dict | None = None,

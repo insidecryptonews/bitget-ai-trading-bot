@@ -109,6 +109,30 @@ def test_edge_search_runs_all_participants_gross_first():
             assert m["gross_pnl_eur"] >= m["net_pnl_eur"] - 1e-6
 
 
+def test_walk_forward_and_shadow_gate():
+    bars = _bars(2000)
+    dec = FAM.family_decider("P01", symbol="X", venue="bitget", timeframe="5m",
+                             gen_id="g")
+    wf = ES.walk_forward(bars, dec, FAM.FAMILIES["P01"]["exit"], "X", n_folds=4)
+    assert wf["n_folds"] == 4 and len(wf["folds"]) == 4
+    assert 0.0 <= wf["fold_pos_frac"] <= 1.0
+    assert "oos_net_total_eur" in wf
+    # a weak candidate (small n, negative oos) must NOT pass the shadow gate
+    weak_metrics = {"gross_ev_eur": -0.01, "net_pnl_eur": -0.1, "n_eff": 5,
+                    "net_without_top3_eur": -0.2}
+    weak_wf = {"oos_net_total_eur": -0.5, "fold_pos_frac": 0.25}
+    g = ES.shadow_candidate_gate(weak_metrics, weak_wf, beats_no_trade=False,
+                                 beats_random=False, net_conservative_eur=-0.1)
+    assert g["all_pass"] is False
+    # a strong synthetic candidate passes every gate
+    strong = {"gross_ev_eur": 0.01, "net_pnl_eur": 0.5, "n_eff": 60,
+              "net_without_top3_eur": 0.3}
+    strong_wf = {"oos_net_total_eur": 0.4, "fold_pos_frac": 0.8}
+    g2 = ES.shadow_candidate_gate(strong, strong_wf, beats_no_trade=True,
+                                  beats_random=True, net_conservative_eur=0.2)
+    assert g2["all_pass"] is True
+
+
 def test_edge_search_deterministic():
     bars = _bars(1200, seed=5)
     a = ES.run_edge_search(bars, symbol="X", venue="bitget", timeframe="5m",
