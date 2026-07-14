@@ -23,6 +23,7 @@ baselines), and the full skip/execution counters.
 
 from __future__ import annotations
 
+import copy
 from typing import Any, Callable
 
 from . import event_clock as EC
@@ -33,7 +34,8 @@ WARMUP = 60
 
 class ImmutableLedger:
     """Append-only ledger. Records can be appended and read but never mutated;
-    each returned record is a shallow copy so callers cannot rewrite history."""
+    each returned record is a DEEP copy so callers cannot rewrite history even
+    through nested mutables (Work audit P3.1)."""
 
     __slots__ = ("_records", "_seq")
 
@@ -42,7 +44,7 @@ class ImmutableLedger:
         self._seq = 0
 
     def append(self, kind: str, **fields: Any) -> int:
-        rec = {"seq": self._seq, "kind": kind, **fields}
+        rec = {"seq": self._seq, "kind": kind, **copy.deepcopy(fields)}
         self._records.append(rec)
         self._seq += 1
         return rec["seq"]
@@ -51,10 +53,10 @@ class ImmutableLedger:
         return len(self._records)
 
     def records(self) -> list[dict]:
-        return [dict(r) for r in self._records]           # defensive copies
+        return copy.deepcopy(self._records)               # deep defensive copies
 
     def by_kind(self, kind: str) -> list[dict]:
-        return [dict(r) for r in self._records if r["kind"] == kind]
+        return [copy.deepcopy(r) for r in self._records if r["kind"] == kind]
 
 
 def _cluster(symbol: str, ts: int, timeframe: str) -> str:
@@ -136,12 +138,33 @@ def drive_causal(bars: list[dict], sigs: list, decide_fn: Callable,
                       immutable=True)
         entry_bar = bars[i + 1]
         exit_bars = bars[i + 2: i + 2 + time_exit]
+        # ---- risk sizing: real ATR-multiple stop when requested (else fixed) ----
+        atr_entry = None
+        stop_atr_mult = exit_params.get("stop_atr_mult")
+        t_stop_frac, t_tp_frac, t_trail_frac, t_trail_act = \
+            stop_frac, tp_frac, trailing_frac, None
+        if stop_atr_mult is not None:
+            # atr_entry is CAUSAL: computed from bars closed at/before the signal
+            atr_entry = float((s or {}).get("atr") or 0.0)
+            entry_px = float(entry_bar["open"])
+            if atr_entry <= 0 or entry_px <= 0:
+                ledger.append("skip", bar=i, ts=ts_i, cluster=cluster,
+                              reason="ATR_UNAVAILABLE")
+                continue
+            t_stop_frac = stop_atr_mult * atr_entry / entry_px
+            tp_mult = exit_params.get("tp_atr_mult")
+            t_tp_frac = (tp_mult * atr_entry / entry_px) if tp_mult else t_stop_frac * 3
+            trail_mult = exit_params.get("trail_atr_mult")
+            if trail_mult:
+                t_trail_frac = trail_mult * atr_entry / entry_px
+                # trailing engages only after +1R (one stop distance) in favour
+                t_trail_act = float(exit_params.get("trail_activate_r", 1.0)) * t_stop_frac
         res = S.simulate_trade(
             side=d["side"], entry_bar=entry_bar, exit_bars=exit_bars,
-            entry_ts_ms=int(entry_bar["ts"]), stop_frac=stop_frac,
-            tp_frac=tp_frac, time_exit=time_exit, scenario_money=scenario_money,
-            scenario_cost=scenario_cost, trailing_frac=trailing_frac,
-            interval_ms=interval_ms)
+            entry_ts_ms=int(entry_bar["ts"]), stop_frac=t_stop_frac,
+            tp_frac=t_tp_frac, time_exit=time_exit, scenario_money=scenario_money,
+            scenario_cost=scenario_cost, trailing_frac=t_trail_frac,
+            trailing_activate_frac=t_trail_act, interval_ms=interval_ms)
         if res["status"] != "OK":
             ledger.append("skip", bar=i, ts=ts_i, cluster=cluster,
                           reason=f"SIM_{res['status']}")
@@ -176,6 +199,16 @@ def drive_causal(bars: list[dict], sigs: list, decide_fn: Callable,
             "bars_held": bars_held, "exit_reason": res["exit_reason"],
             "prob": d.get("calibrated_probability", 0.5),
             "label": 1 if res["net_pnl_eur"] > 0 else 0}
+        if atr_entry is not None:
+            entry_px = float(entry_bar["open"])
+            initial_stop = (entry_px - stop_atr_mult * atr_entry) if d["side"] == "LONG" \
+                else (entry_px + stop_atr_mult * atr_entry)
+            trade.update({
+                "atr_entry": atr_entry, "atr_period": exit_params.get("atr_period", 14),
+                "stop_atr_mult": stop_atr_mult, "entry_price": entry_px,
+                "initial_stop": initial_stop,
+                "stop_distance": abs(entry_px - initial_stop),
+                "stop_distance_pct": abs(entry_px - initial_stop) / entry_px})
         trades.append(trade)
         ledger.append("trade", bar=entry_index, cluster=cluster,
                       net_eur=res["net_pnl_eur"], gross_eur=res["gross_pnl_eur"])

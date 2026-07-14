@@ -158,6 +158,7 @@ def simulate_trade(*, side: str, entry_bar: dict, exit_bars: list[dict],
                    time_exit: int, scenario_money: str = "5eur",
                    scenario_cost: str = "observed",
                    trailing_frac: float | None = None,
+                   trailing_activate_frac: float | None = None,
                    interval_ms: int = BAR_MS) -> dict:
     """Full money-accounted trade lifecycle through the SimOMS.
 
@@ -235,10 +236,15 @@ def simulate_trade(*, side: str, entry_bar: dict, exit_bars: list[dict],
             exit_reason = "TIME"
             exit_ts = b["ts"] + interval_ms
             break
-        # derive trailing from THIS completed bar -> effective from bar k+1
+        # derive trailing from THIS completed bar -> effective from bar k+1.
+        # If an activation threshold is set (e.g. trailing from +1R), the trail
+        # only engages once the favourable excursion has reached it.
         if trailing_frac is not None:
             hwm = max(hwm, hi) if long else min(hwm, lo)
-            trail_stop = hwm * (1 - trailing_frac) if long else hwm * (1 + trailing_frac)
+            fav = (hwm - entry_px_raw) / entry_px_raw if long \
+                else (entry_px_raw - hwm) / entry_px_raw
+            if trailing_activate_frac is None or fav >= trailing_activate_frac:
+                trail_stop = hwm * (1 - trailing_frac) if long else hwm * (1 + trailing_frac)
     if exit_px_raw is None:
         exit_px_raw = exit_bars[-1]["close"] if exit_bars else entry_px_raw
         exit_ts = (exit_bars[-1]["ts"] + interval_ms) if exit_bars else entry_ts_ms

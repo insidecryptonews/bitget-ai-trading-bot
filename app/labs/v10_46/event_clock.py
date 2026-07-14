@@ -66,17 +66,22 @@ def day_id(symbol: str, ts_ms: int) -> str:
 def bars_to_events(bars: list[dict], *, symbol: str, venue: str,
                    timeframe: str, data_generation_id: str | None,
                    repo_commit: str | None = None,
-                   interval_ms: int = BAR_MS) -> list[dict]:
+                   interval_ms: int | None = None) -> list[dict]:
     """Adapt canonical bar dicts to MarketEvents. available_time = bar close
-    (open ts + interval): a bar is NEVER visible before it closes."""
+    (open ts + interval): a bar is NEVER visible before it closes.
+
+    V10.47.16: the interval is DERIVED from the timeframe when not given
+    explicitly (a 4h bar closes 4h after it opens, not 1 minute), and the
+    event cluster is timeframe-aware. This closes Work audit finding P2.2."""
+    interval = interval_ms if interval_ms is not None else interval_ms_for(timeframe)
     out = []
     for b in bars:
         ts = int(b["ts"])
-        close = ts + interval_ms
+        close = ts + interval
         eid = f"{symbol}:{ts}"
         out.append(C.make(
             "MarketEvent", symbol=symbol, venue=venue, timeframe=timeframe,
-            event_id=eid, event_cluster_id=cluster_id(symbol, ts),
+            event_id=eid, event_cluster_id=cluster_id_tf(symbol, ts, timeframe),
             causal_cutoff_ms=close, data_generation_id=data_generation_id,
             repo_commit=repo_commit, created_at_ms=close,
             event_type="BAR", ts_ms=ts, available_time_ms=close,

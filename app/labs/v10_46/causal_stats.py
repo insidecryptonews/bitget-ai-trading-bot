@@ -190,6 +190,103 @@ def matched_random_null(bars: list[dict], trades: list[dict], *, symbol: str,
             "beats_matched_random": bool(p_value < 0.05)}
 
 
+def matched_random_paired(bars: list[dict], trades: list[dict], *, symbol: str,
+                          timeframe: str, exit_params: dict,
+                          scenario_money: str = "5eur",
+                          scenario_cost: str = "observed", reps: int = 200,
+                          seed: int = 20240714) -> dict:
+    """EXACTLY paired exposure-matched baseline (Work audit P1.2).
+
+    For each candidate trade we build an explicit matched baseline trade with the
+    SAME symbol/timeframe/side/cluster/session and the SAME exit rule (holding cap,
+    stop/tp, costs), entered at a RANDOM bar inside the same cluster — replacing
+    only the precise entry timing. The baseline is driven as a SINGLE-POSITION
+    sequence (a spill-over holding blocks the next cluster, exactly like the
+    candidate), so realised holding and end-of-dataset censoring emerge from the
+    same mechanics. We form explicit candidate↔baseline pairs, compute
+    paired_delta_i = candidate_net_i − baseline_net_i, and report coverage. If any
+    pair cannot be matched, match_status = BASELINE_MATCH_INCOMPLETE (GATE_FAIL);
+    we never substitute a total-PnL comparison."""
+    interval_ms = EC.interval_ms_for(timeframe)
+    time_exit = int(exit_params.get("time_exit", 20))
+    stop_frac = float(exit_params.get("stop_frac", 0.008))
+    tp_frac = float(exit_params.get("tp_frac", 0.012))
+    trailing_frac = exit_params.get("trailing_frac")
+    n = len(trades)
+    if n == 0:
+        return {"pairs_requested": 0, "pairs_found": 0, "pairs_impossible": 0,
+                "coverage": 1.0, "paired_mean_eur": 0.0, "paired_median_eur": 0.0,
+                "paired_lower_bound_eur": 0.0, "block": 1,
+                "match_status": "OK", "unmatched_reason": None,
+                "beats_matched_random": False}
+    cluster_bars: dict[str, list[int]] = {}
+    for i in range(len(bars) - 2):
+        c = EC.cluster_id_tf(symbol, int(bars[i]["ts"]), timeframe)
+        cluster_bars.setdefault(c, []).append(i)
+
+    def _sim_at(idx: int, side: str):
+        entry_bar = bars[idx + 1]
+        res = S.simulate_trade(
+            side=side, entry_bar=entry_bar, exit_bars=bars[idx + 2:idx + 2 + time_exit],
+            entry_ts_ms=int(entry_bar["ts"]), stop_frac=stop_frac, tp_frac=tp_frac,
+            time_exit=time_exit, scenario_money=scenario_money,
+            scenario_cost=scenario_cost, trailing_frac=trailing_frac,
+            interval_ms=interval_ms)
+        if res["status"] != "OK":
+            return None, 0
+        return res["net_pnl_eur"], int(res["bars_held"])
+
+    rng = random.Random(seed)
+    # per-trade baseline net averaged over reps where a match is possible
+    acc = [[] for _ in trades]
+    for _ in range(reps):
+        busy_until = -1
+        for j, t in enumerate(trades):
+            choices = [b for b in cluster_bars.get(t["cluster"], []) if b > busy_until]
+            if not choices:
+                continue                                   # impossible this rep
+            idx = choices[rng.randrange(len(choices))]
+            net, held = _sim_at(idx, t["side"])
+            if net is None:
+                continue
+            busy_until = idx + 1 + max(1, held)
+            acc[j].append(net)
+    baseline_net = [(sum(a) / len(a)) if a else None for a in acc]
+    matched = [(t["net_eur"], bn) for t, bn in zip(trades, baseline_net)
+               if bn is not None]
+    pairs_found = len(matched)
+    pairs_impossible = n - pairs_found
+    coverage = pairs_found / n
+    deltas = [c - b for c, b in matched]
+    block = _bootstrap_block(trades, timeframe)
+    bb = block_bootstrap_mean_lb(deltas, block=block) if deltas else \
+        {"mean": 0.0, "mean_lb": 0.0}
+    dsorted = sorted(deltas)
+    median = dsorted[len(dsorted) // 2] if dsorted else 0.0
+    status = "OK" if coverage >= 1.0 - 1e-9 else "BASELINE_MATCH_INCOMPLETE"
+    return {"pairs_requested": n, "pairs_found": pairs_found,
+            "pairs_impossible": pairs_impossible, "coverage": round(coverage, 4),
+            "paired_mean_eur": round(bb["mean"], 6),
+            "paired_median_eur": round(median, 6),
+            "paired_lower_bound_eur": round(bb["mean_lb"], 6),
+            "block": block, "match_status": status,
+            "unmatched_reason": (None if status == "OK"
+                                 else "no non-overlapping bar in candidate cluster"),
+            "beats_matched_random": bool(status == "OK" and bb["mean_lb"] > 0)}
+
+
+def _bootstrap_block(trades: list[dict], timeframe: str) -> int:
+    """Justified block size for the block bootstrap: the median realised holding
+    (in bars) of the candidate trades, clamped to [1, n//2]. This ties the block
+    to the actual serial dependence (holding overlap) rather than a fixed 5."""
+    n = len(trades)
+    if n <= 1:
+        return 1
+    holds = sorted(int(t.get("bars_held", 1)) for t in trades)
+    med = holds[len(holds) // 2]
+    return max(1, min(med, n // 2))
+
+
 def paired_delta_vs_zero(trades: list[dict]) -> dict:
     """Paired per-opportunity delta vs No-Trade (which nets 0 on every
     opportunity), with a block-bootstrap lower bound of the mean."""
