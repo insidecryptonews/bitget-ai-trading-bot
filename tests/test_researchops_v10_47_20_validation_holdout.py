@@ -81,6 +81,8 @@ def _install_stage_driver(monkeypatch, *, validation_net: float | None,
     monkeypatch.setattr(CT, "_metrics", metrics)
     monkeypatch.setattr(CT.CS, "matched_random_paired", lambda *a, **k: {
         "match_status": "OK",
+        "pairing_status": "VALID",
+        "integrity_status": "PASS",
         "beats_matched_random": True,
         "paired_lower_bound_eur": 0.1,
         "coverage": 1.0,
@@ -97,6 +99,9 @@ def _evaluate(CT):
         stage("walk_forward"), [None], decider, exit_params,
         symbol="X", timeframe="1m", m_unique=10,
         policy_fingerprint="a" * 64,
+        registry_hash="b" * 64,
+        baseline_spec_hash="c" * 64,
+        campaign_registry=CT.preregister_campaign(),
     )
     return result, exit_params, decider
 
@@ -160,6 +165,9 @@ def test_candidate_requires_preregistered_policy_fingerprint(monkeypatch):
             {"stop_frac": 0.01, "tp_frac": 0.02, "time_exit": 2},
             symbol="X", timeframe="1m", m_unique=10,
             policy_fingerprint="not-a-registry-fingerprint",
+            registry_hash="b" * 64,
+            baseline_spec_hash="c" * 64,
+            campaign_registry=CT.preregister_campaign(),
         )
 
 

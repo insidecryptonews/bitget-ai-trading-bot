@@ -18,6 +18,19 @@ REQUIRED_MATCH_FIELDS = (
 )
 
 
+def _pairing_context():
+    from app.labs.v10_46 import causal_tournament as CT
+
+    campaign = CT.preregister_campaign()
+    return {
+        "m_campaign": campaign["m_campaign_effective_for_gate"],
+        "campaign_registry": campaign["campaign_registry_contract"],
+        "campaign_registry_sha": campaign["campaign_registry_sha"],
+        "baseline_spec_hash": "b" * 64,
+        "registry_hash": "c" * 64,
+    }
+
+
 def _pair_rows(n=1):
     candidates, baselines = [], []
     for i in range(n):
@@ -76,12 +89,14 @@ def test_incompatible_baseline_field_fails(field, bad):
     baselines[0][field] = bad
     result = CS.matched_random_paired(
         candidate_trades=candidates, baseline_trades=baselines,
-        timeframe="1m", m_global=10,
+        timeframe="1m", m_global=10, **_pairing_context(),
     )
     assert result["match_status"] == "BASELINE_MATCH_INCOMPLETE"
     assert result["pairs_incompatible"] == 1
     assert result["pairs"][0]["match_status"] == "INCOMPATIBLE"
-    assert result["pairs"][0]["unmatched_reason"] == field.upper()
+    assert result["pairs"][0]["unmatched_reason"] == (
+        f"PAIR_FIELD_INCOMPATIBLE:{field.upper()}"
+    )
     assert result["beats_matched_random"] is False
 
 
@@ -91,7 +106,7 @@ def test_exact_pair_records_have_one_to_one_ids_and_deltas():
     candidates, baselines = _pair_rows(4)
     result = CS.matched_random_paired(
         candidate_trades=candidates, baseline_trades=baselines,
-        timeframe="1m", m_global=10,
+        timeframe="1m", m_global=10, **_pairing_context(),
     )
     assert result["pairs_requested"] == 4
     assert result["pairs_found"] == 4
@@ -112,16 +127,18 @@ def test_missing_field_on_both_sides_is_not_an_implicit_match(field):
     baselines[0].pop(field)
     result = CS.matched_random_paired(
         candidate_trades=candidates, baseline_trades=baselines,
-        timeframe="1m", m_global=10,
+        timeframe="1m", m_global=10, **_pairing_context(),
     )
     assert result["match_status"] == "BASELINE_MATCH_INCOMPLETE"
     assert result["pairs_incompatible"] == 1
-    assert result["pairs"][0]["unmatched_reason"] == field.upper()
+    assert result["pairs"][0]["unmatched_reason"] == (
+        f"PAIR_FIELD_INCOMPATIBLE:{field.upper()}"
+    )
 
 
 @pytest.mark.parametrize("missing_id,reason", [
-    ("candidate_trade_id", "CANDIDATE_TRADE_ID"),
-    ("baseline_trade_id", "BASELINE_TRADE_ID"),
+    ("candidate_trade_id", "MISSING_CANDIDATE_TRADE_ID"),
+    ("baseline_trade_id", "MISSING_BASELINE_TRADE_ID"),
 ])
 def test_missing_pair_identity_fails_closed(missing_id, reason):
     from app.labs.v10_46 import causal_stats as CS
@@ -132,10 +149,11 @@ def test_missing_pair_identity_fails_closed(missing_id, reason):
     )
     result = CS.matched_random_paired(
         candidate_trades=candidates, baseline_trades=baselines,
-        timeframe="1m", m_global=10,
+        timeframe="1m", m_global=10, **_pairing_context(),
     )
-    assert result["match_status"] == "BASELINE_MATCH_INCOMPLETE"
-    assert result["pairs"][0]["unmatched_reason"] == reason
+    assert result["match_status"] == "BASELINE_PAIRING_INVALID"
+    assert result["pairing_status"] == "INVALID"
+    assert reason in result["rejection_reasons"]
 
 
 def test_multiple_testing_correction_is_applied_to_baseline_gate():
@@ -145,6 +163,7 @@ def test_multiple_testing_correction_is_applied_to_baseline_gate():
     result = CS.matched_random_paired(
         candidate_trades=candidates, baseline_trades=baselines,
         timeframe="1m", m_global=100, alpha=0.05,
+        **_pairing_context(),
     )
     assert result["raw_p_value"] < 0.05
     assert result["corrected_p_value"] >= 0.05

@@ -17,6 +17,18 @@ import pytest
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
+def _pairing_context():
+    CT = importlib.import_module("app.labs.v10_46.causal_tournament")
+    campaign = CT.preregister_campaign()
+    return {
+        "m_campaign": campaign["m_campaign_effective_for_gate"],
+        "campaign_registry": campaign["campaign_registry_contract"],
+        "campaign_registry_sha": campaign["campaign_registry_sha"],
+        "baseline_spec_hash": "b" * 64,
+        "registry_hash": "c" * 64,
+    }
+
+
 # --------------------------------------------------------------------------- #
 # P1.1 — VALIDATION is evaluated in the gate; holdout is physically sealed     #
 # --------------------------------------------------------------------------- #
@@ -106,7 +118,7 @@ def test_matched_baseline_is_paired_with_explicit_pairs():
     baseline = {**common, "baseline_trade_id": "B1", "baseline_net_eur": 0.0}
     r = CS.matched_random_paired(
         candidate_trades=[candidate], baseline_trades=[baseline],
-        timeframe="1m", m_global=10,
+        timeframe="1m", m_global=10, **_pairing_context(),
     )
     for k in ("pairs_requested", "pairs_found", "coverage", "paired_mean_eur",
               "paired_lower_bound_eur", "match_status"):
@@ -249,7 +261,7 @@ def test_baseline_incomplete_fails_gate():
     candidate.update({"candidate_trade_id": "C1", "candidate_net_eur": 0.5})
     r = CS.matched_random_paired(
         candidate_trades=[candidate], baseline_trades=[],
-        timeframe="1m", m_global=10,
+        timeframe="1m", m_global=10, **_pairing_context(),
     )
     assert r["match_status"] == "BASELINE_MATCH_INCOMPLETE"
     assert r["beats_matched_random"] is False                 # cannot pass the gate

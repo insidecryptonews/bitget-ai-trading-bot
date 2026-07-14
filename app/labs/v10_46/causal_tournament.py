@@ -5,8 +5,8 @@ unmatched random baseline, a fake n_eff and a post-selection "OOS". Here:
 
   * every participant runs through `causal_ledger.drive_causal` (first causal
     signal, single open position, append-only, no ex-post selection);
-  * the participant set is PRE-REGISTERED and the registry is CLOSED (hashed)
-    before any metric is read, with a real multiple-testing count m_global;
+  * the participant set and the complete 12-tournament campaign are
+    PRE-REGISTERED and CLOSED (hashed) before any metric is read;
   * the time axis is split TRAIN / VALIDATION / WALK-FORWARD / sealed HOLDOUT;
     selection happens on TRAIN only, candidates are confirmed on VALIDATION and
     WALK-FORWARD, and the HOLDOUT is never touched here;
@@ -23,6 +23,7 @@ from __future__ import annotations
 import copy
 import hashlib
 from collections.abc import Callable
+from functools import lru_cache
 from typing import Any
 
 from . import contracts as C
@@ -35,14 +36,19 @@ from .discovery_dataset import DiscoveryPartitions
 
 
 RANDOM_BASELINE_SPEC = {
-    "policy_id": "PREREGISTERED_RANDOM_BASELINE_V10_47_21",
+    "policy_id": "PREREGISTERED_RANDOM_BASELINE_V10_47_23",
     "seed_prefix": "v10.47.21",
     "trade_probability_numerator": 64,
     "trade_probability_denominator": 256,
     "side_rule": "sha256_byte_1_lt_128_long_else_short",
     "simulations_per_candidate": 1,
-    "match_contract": "V10_47_21_EXACT_ONE_TO_ONE",
+    "match_contract": "V10_47_23_EXACT_BIJECTIVE_ONE_TO_ONE",
 }
+
+CAMPAIGN_SYMBOLS = ("BTCUSDT", "ETHUSDT", "XRPUSDT", "DOGEUSDT")
+CAMPAIGN_TIMEFRAMES = ("1m", "5m", "15m")
+CAMPAIGN_CORRECTION_METHOD = "bonferroni"
+CAMPAIGN_ALPHA = 0.05
 
 
 # ------------------------------------------------------- pre-registered split
@@ -107,7 +113,7 @@ def _ledger_integrity(ledger: CL.ImmutableLedger, trades: list[dict]) -> dict:
 
 
 def preregister(symbol: str, venue: str, timeframe: str, gen: str,
-                ref_bars_by_ts=None) -> dict:
+                 ref_bars_by_ts=None) -> dict:
     """Deterministic CLOSED registry of participants. Returns the decider map,
     the pre-registered spec hashes, and the multiple-testing counts."""
     deciders = ES.build_deciders(symbol, venue, timeframe, gen,
@@ -164,8 +170,69 @@ def preregister(symbol: str, venue: str, timeframe: str, gen: str,
             "baseline_policy_spec_hash": C.canonical_hash(RANDOM_BASELINE_SPEC),
             "correction": "bonferroni",
             "alpha": 0.05, "baseline_tolerance_spec_hash": C.canonical_hash(
-                CS.BASELINE_TOLERANCE_SPEC),
-            "closed": True, "closed_before_metrics": True}
+             CS.BASELINE_TOLERANCE_SPEC),
+             "closed": True, "closed_before_metrics": True}
+
+
+@lru_cache(maxsize=1)
+def _cached_campaign_registry() -> dict:
+    """Close the 12-tournament family before any market metric is evaluated."""
+    tournaments: list[dict] = []
+    for symbol in CAMPAIGN_SYMBOLS:
+        for timeframe in CAMPAIGN_TIMEFRAMES:
+            registry = preregister(
+                symbol, "bitget", timeframe, "v10_47_23_campaign_registry"
+            )
+            tournaments.append({
+                "symbol": symbol,
+                "timeframe": timeframe,
+                "registry_hash": registry["registry_hash"],
+                "specs_hash": registry["specs_hash"],
+                "participants": sorted(registry["specs"]),
+                "m_nominal": registry["m_nominal"],
+                "m_unique_hypotheses": registry["m_unique_hypotheses"],
+                "m_unique_results": registry["m_unique_results"],
+            })
+    m_nominal = sum(item["m_nominal"] for item in tournaments)
+    m_unique_hypotheses = sum(
+        item["m_unique_hypotheses"] for item in tournaments
+    )
+    m_unique_results = sum(item["m_unique_results"] for item in tournaments)
+    contract = {
+        "schema": "v10_47_23_campaign_registry",
+        "symbols": sorted(CAMPAIGN_SYMBOLS),
+        "timeframes": list(CAMPAIGN_TIMEFRAMES),
+        "tournament_combinations": len(tournaments),
+        "participants_per_tournament": tournaments[0]["m_nominal"],
+        "tournaments": tournaments,
+        "m_campaign_nominal": m_nominal,
+        "m_campaign_unique_hypotheses": m_unique_hypotheses,
+        "m_campaign_unique_results": m_unique_results,
+        # Cross-symbol/timeframe semantic equivalence is not proven. Use the
+        # conservative nominal family for every promotion decision.
+        "m_campaign_effective_for_gate": m_nominal,
+        "deduplication_status": "AMBIGUOUS_USE_NOMINAL",
+        "correction_method": CAMPAIGN_CORRECTION_METHOD,
+        "alpha": CAMPAIGN_ALPHA,
+        "closed": True,
+        "closed_before_metrics": True,
+    }
+    return {
+        "campaign_registry_contract": contract,
+        "campaign_registry_sha": C.canonical_hash(contract),
+        "m_campaign_nominal": m_nominal,
+        "m_campaign_unique_hypotheses": m_unique_hypotheses,
+        "m_campaign_unique_results": m_unique_results,
+        "m_campaign_effective_for_gate": m_nominal,
+        "correction_method": CAMPAIGN_CORRECTION_METHOD,
+        "alpha": CAMPAIGN_ALPHA,
+        "closed": True,
+        "closed_before_metrics": True,
+    }
+
+
+def preregister_campaign() -> dict:
+    return copy.deepcopy(_cached_campaign_registry())
 
 
 def _behavioral_fingerprints(deciders: dict, symbol, venue, timeframe, gen) -> dict:
@@ -234,7 +301,8 @@ def _random_baseline_decider(*, symbol: str, venue: str, timeframe: str,
 
 def evaluate_candidate(bars_tr, sigs_tr, bars_validation, sigs_validation, bars_wf,
                        sigs_wf, decide_fn, exit_params, *, symbol, timeframe,
-                       m_unique, policy_fingerprint):
+                       m_unique, policy_fingerprint, registry_hash,
+                       baseline_spec_hash, campaign_registry):
     """Evaluate TRAIN and VALIDATION before any WALK_FORWARD computation.
 
     ``sigs_wf`` may be a lazy zero-argument supplier.  It is called only after
@@ -258,7 +326,7 @@ def evaluate_candidate(bars_tr, sigs_tr, bars_validation, sigs_validation, bars_
         bars_tr, sigs_tr,
         _random_baseline_decider(
             symbol=symbol, venue="research_baseline", timeframe=timeframe,
-            gen="v10_47_21",
+            gen="v10_47_23",
         ),
         exit_params, symbol=symbol, timeframe=timeframe,
     )
@@ -274,7 +342,47 @@ def evaluate_candidate(bars_tr, sigs_tr, bars_validation, sigs_validation, bars_
         candidate_trades=sel["trades"], baseline_trades=baseline_trades,
         timeframe=timeframe, m_global=m_unique,
         alpha=SHADOW_GATES_V2["matched_random_alpha"],
+        m_campaign=campaign_registry["m_campaign_effective_for_gate"],
+        campaign_registry=campaign_registry["campaign_registry_contract"],
+        campaign_registry_sha=campaign_registry["campaign_registry_sha"],
+        baseline_spec_hash=baseline_spec_hash,
+        registry_hash=registry_hash,
     )
+    if paired["pairing_status"] == "INVALID":
+        gates = {
+            "net_positive_selection": m["net_pnl_eur"] > 0,
+            "n_eff_sufficient": (
+                m["n_eff_final"] >= SHADOW_GATES_V2["min_n_eff"]
+            ),
+            "top3_robust": m["net_without_top3_eur"] >= 0,
+            "baseline_match_complete": False,
+            "beats_matched_random_paired": False,
+            "conservative_survives": False,
+            "validation_positive": False,
+            "validation_n_eff_sufficient": False,
+            "walk_forward_positive": False,
+            "all_pass": False,
+        }
+        return {
+            "selection_metrics": m,
+            "matched_random_paired": paired,
+            "conservative_net_eur": None,
+            "validation_net_eur": None,
+            "validation_trades": 0,
+            "validation_metrics": None,
+            "validation_gate": False,
+            "validation_rejection_reason": "BASELINE_PAIRING_INVALID",
+            "walk_forward_called": False,
+            "walk_forward_metrics": None,
+            "walk_forward_net_eur": None,
+            "status": "BASELINE_PAIRING_INVALID",
+            "next_stage": "NONE",
+            "paired_lower_bound_eur": 0.0,
+            "baseline_coverage": 0.0,
+            "policy_identity": policy_identity,
+            "gates": gates,
+            "is_shadow_candidate": False,
+        }
     cons = CL.drive_causal(bars_tr, sigs_tr, decide_fn, exit_params,
                            symbol=symbol, timeframe=timeframe,
                            scenario_cost="conservative")
@@ -295,7 +403,11 @@ def evaluate_candidate(bars_tr, sigs_tr, bars_validation, sigs_validation, bars_
         "net_positive_selection": m["net_pnl_eur"] > 0,
         "n_eff_sufficient": m["n_eff_final"] >= SHADOW_GATES_V2["min_n_eff"],
         "top3_robust": m["net_without_top3_eur"] >= 0,
-        "baseline_match_complete": paired["match_status"] == "OK",
+        "baseline_match_complete": (
+            paired["match_status"] == "OK"
+            and paired["pairing_status"] == "VALID"
+            and paired["integrity_status"] == "PASS"
+        ),
         "beats_matched_random_paired": paired["beats_matched_random"],
         "conservative_survives": cons_net > 0,
         "validation_positive": val_net > 0,
@@ -386,6 +498,8 @@ def run_causal_tournament(discovery_partitions: DiscoveryPartitions, *,
         "selection_end_index": tr_end,
         "holdout_start_index": wf_end,
     }
+    # Close the full family before any real-market signal or metric is read.
+    campaign = preregister_campaign()
     reg = preregister(symbol, venue, timeframe, gen, ref_bars_by_ts)
 
     # PHYSICAL SEAL: holdout bars never enter this process or object graph.
@@ -399,7 +513,9 @@ def run_causal_tournament(discovery_partitions: DiscoveryPartitions, *,
         f"  [sigs] {n_discovery}/{n} discovery bars "
         f"(holdout {n_holdout} PHYSICALLY ABSENT) in {round(_t.time()-t0, 1)}s "
         f"| m_nominal={reg['m_nominal']} "
-        f"m_unique_results={reg['m_unique_results']} holdout_state=SEALED"
+        f"m_unique_results={reg['m_unique_results']} "
+        f"m_campaign={campaign['m_campaign_effective_for_gate']} "
+        f"holdout_state=SEALED"
     )
     wf_signal_cache: list | None = None
 
@@ -431,7 +547,10 @@ def run_causal_tournament(discovery_partitions: DiscoveryPartitions, *,
                                 _walk_forward_signals, fn, ex,
                                 symbol=symbol, timeframe=timeframe,
                                 m_unique=reg["m_global"],
-                                policy_fingerprint=reg["fingerprints"][name])
+                                policy_fingerprint=reg["fingerprints"][name],
+                                registry_hash=reg["registry_hash"],
+                                baseline_spec_hash=reg["baseline_policy_spec_hash"],
+                                campaign_registry=campaign)
         results[name]["gate"] = ev
         if ev["validation_gate"]:
             validation_admitted_candidates.append(name)
@@ -452,6 +571,7 @@ def run_causal_tournament(discovery_partitions: DiscoveryPartitions, *,
                          "baseline_policy_spec_hash", "correction", "alpha",
                          "baseline_tolerance_spec_hash",
                          "closed", "closed_before_metrics")},
+            "campaign_registry": campaign,
             "holdout": {"state": "SEALED",
                         "commitment_sha256": holdout_commitment["commitment_sha256"],
                         "index_range": list(sp["holdout"]), "n_bars": n_holdout,
