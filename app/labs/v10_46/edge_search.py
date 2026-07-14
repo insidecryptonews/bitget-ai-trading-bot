@@ -90,13 +90,16 @@ def _drive(bars, sigs, decide_fn, exit_params, symbol, scenario_money="5eur",
     used: dict = {}
     time_exit = int(exit_params.get("time_exit", 20))
     for i in range(WARMUP, len(bars) - 1):
-        dt = int(bars[i]["ts"]) + EC.BAR_MS
-        cluster = EC.cluster_id(symbol, int(bars[i]["ts"]))
+        ts_i = int(bars[i]["ts"])
+        dt = ts_i + EC.BAR_MS
+        cluster = EC.cluster_id(symbol, ts_i)
         if cluster in used and (i - used[cluster]) < cooldown_clusters:
             continue
         s = sigs[i]
-        event_id = f"{symbol}:{bars[i]['ts']}"
-        feats = {"bars_upto": bars[:i + 1], "_sig": s}
+        event_id = f"{symbol}:{ts_i}"
+        # share the precomputed signal + ts by REFERENCE (no per-bar history
+        # copy) — this is what keeps the full tournament O(participants * n)
+        feats = {"_sig": s, "ts": ts_i}
         d = decide_fn(feats, event_id, dt, cluster)
         if d.get("decision_action") != "TRADE":
             per_cluster.setdefault(cluster, {"net_eur": 0.0, "traded": False})
@@ -149,18 +152,26 @@ def run_edge_search(bars: list[dict], *, symbol: str, venue: str,
     """Run the full gross-first tournament. `directions` may include None
     (both), 'LONG', 'SHORT' to add LONG-only / SHORT-only research variants."""
     import random as _r
+    import time as _t
+    # precompute the shared causal signal ONCE per bar using a BOUNDED window
+    # (O(SIG_LOOKBACK) each) instead of re-scanning the whole history
+    t0 = _t.time()
+    lb = FAM.SIG_LOOKBACK
     sigs = [None] * len(bars)
     for i in range(WARMUP, len(bars)):
-        sigs[i] = FAM._sig(bars[:i + 1])
+        sigs[i] = FAM._sig(bars[max(0, i - lb):i + 1])
+    log(f"  [sigs] {len(bars)} bars precomputed in {round(_t.time()-t0,1)}s")
     results: dict = {}
 
     def _add(name, decide_fn, exit_params):
+        ta = _t.time()
         pc = _drive(bars, sigs, decide_fn, exit_params, symbol,
                     scenario_money=scenario_money, scenario_cost=scenario_cost)
         results[name] = {"metrics": _participant_metrics(pc), "per_cluster": pc}
-        log(f"  {name}: {results[name]['metrics']['classification']} "
-            f"net={results[name]['metrics']['net_pnl_eur']}€ "
-            f"gross={results[name]['metrics']['gross_pnl_eur']}€")
+        m = results[name]["metrics"]
+        log(f"  {name}: {m['classification']} trades={m['trades']} "
+            f"net={m['net_pnl_eur']}€ gross={m['gross_pnl_eur']}€ "
+            f"({round(_t.time()-ta,1)}s)")
 
     # P01–P12 (both-direction) + optional LONG-only / SHORT-only
     for fid, fam in FAM.FAMILIES.items():
@@ -186,7 +197,7 @@ def run_edge_search(bars: list[dict], *, symbol: str, venue: str,
                                    spec_hash=spec_hash, policy_id=_tid)
                 ctx = {}
                 if ref_bars_by_ts is not None:
-                    ref = ref_bars_by_ts.get(int(feats["bars_upto"][-1]["ts"]))
+                    ref = ref_bars_by_ts.get(int(feats.get("ts", 0)))
                     if ref is not None and s["last"]:
                         ctx["xv_gap"] = (s["last"] - float(ref)) / s["last"]
                 a, sd, pb = _tv["fn"](s, ctx)

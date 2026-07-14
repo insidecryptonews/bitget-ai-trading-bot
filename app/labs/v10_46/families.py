@@ -21,8 +21,15 @@ BAR_MS = 60_000
 
 
 # ---------------------------------------------------------------- indicators
+SIG_LOOKBACK = 260   # bounded window: every _sig call is O(SIG_LOOKBACK), not O(history)
+
+
 def _sig(bars: list[dict]) -> dict:
-    """Causal signal bundle from the bar window (last bar = decision bar)."""
+    """Causal signal bundle from the bar window (last bar = decision bar).
+    Only the last SIG_LOOKBACK bars are used, so a call is O(SIG_LOOKBACK)
+    regardless of total history length (avoids O(history^2) in a full replay)."""
+    if len(bars) > SIG_LOOKBACK:
+        bars = bars[-SIG_LOOKBACK:]
     n = len(bars)
     if n < 25:
         return {"ok": False}
@@ -333,16 +340,22 @@ def family_decider(fid: str, *, symbol: str, venue: str, timeframe: str,
     spec_hash = C.canonical_hash({"family": fid, "exit": fam["exit"]})
 
     def decide_fn(feats, event_id, dt, cluster):
-        bars_upto = feats.get("bars_upto") or []
-        s = _sig(bars_upto)
+        # fast path: the driver precomputes _sig ONCE per bar and shares it;
+        # fall back to computing from bars_upto for direct/unit-test callers
+        s = feats.get("_sig")
+        if s is None:
+            s = _sig(feats.get("bars_upto") or [])
         if not s.get("ok"):
             return _mk("ABSTAIN_DATA_QUALITY", "FLAT", 0.5, symbol=symbol,
                        venue=venue, timeframe=timeframe, event_id=event_id,
                        dt=dt, gen_id=gen_id, reason="ABSTAIN_DATA_QUALITY",
                        spec_hash=spec_hash, policy_id=fid)
         ctx = {}
-        if ref_bars_by_ts is not None and bars_upto:
-            ref = ref_bars_by_ts.get(int(bars_upto[-1]["ts"]))
+        if ref_bars_by_ts is not None:
+            ts = feats.get("ts")
+            if ts is None and feats.get("bars_upto"):
+                ts = int(feats["bars_upto"][-1]["ts"])
+            ref = ref_bars_by_ts.get(int(ts)) if ts is not None else None
             if ref is not None and s["last"]:
                 ctx["xv_gap"] = (s["last"] - float(ref)) / s["last"]
         action, side, prob = fam["fn"](s, ctx)
