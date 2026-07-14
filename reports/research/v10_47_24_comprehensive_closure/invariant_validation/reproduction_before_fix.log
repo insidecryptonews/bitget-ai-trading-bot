@@ -1,0 +1,23 @@
+V10.47.24 LOCAL INVARIANT VALIDATION - BEFORE FIX
+HEAD=807857d8b9c8ecdc5e469592f3210d8f929894a9
+NETWORK_USED=false
+HOLDOUT_OPENED=false
+
+campaign_564: raw_p=0.0004882812 campaign_p=0.275390625 promotion_allowed=false
+campaign_self_consistent_47: raw_p=0.0004882812 campaign_p=0.0229492188 promotion_allowed=true
+three_symbol_rehashed_registry: campaign_p=0.0229492188 promotion_allowed=true
+both_sides_missing_required: pairing_status=VALID accepted=1
+nonfinite_outcome: pairing_status=VALID accepted=11 campaign_p=0.0229492188 promotion_allowed=true
+unicode_identifier: pairing_status=VALID accepted=1
+repeated_economic_dependency_pairing: pairing_status=VALID accepted=11 promotion_allowed=true
+pair_order_good_first: accepted=1 impossible=1 incompatible=0 coverage=0.5
+pair_order_bad_first: accepted=0 impossible=1 incompatible=1 coverage=0.0
+n_eff_repeated_dependency: n_raw=40 n_eff_final=40.0 dependency_cluster_count_expected=1
+validation_nan: validation_gate=true walk_forward_called=true
+validation_parameter_mutation: parameters_unchanged=false walk_forward_called=true is_shadow_candidate=true
+discovery_invalid_ohlc_overlap: accepted=true train_last_ts=1000 validation_first_ts=1000 high=90 low=110
+simoms_invalid_side: status=OK side=HOLD
+simoms_zero_entry: exception=ZeroDivisionError
+regression_file_before_fix: 8 failed in 0.29s exit_code=1
+
+FINAL_RECOMMENDATION=NO LIVE

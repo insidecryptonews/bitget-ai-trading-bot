@@ -1,0 +1,7 @@
+rg -n "matched_random_paired|evaluate_candidate|run_causal_tournament|preregister_campaign" app tests scripts
+python - <synthetic campaign, pairing, validation, discovery and SimOMS fixtures>
+python - <synthetic n_eff dependency fixture>
+git status --short
+git log --oneline --decorate -6
+
+All fixture values were synthetic. No network, credentials, private endpoints, real orders or real holdout access were used.

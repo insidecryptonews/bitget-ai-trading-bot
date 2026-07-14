@@ -1,0 +1,24 @@
+{
+  "schema": "v10_47_24_findings_before_fix_v1",
+  "head": "807857d8b9c8ecdc5e469592f3210d8f929894a9",
+  "findings": [
+    {"id": "INV-001", "severity": "P1", "component": "campaign_authority", "result": "REPRODUCED", "detail": "Self-consistent caller registry with m_campaign=47 changes the campaign gate from false to true."},
+    {"id": "INV-002", "severity": "P1", "component": "paired_baseline", "result": "REPRODUCED", "detail": "Both sides may omit a required semantic value and still form an accepted pair."},
+    {"id": "INV-003", "severity": "P1", "component": "paired_baseline", "result": "REPRODUCED", "detail": "Non-finite outcomes can reach corrected significance and promotion_allowed=true."},
+    {"id": "INV-004", "severity": "P1", "component": "economic_dependencies", "result": "REPRODUCED", "detail": "Forty rows with one underlying_trade_id and dependency_cluster_id produce n_eff_final=40.0."},
+    {"id": "INV-005", "severity": "P1", "component": "validation_walk_forward", "result": "REPRODUCED", "detail": "NaN validation net is not rejected and invokes walk-forward."},
+    {"id": "INV-006", "severity": "P1", "component": "validation_walk_forward", "result": "REPRODUCED", "detail": "Exit parameter mutation is reported but does not block walk-forward or shadow candidacy."},
+    {"id": "INV-007", "severity": "P2", "component": "paired_baseline", "result": "REPRODUCED", "detail": "Candidate row order changes accepted/incompatible reconciliation."},
+    {"id": "INV-008", "severity": "P2", "component": "paired_baseline", "result": "REPRODUCED", "detail": "Ambiguous non-ASCII identifiers pass the current canonical ID check."},
+    {"id": "INV-009", "severity": "P2", "component": "discovery_dataset", "result": "REPRODUCED", "detail": "Overlapping partitions and invalid OHLC bounds are accepted."},
+    {"id": "INV-010", "severity": "P2", "component": "sim_oms", "result": "REPRODUCED", "detail": "Unknown side is interpreted as SHORT and zero entry can raise an unexpected exception."},
+    {"id": "INV-011", "severity": "P2", "component": "campaign_authority", "result": "REPRODUCED", "detail": "Caller alpha, local multiplicity and tolerance overrides remain part of the gate API."}
+  ],
+  "p0": 0,
+  "p1": 6,
+  "p2": 5,
+  "p3": 0,
+  "holdout_opened": false,
+  "network_used": false,
+  "final_recommendation": "NO LIVE"
+}

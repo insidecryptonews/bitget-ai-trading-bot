@@ -1,0 +1,89 @@
+{
+  "schema": "v10_47_24_invariant_matrix_v1",
+  "generated_from_head": "807857d8b9c8ecdc5e469592f3210d8f929894a9",
+  "research_only": true,
+  "holdout_opened": false,
+  "components": [
+    {
+      "component": "campaign_authority",
+      "claim": "Campaign-wide correction is fixed before metrics",
+      "trust_boundary": "caller to statistical gate",
+      "caller_controlled_input": ["m_campaign", "alpha", "correction_method", "campaign_registry", "campaign_registry_sha"],
+      "authorized_source": "missing tracked canonical authority",
+      "observed_invariant_failure": "A reduced self-consistent registry changes promotion",
+      "expected_fail_closed_behavior": "Only the tracked 12x47 authority may evaluate promotion",
+      "status_before_fix": "FAIL"
+    },
+    {
+      "component": "paired_baseline",
+      "claim": "Exact bijective pairing is complete and order-independent",
+      "trust_boundary": "candidate/baseline rows to paired statistic",
+      "caller_controlled_input": ["row order", "IDs", "matching fields", "outcomes", "tolerance_spec"],
+      "authorized_source": "canonical pairing contract plus ledger evidence",
+      "observed_invariant_failure": "Missing values, non-finite outcomes and row order can change accepted evidence",
+      "expected_fail_closed_behavior": "Canonical IDs, finite values, complete fields and deterministic reconciliation",
+      "status_before_fix": "FAIL"
+    },
+    {
+      "component": "economic_dependencies",
+      "claim": "Repeated economic evidence cannot inflate effective sample size",
+      "trust_boundary": "ledger identities to statistics",
+      "caller_controlled_input": ["cluster", "event", "trade and hypothesis IDs"],
+      "authorized_source": "causal ledger generated identities",
+      "observed_invariant_failure": "dependency_cluster_id and underlying_trade_id are ignored",
+      "expected_fail_closed_behavior": "n_eff is capped by unique economic dependencies",
+      "status_before_fix": "FAIL"
+    },
+    {
+      "component": "validation_walk_forward",
+      "claim": "Rejected or changed candidates cannot reach walk-forward",
+      "trust_boundary": "validation output to lazy walk-forward supplier",
+      "caller_controlled_input": ["metrics", "callable", "exit parameters", "precomputed signals"],
+      "authorized_source": "finite validation metrics and immutable policy identity",
+      "observed_invariant_failure": "NaN and parameter mutation can pass validation",
+      "expected_fail_closed_behavior": "No walk-forward computation after any invalid metric or identity change",
+      "status_before_fix": "FAIL"
+    },
+    {
+      "component": "discovery_dataset",
+      "claim": "Discovery partitions are valid, disjoint and causal",
+      "trust_boundary": "partition files to feature computation",
+      "caller_controlled_input": ["OHLCV values", "partition timestamps", "file identity"],
+      "authorized_source": "validated isolated discovery loader and dataset commitment",
+      "observed_invariant_failure": "Invalid OHLC and cross-partition timestamp overlap are accepted",
+      "expected_fail_closed_behavior": "Finite valid bars, strict boundaries and distinct files",
+      "status_before_fix": "FAIL"
+    },
+    {
+      "component": "sim_oms",
+      "claim": "Simulation rejects malformed inputs without ambiguous behavior",
+      "trust_boundary": "strategy parameters and bars to simulated money result",
+      "caller_controlled_input": ["side", "prices", "fractions", "timestamps", "scenario IDs"],
+      "authorized_source": "strict SimOMS input contract",
+      "observed_invariant_failure": "Unknown side is treated as SHORT and zero entry raises ZeroDivisionError",
+      "expected_fail_closed_behavior": "Structured INVALID_INPUT with no promotion path",
+      "status_before_fix": "FAIL"
+    },
+    {
+      "component": "holdout_isolation",
+      "claim": "Selection cannot load real holdout bars",
+      "trust_boundary": "discovery process to sealed holdout root",
+      "caller_controlled_input": ["commitment metadata only"],
+      "authorized_source": "separate sealed loader and capability",
+      "observed_invariant_failure": null,
+      "expected_fail_closed_behavior": "No holdout bars or capability in tournament object graph",
+      "status_before_fix": "PASS_EXISTING_DEFENSIVE_TESTS_REQUIRED"
+    },
+    {
+      "component": "provenance_manifest_seal",
+      "claim": "Evidence identifies the exact code and tracked inputs",
+      "trust_boundary": "worktree and generated artifacts to manifest",
+      "caller_controlled_input": ["artifact list", "labels", "run metadata"],
+      "authorized_source": "post-recompute manifest over final HEAD/tree",
+      "observed_invariant_failure": "Existing V10.47.23 manifest is obsolete after the authorized documentation commit",
+      "expected_fail_closed_behavior": "Recompute affected outputs and seal final tracked state",
+      "status_before_fix": "RECOMPUTE_REQUIRED"
+    }
+  ],
+  "final_recommendation": "NO LIVE"
+}
