@@ -74,3 +74,31 @@ certification contract under adversarial execution:
 The twelve regenerated outputs still support the conservative result
 `SHADOW_CANDIDATES=0 / NO_CONFIRMED_EDGE / NO LIVE`, but they do not pass final
 certification. Full evidence: `reviews/V10_47_18_WORK_REAUDIT.md`.
+
+## Independent final re-audit of V10.47.22 (2026-07-14)
+
+Verdict: **FAIL** for final scientific certification. Most of the repair now
+passes: validation short-circuits WF, the holdout remained sealed/unopened,
+MTF and ATR/ledger behavior are causal, 12/12 tournaments and 5/5 MTF outputs
+reproduce, the certified 3040-test evidence is coherent, and operational safety
+remains `SAFE_PAPER_ONLY`.
+
+One P1 blocker was independently reproduced in
+`app/labs/v10_46/causal_stats.py`: `matched_random_paired()` consumes baseline
+IDs but does not enforce unique candidate IDs. Twelve rows with the same
+`candidate_trade_id` were accepted as twelve exact pairs and passed the real
+Bonferroni gate (`m_global=47`, corrected p=0.0114746094,
+`beats_matched_random=true`). The declared exact one-to-one baseline contract is
+therefore false for adversarial input.
+
+The published outputs are not contaminated by that defect: their four actual
+OK pairs have unique IDs, 299 requests are impossible, eight are incompatible,
+the minimum corrected p-value is 1.0, validation admits zero candidates, and
+there are zero shadow candidates. The conservative conclusion remains:
+`NO_CONFIRMED_EDGE / SHADOW_CANDIDATES=0 / HOLDOUT=SEALED / NO LIVE`.
+
+Required next action: V10.47.23 must enforce candidate/baseline/pair ID
+uniqueness before statistics, fail closed on duplicates, add a production-scale
+`m_global=47` adversarial regression, and define the multiple-testing family
+across the 12-tournament campaign before any future promotion. Full evidence:
+`reviews/V10_47_22_WORK_FINAL_REAUDIT.md`.
