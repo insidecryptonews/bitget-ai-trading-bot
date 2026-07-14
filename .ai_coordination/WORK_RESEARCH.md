@@ -102,3 +102,32 @@ uniqueness before statistics, fail closed on duplicates, add a production-scale
 `m_global=47` adversarial regression, and define the multiple-testing family
 across the 12-tournament campaign before any future promotion. Full evidence:
 `reviews/V10_47_22_WORK_FINAL_REAUDIT.md`.
+
+## Independent focused re-audit of V10.47.23 (2026-07-15)
+
+Verdict: **FAIL** for final scientific certification. The prior one-to-one
+pairing defect is repaired: candidate, baseline and pair identities are
+bijective per evaluation; invalid identities fail closed; pair IDs are
+deterministic; and the 311 published requests reconcile exactly as 4 accepted,
+299 impossible and 8 incompatible. The 12 published tournaments remain safely
+negative: validation admits zero candidates, shadow has zero candidates,
+minimum campaign-corrected p is 1.0, and the holdout remained sealed.
+
+The remaining P1 blocker is campaign-family authority. `matched_random_paired()`
+accepts a caller-supplied campaign contract and only checks that contract against
+its caller-supplied SHA and internal multiplicities. It does not anchor the
+contract to the canonical 4-symbol x 3-timeframe x 47-participant family. A
+rehashed one-tournament contract with `m_campaign=47` was therefore accepted and
+promoted the same synthetic evidence that correctly fails under the official
+`m_campaign=564` contract. The campaign registry also does not bind the supplied
+tournament/baseline/matching hashes to the actual tournament entry.
+
+Required next action: `V10_47_24_ANCHOR_CAMPAIGN_REGISTRY_AND_FWER`. Require the
+canonical closed campaign identity inside the statistical gate, validate the
+exact universe and participant set, bind every tournament/spec/tolerance hash,
+reject rehashed reduced families and unrelated hashes, then regenerate all
+gates, reports, manifest and seal for another independent Work audit. Full
+evidence: `reviews/V10_47_23_WORK_FINAL_REAUDIT.md`.
+
+The operational conclusion is unchanged:
+`NO_CONFIRMED_EDGE / SHADOW_CANDIDATES=0 / HOLDOUT=SEALED / NO LIVE`.
