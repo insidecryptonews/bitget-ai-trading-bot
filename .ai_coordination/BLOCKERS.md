@@ -17,3 +17,13 @@
 - BLK-002: no reproducible free historical real OI / funding-sign feed →
   canonical P08_OI_FUNDING_DIVERGENCE cannot be implemented (only the proxy).
 - BLK-003: no free historical L2 order book → book-based costs stay MODELLED.
+
+## Focused re-audit blockers (V10.47.18)
+- BLK-R1 (P1): validation rejection does not prevent WALK_FORWARD execution.
+- BLK-R2 (P1): holdout data is present in discovery memory and self-authorization
+  plus path escape are possible.
+- BLK-R3 (P1): baseline accepts mismatched holding/session/day/censoring/notional/
+  funding/regime and does not apply a corrected p-value.
+- BLK-R4 (P1): manifest/seal does not verify current Git/dataset/spec/policy state.
+- BLK-R5 (P2): incomplete 4h buckets can become regime-ready; DET_* is smoke-only.
+- BLK-R6 (P2): ATR and initial stop are not append-only ledger facts.

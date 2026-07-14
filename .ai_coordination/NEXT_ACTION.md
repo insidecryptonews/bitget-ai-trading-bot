@@ -2,10 +2,8 @@
 
 There must be exactly ONE next action.
 
-- [ ] NEXT: Route the certification repair (V10.47.16–18) back to Work for an
-  independent RE-AUDIT — verify VALIDATION participation, the physically sealed
-  holdout (state SEALED, guard, commitment), the exactly-paired baseline with
-  coverage + paired lower bound, the real 4h→1h + 2-ATR deterministic strategies,
-  the provenance-bound manifest/seal, and the unique-test count. Keep the holdout
-  SEALED. Only if the re-audit PASSES, resume acquiring ≥2 years of verified 1h/4h
-  OHLCV to run EXP-DET-EMA-ADX / EXP-DET-DONCHIAN under the closed registry.
+- [ ] NEXT: IMPLEMENT_V10_47_20_VALIDATION_AND_PHYSICAL_HOLDOUT_ISOLATION. Convert
+  Work's focused falsifications into RED tests, then make VALIDATION admit the only
+  candidates visible to WALK_FORWARD and replace the in-memory holdout wrapper with
+  a separate fail-closed loader using synthetic fixtures only. Keep the real holdout
+  SEALED and preserve NO_CONFIRMED_EDGE / SHADOW_CANDIDATES=0 / NO LIVE.

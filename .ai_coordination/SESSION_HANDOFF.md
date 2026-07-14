@@ -1,13 +1,11 @@
 # SESSION HANDOFF
 
-Resume point: Work's independent audit of V10.47.14 returned **CERTIFICATION=FAIL**
-(material gaps in VALIDATION use, physical holdout sealing, matched/paired baseline,
-deterministic strategy spec-conformance, manifest/seal provenance, and a duplicate
-pytest nodeid). The conservative conclusion (NO_CONFIRMED_EDGE / SHADOW_CANDIDATES=0
-/ NO LIVE) is unaffected and reproduced.
+Work's focused V10.47.18 re-audit returned FAIL and its two evidence files are
+preserved byte-for-byte. Official state is IMPLEMENTATION_STATUS=IN_PROGRESS,
+CERTIFICATION=FAIL, WORK_REAUDIT_REQUIRED=true, NO_CONFIRMED_EDGE,
+SHADOW_CANDIDATES=0, HOLDOUT=SEALED and FINAL_RECOMMENDATION=NO LIVE.
 
-Official state: SCIENTIFIC_REPAIR_IMPLEMENTED_BUT_NOT_CERTIFIED. The certification
-repair proceeds V10.47.16 (validation + physical sealed holdout + paired baselines)
-→ V10.47.17 (real 4h→1h + ATR risk) → V10.47.18 (reproducible manifest/seal + unique
-certification + regenerate the twelve tournaments without opening the holdout), then
-re-run the audit. Holdout stays SEALED. No push; no live.
+Resume at V10.47.20: reproduce focused failures as RED tests, then implement a real
+validation admission boundary and physical holdout isolation without opening the
+real holdout. Subsequent blocks repair exact baseline/MTF/ATR and real-state sealing,
+regenerate all twelve tournaments, and route V10.47.22 to Work for re-audit.

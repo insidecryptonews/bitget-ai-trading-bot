@@ -41,3 +41,13 @@
   dynamic 2-ATR stops / 1R trailing (per their pre-registration) — status
   NEEDS_IMPLEMENTATION_REPAIR, then NEEDS_DATA. `IMPLEMENTATION_STATUS=COMPLETE` is retracted.
 - **Owner:** COORDINATOR · **Status:** OPEN → repaired in V10.47.17.
+
+### D006 - Focused Work re-audit V10.47.18 failed certification
+- **Date (UTC):** 2026-07-14
+- **Decision:** Accept the focused FAIL without qualification. Retract the claim
+  that V10.47.16-18 closed the scientific-repair contract. Preserve the conservative
+  result NO_CONFIRMED_EDGE / SHADOW_CANDIDATES=0 / HOLDOUT=SEALED / NO LIVE.
+- **Required repair:** validation short-circuit; physical holdout isolation; exact
+  one-to-one baseline with corrected multiple testing; complete causal MTF buckets;
+  append-only ATR risk; real-state deterministic manifest and seal.
+- **Owner:** TEMPORARY BUILDER (Codex) - **Status:** IN_PROGRESS.

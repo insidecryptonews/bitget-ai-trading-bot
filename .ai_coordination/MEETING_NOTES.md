@@ -16,3 +16,10 @@
 - Regenerated the 12 tournaments without opening the holdout → SHADOW_CANDIDATES=0,
   holdout SEALED everywhere. Verdict: CERTIFICATION REPAIR COMPLETE — NO CONFIRMED EDGE.
 - NEXT_ACTION: route back to Work for re-audit; hold the holdout SEALED.
+
+## 2026-07-14 - Focused V10.47.18 re-audit FAIL
+- Accepted Work's focused FAIL and preserved its evidence byte-for-byte.
+- Retracted claims that validation, physical holdout isolation, exact matching,
+  MTF completeness, ATR ledger and real-state sealing were closed.
+- Opened the bounded V10.47.19-22 adversarial repair. The conservative trading
+  conclusion is unchanged: zero candidates, no confirmed edge, NO LIVE.

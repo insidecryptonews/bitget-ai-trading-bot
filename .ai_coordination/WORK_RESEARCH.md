@@ -42,3 +42,35 @@ totals reproduce, but the final certification has material gaps:
 
 Full evidence, severity, matrix, reproductions and required next action:
 `reviews/V10_47_14_WORK_FINAL_AUDIT.md`.
+
+## Focused re-audit of V10.47.15–18 (2026-07-14)
+
+Verdict: **FAIL**. The repair adds real improvements, but does not close the
+certification contract under adversarial execution:
+
+1. VALIDATION has its own metrics and rejects candidates, but WALK_FORWARD is
+   still executed for validation failures instead of receiving admitted
+   candidates only.
+2. `SealedHoldout` is an in-memory wrapper over `bars[hstart:]`, not a separate
+   physical loader/path. `_bars` is directly readable, any neutral caller can
+   self-authorize with an arbitrary string, and commitment paths allow traversal.
+3. `matched_random_paired` accepts `match_status=OK` despite deliberately
+   mismatched holding, session, day, censoring, notional, funding and regime. It
+   returns no candidate/baseline trade IDs or explicit pairs, and applies no
+   multiple-testing correction.
+4. The regular 4h→1h mapping is causal, but an incomplete 4h candle is published
+   as ready and the twelve-tournament registry contains no deterministic MTF
+   participant.
+5. LONG/SHORT 2-ATR stops are numerically exact and reach SimOMS; ATR and the
+   initial stop are not stored in the append-only ledger records.
+6. The final manifest is stale again (`progress_checkpoint.md` changed after
+   sealing). Its verifier does not compare current Git or re-hash external
+   datasets/specs/registry, excludes collection `.txt`, audits and hub, and two
+   identical rebuilds produce different payload/seal due to `generated_utc`.
+7. The unique collection itself is repaired: 2912 invocations, 2912 unique
+   nodeids, zero duplicates. The execution log lacks HEAD/tree and its manifest
+   certification is invalid because the manifest does not verify.
+
+The twelve regenerated outputs still support the conservative result
+`SHADOW_CANDIDATES=0 / NO_CONFIRMED_EDGE / NO LIVE`, but they do not pass final
+certification. Full evidence: `reviews/V10_47_18_WORK_REAUDIT.md`.
