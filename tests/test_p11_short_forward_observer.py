@@ -180,6 +180,11 @@ def test_rejection_boundary_bootstrap_and_forming_bar_are_separated(tmp_path):
     assert status["boundary"]["bootstrap_is_feature_only"] is True
     assert status["reconciliation"]["status"] == "PASS"
     assert status["reconciliation"]["lhs_forward_opportunities"] == 1
+    assert status["safety"]["paper_filter_enabled"] is False
+    assert status["safety"]["can_send_real_orders"] is False
+    assert status["safety"]["final_recommendation"] == "NO LIVE"
+    assert status["final_recommendation"] == "NO LIVE"
+    assert status["heartbeat"]["source_finality_lag_ms"] == 120_000
 
 
 def test_integrated_real_p11_signal_to_tp_outcome_and_label(tmp_path):
@@ -403,6 +408,35 @@ def test_duplicate_bar_is_idempotent_and_conflict_is_fail_closed(tmp_path, monke
     assert _scalar(observer, "SELECT COUNT(*) FROM p11_bars") == 1
     assert _scalar(observer, "SELECT COUNT(*) FROM p11_events") == before[2]
     assert observer.store.checkpoint()["observer_status"] == "HALTED_FAIL_CLOSED"
+    diagnostic = _rows(
+        observer,
+        "SELECT bar_open_ms,details_json FROM p11_diagnostics WHERE code=?",
+        ("BAR_PAYLOAD_CONFLICT",),
+    )[0]
+    details = json.loads(diagnostic["details_json"])
+    assert diagnostic["bar_open_ms"] == T0
+    assert details["stored_payload"]["high"] == original["high"]
+    assert details["incoming_payload"]["high"] == conflicting["high"]
+    assert details["stored_payload_hash"] != details["incoming_payload_hash"]
+
+
+def test_restart_accepts_unrelated_repo_provenance_but_keeps_frozen_origin(tmp_path):
+    path = tmp_path / "provenance-continuity"
+    first = observer_mod.ObserverStore(
+        path, now_ms=T0, forward_start_ms=T0, provenance=PROVENANCE,
+    )
+    changed_repo = {"head": "c" * 40, "tree": "d" * 40}
+    restarted = observer_mod.ObserverStore(
+        path, now_ms=T0 + I, forward_start_ms=T0 + I,
+        provenance=changed_repo,
+    )
+
+    assert restarted.run_id == first.run_id
+    assert restarted.forward_start_ms == T0
+    assert restarted.run["repo_head"] == PROVENANCE["head"]
+    assert restarted.run["repo_tree"] == PROVENANCE["tree"]
+    assert restarted.config["dependency_closure_fingerprint"]
+    assert restarted.config["source_finality_lag_ms"] == 120_000
 
 
 def test_atomic_lease_blocks_second_process_and_fences_old_holder(tmp_path):
@@ -671,6 +705,66 @@ def test_reconciliation_binds_checkpoint_bars_and_lifecycles_fail_closed(
     assert degraded["recommendation"] == "WAIT_FOR_OBSERVER_RECOVERY"
     assert "START_FORWARD_SHADOW_NOW" not in degraded["activation_state"]
     assert "OBSERVER_BLOCKED_FAIL_CLOSED" in degraded["activation_state"]
+    summary = (observer.output_dir / "summary.txt").read_text(encoding="utf-8")
+    assert "recommendation=WAIT_FOR_OBSERVER_RECOVERY" in summary
+    assert "recommendation=START_FORWARD_SHADOW_NOW" not in summary
+    assert "paper_filter_enabled=false" in summary
+    assert "final_recommendation=NO LIVE" in summary
+
+
+def test_public_provider_waits_for_explicit_source_finality_lag(
+    monkeypatch,
+):
+    raw_rows = []
+    for index in range(15):
+        ts_ms = T0 + index * 60_000
+        raw_rows.append([ts_ms, 100.0, 100.2, 99.8, 100.0, 1.0, 100.0])
+    requested_end_ms = []
+
+    def fake_fetch(_symbol, days, log, end_ms):
+        requested_end_ms.append(end_ms)
+        return raw_rows
+
+    monkeypatch.setattr(observer_mod.bitget_data, "fetch_bitget_1m", fake_fetch)
+    provider = observer_mod.BitgetClosedBarProvider()
+    before_finality = T0 + I + observer_mod.SOURCE_FINALITY_LAG_MS - 1
+    with pytest.raises(
+        observer_mod.PublicDataUnavailable,
+        match="BITGET_STRICT_15M_DATA_UNAVAILABLE",
+    ):
+        provider.fetch(now_ms=before_finality, since_ms=T0)
+
+    settled_now = T0 + I + observer_mod.SOURCE_FINALITY_LAG_MS
+    bars = provider.fetch(now_ms=settled_now, since_ms=T0)
+    assert [bar["ts"] for bar in bars] == [T0]
+    assert requested_end_ms == [T0 + I - 1, T0 + I]
+
+
+def test_public_poll_never_returns_a_stale_healthy_snapshot_after_publish_failure(
+    tmp_path,
+    monkeypatch,
+):
+    observer = _new_observer(tmp_path / "publish-fail-closed")
+    observer.poll_once(now_ms=T0 + I, bars=[_bar(T0)])
+
+    class ConflictingProvider:
+        def fetch(self, *, now_ms, since_ms):
+            return [_bar(T0, high=100.3)]
+
+    observer.provider = ConflictingProvider()
+    monkeypatch.setattr(
+        observer,
+        "_publish",
+        lambda _now_ms: (_ for _ in ()).throw(OSError("simulated publish failure")),
+    )
+    result = observer.poll_once(
+        now_ms=T0 + 2 * I + observer_mod.SOURCE_FINALITY_LAG_MS
+    )
+
+    assert result["observer_status"] == "HALTED_FAIL_CLOSED"
+    assert result["recommendation"] == "WAIT_FOR_OBSERVER_RECOVERY"
+    assert result["can_send_real_orders"] is False
+    assert result["final_recommendation"] == "NO LIVE"
 
 
 def _dotted_name(node: ast.AST) -> str:
@@ -760,15 +854,16 @@ def test_public_bitget_http_failure_is_visible_and_retryable(tmp_path, monkeypat
         provenance=PROVENANCE,
         provider=FlakyProvider(),
     )
-    waiting = observer.poll_once(now_ms=T0 + I)
+    first_poll_ms = T0 + I + observer_mod.SOURCE_FINALITY_LAG_MS
+    waiting = observer.poll_once(now_ms=first_poll_ms)
     assert waiting["observer_status"] == "WAITING_FOR_DATA"
     assert "PublicDataUnavailable" in waiting["heartbeat"]["last_error"]
     assert waiting["reconciliation"]["status"] == "PASS"
 
-    recovered = observer.poll_once(now_ms=T0 + I)
+    recovered = observer.poll_once(now_ms=first_poll_ms)
     assert recovered["observer_status"] == "OBSERVER_CONNECTED"
     assert recovered["heartbeat"]["last_error"] is None
-    correlation = f"public-source:{(T0 + I) // I}"
+    correlation = f"public-source:{first_poll_ms // I}"
     with observer.store.connect() as conn:
         phases = conn.execute(
             """SELECT phase FROM p11_diagnostics

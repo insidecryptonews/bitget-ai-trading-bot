@@ -97,11 +97,35 @@ El dashboard V10.43c consume únicamente el snapshot atómico `observer_status.j
 
 ## Evidencia local previa a la activación
 
-- 21 pruebas adversariales del core cubren frontera, forming bars, rechazo, señal real P11, entrada, TP, SL, TIME=15, stop-first, gap-through, restart, idempotencia, conflictos, lease/fencing, huérfanos, unicidad, outage/recovery, orden temporal, costes no finitos, transiciones inválidas, reconciliación exacta, `n_eff`, seguridad, HTTP 503, propagación de IDs y finalización.
-- La validación combinada relevante terminó con 142 pruebas superadas; las rutas generales afectadas añadieron otras 39 pruebas superadas.
+- 24 pruebas adversariales del core cubren frontera, forming bars, rechazo, señal real P11, entrada, TP, SL, TIME=15, stop-first, gap-through, restart, idempotencia, conflictos con payload completo, lease/fencing, huérfanos, unicidad, outage/recovery, orden temporal, costes no finitos, transiciones inválidas, reconciliación exacta, `n_eff`, finalización de fuente, provenance semántica y seguridad.
+- Las 39 pruebas focalizadas de observer, integración y dashboard terminaron correctamente. La batería ampliada V10.46/V10.47 terminó con 345 pruebas superadas.
+- La suite completa local terminó con `3140 passed in 687.38s` y exit code 0.
 - La compilación integral de `app`, `scripts` y `tests` terminó correctamente.
 - La auditoría estática/dinámica no encontró imports ni llamadas a órdenes, endpoints privados, wallet, `.env` u holdout en la ruta del observador.
 - Una comprobación pública real obtuvo 5.800 velas 1m cerradas y 385 velas 15m continuas, sin gaps; el agregador local fue byte-equivalente al de referencia, con SHA-256 `a2ffe24ccc240eb299612712245c3abaa912372f04e6eb5ea13acf1226dfc18c`.
+
+## Incidente de finalización de fuente y hardening
+
+La primera ejecución local detectó correctamente un conflicto inmutable en la
+vela de las 18:00 UTC: la lectura realizada seis segundos después del cierre
+todavía contenía el último minuto incompleto. Una lectura pública posterior de
+Bitget revisó `high` de `65095.5` a `65120.0`, `close` de `65087.9` a
+`65092.8` y `volume` de `246.4937` a `263.7498`. El run afectado quedó
+`HALTED_FAIL_CLOSED`; sus datos no se reescriben ni se contabilizan como
+evidencia válida.
+
+El adapter aplica ahora un margen explícito de finalización de 120 segundos
+antes de admitir una vela 15m. Los conflictos conservan ambos payloads y hashes
+en el diagnóstico estructurado. HEAD y tree siguen congelados como provenance,
+pero la continuidad tras reinicio se decide por la huella completa del código
+productivo que determina fuente, señal, costes, reloj, contratos y simulación;
+un commit documental no invalida el run y un cambio semántico sí lo hace.
+
+El resumen corto utiliza la misma decisión fail-closed que el status JSON: solo
+publica `START_FORWARD_SHADOW_NOW` con reconciliación `PASS` y estado sano. En
+cualquier otro caso publica `WAIT_FOR_OBSERVER_RECOVERY`. Todos los outputs
+declaran `paper_filter_enabled=false`, `can_send_real_orders=false` y
+`final_recommendation=NO LIVE`.
 
 ## Criterio de activación
 

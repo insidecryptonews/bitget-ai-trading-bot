@@ -87,6 +87,8 @@ def test_observer_cli_handlers_poll_close_and_use_continuous_helper():
     )
     assert once["result"] == {"processed_bars": 2}
     assert once["can_send_real_orders"] is False
+    assert once["paper_filter_enabled"] is False
+    assert once["final_recommendation"] == "NO LIVE"
     assert observer.poll_calls == 1 and observer.close_calls == 1
 
     runner_calls = []
@@ -98,6 +100,8 @@ def test_observer_cli_handlers_poll_close_and_use_continuous_helper():
     assert runner_calls == ["run"]
     assert run["result"]["stop_reason"] == "test"
     assert run["can_send_real_orders"] is False
+    assert run["paper_filter_enabled"] is False
+    assert run["final_recommendation"] == "NO LIVE"
 
 
 def test_observer_commands_are_early_public_and_skip_private_bootstrap(monkeypatch, capsys):
