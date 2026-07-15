@@ -602,3 +602,16 @@ def test_v104725_evidence_resolves_the_current_git_tree():
     assert tree == evidence.git("rev-parse", "HEAD^{tree}")
     assert len(tree) == 40
     assert all(char in "0123456789abcdef" for char in tree)
+
+
+def test_v104725_evidence_coverage_categories_are_one_to_one():
+    import pytest
+    from scripts import v10_47_25_generate_evidence as evidence
+
+    evidence.validate_coverage_seed({"spec": ["spec.json"], "policy": ["policy.py"]})
+    with pytest.raises(RuntimeError, match="coverage path reused"):
+        evidence.validate_coverage_seed({
+            "spec": ["authority.json"], "policy": ["authority.json"],
+        })
+    with pytest.raises(RuntimeError, match="empty coverage category"):
+        evidence.validate_coverage_seed({"spec": []})

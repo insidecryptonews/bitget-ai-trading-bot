@@ -59,6 +59,22 @@ def canonical_hash(value: Any) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
+def validate_coverage_seed(coverage: dict[str, list[str]]) -> None:
+    """Reject empty categories and paths assigned to more than one root."""
+    seen: dict[str, str] = {}
+    for category, paths in coverage.items():
+        if not isinstance(paths, list) or not paths:
+            raise RuntimeError(f"empty coverage category: {category}")
+        for raw_path in paths:
+            path = str(raw_path)
+            previous = seen.get(path)
+            if previous is not None:
+                raise RuntimeError(
+                    f"coverage path reused by {previous} and {category}: {path}"
+                )
+            seen[path] = category
+
+
 def atomic_text(path: Path, value: str) -> None:
     temporary = path.with_name(path.name + f".tmp.{uuid.uuid4().hex}")
     temporary.write_text(value, encoding="utf-8", newline="\n")
@@ -445,7 +461,6 @@ th,td{{border:1px solid #39434a;padding:7px;text-align:left}}th{{color:#b8c2c8}}
                     holdout_paths.append(rel(combo / row["path"]))
     policy_paths = [
         "app/labs/v10_46/campaign_authority.py",
-        "app/labs/v10_46/campaign_authority_v10_47_25.json",
         "app/labs/v10_46/contracts.py",
         "app/labs/v10_46/event_clock.py",
         "app/labs/v10_46/families.py",
@@ -468,13 +483,18 @@ th,td{{border:1px solid #39434a;padding:7px;text-align:left}}th{{color:#b8c2c8}}
         path.relative_to(ROOT).as_posix()
         for path in (ROOT / "tests").glob("test_researchops_v10_47*.py")
     )
-    tournament_paths = sorted(
+    ledger_paths = sorted(
         rel(path) for root in (primary_root, replay_root)
-        for path in root.glob("*.json")
+        for path in root.glob("*_*.json")
+        if path.name not in {"final_summary.json", "tournament_summary.json"}
+    )
+    tournament_paths = sorted(
+        rel(root / name) for root in (primary_root, replay_root)
+        for name in ("final_summary.json", "tournament_summary.json")
     )
     report_paths = [rel(paths["report"]), rel(paths["tests"])]
     audit_paths = [
-        rel(paths["authority"]), rel(paths["pairing"]), rel(paths["replay"]),
+        rel(paths["pairing"]), rel(paths["replay"]),
         rel(paths["summary"]), rel(paths["invariants"]), rel(security_log),
         *test_paths,
     ]
@@ -487,7 +507,7 @@ th,td{{border:1px solid #39434a;padding:7px;text-align:left}}th{{color:#b8c2c8}}
         "registry": [rel(paths["authority"])],
         "holdout": sorted(set(holdout_paths)),
         "policy": policy_paths,
-        "ledger": tournament_paths,
+        "ledger": ledger_paths,
         "tournament": tournament_paths,
         "report": report_paths,
         "dashboard": [rel(paths["dashboard"])],
@@ -509,6 +529,7 @@ th,td{{border:1px solid #39434a;padding:7px;text-align:left}}th{{color:#b8c2c8}}
         ],
         "test_nodeids": [rel(certified_root / "pytest_nodeids.txt")],
     }
+    validate_coverage_seed(coverage)
     atomic_json(evidence_root / "coverage_seed.json", coverage)
     print(f"EVIDENCE_ROOT={rel(evidence_root)}")
     print("DETERMINISTIC_REPLAY=12/12")
