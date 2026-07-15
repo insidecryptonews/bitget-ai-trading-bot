@@ -7465,16 +7465,54 @@ class ResearchLab:
                 "final_recommendation: NO LIVE", "OPPORTUNITY SCANNER PLAN V10.28 END"]
         return "\n".join(out)
 
+    def p11_forward_observer_once_cli(self, *, observer_factory=None) -> str:
+        """Run one isolated, public-data P11_SHORT forward-observer poll."""
+        if observer_factory is None:
+            from .labs.p11_short_forward_observer import P11ShortForwardObserver
+            observer_factory = P11ShortForwardObserver
+
+        observer = observer_factory()
+        try:
+            result = observer.poll_once()
+        finally:
+            observer.close()
+        payload = {
+            "command": "p11-forward-observer-once",
+            "result": result,
+            "research_only": True,
+            "shadow_only": True,
+            "can_send_real_orders": False,
+        }
+        return json.dumps(payload, sort_keys=True, default=str)
+
+    def p11_forward_observer_run_cli(self, *, runner=None) -> str:
+        """Run the observer's own continuous clock until its clean shutdown."""
+        if runner is None:
+            from .labs.p11_short_forward_observer import run_observer_forever
+            runner = run_observer_forever
+        result = runner()
+        payload = {
+            "command": "p11-forward-observer-run",
+            "result": result,
+            "research_only": True,
+            "shadow_only": True,
+            "can_send_real_orders": False,
+        }
+        return json.dumps(payload, sort_keys=True, default=str)
+
     def opportunity_scanner_run_v1028_cli(self, *, universe="", timeframe="15m", days=5,
                                           interval_seconds=60.0, max_scans=1, request_budget=6,
                                           output_dir="", bars_provider=None, sleep_fn=None,
-                                          should_stop=None, emit=None) -> str:
+                                          should_stop=None, emit=None, observer=None,
+                                          observer_factory=None,
+                                          attach_p11_observer=None) -> str:
         """Live multi-symbol shadow scanner. Fetches PUBLIC OHLCV (GET-only, no keys),
         ranks candidate setups, autosaves every scan, and shuts down cleanly on Ctrl+C
         or a typed q/quit/exit/stop. Makes NO real/paper orders (DRY_RUN shadow only)."""
         from .labs import multi_symbol_opportunity_scanner_v10_28 as S
         uni = self._v107_csv_arg(universe) or list(S.DEFAULT_UNIVERSE)
         out_dir = output_dir or S.OUTPUT_ROOT
+        using_real_public_provider = bars_provider is None
 
         if bars_provider is None:
             from .labs import cross_exchange_public_ohlcv_v10_15 as X
@@ -7491,12 +7529,41 @@ class ResearchLab:
         if should_stop is None:
             should_stop = self._make_console_stop()
 
+        # The real scanner process carries the P11 observer as an isolated
+        # research sidecar. The hook is zero-argument and receives no Binance
+        # bars, scanner report or heuristic candidate. The observer therefore
+        # obtains its own public Bitget data and maintains its own persistence.
+        if attach_p11_observer is None:
+            attach_p11_observer = (
+                using_real_public_provider
+                or observer is not None
+                or observer_factory is not None
+            )
+        observer_box = {"instance": observer}
+
+        def _observer_poll():
+            if observer_box["instance"] is None:
+                if observer_factory is None:
+                    from .labs.p11_short_forward_observer import P11ShortForwardObserver
+                    observer_box["instance"] = P11ShortForwardObserver()
+                else:
+                    observer_box["instance"] = observer_factory()
+            return observer_box["instance"].poll_once()
+
+        def _observer_close():
+            if observer_box["instance"] is not None:
+                observer_box["instance"].close()
+
         summary = S.run_loop(universe=uni, bars_provider=bars_provider, max_scans=int(max_scans),
                              interval_seconds=float(interval_seconds), output_dir=out_dir,
-                             sleep_fn=sleep_fn, should_stop=should_stop, emit=emit)
+                             sleep_fn=sleep_fn, should_stop=should_stop, emit=emit,
+                             observer_hook=_observer_poll if attach_p11_observer else None,
+                             observer_close=_observer_close if attach_p11_observer else None)
         return ("OPPORTUNITY SCANNER RUN V10.28 END  "
                 f"scans={summary['scans_completed']} candidates={summary['shadow_candidates_total']} "
                 f"stay_out_scans={summary['stay_out_scans']} stop_reason={summary['stop_reason']} "
+                f"p11_observer_attached={str(bool(attach_p11_observer)).lower()} "
+                f"p11_observer_errors={summary.get('observer_hook_errors', 0)} "
                 "clean_shutdown=True can_send_real_orders=false final_recommendation=NO LIVE")
 
     @staticmethod
@@ -8740,6 +8807,8 @@ def build_argument_parser() -> argparse.ArgumentParser:
             "continuous-collection-status-v1027",
             "opportunity-scanner-plan-v1028",
             "opportunity-scanner-run-v1028",
+            "p11-forward-observer-once",
+            "p11-forward-observer-run",
             "free-microstructure-assembler-plan-v1029",
             "free-microstructure-assemble-sample-v1029",
             "free-microstructure-readiness-status-v1029",
@@ -9023,6 +9092,8 @@ PUBLIC_RESEARCH_ONLY_COMMANDS = frozenset({
     "continuous-collection-status-v1027",
     "opportunity-scanner-plan-v1028",
     "opportunity-scanner-run-v1028",
+    "p11-forward-observer-once",
+    "p11-forward-observer-run",
     "free-microstructure-assembler-plan-v1029",
     "free-microstructure-assemble-sample-v1029",
     "free-microstructure-readiness-status-v1029",
@@ -9153,6 +9224,10 @@ def _dispatch_public_research_only(args) -> None:
             universe=args.universe, timeframe=args.timeframe, days=args.days,
             interval_seconds=args.interval_seconds, max_scans=args.max_scans,
             request_budget=args.request_budget, output_dir=args.output_dir))
+    elif args.command == "p11-forward-observer-once":
+        print(lab.p11_forward_observer_once_cli())
+    elif args.command == "p11-forward-observer-run":
+        print(lab.p11_forward_observer_run_cli())
     elif args.command == "free-microstructure-assembler-plan-v1029":
         print(lab.free_microstructure_assembler_plan_v1029_cli())
     elif args.command == "free-microstructure-assemble-sample-v1029":

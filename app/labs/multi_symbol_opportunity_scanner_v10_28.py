@@ -450,11 +450,17 @@ def render_board(report: dict, scan_no: int, elapsed_s: float = 0.0) -> str:
 
 def run_loop(*, universe, bars_provider, config=None, max_scans: int = 1,
              interval_seconds: float = 60.0, output_dir: str = OUTPUT_ROOT,
-             sleep_fn=None, should_stop=None, emit=None, time_fn=None) -> dict[str, Any]:
+             sleep_fn=None, should_stop=None, emit=None, time_fn=None,
+             observer_hook=None, observer_close=None) -> dict[str, Any]:
     """Core live loop. NO network here: `bars_provider(symbol)->list[bars]|None`.
 
     Discipline / safety are enforced by scan(); this only orchestrates fetch ->
     scan -> render -> AUTOSAVE (every scan) -> sleep, with a clean-shutdown check.
+    ``observer_hook`` is an optional, zero-argument, isolated research hook. It is
+    deliberately given none of this scanner's bars or decisions: an attached
+    observer must obtain and validate its own data. Hook failures are reported and
+    counted but never abort the legacy scanner. ``observer_close`` is called once
+    when the loop stops.
     max_scans<=0 => run until should_stop() (Ctrl+C or q/quit/exit/stop). Between
     scans the wait is chopped into small slices so a stop request is honoured fast.
     """
@@ -468,7 +474,8 @@ def run_loop(*, universe, bars_provider, config=None, max_scans: int = 1,
 
     started = time_fn()
     scan_no = 0
-    totals = {"scans": 0, "candidates": 0, "stay_out": 0, "errors": 0}
+    totals = {"scans": 0, "candidates": 0, "stay_out": 0, "errors": 0,
+              "observer_hook_errors": 0}
     last_report: dict[str, Any] = {}
     stop_reason = "completed"
 
@@ -485,6 +492,15 @@ def run_loop(*, universe, bars_provider, config=None, max_scans: int = 1,
                 stop_reason = "max_scans"
                 break
             scan_no += 1
+            # Poll the independent Bitget observer before the legacy scanner's
+            # multi-symbol downloads so a slow 19-symbol scan cannot delay a
+            # newly closed P11 15m bar. No scanner bar/report is shared.
+            if observer_hook is not None:
+                try:
+                    observer_hook()
+                except Exception as exc:
+                    totals["observer_hook_errors"] += 1
+                    emit(f"   ! isolated P11 observer error: {type(exc).__name__}: {exc}")
             bars_by_symbol: dict[str, list] = {}
             for sym in uni:
                 try:
@@ -524,6 +540,13 @@ def run_loop(*, universe, bars_provider, config=None, max_scans: int = 1,
                 break
     except KeyboardInterrupt:
         stop_reason = "keyboard_interrupt"
+    finally:
+        if observer_close is not None:
+            try:
+                observer_close()
+            except Exception as exc:
+                totals["observer_hook_errors"] += 1
+                emit(f"   ! isolated P11 observer close error: {type(exc).__name__}: {exc}")
 
     # --- clean shutdown: stop new work, flush state, confirm on screen ---
     emit("")
@@ -531,6 +554,7 @@ def run_loop(*, universe, bars_provider, config=None, max_scans: int = 1,
     summary = {"tool_version": TOOL_VERSION, "stop_reason": stop_reason,
                "scans_completed": totals["scans"], "shadow_candidates_total": totals["candidates"],
                "stay_out_scans": totals["stay_out"], "fetch_errors": totals["errors"],
+               "observer_hook_errors": totals["observer_hook_errors"],
                "runtime_seconds": round(time_fn() - started, 2),
                "last_verdict": last_report.get("verdict"), **_safety()}
     try:
