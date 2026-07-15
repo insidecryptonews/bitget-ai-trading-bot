@@ -593,3 +593,12 @@ def test_v104725_evidence_requires_hashed_test_logs_and_safe_security_output(tmp
     security.write_text("final_security_status: UNKNOWN\n", encoding="utf-8")
     with pytest.raises(RuntimeError, match="SAFE_PAPER_ONLY"):
         evidence.validate_security_audit(security)
+
+
+def test_v104725_evidence_resolves_the_current_git_tree():
+    from scripts import v10_47_25_generate_evidence as evidence
+
+    tree = evidence.git_tree()
+    assert tree == evidence.git("rev-parse", "HEAD^{tree}")
+    assert len(tree) == 40
+    assert all(char in "0123456789abcdef" for char in tree)

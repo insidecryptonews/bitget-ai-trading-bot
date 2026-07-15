@@ -39,6 +39,11 @@ def git(*args: str) -> str:
     return completed.stdout.strip()
 
 
+def git_tree() -> str:
+    """Return the current Git tree using Git's exact revision syntax."""
+    return git("rev-parse", "HEAD^{tree}")
+
+
 def sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -366,7 +371,7 @@ def main(argv: list[str] | None = None) -> int:
     report = f"""# V10.47.25 Comprehensive Closure
 
 - HEAD: `{git('rev-parse', 'HEAD')}`
-- tree: `{git('rev-parse', 'HEAD^{{tree}}')}`
+- tree: `{git_tree()}`
 - campaign authority: 12 x 47 = 564 hypotheses
 - deterministic replay: 12/12 equal
 - baseline component gates passed: {pairing['baseline_gate_passes']}
