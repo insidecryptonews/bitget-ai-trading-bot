@@ -1,5 +1,17 @@
 # EVIDENCE INDEX
 
+## P11_SHORT continuous forward observer
+- reviews/OPERATIONAL_ACTIVATION_REVIEW.md - revisión operativa que identificó el bloqueo.
+- reviews/P11_SHORT_FORWARD_OBSERVER_IMPLEMENTATION.md - causa raíz, contrato, implementación y criterio de activación.
+- app/labs/p11_short_forward_observer.py - fuente pública, lifecycle durable, persistencia, reconciliación y exports.
+- app/labs/multi_symbol_opportunity_scanner_v10_28.py - conexión automática aislada al proceso continuo de research.
+- app/research_lab.py - comandos públicos one-shot y continuos con dispatch temprano.
+- app/labs/research_dashboard_v10_43c.py - proyección visible read-only y enlaces a exports atómicos.
+- tests/test_p11_short_forward_observer.py - pruebas adversariales de lifecycle, recuperación, fencing y seguridad.
+- tests/test_p11_forward_observer_integration.py - pruebas de CLI, hook, autowiring y ausencia de órdenes.
+- tests/test_researchops_v10_43c_dashboard_watch.py - pruebas del panel, N/A, exports y publicación atómica.
+- reports/research/p11_short_forward_observer/ - evidencia runtime ignorada: SQLite, ledger, outcomes, labels, reconciliación, status, resumen y captura del dashboard.
+
 ## V10.47.23 exact bijective pairing and campaign-wide FWER
 - reviews/V10_47_22_WORK_FINAL_REAUDIT.md - protected independent Work FAIL.
 - WORK_RESEARCH.md - protected Work research record.

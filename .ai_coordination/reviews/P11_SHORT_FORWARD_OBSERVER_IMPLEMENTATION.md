@@ -78,3 +78,31 @@ Además verificará por separado la cardinalidad de entradas, outcomes y labels,
 El observer arrancará automáticamente con el proceso continuo de research, tendrá también un comando aislado para diagnóstico/smoke, conservará checkpoint y recuperará una posición abierta sin reprocesar historia como forward. El dashboard leerá la misma fuente durable y mostrará `N/A` para métricas sin outcomes. Los exports incluirán ledger, outcomes, labels, reconciliación y resumen.
 
 La reparación no activa paper ni live trading, no abre holdout y no afirma edge, rentabilidad, validación o promoción.
+
+## Implementación completada
+
+Se implementó `app/labs/p11_short_forward_observer.py` como un proceso aislado de investigación. La fuente consulta únicamente las velas públicas cerradas de Bitget y aplica una agregación estricta de 15 velas 1m consecutivas para formar cada vela 15m. La definición de P11_SHORT, la entrada causal y las reglas SL/TP/TIME permanecen congeladas; el observador no optimiza ni cambia la hipótesis.
+
+La frontera forward se persiste antes de la primera descarga. Cada ejecución queda vinculada a HEAD, tree, configuración, política, fuente y versión de esquema. Las velas anteriores a la frontera solo calientan las features. SQLite opera con WAL, sincronización FULL, claves únicas, triggers de inmutabilidad, lease con fencing y una cadena hash append-only. La actualización de lifecycle, evento y checkpoint de cada vela cerrada ocurre dentro de una sola transacción.
+
+La máquina de estados durable implementa rechazo final o el recorrido completo desde señal elegible hasta label finalizado. Conserva una posición planificada/abierta tras reinicio, aplica stop-first cuando SL y TP coinciden, mantiene abierta una ventana incompleta y falla de forma cerrada ante gaps, barras fuera de orden, conflictos de replay, valores no finitos, transiciones inválidas, huérfanos o pérdida temporal de datos públicos.
+
+La reconciliación comprueba además una biyección 1:1 entre las barras forward procesadas hasta el checkpoint y sus lifecycles, la continuidad temporal, la partición de estados, las cardinalidades de entradas/salidas/outcomes/labels, la cadena de eventos y la ausencia de observaciones anteriores a la frontera. Solo una reconciliación `PASS` junto con un estado sano permite publicar `OBSERVER_CONNECTED` y `START_FORWARD_SHADOW_NOW`; cualquier fallo publica el bloqueo fail-closed.
+
+## Integración continua y dashboard
+
+El proceso continuo del escáner público conecta exactamente una instancia del observador mediante un hook sin argumentos: el observador obtiene sus propias velas de Bitget y no recibe barras ni decisiones del escáner. También existen los comandos públicos aislados `p11-forward-observer-once` y `p11-forward-observer-run`, despachados antes de cargar configuración privada, `.env` o base de datos productiva.
+
+El dashboard V10.43c consume únicamente el snapshot atómico `observer_status.json`; no importa, inicia ni modifica el runtime. Expone identidad, frontera, heartbeat, checkpoint, lifecycle, reconciliación, errores, HEAD/tree y fingerprints. Hasta que exista al menos un outcome finalizado, las métricas económicas y `forward_n_eff` aparecen como `N/A`, no como cero. Los enlaces locales apuntan a ledger, outcomes, labels, reconciliación y resumen publicados por el observador.
+
+## Evidencia local previa a la activación
+
+- 21 pruebas adversariales del core cubren frontera, forming bars, rechazo, señal real P11, entrada, TP, SL, TIME=15, stop-first, gap-through, restart, idempotencia, conflictos, lease/fencing, huérfanos, unicidad, outage/recovery, orden temporal, costes no finitos, transiciones inválidas, reconciliación exacta, `n_eff`, seguridad, HTTP 503, propagación de IDs y finalización.
+- La validación combinada relevante terminó con 142 pruebas superadas; las rutas generales afectadas añadieron otras 39 pruebas superadas.
+- La compilación integral de `app`, `scripts` y `tests` terminó correctamente.
+- La auditoría estática/dinámica no encontró imports ni llamadas a órdenes, endpoints privados, wallet, `.env` u holdout en la ruta del observador.
+- Una comprobación pública real obtuvo 5.800 velas 1m cerradas y 385 velas 15m continuas, sin gaps; el agregador local fue byte-equivalente al de referencia, con SHA-256 `a2ffe24ccc240eb299612712245c3abaa912372f04e6eb5ea13acf1226dfc18c`.
+
+## Criterio de activación
+
+La activación operativa debe ejecutarse únicamente después del commit final de código, pruebas, dashboard y documentación, de modo que la frontera congele un HEAD/tree limpio y completo. El resultado seguirá siendo `NO_CONFIRMED_EDGE`: observar no equivale a demostrar rentabilidad, validar la hipótesis ni autorizar promoción, paper trading o live trading.

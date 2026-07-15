@@ -1,3 +1,4 @@
+import ast
 import json
 import os
 from pathlib import Path
@@ -169,3 +170,128 @@ def test_dashboard_watch_source_has_no_trading_side_effect_calls():
     ]
     for token in forbidden:
         assert token not in source
+
+
+def test_missing_p11_snapshot_is_explicitly_unavailable_not_zero(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(DASH.CE, "_repo_root", lambda: tmp_path)
+
+    snapshot = DASH._load_p11_observer_status()
+    state = _state()
+    state["p11_short_forward_observer"] = snapshot
+    html = DASH.render_html(state)
+
+    assert snapshot["observer_status"] == "OBSERVER_STATUS_UNAVAILABLE"
+    assert snapshot["_snapshot_available"] is False
+    assert "P11_SHORT FORWARD OBSERVER" in html
+    assert '<span class="k">Forward n_eff</span><span class="v">N/A</span>' in html
+    assert '<span class="k">Profit factor</span><span class="v">N/A</span>' in html
+    assert "N/A — not published" in html
+
+
+def test_p11_snapshot_panel_and_local_exports_are_visible(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(DASH.CE, "_repo_root", lambda: tmp_path)
+    observer_dir = tmp_path.joinpath(*DASH.P11_OBSERVER_OUTPUT_SUBDIR)
+    observer_dir.mkdir(parents=True)
+    payload = {
+        "observer_status": "RUNNING",
+        "identity": {
+            "symbol": "BTCUSDT",
+            "venue": "Bitget",
+            "timeframe": "15m",
+            "hypothesis": "P11_SHORT",
+            "mode": "forward_shadow",
+        },
+        "boundary": {"forward_start_timestamp": "2026-07-15T18:30:00+00:00"},
+        "checkpoint": {"last_closed_bar": "2026-07-15T18:30:00+00:00"},
+        "metrics": {
+            "forward_opportunities": 1,
+            "forward_signals": 0,
+            "forward_rejections": 1,
+            "forward_entries": 0,
+            "forward_open_positions": 0,
+            "forward_closed_outcomes": 0,
+            "forward_finalized_labels": 0,
+            "forward_n_raw": 0,
+            "forward_n_eff": 0.0,
+            "gross_pnl": 0.0,
+            "net_pnl": 0.0,
+            "profit_factor": 0.0,
+            "duplicate_count": 0,
+            "orphan_count": 0,
+            "observer_heartbeat": "2026-07-15T18:31:00+00:00",
+            "observer_lag_seconds": 4.2,
+        },
+        "reconciliation": {"status": "PASS"},
+        "errors": [],
+        "provenance": {
+            "schema_version": "p11-forward-observer.v1",
+            "code_head": "a" * 40,
+            "code_tree": "b" * 40,
+            "policy_fingerprint": "c" * 64,
+            "config_hash": "d" * 64,
+        },
+    }
+    status_path = observer_dir / DASH.P11_OBSERVER_STATUS_FILE
+    status_path.write_text(json.dumps(payload), encoding="utf-8")
+    for filename in DASH.P11_OBSERVER_EXPORT_FILES.values():
+        (observer_dir / filename).write_text("fixture\n", encoding="utf-8")
+
+    snapshot = DASH._load_p11_observer_status()
+    state = _state()
+    state["p11_short_forward_observer"] = snapshot
+    output = tmp_path / "dashboard"
+    DASH.build_dashboard("BTCUSDT", state=state, out_dir=output)
+    html = (output / "index.html").read_text(encoding="utf-8")
+
+    assert snapshot["_snapshot_available"] is True
+    assert "P11_SHORT FORWARD OBSERVER" in html
+    assert "Reports &amp; Exports — P11_SHORT" in html
+    assert "BTCUSDT" in html and "Bitget" in html and "P11_SHORT" in html
+    assert '<span class="k">Closed outcomes</span><span class="v">0</span>' in html
+    assert '<span class="k">Forward n_eff</span><span class="v">N/A</span>' in html
+    assert '<span class="k">Gross PnL</span><span class="v">N/A</span>' in html
+    assert '<span class="k">Profit factor</span><span class="v">N/A</span>' in html
+    assert "file:///" in html
+    assert 'download="lifecycle_ledger.jsonl"' in html
+    assert 'download="outcomes.csv"' in html
+    assert 'download="labels.csv"' in html
+    assert 'download="reconciliation_report.json"' in html
+    assert 'download="summary.txt"' in html
+    assert "overflow-wrap:anywhere" in html
+    assert "can_send_real_orders=true" not in html
+
+
+def test_dashboard_html_publish_is_atomic(tmp_path: Path, monkeypatch):
+    target = tmp_path / "index.html"
+    target.write_text("old-complete-dashboard", encoding="utf-8")
+    real_replace = DASH.os.replace
+    html_replacements: list[tuple[Path, Path]] = []
+
+    def checked_replace(src, dst):
+        src_path, dst_path = Path(src), Path(dst)
+        if dst_path.name == "index.html":
+            assert dst_path.read_text(encoding="utf-8") == "old-complete-dashboard"
+            assert src_path.name == "index.html.tmp"
+            assert src_path.read_text(encoding="utf-8").startswith("<!doctype html>")
+            html_replacements.append((src_path, dst_path))
+        real_replace(src, dst)
+
+    monkeypatch.setattr(DASH.os, "replace", checked_replace)
+    DASH.build_dashboard("BTCUSDT", state=_state(), out_dir=tmp_path)
+
+    assert len(html_replacements) == 1
+    assert target.read_text(encoding="utf-8").startswith("<!doctype html>")
+    assert not (tmp_path / "index.html.tmp").exists()
+
+
+def test_p11_dashboard_consumer_does_not_import_observer_runtime():
+    source = Path(DASH.__file__).read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    imported: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imported.extend(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            imported.append(node.module or "")
+
+    assert not any("p11_short_forward_observer" in module for module in imported)

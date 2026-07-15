@@ -34,6 +34,15 @@ MIN_REFRESH_SECONDS = 15
 SLOW_STALE_SECONDS = 15 * 60
 SLOW_SOURCE_REFRESH_SECONDS = 300
 CACHE_FILE = "dashboard_fast_cache_v1043c.json"
+P11_OBSERVER_OUTPUT_SUBDIR = ("reports", "research", "p11_short_forward_observer")
+P11_OBSERVER_STATUS_FILE = "observer_status.json"
+P11_OBSERVER_EXPORT_FILES = {
+    "lifecycle_ledger": "lifecycle_ledger.jsonl",
+    "outcomes": "outcomes.csv",
+    "labels": "labels.csv",
+    "reconciliation": "reconciliation_report.json",
+    "summary": "summary.txt",
+}
 
 
 def _safety() -> dict[str, Any]:
@@ -73,7 +82,8 @@ def gather_state(symbol: str = "BTCUSDT") -> dict[str, Any]:
     return {**base, "tool_version": TOOL_VERSION, "persistent_health": health,
             "persistent_continuity": continuity, "source_compare_3way": compare,
             "strategy_hardening": strategy, "ws_persistent_tournament": tournament,
-            "exit_optimization": exits, "readiness_v1043c": readiness, **_safety()}
+            "exit_optimization": exits, "readiness_v1043c": readiness,
+            "p11_short_forward_observer": _load_p11_observer_status(), **_safety()}
 
 
 def gather_state_fast(symbol: str = "BTCUSDT") -> dict[str, Any]:
@@ -102,6 +112,7 @@ def gather_state_fast(symbol: str = "BTCUSDT") -> dict[str, Any]:
             "persistent_continuity": continuity, "source_compare_3way": compare,
             "strategy_hardening": strategy, "ws_persistent_tournament": tournament,
             "exit_optimization": exits, "readiness_v1043c": readiness,
+            "p11_short_forward_observer": _load_p11_observer_status(),
             "fast_metrics": {"last_updated_at": _utc_now(), "source": "fast_watcher"},
             "slow_metrics": {**slow_meta, **source_meta}, **_safety()}
 
@@ -283,6 +294,35 @@ def _file_age_seconds(path: Path) -> float | None:
         return None
 
 
+def _p11_observer_output_dir() -> Path:
+    """Fixed local output owned by the observer; the dashboard never writes it."""
+    return CE._repo_root().joinpath(*P11_OBSERVER_OUTPUT_SUBDIR)
+
+
+def _load_p11_observer_status() -> dict[str, Any]:
+    """Read only the observer's atomically published status snapshot.
+
+    There is deliberately no import of the observer, its persistence layer, or
+    any trading/runtime module here.  A missing or malformed snapshot is an
+    explicit unavailable state, never a fabricated all-zero observation.
+    """
+    status_path = _p11_observer_output_dir() / P11_OBSERVER_STATUS_FILE
+    payload = _read_json(status_path)
+    if not isinstance(payload, dict):
+        return {
+            "observer_status": "OBSERVER_STATUS_UNAVAILABLE",
+            "_snapshot_available": False,
+            "_snapshot_path": str(status_path).replace("\\", "/"),
+            "_snapshot_age_seconds": None,
+        }
+    return {
+        **payload,
+        "_snapshot_available": True,
+        "_snapshot_path": str(status_path).replace("\\", "/"),
+        "_snapshot_age_seconds": _file_age_seconds(status_path),
+    }
+
+
 def _mtime_iso(path: Path) -> str | None:
     try:
         return datetime.fromtimestamp(path.stat().st_mtime, timezone.utc).isoformat()
@@ -397,6 +437,198 @@ def _panel_watch(d: dict) -> str:
         A._kv("Dataset changed since cache", slow.get("source_dataset_changed_since_cache"),
               "warn" if slow.get("source_dataset_changed_since_cache") else "ok") +
         '<div class="sub">Fast watcher does not run full strategy lab / tournament / exit optimization every refresh.</div>')
+
+
+def _p11_pick(snapshot: dict[str, Any], *paths: str) -> Any:
+    """First present value across flat and nested snapshot schema spellings."""
+    for path in paths:
+        node: Any = snapshot
+        for part in path.split("."):
+            if not isinstance(node, dict) or part not in node:
+                node = None
+                break
+            node = node[part]
+        if node is not None and node != "":
+            return node
+    return None
+
+
+def _p11_has_closed_sample(snapshot: dict[str, Any]) -> bool:
+    value = _p11_pick(
+        snapshot,
+        "metrics.forward_closed_outcomes",
+        "forward_closed_outcomes",
+        "counts.forward_closed_outcomes",
+        "closed_outcomes",
+    )
+    try:
+        return float(value) > 0
+    except (TypeError, ValueError):
+        return False
+
+
+def _p11_sample_metric(snapshot: dict[str, Any], *paths: str) -> Any:
+    """Economic statistics are N/A until at least one outcome is finalized."""
+    return _p11_pick(snapshot, *paths) if _p11_has_closed_sample(snapshot) else None
+
+
+def _p11_state_kind(value: Any) -> str:
+    state = str(value or "").upper()
+    if state in {"RUNNING", "HEALTHY", "PASS", "RECONCILED", "OBSERVER_CONNECTED"}:
+        return "ok"
+    if state.startswith("WAITING_") or state in {"STARTING", "STALE", "DEGRADED"}:
+        return "warn"
+    if state in {"ERROR", "FAILED", "FAIL", "INVALID", "UNRECONCILED",
+                 "HALTED_FAIL_CLOSED", "WAITING_FOR_DATA_GAP"}:
+        return "bad"
+    return "muted"
+
+
+def _panel_p11_forward_observer(d: dict) -> str:
+    p = d.get("p11_short_forward_observer") or {}
+    observer_status = _p11_pick(p, "observer_status", "status", "state")
+    reconciliation = _p11_pick(
+        p, "reconciliation.status", "reconciliation_status", "metrics.reconciliation_status")
+    closed = _p11_pick(
+        p, "metrics.forward_closed_outcomes", "forward_closed_outcomes",
+        "counts.forward_closed_outcomes", "closed_outcomes")
+
+    contract = (
+        A._kv("Observer status", observer_status,
+              _p11_state_kind(observer_status)) +
+        A._kv("Symbol", _p11_pick(p, "identity.symbol", "contract.symbol", "symbol")) +
+        A._kv("Venue", _p11_pick(p, "identity.venue", "contract.venue", "venue")) +
+        A._kv("Timeframe", _p11_pick(p, "identity.timeframe", "contract.timeframe", "timeframe")) +
+        A._kv("Hypothesis", _p11_pick(
+            p, "identity.hypothesis", "identity.hypothesis_id", "contract.hypothesis",
+            "hypothesis", "hypothesis_id")) +
+        A._kv("Mode", _p11_pick(p, "identity.mode", "contract.mode", "mode")) +
+        A._kv("Forward boundary", _p11_pick(
+            p, "boundary.forward_start_timestamp", "forward_start_timestamp")) +
+        A._kv("Last closed bar", _p11_pick(
+            p, "checkpoint.last_closed_bar", "metrics.last_closed_bar", "last_closed_bar",
+            "last_processed_bar")) +
+        A._kv("Observer heartbeat", _p11_pick(
+            p, "metrics.observer_heartbeat", "observer_heartbeat", "heartbeat")) +
+        A._kv("Observer lag (s)", _p11_pick(
+            p, "metrics.observer_lag_seconds", "observer_lag_seconds", "lag_seconds")) +
+        A._kv("Orders allowed", False, "ok")
+    )
+    lifecycle = (
+        A._kv("Forward opportunities", _p11_pick(
+            p, "metrics.forward_opportunities", "forward_opportunities")) +
+        A._kv("Forward signals", _p11_pick(p, "metrics.forward_signals", "forward_signals")) +
+        A._kv("Forward rejections", _p11_pick(
+            p, "metrics.forward_rejections", "forward_rejections")) +
+        A._kv("Forward entries", _p11_pick(p, "metrics.forward_entries", "forward_entries")) +
+        A._kv("Open positions", _p11_pick(
+            p, "metrics.forward_open_positions", "forward_open_positions", "open_positions")) +
+        A._kv("Closed outcomes", closed) +
+        A._kv("Finalized labels", _p11_pick(
+            p, "metrics.forward_finalized_labels", "forward_finalized_labels", "finalized_labels")) +
+        A._kv("Forward n_raw", _p11_pick(p, "metrics.forward_n_raw", "forward_n_raw")) +
+        A._kv("Forward n_eff", _p11_sample_metric(
+            p, "metrics.forward_n_eff", "forward_n_eff", "n_eff")) +
+        A._kv("Time exits", _p11_sample_metric(p, "metrics.time_exits", "time_exits")) +
+        A._kv("Duplicate count", _p11_pick(
+            p, "metrics.duplicate_count", "duplicate_count")) +
+        A._kv("Orphan count", _p11_pick(p, "metrics.orphan_count", "orphan_count")) +
+        A._kv("Reconciliation", reconciliation, _p11_state_kind(reconciliation)) +
+        A._kv("Errors", _p11_pick(
+            p, "heartbeat.last_error", "reconciliation.pending_errors", "errors",
+            "pending_errors", "metrics.errors", "metrics.error_count", "last_error"))
+    )
+    economics = (
+        A._kv("Gross PnL", _p11_sample_metric(p, "metrics.gross_pnl", "gross_pnl")) +
+        A._kv("Net PnL", _p11_sample_metric(p, "metrics.net_pnl", "net_pnl")) +
+        A._kv("Fees", _p11_sample_metric(p, "metrics.fees", "fees")) +
+        A._kv("Spread", _p11_sample_metric(p, "metrics.spread", "spread")) +
+        A._kv("Slippage", _p11_sample_metric(p, "metrics.slippage", "slippage")) +
+        A._kv("Funding", _p11_sample_metric(p, "metrics.funding", "funding")) +
+        A._kv("MFE", _p11_sample_metric(p, "metrics.mfe", "metrics.MFE", "mfe", "MFE")) +
+        A._kv("MAE", _p11_sample_metric(p, "metrics.mae", "metrics.MAE", "mae", "MAE")) +
+        A._kv("Win rate", _p11_sample_metric(p, "metrics.win_rate", "win_rate")) +
+        A._kv("Payoff", _p11_sample_metric(p, "metrics.payoff", "payoff")) +
+        A._kv("Profit factor", _p11_sample_metric(
+            p, "metrics.profit_factor", "profit_factor"))
+    )
+    provenance = (
+        A._kv("Snapshot available", p.get("_snapshot_available")) +
+        A._kv("Snapshot age (s)", p.get("_snapshot_age_seconds")) +
+        A._kv("Snapshot path", p.get("_snapshot_path")) +
+        A._kv("Schema version", _p11_pick(p, "provenance.schema_version", "schema_version")) +
+        A._kv("Code HEAD", _p11_pick(
+            p, "provenance.code_head", "provenance.head", "code_head", "head")) +
+        A._kv("Code tree", _p11_pick(
+            p, "provenance.code_tree", "provenance.tree", "code_tree", "tree")) +
+        A._kv("Policy fingerprint", _p11_pick(
+            p, "provenance.policy_fingerprint", "policy_fingerprint")) +
+        A._kv("Config hash", _p11_pick(p, "provenance.config_hash", "config_hash"))
+    )
+    return (
+        '<div class="p11-metrics-grid">'
+        f'<div><h4 class="p11-subhead">Contract / heartbeat</h4>{contract}</div>'
+        f'<div><h4 class="p11-subhead">Lifecycle / reconciliation</h4>{lifecycle}</div>'
+        f'<div><h4 class="p11-subhead">Closed-outcome economics</h4>{economics}</div>'
+        f'<div><h4 class="p11-subhead">Frozen provenance</h4>{provenance}</div>'
+        '</div><div class="sub">Read-only projection of observer_status.json. '
+        'This dashboard does not import, start, reconcile or execute the observer. '
+        'No outcome sample means economic metrics are N/A, not zero.</div>'
+    )
+
+
+def _p11_export_filename(snapshot: dict[str, Any], key: str, default: str) -> str:
+    exports = snapshot.get("exports") if isinstance(snapshot.get("exports"), dict) else {}
+    aliases = {
+        "lifecycle_ledger": ("lifecycle_ledger", "ledger"),
+        "outcomes": ("outcomes", "outcome_export"),
+        "labels": ("labels", "label_export"),
+        "reconciliation": ("reconciliation", "reconciliation_report"),
+        "summary": ("summary", "short_summary"),
+    }
+    raw: Any = None
+    for alias in aliases.get(key, (key,)):
+        if alias in exports:
+            raw = exports[alias]
+            break
+    if isinstance(raw, dict):
+        raw = raw.get("filename") or raw.get("path")
+    # Only a basename inside the fixed observer output is accepted.  The status
+    # snapshot cannot turn the local dashboard into an arbitrary file browser.
+    name = Path(str(raw)).name if raw else default
+    return name or default
+
+
+def _panel_p11_exports(d: dict) -> str:
+    snapshot = d.get("p11_short_forward_observer") or {}
+    out_dir = _p11_observer_output_dir()
+    labels = {
+        "lifecycle_ledger": "Lifecycle ledger",
+        "outcomes": "Outcomes",
+        "labels": "Labels",
+        "reconciliation": "Reconciliation report",
+        "summary": "Short summary",
+    }
+    items: list[str] = []
+    for key, default in P11_OBSERVER_EXPORT_FILES.items():
+        filename = _p11_export_filename(snapshot, key, default)
+        path = out_dir / filename
+        label = html.escape(labels[key])
+        if path.is_file():
+            href = html.escape(path.resolve().as_uri(), quote=True)
+            safe_name = html.escape(filename, quote=True)
+            items.append(
+                f'<a class="p11-export-link" href="{href}" download="{safe_name}">'
+                f'<strong>{label}</strong><span>{safe_name}</span></a>')
+        else:
+            items.append(
+                f'<div class="p11-export-link missing"><strong>{label}</strong>'
+                f'<span>N/A — not published ({html.escape(filename)})</span></div>')
+    return (
+        f'<div class="p11-export-grid">{"".join(items)}</div>'
+        '<div class="sub">Local, read-only artifacts published by the observer. '
+        'Missing files stay N/A; the dashboard never synthesizes or mutates them.</div>'
+    )
 
 
 def _latest_v1044() -> dict[str, Any]:
@@ -537,9 +769,12 @@ def _panel_lattice(d: dict) -> str:
 def render_html(d: dict, auto_refresh_seconds: int | None = None) -> str:
     base = A.render_html({**d, "readiness": d.get("readiness_v1043c") or d.get("readiness")})
     base = _remove_legacy_probability_lattice(base)
+    base = base.replace("</style>", _P11_CSS + "</style>", 1)
     extra = _EXTRA.format(
         watch=_panel_watch(d),
         pws=_panel_persistent_ws(d), compare=_panel_compare(d),
+        p11=_panel_p11_forward_observer(d),
+        p11_exports=_panel_p11_exports(d),
         strategy=_panel_strategy(d), exits=_panel_exit(d),
         alpha=_panel_alpha_factory(d),
         ai=_panel_ai_copilot(d),
@@ -580,6 +815,8 @@ def _remove_legacy_probability_lattice(rendered: str) -> str:
 _EXTRA = """
 <div class="grid" style="margin-top:14px">
   <div class="card wide"><h3>Dashboard Auto Refresh</h3>{watch}</div>
+  <div class="card full p11-panel"><h3>P11_SHORT FORWARD OBSERVER</h3>{p11}</div>
+  <div class="card full p11-panel"><h3>Reports &amp; Exports — P11_SHORT</h3>{p11_exports}</div>
   <div class="card wide"><h3>Persistent WS Panel</h3>{pws}</div>
   <div class="card wide"><h3>REST vs WS vs WS Persistent</h3>{compare}</div>
   <div class="card wide"><h3>Alpha Factory V10.44</h3>{alpha}</div>
@@ -591,6 +828,19 @@ _EXTRA = """
   <div class="card wide"><h3>Relationship Graph</h3>{graph}<div class="sub">No invented correlations. Alt symbols WAITING_DATA until collected.</div></div>
 </div>
 <div class="sub" style="text-align:center;margin-top:8px">V10.43C generated {gen} · RESEARCH_ONLY · NO LIVE</div>
+"""
+
+
+_P11_CSS = """
+.p11-panel .kv .v{max-width:68%;overflow-wrap:anywhere;word-break:break-word;text-align:right}
+.p11-metrics-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.p11-subhead{margin:0 0 7px;color:var(--txt);font-size:11px;letter-spacing:.08em;text-transform:uppercase}
+.p11-export-grid{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:9px}
+.p11-export-link{display:flex;min-width:0;flex-direction:column;gap:5px;padding:10px;border:1px solid var(--line);border-radius:8px;background:var(--panel2);color:var(--txt);text-decoration:none;overflow-wrap:anywhere;word-break:break-word}
+.p11-export-link:hover{border-color:var(--accent)}
+.p11-export-link span{color:var(--muted);font-size:11px}
+.p11-export-link.missing{cursor:not-allowed;opacity:.72}
+@media(max-width:900px){.p11-metrics-grid{grid-template-columns:1fr}.p11-export-grid{grid-template-columns:1fr}.p11-panel .kv .v{max-width:60%}}
 """
 
 
@@ -608,7 +858,9 @@ def build_dashboard(symbol: str = "BTCUSDT", state: dict | None = None,
     result = {"tool_version": TOOL_VERSION, "mode": "RESEARCH_ONLY", **_safety()}
     if write:
         d.mkdir(parents=True, exist_ok=True)
-        (d / "index.html").write_text(render_html(data, auto_refresh_seconds=interval), encoding="utf-8")
+        html_tmp = d / "index.html.tmp"
+        html_tmp.write_text(render_html(data, auto_refresh_seconds=interval), encoding="utf-8")
+        os.replace(html_tmp, d / "index.html")
         tmp = d / "dashboard_data_v10_43c.json.tmp"
         tmp.write_text(json.dumps(data, indent=2, default=str), encoding="utf-8")
         os.replace(tmp, d / "dashboard_data_v10_43c.json")
