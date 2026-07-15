@@ -26,7 +26,7 @@ DATA_ROOT = ROOT / "external_data" / "staging" / "v10_47_22_isolated"
 SYMBOLS = ("BTCUSDT", "ETHUSDT", "XRPUSDT", "DOGEUSDT")
 TIMEFRAMES = ("1m", "5m", "15m")
 EXPECTED_KEYS = {f"{symbol}:{timeframe}" for symbol in SYMBOLS for timeframe in TIMEFRAMES}
-EXPECTED_CAMPAIGN_ROOT = "2355b07492797f2065f016c4a1160a8cd933b6efe1ddafc6cbe8230d8a4aa439"
+EXPECTED_CAMPAIGN_ROOT = "1b71ac3805e4717530d8f168229b4e49ab567a19752ea57411ea425f54d75c96"
 
 
 def git(*args: str) -> str:

@@ -18,9 +18,15 @@ from typing import Any
 
 CAMPAIGN_ID = "V10_47_OFFICIAL_4X3X47"
 AUTHORITY_FILENAME = "campaign_authority_v10_47_25.json"
-EXPECTED_ROOT_ANCHOR = "2355b07492797f2065f016c4a1160a8cd933b6efe1ddafc6cbe8230d8a4aa439"
+EXPECTED_ROOT_ANCHOR = "1b71ac3805e4717530d8f168229b4e49ab567a19752ea57411ea425f54d75c96"
 EXPECTED_SYMBOLS = ("BTCUSDT", "ETHUSDT", "XRPUSDT", "DOGEUSDT")
 EXPECTED_TIMEFRAMES = ("1m", "5m", "15m")
+EXPECTED_VENUES = {
+    "BTCUSDT": "bitget",
+    "ETHUSDT": "bitget",
+    "XRPUSDT": "bybit",
+    "DOGEUSDT": "bitget",
+}
 _FULL_CONTEXT_CAPABILITY = object()
 
 
@@ -129,7 +135,8 @@ def _validate_authority(authority: dict[str, Any]) -> None:
         if entry.get("symbol") not in EXPECTED_SYMBOLS \
                 or entry.get("timeframe") not in EXPECTED_TIMEFRAMES:
             problems.append("AUTHORITY_ENTRY_SCOPE_MISMATCH")
-        if entry.get("venue") != "bitget" or entry.get("participant_count") != 47:
+        if entry.get("venue") != EXPECTED_VENUES.get(entry.get("symbol")) \
+                or entry.get("participant_count") != 47:
             problems.append("AUTHORITY_ENTRY_CONTRACT_MISMATCH")
         for hash_key in (
             "participant_specs_hash", "tournament_registry_hash",

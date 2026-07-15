@@ -374,9 +374,14 @@ def test_campaign_authority_matches_all_twelve_current_registries():
     authority = CA.load_campaign_authority()
     assert len(authority["entries"]) == 12
     assert len({entry["key"] for entry in authority["entries"]}) == 12
+    expected_venues = {
+        "BTCUSDT": "bitget", "ETHUSDT": "bitget",
+        "XRPUSDT": "bybit", "DOGEUSDT": "bitget",
+    }
     for entry in authority["entries"]:
+        assert entry["venue"] == expected_venues[entry["symbol"]]
         registry = CT.preregister(
-            entry["symbol"], "bitget", entry["timeframe"],
+            entry["symbol"], entry["venue"], entry["timeframe"],
             entry["dataset_source_generation_id"],
         )
         assert registry["registry_hash"] == entry["tournament_registry_hash"]
