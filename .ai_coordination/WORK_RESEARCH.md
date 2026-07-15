@@ -131,3 +131,80 @@ evidence: `reviews/V10_47_23_WORK_FINAL_REAUDIT.md`.
 
 The operational conclusion is unchanged:
 `NO_CONFIRMED_EDGE / SHADOW_CANDIDATES=0 / HOLDOUT=SEALED / NO LIVE`.
+
+## Independent final comprehensive re-audit of V10.47.25 (2026-07-15)
+
+Verdict: **PASS WITH LIMITATIONS** for final scientific closure. No P0, P1 or
+material P2 was reproduced. The canonical authority is now anchored to
+`V10_47_OFFICIAL_4X3X47`: 4 symbols x 3 timeframes x 47 participants,
+`m_campaign=564`, alpha 0.05 and Bonferroni. All 12 real manifests, commitments,
+venues and registry/spec/matching hashes authorize; reduced, incomplete,
+duplicated, alternate-venue/registry and self-consistent non-canonical campaigns
+fail closed.
+
+The 12 primary and 12 replay JSONs at HEAD
+`81d8b0b07c93b13a28cca75c220b4def79ac68b1` and tree
+`6c0775620c45e28939c23692593a558dbe9f0e16` are byte-identical by pair. Direct
+record reconciliation gives 564 hypotheses: 399 without gross edge, 146 killed
+by costs and 19 TRAIN net-positive blocks; their 172 requested baseline pairs
+reconcile as 3 accepted, 163 impossible and 6 incompatible. Zero hypotheses
+complete the baseline gate, zero enter validation/WF and zero reach shadow.
+P11/P11_SHORT dependency reuse does not inflate `n_eff` or reduce campaign FWER.
+
+The holdout was not opened and remains physically unloaded in 24/24 outputs.
+The certified suite is coherent at 3107 collected, 3107 unique and 3107 passed;
+234 focused tests also passed. Independent manifest/seal verification succeeds
+with payload `a86e4663d48fbbf4da3a9887b9c4642b6369e559b284af19c19fa6b47e1430aa`
+and canonical seal
+`de93a0c1d733ed2d2a0e153c9c177a7eedae5164ae951338f765ea13ea92341d`.
+Safety remains `SAFE_PAPER_ONLY` with `can_send_real_orders=false`.
+
+Non-blocking limitations: final evidence is local and ignored by Git pending an
+external read-only archive; no real dashboard screenshot was taken; full ledger
+events are represented by integrity summaries/hashes; two pairing identities
+are inferable rather than explicitly serialized; validation faults abort closed
+rather than emit a structured rejection. Full evidence and P3 analysis:
+`reviews/V10_47_25_WORK_FINAL_COMPREHENSIVE_REAUDIT.md`.
+
+Final closure state:
+`NO_CONFIRMED_EDGE / SHADOW_CANDIDATES=0 / HOLDOUT=SEALED / NO LIVE`.
+
+## Revisión de activación operativa (2026-07-15)
+
+Decisión: **C — REPAIR_ONE_SPECIFIC_BLOCKER**. El bloqueo no es un gate de
+promoción ni un flag paper demasiado estricto: ninguna política V10.47 está
+seleccionada y conectada a un lifecycle forward continuo. El escáner V10.28
+activo es deliberadamente no accionable y emite snapshots repetidos sin abrir,
+cerrar ni etiquetar posiciones virtuales; el runtime local `app.main` no está
+activo. El `PaperTrader` existente tampoco reproduce los exits ni todos los
+costes de P11.
+
+El historial paper continuo de dos o tres meses no existe localmente. La
+evidencia auditable es: un episodio paper parcial en seis reinicios del 1–2 de
+mayo (1.800 evaluaciones, 17 ciclos seleccionados, 11 bloqueos de riesgo, seis
+aperturas LONG y cero cierres/labels); 12,52 días transcurridos de escáner estable
+en julio (9.337 scans y 27.013 snapshots candidatos repetidos, cero
+ejecuciones/outcomes); y readiness V10.29 diferenciado de 12,66 días de trades,
+13,62 de orderbook, 15,35 de OI y cero días/frames de liquidaciones. No forman un
+único reloj de cobertura densa. Operaciones cerradas, labels y `n_eff` forward de
+una política válida: cero. Fixtures, labels smoke de vault, replays y torneos
+post hoc se excluyeron del rendimiento forward.
+
+El mejor lead existente es BTCUSDT Bitget 15m P11_SHORT. En TRAIN tuvo 101
+señales raw, 35 trades SimOMS en 46 días, `n_eff=20`, gross EV €0,013404, coste
+medio €0,008714 y net EV €0,004689. La validation diagnóstica tuvo nueve trades,
+neto +€0,0494 y `n_eff=6,1723`, pero neto sin top-3 −€0,1046. Su cobertura de
+baseline exacto fue sólo 1/35. Sólo justifica un observer forward-shadow congelado
+inmediato, no posiciones paper ni promoción.
+
+Próxima acción requerida: implementar un único observer append-only
+`P11_SHORT_BTC_15M_FORWARD_SHADOW` con el decider P11, causal ledger, SimOMS y el
+contrato público oficial Bitget 1m→15m; registrar entradas next-open, lifecycle
+TP/SL/TIME, MFE/MAE, costes base/conservador y controles preregistrados
+no-trade/integridad/placebo bajo un contrato de matching nuevo y certificado;
+mostrar su funnel en dashboard; nunca llamar PaperTrader/ExecutionEngine ni
+enviar una orden. Cuando la reparación pase sus gates de integridad, el estado
+operativo cambia inmediatamente a B/START_FORWARD_SHADOW_NOW; no promociona edge
+ni autoriza paper. Evidencia completa en 20 partes, política, hipótesis Warren
+MTF, gates, tiempo basado en eventos y criterios de aceptación:
+`reviews/OPERATIONAL_ACTIVATION_REVIEW.md`.
