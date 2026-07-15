@@ -34,13 +34,14 @@ from app.labs.v10_46 import families
 from app.labs.v10_46 import sim_oms
 
 
-SCHEMA_VERSION = "p11_short_forward_observer.v1"
+SCHEMA_VERSION = "p11_short_forward_observer.v2"
 SYMBOL = "BTCUSDT"
 VENUE = "bitget"
 TIMEFRAME = "15m"
 HYPOTHESIS_ID = "P11_SHORT"
 SIDE = "SHORT"
 INTERVAL_MS = 900_000
+SOURCE_FINALITY_LAG_MS = 120_000
 MAX_POSITION = 1
 MONEY_SCENARIO = "5eur"
 COST_SCENARIO = "observed"
@@ -98,6 +99,10 @@ class ObserverAlreadyRunning(ObserverError):
 class ObserverDataError(ObserverError):
     """Raised for malformed, conflicting or non-causal market data."""
 
+    def __init__(self, message: str, *, details: dict[str, Any] | None = None) -> None:
+        super().__init__(message)
+        self.details = dict(details or {})
+
 
 class PublicDataUnavailable(ObserverDataError):
     """Transient public-source outage: visible and retryable, never silent."""
@@ -115,6 +120,33 @@ def _canonical(value: Any) -> str:
 def _sha(value: Any) -> str:
     raw = value if isinstance(value, str) else _canonical(value)
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _file_sha(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _dependency_code_fingerprints() -> dict[str, str]:
+    """Fingerprint the code closure that can change observer semantics.
+
+    Git HEAD/tree remain frozen provenance, but unrelated documentation or test
+    commits must not make a durable observer run impossible to reopen. Runtime
+    continuity is therefore gated by these exact productive dependencies.
+    """
+    paths = {
+        "observer": Path(__file__),
+        "public_bitget_adapter": Path(bitget_data.__file__),
+        "causal_stats": Path(causal_stats.__file__),
+        "contracts": Path(contracts.__file__),
+        "event_clock": Path(event_clock.__file__),
+        "families": Path(families.__file__),
+        "sim_oms": Path(sim_oms.__file__),
+        "campaign_authority": Path(causal_stats.__file__).with_name(
+            "campaign_authority.py"
+        ),
+        "authority_registry": AUTHORITY_PATH,
+    }
+    return {name: _file_sha(path.resolve()) for name, path in paths.items()}
 
 
 def _deterministic_id(kind: str, *parts: Any) -> str:
@@ -287,17 +319,20 @@ def load_policy_binding() -> dict[str, Any]:
 
 
 def _config_contract(policy: dict[str, Any]) -> dict[str, Any]:
+    dependency_fingerprints = _dependency_code_fingerprints()
     return {
         "schema_version": SCHEMA_VERSION,
         "symbol": SYMBOL, "venue": VENUE, "timeframe": TIMEFRAME,
         "hypothesis_id": HYPOTHESIS_ID, "side": SIDE,
         "source": SOURCE, "strict_1m_aggregation_factor": 15,
-        "closed_bars_only": True, "max_position": MAX_POSITION,
+        "closed_bars_only": True,
+        "source_finality_lag_ms": SOURCE_FINALITY_LAG_MS,
+        "max_position": MAX_POSITION,
         "money_scenario": MONEY_SCENARIO, "cost_scenario": COST_SCENARIO,
         "policy_fingerprint": policy["policy_fingerprint"],
-        "observer_code_fingerprint": hashlib.sha256(
-            Path(__file__).read_bytes()
-        ).hexdigest(),
+        "observer_code_fingerprint": dependency_fingerprints["observer"],
+        "dependency_code_fingerprints": dependency_fingerprints,
+        "dependency_closure_fingerprint": _sha(dependency_fingerprints),
     }
 
 
@@ -560,7 +595,9 @@ class ObserverStore:
         self.config_hash = _sha(self.config)
         self.market_source_generation_id = _sha({
             "source": SOURCE, "aggregation": "strict_1m_to_15m",
-            "closed_only": True, "schema": SCHEMA_VERSION,
+            "closed_only": True,
+            "source_finality_lag_ms": SOURCE_FINALITY_LAG_MS,
+            "schema": SCHEMA_VERSION,
         })[:16]
         self.provenance = dict(provenance or _repo_provenance())
         self.instance_id = f"observer-{os.getpid()}-{uuid.uuid4().hex}"
@@ -607,8 +644,6 @@ class ObserverStore:
                         "participant_spec_hash": self.policy["participant_spec_hash"],
                         "callable_fingerprint": self.policy["callable_fingerprint"],
                         "config_hash": self.config_hash,
-                        "repo_head": self.provenance.get("head", "UNAVAILABLE"),
-                        "repo_tree": self.provenance.get("tree", "UNAVAILABLE"),
                     }
                     mismatch = [key for key, value in immutable_expected.items()
                                 if row.get(key) != value]
@@ -798,14 +833,30 @@ class ObserverStore:
                 payload = _bar_payload(bar)
                 payload_hash = _sha(payload)
                 existing = conn.execute(
-                    """SELECT payload_hash FROM p11_bars
+                    """SELECT bar_open_ms AS ts,open,high,low,close,volume,
+                              payload_hash FROM p11_bars
                        WHERE run_id=? AND bar_open_ms=?""",
                     (self.run_id, payload["ts"]),
                 ).fetchone()
                 if existing is not None:
                     if existing["payload_hash"] != payload_hash:
+                        stored_payload = {
+                            "ts": int(existing["ts"]),
+                            "open": float(existing["open"]),
+                            "high": float(existing["high"]),
+                            "low": float(existing["low"]),
+                            "close": float(existing["close"]),
+                            "volume": float(existing["volume"]),
+                        }
                         raise ObserverDataError(
-                            f"BAR_PAYLOAD_CONFLICT:{payload['ts']}"
+                            f"BAR_PAYLOAD_CONFLICT:{payload['ts']}",
+                            details={
+                                "bar_open_ms": int(payload["ts"]),
+                                "stored_payload": stored_payload,
+                                "incoming_payload": payload,
+                                "stored_payload_hash": str(existing["payload_hash"]),
+                                "incoming_payload_hash": payload_hash,
+                            },
                         )
                     continue
                 conn.execute(
@@ -1105,7 +1156,8 @@ class BitgetClosedBarProvider:
         self.log = log or (lambda _message: None)
 
     def fetch(self, *, now_ms: int, since_ms: int) -> list[dict[str, Any]]:
-        span_ms = max(0, int(now_ms) - int(since_ms))
+        settled_as_of_ms = int(now_ms) - SOURCE_FINALITY_LAG_MS
+        span_ms = max(0, settled_as_of_ms - int(since_ms))
         days = max(1, math.ceil(span_ms / 86_400_000))
         transport_messages: list[str] = []
 
@@ -1115,7 +1167,7 @@ class BitgetClosedBarProvider:
             self.log(text)
 
         rows = bitget_data.fetch_bitget_1m(
-            SYMBOL, days=days, end_ms=int(now_ms), log=capture
+            SYMBOL, days=days, end_ms=settled_as_of_ms, log=capture
         )
         http_errors = [message for message in transport_messages
                        if " HTTP " in f" {message} "]
@@ -1130,7 +1182,7 @@ class BitgetClosedBarProvider:
             if not bitget_data.validate_raw_candle(row):
                 continue
             ts_ms = int(row[0])
-            if ts_ms + 60_000 > int(now_ms):
+            if ts_ms + 60_000 > settled_as_of_ms:
                 continue
             bar = {
                 "ts": ts_ms, "open": float(row[1]), "high": float(row[2]),
@@ -1145,7 +1197,9 @@ class BitgetClosedBarProvider:
                 raise ObserverDataError(f"BITGET_1M_CONFLICT:{ts_ms}")
             minute_by_ts[ts_ms] = bar
         minute_bars = [minute_by_ts[key] for key in sorted(minute_by_ts)]
-        aggregated = _resample_closed_15m(minute_bars, as_of_ms=int(now_ms))
+        aggregated = _resample_closed_15m(
+            minute_bars, as_of_ms=settled_as_of_ms
+        )
         if not aggregated:
             raise PublicDataUnavailable("BITGET_STRICT_15M_DATA_UNAVAILABLE")
         return aggregated
@@ -1577,7 +1631,8 @@ class P11ShortForwardObserver:
             if last_processed is None else int(last_processed)
         )
         explicit = bars is not None
-        if not explicit and processing_ms < next_expected_open + INTERVAL_MS:
+        if not explicit and processing_ms < (
+                next_expected_open + INTERVAL_MS + SOURCE_FINALITY_LAG_MS):
             self.store.set_heartbeat(
                 processing_ms,
                 status=("WAITING_FOR_FIRST_CLOSED_BAR"
@@ -1616,7 +1671,13 @@ class P11ShortForwardObserver:
             # Drive from durable bars, not merely this fetch. If a later bar was
             # persisted while an earlier gap was pending, supplying the missing
             # bar once is enough to resume and catch up deterministically.
-            latest_closed_open = (processing_ms // INTERVAL_MS - 1) * INTERVAL_MS
+            settled_as_of_ms = (
+                processing_ms if explicit
+                else processing_ms - SOURCE_FINALITY_LAG_MS
+            )
+            latest_closed_open = (
+                settled_as_of_ms // INTERVAL_MS - 1
+            ) * INTERVAL_MS
             durable_forward = self.store.bars_between(
                 expected, latest_closed_open
             ) if latest_closed_open >= expected else []
@@ -1695,15 +1756,32 @@ class P11ShortForwardObserver:
                     return {
                         "observer_status": "WAITING_FOR_DATA",
                         "last_error": f"{type(exc).__name__}:{str(exc)[:400]}",
+                        "recommendation": "WAIT_FOR_OBSERVER_RECOVERY",
+                        "research_only": True,
+                        "paper_filter_enabled": False,
+                        "can_send_real_orders": False,
+                        "final_recommendation": "NO LIVE",
                     }
             code = str(exc).split(":", 1)[0] or type(exc).__name__
-            correlation = f"poll-error:{code}:{processing_ms // INTERVAL_MS}"
+            diagnostic_details = {
+                "error_type": type(exc).__name__,
+                "message": str(exc)[:500],
+            }
+            if isinstance(exc, ObserverDataError):
+                diagnostic_details.update(exc.details)
+            offending_bar_ms = diagnostic_details.get("bar_open_ms")
+            correlation_suffix = (
+                str(offending_bar_ms) if offending_bar_ms is not None
+                else str(processing_ms // INTERVAL_MS)
+            )
+            correlation = f"poll-error:{code}:{correlation_suffix}"
             try:
                 self.store.record_diagnostic(
                     correlation_key=correlation, phase="DETECTED",
                     severity="ERROR", code=code, now_ms=processing_ms,
-                    details={"error_type": type(exc).__name__,
-                             "message": str(exc)[:500]},
+                    bar_open_ms=(int(offending_bar_ms)
+                                 if offending_bar_ms is not None else None),
+                    details=diagnostic_details,
                 )
                 self.store.set_heartbeat(
                     processing_ms, status="HALTED_FAIL_CLOSED",
@@ -1714,16 +1792,19 @@ class P11ShortForwardObserver:
                 pass
             if explicit:
                 raise
-            return self.read_status() or {
+            return {
                 "observer_status": "HALTED_FAIL_CLOSED",
                 "last_error": f"{type(exc).__name__}:{str(exc)[:400]}",
+                "recommendation": "WAIT_FOR_OBSERVER_RECOVERY",
+                "research_only": True,
+                "paper_filter_enabled": False,
+                "can_send_real_orders": False,
+                "final_recommendation": "NO LIVE",
             }
 
     def _publish(self, now_ms: int) -> dict[str, Any]:
         report = reconcile_store(self.store, now_ms=now_ms)
         metrics = calculate_forward_metrics(self.store, report, now_ms=now_ms)
-        exports = write_exports(self.store, report=report, metrics=metrics,
-                                now_ms=now_ms)
         checkpoint = self.store.checkpoint()
         first_bar = checkpoint.get("last_processed_bar_ms")
         observer_state = str(checkpoint["observer_status"])
@@ -1749,6 +1830,10 @@ class P11ShortForwardObserver:
                 "WAIT_FOR_OBSERVER_RECOVERY",
             ]
             recommendation = "WAIT_FOR_OBSERVER_RECOVERY"
+        exports = write_exports(
+            self.store, report=report, metrics=metrics, now_ms=now_ms,
+            observer_status=observer_state, recommendation=recommendation,
+        )
         status = {
             "schema_version": SCHEMA_VERSION,
             "observer_status": observer_state,
@@ -1786,6 +1871,9 @@ class P11ShortForwardObserver:
                     "authority_reference_generation_id"
                 ],
                 "authority_role": "PARENT_REFERENCE_ONLY",
+                "dependency_closure_fingerprint": self.store.config[
+                    "dependency_closure_fingerprint"
+                ],
             },
             "heartbeat": {
                 "observer_heartbeat": _utc_iso(checkpoint.get("heartbeat_ms")),
@@ -1793,6 +1881,7 @@ class P11ShortForwardObserver:
                 "observer_lag_seconds": metrics["observer_lag_seconds"],
                 "last_closed_bar": metrics["last_closed_bar"],
                 "last_error": checkpoint.get("last_error"),
+                "source_finality_lag_ms": SOURCE_FINALITY_LAG_MS,
             },
             "metrics": metrics,
             "reconciliation": report,
@@ -1800,9 +1889,13 @@ class P11ShortForwardObserver:
             "safety": {
                 "research_only": True, "paper_execution_enabled": False,
                 "live_execution_enabled": False, "dry_run": True,
+                "paper_filter_enabled": False,
                 "can_send_real_orders": False, "private_endpoints_used": False,
                 "wallet_used": False, "holdout_opened": False,
+                "fills_are_simulated": True,
+                "final_recommendation": "NO LIVE",
             },
+            "final_recommendation": "NO LIVE",
             "first_observation_status": (
                 observer_state if first_bar is None
                 else "FIRST_FORWARD_BAR_OBSERVED"
@@ -2227,7 +2320,9 @@ def _csv_text(rows: list[dict[str, Any]], fields: list[str]) -> str:
 
 
 def write_exports(store: ObserverStore, *, report: dict[str, Any],
-                  metrics: dict[str, Any], now_ms: int) -> dict[str, str]:
+                  metrics: dict[str, Any], now_ms: int,
+                  observer_status: str,
+                  recommendation: str) -> dict[str, str]:
     with store.connect() as conn:
         events = [dict(row) for row in conn.execute(
             "SELECT * FROM p11_events WHERE run_id=? ORDER BY seq",
@@ -2293,10 +2388,15 @@ def write_exports(store: ObserverStore, *, report: dict[str, Any],
         f"closed_outcomes={metrics['forward_closed_outcomes']}",
         f"labels={metrics['forward_finalized_labels']}",
         f"forward_n_eff={metrics['forward_n_eff']}",
+        f"observer_status={observer_status}",
         f"reconciliation={report['status']}",
         "scientific_status=NO_CONFIRMED_EDGE_RESEARCH_ONLY",
+        "research_only=true",
+        "paper_filter_enabled=false",
+        "can_send_real_orders=false",
         "orders_sent=0",
-        "recommendation=START_FORWARD_SHADOW_NOW",
+        f"recommendation={recommendation}",
+        "final_recommendation=NO LIVE",
     ]) + "\n"
     _atomic_write_text(paths["summary"], summary)
     return {key: path.name for key, path in paths.items()}
@@ -2329,5 +2429,7 @@ def run_observer_forever(
     return {
         "cycles": cycles, "last_status": last,
         "mode": "FORWARD_SHADOW", "research_only": True,
+        "shadow_only": True, "paper_filter_enabled": False,
         "can_send_real_orders": False,
+        "final_recommendation": "NO LIVE",
     }

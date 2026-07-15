@@ -7481,7 +7481,9 @@ class ResearchLab:
             "result": result,
             "research_only": True,
             "shadow_only": True,
+            "paper_filter_enabled": False,
             "can_send_real_orders": False,
+            "final_recommendation": "NO LIVE",
         }
         return json.dumps(payload, sort_keys=True, default=str)
 
@@ -7496,7 +7498,9 @@ class ResearchLab:
             "result": result,
             "research_only": True,
             "shadow_only": True,
+            "paper_filter_enabled": False,
             "can_send_real_orders": False,
+            "final_recommendation": "NO LIVE",
         }
         return json.dumps(payload, sort_keys=True, default=str)
 
