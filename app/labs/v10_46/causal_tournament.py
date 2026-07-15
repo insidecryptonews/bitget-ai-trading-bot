@@ -22,17 +22,26 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import marshal
+import math
+import types
 from collections.abc import Callable
-from functools import lru_cache
+from pathlib import Path
 from typing import Any
 
 from . import contracts as C
 from . import causal_ledger as CL
 from . import causal_stats as CS
+from . import campaign_authority as CA
 from . import event_clock as EC
 from . import families as FAM
 from . import edge_search as ES
-from .discovery_dataset import DiscoveryPartitions
+from .discovery_dataset import (
+    DiscoveryPartitions,
+    load_verified_holdout_commitment,
+    load_verified_reference,
+    verify_discovery_partitions,
+)
 
 
 RANDOM_BASELINE_SPEC = {
@@ -45,8 +54,8 @@ RANDOM_BASELINE_SPEC = {
     "match_contract": "V10_47_23_EXACT_BIJECTIVE_ONE_TO_ONE",
 }
 
-CAMPAIGN_SYMBOLS = ("BTCUSDT", "ETHUSDT", "XRPUSDT", "DOGEUSDT")
-CAMPAIGN_TIMEFRAMES = ("1m", "5m", "15m")
+CAMPAIGN_SYMBOLS = CA.EXPECTED_SYMBOLS
+CAMPAIGN_TIMEFRAMES = CA.EXPECTED_TIMEFRAMES
 CAMPAIGN_CORRECTION_METHOD = "bonferroni"
 CAMPAIGN_ALPHA = 0.05
 
@@ -66,8 +75,22 @@ def split_indices(n: int) -> dict:
 
 def _metrics(trades: list[dict], counters: dict, timeframe: str) -> dict:
     n = len(trades)
-    nets = [t["net_eur"] for t in trades]
-    gross = [t["gross_eur"] for t in trades]
+    money_fields = (
+        "net_eur", "gross_eur", "fee_eur", "spread_eur",
+        "slippage_eur", "funding_eur",
+    )
+    try:
+        values = {
+            field: [float(trade[field]) for trade in trades]
+            for field in money_fields
+        }
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError("invalid trade metrics") from exc
+    if any(
+            not math.isfinite(value)
+            for field_values in values.values() for value in field_values):
+        raise ValueError("non-finite trade metrics")
+    nets, gross = values["net_eur"], values["gross_eur"]
     net_total, gross_total = float(sum(nets)), float(sum(gross))
     neff = CS.n_eff_estimate(trades, timeframe=timeframe)
     without_top3 = float(sum(sorted(nets, reverse=True)[3:])) if n > 3 else net_total
@@ -76,14 +99,43 @@ def _metrics(trades: list[dict], counters: dict, timeframe: str) -> dict:
         "net_pnl_eur": round(net_total, 6),
         "gross_ev_eur": round(gross_total / n, 6) if n else 0.0,
         "net_ev_eur": round(net_total / n, 6) if n else 0.0,
-        "fee_eur": round(sum(t["fee_eur"] for t in trades), 6),
-        "spread_eur": round(sum(t["spread_eur"] for t in trades), 6),
-        "slippage_eur": round(sum(t["slippage_eur"] for t in trades), 6),
-        "funding_eur": round(sum(t["funding_eur"] for t in trades), 6),
+        "fee_eur": round(sum(values["fee_eur"]), 6),
+        "spread_eur": round(sum(values["spread_eur"]), 6),
+        "slippage_eur": round(sum(values["slippage_eur"]), 6),
+        "funding_eur": round(sum(values["funding_eur"]), 6),
         "net_without_top3_eur": round(without_top3, 6),
         "n_eff_final": neff["n_eff_final"], "n_eff": neff,
         "counters": counters,
-        "classification": ES._classify(gross_total, net_total)}
+        "classification": ES._classify(gross_total, net_total),
+        "metrics_valid": True}
+
+
+def _metrics_are_finite(metrics: dict | None) -> bool:
+    if not isinstance(metrics, dict) or metrics.get("metrics_valid") is not True:
+        return False
+    for key in (
+        "gross_pnl_eur", "net_pnl_eur", "gross_ev_eur", "net_ev_eur",
+        "net_without_top3_eur", "n_eff_final",
+    ):
+        value = metrics.get(key)
+        if type(value) not in (int, float) or not math.isfinite(float(value)):
+            return False
+    return True
+
+
+def _safe_metrics(trades: list[dict], counters: dict, timeframe: str) -> dict:
+    try:
+        return _metrics(trades, counters, timeframe)
+    except (KeyError, TypeError, ValueError, OverflowError) as exc:
+        return {
+            "trades": len(trades), "gross_pnl_eur": 0.0,
+            "net_pnl_eur": 0.0, "gross_ev_eur": 0.0, "net_ev_eur": 0.0,
+            "fee_eur": 0.0, "spread_eur": 0.0, "slippage_eur": 0.0,
+            "funding_eur": 0.0, "net_without_top3_eur": 0.0,
+            "n_eff_final": 0.0, "n_eff": {}, "counters": counters,
+            "classification": "INVALID_METRICS", "metrics_valid": False,
+            "metrics_error": type(exc).__name__,
+        }
 
 
 def _ledger_integrity(ledger: CL.ImmutableLedger, trades: list[dict]) -> dict:
@@ -174,65 +226,9 @@ def preregister(symbol: str, venue: str, timeframe: str, gen: str,
              "closed": True, "closed_before_metrics": True}
 
 
-@lru_cache(maxsize=1)
-def _cached_campaign_registry() -> dict:
-    """Close the 12-tournament family before any market metric is evaluated."""
-    tournaments: list[dict] = []
-    for symbol in CAMPAIGN_SYMBOLS:
-        for timeframe in CAMPAIGN_TIMEFRAMES:
-            registry = preregister(
-                symbol, "bitget", timeframe, "v10_47_23_campaign_registry"
-            )
-            tournaments.append({
-                "symbol": symbol,
-                "timeframe": timeframe,
-                "registry_hash": registry["registry_hash"],
-                "specs_hash": registry["specs_hash"],
-                "participants": sorted(registry["specs"]),
-                "m_nominal": registry["m_nominal"],
-                "m_unique_hypotheses": registry["m_unique_hypotheses"],
-                "m_unique_results": registry["m_unique_results"],
-            })
-    m_nominal = sum(item["m_nominal"] for item in tournaments)
-    m_unique_hypotheses = sum(
-        item["m_unique_hypotheses"] for item in tournaments
-    )
-    m_unique_results = sum(item["m_unique_results"] for item in tournaments)
-    contract = {
-        "schema": "v10_47_23_campaign_registry",
-        "symbols": sorted(CAMPAIGN_SYMBOLS),
-        "timeframes": list(CAMPAIGN_TIMEFRAMES),
-        "tournament_combinations": len(tournaments),
-        "participants_per_tournament": tournaments[0]["m_nominal"],
-        "tournaments": tournaments,
-        "m_campaign_nominal": m_nominal,
-        "m_campaign_unique_hypotheses": m_unique_hypotheses,
-        "m_campaign_unique_results": m_unique_results,
-        # Cross-symbol/timeframe semantic equivalence is not proven. Use the
-        # conservative nominal family for every promotion decision.
-        "m_campaign_effective_for_gate": m_nominal,
-        "deduplication_status": "AMBIGUOUS_USE_NOMINAL",
-        "correction_method": CAMPAIGN_CORRECTION_METHOD,
-        "alpha": CAMPAIGN_ALPHA,
-        "closed": True,
-        "closed_before_metrics": True,
-    }
-    return {
-        "campaign_registry_contract": contract,
-        "campaign_registry_sha": C.canonical_hash(contract),
-        "m_campaign_nominal": m_nominal,
-        "m_campaign_unique_hypotheses": m_unique_hypotheses,
-        "m_campaign_unique_results": m_unique_results,
-        "m_campaign_effective_for_gate": m_nominal,
-        "correction_method": CAMPAIGN_CORRECTION_METHOD,
-        "alpha": CAMPAIGN_ALPHA,
-        "closed": True,
-        "closed_before_metrics": True,
-    }
-
-
 def preregister_campaign() -> dict:
-    return copy.deepcopy(_cached_campaign_registry())
+    """Public read-only view of the tracked canonical campaign authority."""
+    return CA.public_campaign_contract()
 
 
 def _behavioral_fingerprints(deciders: dict, symbol, venue, timeframe, gen) -> dict:
@@ -267,8 +263,138 @@ def _behavioral_fingerprints(deciders: dict, symbol, venue, timeframe, gen) -> d
     return out
 
 
+def _structural_value(value: Any, seen: set[int] | None = None) -> Any:
+    """Canonicalize a policy closure without executing it.
+
+    The identity is used only to compare a supplied participant with the
+    canonical participant rebuilt in this process. It is not caller authority.
+    """
+    if seen is None:
+        seen = set()
+    if value is None or type(value) in (bool, int, str):
+        return value
+    if type(value) is float:
+        if not math.isfinite(value):
+            raise CA.CampaignAuthorityError("POLICY_CALLABLE_NONFINITE_STATE")
+        return {"float_hex": value.hex()}
+    if isinstance(value, bytes):
+        return {"bytes_sha256": hashlib.sha256(value).hexdigest()}
+    identity = id(value)
+    if identity in seen:
+        return {"cycle": type(value).__qualname__}
+    seen.add(identity)
+    try:
+        if isinstance(value, types.FunctionType):
+            closure = []
+            for cell in value.__closure__ or ():
+                try:
+                    cell_value = cell.cell_contents
+                except ValueError:
+                    cell_value = {"empty_cell": True}
+                closure.append(_structural_value(cell_value, seen))
+            return {
+                "kind": "function",
+                "module": value.__module__,
+                "qualname": value.__qualname__,
+                "code_sha256": hashlib.sha256(
+                    marshal.dumps(value.__code__)
+                ).hexdigest(),
+                "defaults": _structural_value(value.__defaults__, seen),
+                "kwdefaults": _structural_value(value.__kwdefaults__, seen),
+                "closure": closure,
+            }
+        if isinstance(value, dict):
+            if len(value) > 1_000 and all(
+                    type(key) is int
+                    and type(item) in (int, float)
+                    and not isinstance(item, bool)
+                    and math.isfinite(float(item))
+                    for key, item in value.items()):
+                digest = hashlib.sha256()
+                for key, item in sorted(value.items()):
+                    digest.update(f"{key}:{float(item).hex()}\n".encode("ascii"))
+                return {"numeric_mapping_sha256": digest.hexdigest(), "size": len(value)}
+            rows = [
+                (_structural_value(key, seen), _structural_value(item, seen))
+                for key, item in value.items()
+            ]
+            rows.sort(key=lambda row: C.canonical_hash(row[0]))
+            return {"mapping": rows}
+        if isinstance(value, (list, tuple)):
+            return {
+                "sequence_type": type(value).__name__,
+                "items": [_structural_value(item, seen) for item in value],
+            }
+        if isinstance(value, (set, frozenset)):
+            items = [_structural_value(item, seen) for item in value]
+            items.sort(key=C.canonical_hash)
+            return {"set_type": type(value).__name__, "items": items}
+    finally:
+        seen.discard(identity)
+    raise CA.CampaignAuthorityError(
+        f"POLICY_CALLABLE_UNSUPPORTED_STATE:{type(value).__qualname__}"
+    )
+
+
+def _callable_fingerprint(decide_fn: Callable) -> str:
+    if not isinstance(decide_fn, types.FunctionType):
+        raise CA.CampaignAuthorityError("POLICY_CALLABLE_TYPE_INVALID")
+    return C.canonical_hash(_structural_value(decide_fn))
+
+
 SHADOW_GATES_V2 = {"min_n_eff": 30, "min_net_pnl_eur": 0.0,
                    "matched_random_alpha": 0.05, "min_bootstrap_lb_eur": 0.0}
+
+
+def _authorize_candidate_policy(*, decide_fn, exit_params: dict,
+                                hypothesis_id: str,
+                                authorization: CA.TournamentAuthorization,
+                                verified_reference=None) -> dict:
+    """Derive policy identity from canonical code, never caller hashes."""
+    context = CA.validate_full_authorization(authorization)
+    authority = CA.load_campaign_authority(context.campaign_id)
+    symbol, timeframe = context.symbol, context.timeframe
+    entry = context.entry
+    canonical = preregister(
+        symbol, entry["venue"], timeframe, entry["dataset_source_generation_id"],
+        verified_reference,
+    )
+    expected_registry = {
+        "registry_hash": entry["tournament_registry_hash"],
+        "specs_hash": entry["participant_specs_hash"],
+        "baseline_policy_spec_hash": entry["baseline_spec_hash"],
+        "baseline_tolerance_spec_hash": entry["tolerance_spec_hash"],
+    }
+    if any(canonical.get(key) != value for key, value in expected_registry.items()):
+        raise CA.CampaignAuthorityError("POLICY_REGISTRY_AUTHORITY_MISMATCH")
+    if hypothesis_id not in canonical["deciders"] \
+            or hypothesis_id not in authority["participant_spec_hashes"]:
+        raise CA.CampaignAuthorityError("UNAUTHORIZED_HYPOTHESIS_ID")
+    expected_exit = canonical["deciders"][hypothesis_id][1]
+    if exit_params != expected_exit:
+        raise CA.CampaignAuthorityError("POLICY_EXIT_SPEC_AUTHORITY_MISMATCH")
+    supplied_callable = _callable_fingerprint(decide_fn)
+    expected_callable = _callable_fingerprint(
+        canonical["deciders"][hypothesis_id][0]
+    )
+    if supplied_callable != expected_callable:
+        raise CA.CampaignAuthorityError("POLICY_CALLABLE_AUTHORITY_MISMATCH")
+    supplied_behavior = _behavioral_fingerprints(
+        {hypothesis_id: (decide_fn, exit_params)}, symbol, entry["venue"],
+        timeframe, entry["dataset_source_generation_id"],
+    )[hypothesis_id]
+    expected_behavior = canonical["fingerprints"][hypothesis_id]
+    if supplied_behavior != expected_behavior:
+        raise CA.CampaignAuthorityError("POLICY_BEHAVIOR_AUTHORITY_MISMATCH")
+    expected_spec = authority["participant_spec_hashes"][hypothesis_id]
+    if canonical["specs"][hypothesis_id] != expected_spec:
+        raise CA.CampaignAuthorityError("POLICY_SPEC_AUTHORITY_MISMATCH")
+    return {
+        "participant_spec_hash": expected_spec,
+        "behavior_fingerprint": expected_behavior,
+        "callable_fingerprint": expected_callable,
+        "registry_hash": canonical["registry_hash"],
+    }
 
 
 def _random_baseline_decider(*, symbol: str, venue: str, timeframe: str,
@@ -300,35 +426,58 @@ def _random_baseline_decider(*, symbol: str, venue: str, timeframe: str,
 
 
 def evaluate_candidate(bars_tr, sigs_tr, bars_validation, sigs_validation, bars_wf,
-                       sigs_wf, decide_fn, exit_params, *, symbol, timeframe,
-                       m_unique, policy_fingerprint, registry_hash,
-                       baseline_spec_hash, campaign_registry):
+                       sigs_wf, decide_fn, exit_params, *,
+                       authorization: CA.TournamentAuthorization,
+                       hypothesis_id, verified_reference=None):
     """Evaluate TRAIN and VALIDATION before any WALK_FORWARD computation.
 
     ``sigs_wf`` may be a lazy zero-argument supplier.  It is called only after
     VALIDATION admission.  The holdout is neither an argument nor an import.
     """
-    if len(str(policy_fingerprint)) != 64 or any(
-            char not in "0123456789abcdef" for char in str(policy_fingerprint).lower()
-    ):
-        raise ValueError("a preregistered 64-hex policy fingerprint is required")
+    context = CA.validate_full_authorization(authorization)
+    campaign_id = context.campaign_id
+    symbol, timeframe = context.symbol, context.timeframe
+    authority = CA.load_campaign_authority(campaign_id)
+    if hypothesis_id not in authority["participant_spec_hashes"]:
+        raise CA.CampaignAuthorityError("UNAUTHORIZED_HYPOTHESIS_ID")
+    policy_contract = _authorize_candidate_policy(
+        decide_fn=decide_fn, exit_params=exit_params,
+        hypothesis_id=hypothesis_id, authorization=context,
+        verified_reference=verified_reference,
+    )
     original_params = copy.deepcopy(exit_params)
     original_decider = decide_fn
+    stage_parameter_integrity: dict[str, bool] = {}
+
+    def drive(stage: str, bars, sigs, fn, *, scenario_cost="observed",
+              stage_hypothesis=hypothesis_id):
+        params = copy.deepcopy(original_params)
+        result = CL.drive_causal(
+            bars, sigs, fn, params, symbol=symbol, timeframe=timeframe,
+            scenario_cost=scenario_cost, hypothesis_id=stage_hypothesis,
+        )
+        stage_parameter_integrity[stage] = params == original_params
+        return result
+
     policy_identity = {
-        "decider_fingerprint": str(policy_fingerprint).lower(),
+        "decider_fingerprint": policy_contract["behavior_fingerprint"],
+        "callable_fingerprint": policy_contract["callable_fingerprint"],
+        "participant_spec_hash": policy_contract["participant_spec_hash"],
+        "registry_hash": policy_contract["registry_hash"],
         "callable_unchanged": True,
         "parameters_before": copy.deepcopy(original_params),
+        "hypothesis_id": hypothesis_id,
+        "campaign_id": campaign_id,
     }
-    sel = CL.drive_causal(bars_tr, sigs_tr, decide_fn, exit_params,
-                          symbol=symbol, timeframe=timeframe)
-    m = _metrics(sel["trades"], sel["counters"], timeframe)
-    baseline = CL.drive_causal(
-        bars_tr, sigs_tr,
+    sel = drive("selection", bars_tr, sigs_tr, decide_fn)
+    m = _safe_metrics(sel["trades"], sel["counters"], timeframe)
+    baseline = drive(
+        "baseline", bars_tr, sigs_tr,
         _random_baseline_decider(
             symbol=symbol, venue="research_baseline", timeframe=timeframe,
             gen="v10_47_23",
         ),
-        exit_params, symbol=symbol, timeframe=timeframe,
+        stage_hypothesis="PREREGISTERED_RANDOM_BASELINE_V10_47_23",
     )
     baseline_trades = []
     for index, trade in enumerate(baseline["trades"]):
@@ -340,13 +489,7 @@ def evaluate_candidate(bars_tr, sigs_tr, bars_validation, sigs_validation, bars_
         baseline_trades.append(row)
     paired = CS.matched_random_paired(
         candidate_trades=sel["trades"], baseline_trades=baseline_trades,
-        timeframe=timeframe, m_global=m_unique,
-        alpha=SHADOW_GATES_V2["matched_random_alpha"],
-        m_campaign=campaign_registry["m_campaign_effective_for_gate"],
-        campaign_registry=campaign_registry["campaign_registry_contract"],
-        campaign_registry_sha=campaign_registry["campaign_registry_sha"],
-        baseline_spec_hash=baseline_spec_hash,
-        registry_hash=registry_hash,
+        campaign_id=campaign_id, symbol=symbol, timeframe=timeframe,
     )
     if paired["pairing_status"] == "INVALID":
         gates = {
@@ -380,25 +523,43 @@ def evaluate_candidate(bars_tr, sigs_tr, bars_validation, sigs_validation, bars_
             "paired_lower_bound_eur": 0.0,
             "baseline_coverage": 0.0,
             "policy_identity": policy_identity,
+            "campaign_authority": {
+                "status": paired.get("authority_status"),
+                "root": context.root_anchor_sha256,
+            },
             "gates": gates,
             "is_shadow_candidate": False,
         }
-    cons = CL.drive_causal(bars_tr, sigs_tr, decide_fn, exit_params,
-                           symbol=symbol, timeframe=timeframe,
-                           scenario_cost="conservative")
-    cons_net = float(sum(t["net_eur"] for t in cons["trades"]))
-    val = CL.drive_causal(bars_validation, sigs_validation, decide_fn, exit_params,
-                          symbol=symbol, timeframe=timeframe)
-    val_metrics = _metrics(val["trades"], val["counters"], timeframe)
+    cons = drive(
+        "conservative", bars_tr, sigs_tr, decide_fn,
+        scenario_cost="conservative",
+    )
+    cons_values = [float(trade.get("net_eur", math.nan)) for trade in cons["trades"]]
+    cons_net = sum(cons_values) if all(math.isfinite(value) for value in cons_values) \
+        else math.nan
+    val = drive("validation", bars_validation, sigs_validation, decide_fn)
+    val_metrics = _safe_metrics(val["trades"], val["counters"], timeframe)
     val_net = float(val_metrics["net_pnl_eur"])
     validation_reason = None
-    if not val["trades"]:
+    identity_unchanged = (
+        decide_fn is original_decider
+        and all(stage_parameter_integrity.values())
+        and exit_params == original_params
+    )
+    if not _metrics_are_finite(m) or not math.isfinite(cons_net):
+        validation_reason = "SELECTION_OR_COST_METRICS_INVALID"
+    elif not val["trades"]:
         validation_reason = "NO_VALIDATION_TRADES"
+    elif not _metrics_are_finite(val_metrics):
+        validation_reason = "VALIDATION_METRICS_INVALID"
     elif val_net <= 0:
         validation_reason = "VALIDATION_NET_NOT_POSITIVE"
     elif val_metrics["n_eff_final"] < SHADOW_GATES_V2["min_n_eff"]:
         validation_reason = "VALIDATION_N_EFF_INSUFFICIENT"
-    validation_gate = validation_reason is None
+    elif not identity_unchanged:
+        validation_reason = "POLICY_IDENTITY_CHANGED"
+    elif not isinstance(sigs_wf, Callable):
+        validation_reason = "WALK_FORWARD_SUPPLIER_NOT_LAZY"
     base_gates = {
         "net_positive_selection": m["net_pnl_eur"] > 0,
         "n_eff_sufficient": m["n_eff_final"] >= SHADOW_GATES_V2["min_n_eff"],
@@ -409,14 +570,29 @@ def evaluate_candidate(bars_tr, sigs_tr, bars_validation, sigs_validation, bars_
             and paired["integrity_status"] == "PASS"
         ),
         "beats_matched_random_paired": paired["beats_matched_random"],
-        "conservative_survives": cons_net > 0,
-        "validation_positive": val_net > 0,
+        "conservative_survives": math.isfinite(cons_net) and cons_net > 0,
+        "validation_positive": _metrics_are_finite(val_metrics) and val_net > 0,
         "validation_n_eff_sufficient": (
             val_metrics["n_eff_final"] >= SHADOW_GATES_V2["min_n_eff"]
         ),
+        "policy_identity_unchanged": identity_unchanged,
+        "campaign_authority_valid": paired.get("authority_status") == (
+            "CANONICAL_AUTHORITY_VALID"
+        ),
     }
+    failed_pre_walk_forward = [
+        name for name, passed in base_gates.items() if not passed
+    ]
+    if validation_reason is None and failed_pre_walk_forward:
+        validation_reason = "PRE_WALK_FORWARD_GATES_FAILED:" + ",".join(
+            failed_pre_walk_forward
+        )
+    validation_gate = validation_reason is None
     policy_identity["parameters_after_validation"] = copy.deepcopy(exit_params)
-    policy_identity["parameters_unchanged"] = exit_params == original_params
+    policy_identity["stage_parameter_integrity"] = copy.deepcopy(
+        stage_parameter_integrity
+    )
+    policy_identity["parameters_unchanged"] = identity_unchanged
     policy_identity["callable_unchanged"] = decide_fn is original_decider
     if not validation_gate:
         gates = {**base_gates, "walk_forward_positive": False, "all_pass": False}
@@ -437,18 +613,33 @@ def evaluate_candidate(bars_tr, sigs_tr, bars_validation, sigs_validation, bars_
             "paired_lower_bound_eur": paired["paired_lower_bound_eur"],
             "baseline_coverage": paired["coverage"],
             "policy_identity": policy_identity,
+            "campaign_authority": {
+                "status": paired.get("authority_status"),
+                "root": context.root_anchor_sha256,
+            },
             "gates": gates,
             "is_shadow_candidate": False,
         }
-    wf_signals = sigs_wf() if isinstance(sigs_wf, Callable) else sigs_wf
-    wf = CL.drive_causal(bars_wf, wf_signals, decide_fn, exit_params,
-                         symbol=symbol, timeframe=timeframe)
-    wf_metrics = _metrics(wf["trades"], wf["counters"], timeframe)
+    wf_signals = sigs_wf()
+    wf = drive("walk_forward", bars_wf, wf_signals, decide_fn)
+    wf_metrics = _safe_metrics(wf["trades"], wf["counters"], timeframe)
     wf_net = float(wf_metrics["net_pnl_eur"])
-    gates = {**base_gates, "walk_forward_positive": wf_net > 0}
+    identity_after_wf = (
+        decide_fn is original_decider
+        and all(stage_parameter_integrity.values())
+        and exit_params == original_params
+    )
+    gates = {
+        **base_gates,
+        "walk_forward_positive": _metrics_are_finite(wf_metrics) and wf_net > 0,
+        "policy_identity_unchanged": identity_after_wf,
+    }
     gates["all_pass"] = all(gates.values())
     policy_identity["parameters_after_walk_forward"] = copy.deepcopy(exit_params)
-    policy_identity["parameters_unchanged"] = exit_params == original_params
+    policy_identity["stage_parameter_integrity"] = copy.deepcopy(
+        stage_parameter_integrity
+    )
+    policy_identity["parameters_unchanged"] = identity_after_wf
     policy_identity["callable_unchanged"] = decide_fn is original_decider
     return {"selection_metrics": m, "matched_random_paired": paired,
             "conservative_net_eur": round(cons_net, 6),
@@ -465,13 +656,16 @@ def evaluate_candidate(bars_tr, sigs_tr, bars_validation, sigs_validation, bars_
             "paired_lower_bound_eur": paired["paired_lower_bound_eur"],
             "baseline_coverage": paired["coverage"],
             "policy_identity": policy_identity,
+            "campaign_authority": {
+                "status": paired.get("authority_status"),
+                "root": context.root_anchor_sha256,
+            },
             "gates": gates, "is_shadow_candidate": gates["all_pass"]}
 
 
 def run_causal_tournament(discovery_partitions: DiscoveryPartitions, *,
                           symbol: str, venue: str, timeframe: str, gen: str,
-                          holdout_commitment: dict,
-                          ref_bars_by_ts=None, log=lambda *a: None) -> dict:
+                          log=lambda *a: None) -> dict:
     """Run discovery without ever receiving or loading holdout observations.
 
     VALIDATION admission is the boundary that makes WALK_FORWARD computation
@@ -480,12 +674,24 @@ def run_causal_tournament(discovery_partitions: DiscoveryPartitions, *,
     import time as _t
     if not isinstance(discovery_partitions, DiscoveryPartitions):
         raise TypeError("discovery_partitions must come from DiscoveryDatasetLoader")
-    if holdout_commitment.get("state") != "SEALED" \
-            or len(str(holdout_commitment.get("commitment_sha256", ""))) != 64:
-        raise ValueError("a valid SEALED holdout commitment is required")
     bars_tr, bars_va, bars_wf = discovery_partitions.as_mutable()
+    # Close the full family before any real-market signal or metric is read.
+    campaign = preregister_campaign()
+    dataset_manifest_path = (
+        Path(discovery_partitions.source_root).resolve(strict=True).parent
+        / "dataset_manifest.json"
+    )
+    dataset_evidence = verify_discovery_partitions(
+        discovery_partitions, dataset_manifest_path
+    )
+    verified_reference, reference_evidence = load_verified_reference(
+        discovery_partitions.source_root, dataset_manifest_path,
+    )
+    holdout_commitment, holdout_evidence = load_verified_holdout_commitment(
+        discovery_partitions.source_root, dataset_manifest_path,
+    )
     n_discovery = len(bars_tr) + len(bars_va) + len(bars_wf)
-    n_holdout = int(holdout_commitment.get("n_bars", 0))
+    n_holdout = holdout_commitment["n_bars"]
     n = n_discovery + n_holdout
     tr_end = len(bars_tr)
     val_end = tr_end + len(bars_va)
@@ -494,13 +700,22 @@ def run_causal_tournament(discovery_partitions: DiscoveryPartitions, *,
         "train": (0, tr_end),
         "validation": (tr_end, val_end),
         "walk_forward": (val_end, wf_end),
-        "holdout": tuple(holdout_commitment.get("index_range", (wf_end, n))),
+        "holdout": tuple(holdout_commitment["index_range"]),
         "selection_end_index": tr_end,
         "holdout_start_index": wf_end,
     }
-    # Close the full family before any real-market signal or metric is read.
-    campaign = preregister_campaign()
-    reg = preregister(symbol, venue, timeframe, gen, ref_bars_by_ts)
+    if sp["holdout"][0] != wf_end or sp["holdout"][1] != n:
+        raise ValueError("holdout commitment does not continue discovery partitions")
+    reg = preregister(symbol, venue, timeframe, gen, verified_reference)
+    authorization = CA.validate_full_authorization(
+        CA.authorize_tournament(
+            campaign_id=CA.CAMPAIGN_ID, symbol=symbol, timeframe=timeframe,
+            venue=venue, registry=reg,
+            dataset_manifest_path=dataset_manifest_path,
+            source_generation_id=gen,
+            holdout_commitment_sha256=holdout_commitment["commitment_sha256"],
+        )
+    )
 
     # PHYSICAL SEAL: holdout bars never enter this process or object graph.
     # Features are computed only from the three discovery partitions.
@@ -528,8 +743,10 @@ def run_causal_tournament(discovery_partitions: DiscoveryPartitions, *,
         return wf_signal_cache
     results: dict = {}
     for name, (fn, ex) in reg["deciders"].items():
-        out = CL.drive_causal(bars_tr, sigs_tr, fn, ex, symbol=symbol,
-                              timeframe=timeframe)
+        out = CL.drive_causal(
+            bars_tr, sigs_tr, fn, ex, symbol=symbol, timeframe=timeframe,
+            hypothesis_id=name,
+        )
         m = _metrics(out["trades"], out["counters"], timeframe)
         results[name] = {
             "metrics": m,
@@ -545,12 +762,10 @@ def run_causal_tournament(discovery_partitions: DiscoveryPartitions, *,
         fn, ex = reg["deciders"][name]
         ev = evaluate_candidate(bars_tr, sigs_tr, bars_va, sigs_va, bars_wf,
                                 _walk_forward_signals, fn, ex,
-                                symbol=symbol, timeframe=timeframe,
-                                m_unique=reg["m_global"],
-                                policy_fingerprint=reg["fingerprints"][name],
-                                registry_hash=reg["registry_hash"],
-                                baseline_spec_hash=reg["baseline_policy_spec_hash"],
-                                campaign_registry=campaign)
+                                authorization=authorization,
+                                hypothesis_id=name,
+                                verified_reference=verified_reference,
+                                )
         results[name]["gate"] = ev
         if ev["validation_gate"]:
             validation_admitted_candidates.append(name)
@@ -572,6 +787,23 @@ def run_causal_tournament(discovery_partitions: DiscoveryPartitions, *,
                          "baseline_tolerance_spec_hash",
                          "closed", "closed_before_metrics")},
             "campaign_registry": campaign,
+            "campaign_authority": {
+                "campaign_id": authorization.campaign_id,
+                "campaign_version": authorization.campaign_version,
+                "root_anchor_sha256": authorization.root_anchor_sha256,
+                "tournament_spec_hash": authorization.entry[
+                    "tournament_spec_hash"
+                ],
+                "canonical_entry_match": authorization.full_context_verified,
+                "m_campaign": authorization.m_campaign,
+                "alpha": authorization.alpha,
+                "correction_method": authorization.correction_method,
+                "research_only": True,
+                "final_recommendation": "NO LIVE",
+            },
+            "discovery_dataset_evidence": dataset_evidence,
+            "reference_dataset_evidence": reference_evidence,
+            "holdout_commitment_evidence": holdout_evidence,
             "holdout": {"state": "SEALED",
                         "commitment_sha256": holdout_commitment["commitment_sha256"],
                         "index_range": list(sp["holdout"]), "n_bars": n_holdout,

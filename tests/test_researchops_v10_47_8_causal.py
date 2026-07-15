@@ -3,6 +3,8 @@ and prove the causal single-position ledger fixes it. Research only, NO LIVE."""
 
 from __future__ import annotations
 
+import dataclasses
+
 from app.labs.v10_46 import edge_search as ES
 from app.labs.v10_46 import causal_ledger as CL
 from app.labs.v10_46 import causal_stats as CS
@@ -105,6 +107,25 @@ def test_single_position_blocks_overlapping_signal():
     assert out["counters"]["n_skipped_position_open"] == 1
 
 
+def test_single_position_does_not_block_one_extra_bar_after_exit_boundary():
+    """After a conservative same-boundary block, the following entry is free.
+
+    Signal 119 enters bar 120 and exits at boundary 121. Signal 120 would enter
+    at that same boundary and remains blocked; signal 121 enters bar 122 and
+    must not be suppressed by an off-by-one busy marker.
+    """
+    bars = [_mk_bar(i, 100.0, 100.1, 99.9, 100.0) for i in range(130)]
+    sigs = [{"ok": True}] * len(bars)
+    decider = _decider_trading_at([119, 120, 121])
+    out = CL.drive_causal(
+        bars, sigs, decider,
+        {"stop_frac": 0.02, "tp_frac": 0.02, "time_exit": 1},
+        symbol="Z", timeframe="1m",
+    )
+    assert [trade["opportunity_bar"] for trade in out["trades"]] == [119, 121]
+    assert out["counters"]["n_skipped_position_open"] == 1
+
+
 def test_later_winner_cannot_replace_earlier_loser():
     """Explicit: a later winning signal must NOT retrospectively replace an
     earlier losing one (the exact V10.47 defect)."""
@@ -147,13 +168,17 @@ def test_n_eff_same_event_collapses():
     distinct clusters do not."""
     same = [{"opportunity_bar": i, "entry_bar": i, "exit_index": i + 1,
              "entry_ts": 1000 + i, "cluster": "Z:0", "session": "Z:S0",
-             "day": "Z:D0", "net_eur": 0.01, "side": "LONG"} for i in range(20)]
+             "day": "Z:D0", "net_eur": 0.01, "side": "LONG",
+             "dependency_cluster_id": "DEP-0",
+             "underlying_trade_id": f"SAME-{i}"} for i in range(20)]
     r_same = CS.n_eff_estimate(same, timeframe="1m")
     assert r_same["n_cluster"] == 1 and r_same["n_eff_final"] <= 2.0
     diff = [{"opportunity_bar": i, "entry_bar": i * 100, "exit_index": i * 100 + 1,
              "entry_ts": i * CS.EC.cluster_block_ms("1m") + 1,
              "cluster": f"Z:{i}", "session": f"Z:S{i}", "day": f"Z:D{i}",
-             "net_eur": (1 if i % 2 else -1) * 0.01, "side": "LONG"}
+             "net_eur": (1 if i % 2 else -1) * 0.01, "side": "LONG",
+             "dependency_cluster_id": f"DEP-{i}",
+             "underlying_trade_id": f"DIFF-{i}"}
             for i in range(20)]
     r_diff = CS.n_eff_estimate(diff, timeframe="1m")
     assert r_diff["n_cluster"] == 20 and r_diff["n_eff_final"] > r_same["n_eff_final"]
@@ -217,7 +242,7 @@ def test_registry_closed_and_multiple_testing():
     assert "D_no_trade" in reg["deciders"]
 
 
-def test_tournament_no_shadow_on_noise_and_holdout_sealed():
+def test_tournament_no_shadow_on_noise_and_holdout_sealed(monkeypatch, tmp_path):
     import random
     rng = random.Random(9)
     price, bars = 100.0, []
@@ -234,15 +259,46 @@ def test_tournament_no_shadow_on_noise_and_holdout_sealed():
     train = tuple(bars[slice(*sp["train"])])
     validation = tuple(bars[slice(*sp["validation"])])
     walk_forward = tuple(bars[slice(*sp["walk_forward"])])
-    discovery = DiscoveryPartitions(train, validation, walk_forward, "synthetic")
+    discovery_root = tmp_path / "synthetic_discovery"
+    discovery_root.mkdir()
+    discovery = DiscoveryPartitions(
+        train, validation, walk_forward, str(discovery_root)
+    )
     holdout = {
         "state": "SEALED", "commitment_sha256": "0" * 64,
         "n_bars": sp["holdout"][1] - sp["holdout"][0],
         "index_range": list(sp["holdout"]),
     }
+    # This test isolates the no-shadow statistical behavior. Canonical dataset
+    # authorization is covered separately with tracked manifests and hashes.
+    def authorize_fixture(**kwargs):
+        context = CT.CA.authorize_pairing(
+            campaign_id=kwargs["campaign_id"], symbol=kwargs["symbol"],
+            timeframe=kwargs["timeframe"],
+        )
+        return dataclasses.replace(context, full_context_verified=True)
+
+    monkeypatch.setattr(CT.CA, "authorize_tournament", authorize_fixture)
+    monkeypatch.setattr(
+        CT.CA, "validate_full_authorization", lambda authorization: authorization,
+    )
+    monkeypatch.setattr(
+        CT, "verify_discovery_partitions",
+        lambda *a, **k: {"status": "SYNTHETIC_FIXTURE_VERIFIED"},
+    )
+    monkeypatch.setattr(
+        CT, "load_verified_reference",
+        lambda *a, **k: (None, {"status": "REFERENCE_NOT_AVAILABLE"}),
+    )
+    monkeypatch.setattr(
+        CT, "load_verified_holdout_commitment",
+        lambda *a, **k: (holdout, {
+            "status": "HOLDOUT_COMMITMENT_VERIFIED", "sealed_data_opened": False,
+        }),
+    )
     out = CT.run_causal_tournament(
         discovery, symbol="BTCUSDT", venue="bitget", timeframe="1m", gen="g",
-        holdout_commitment=holdout, log=lambda *a: None,
+        log=lambda *a: None,
     )
     assert out["shadow_candidates"] == []
     assert out["holdout_touched"] is False

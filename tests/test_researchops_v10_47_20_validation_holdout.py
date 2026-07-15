@@ -5,9 +5,11 @@ All fixtures are synthetic.  No real holdout is opened by this suite.
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import inspect
 import json
+import math
 import os
 from pathlib import Path
 
@@ -37,13 +39,16 @@ def _trade(net: float, *, neff: float = 40.0) -> dict:
 
 def _install_stage_driver(monkeypatch, *, validation_net: float | None,
                           validation_neff: float = 40.0,
-                          walk_forward_net: float = 99.0):
+                          walk_forward_net: float = 99.0,
+                          mutate_params_stage: str | None = None):
     from app.labs.v10_46 import causal_tournament as CT
 
     calls: list[tuple[str, str]] = []
 
     def drive(bars, sigs, decide_fn, exit_params, **kwargs):
         stage = bars[0]["stage"]
+        if stage == mutate_params_stage:
+            exit_params["time_exit"] = 999
         calls.append((stage, kwargs.get("scenario_cost", "observed")))
         if stage == "train":
             trades = [_trade(1.0)]
@@ -75,10 +80,20 @@ def _install_stage_driver(monkeypatch, *, validation_net: float | None,
             "n_eff": {"n_eff_final": neff},
             "counters": counters,
             "classification": "NET_EDGE_POSITIVE" if net > 0 else "NO_GROSS_EDGE",
+            "metrics_valid": True,
         }
 
     monkeypatch.setattr(CT.CL, "drive_causal", drive)
     monkeypatch.setattr(CT, "_metrics", metrics)
+    monkeypatch.setattr(CT, "_authorize_candidate_policy", lambda **kwargs: {
+        "participant_spec_hash": "a" * 64,
+        "behavior_fingerprint": "b" * 64,
+        "callable_fingerprint": "d" * 64,
+        "registry_hash": "c" * 64,
+    })
+    monkeypatch.setattr(
+        CT.CA, "validate_full_authorization", lambda authorization: authorization,
+    )
     monkeypatch.setattr(CT.CS, "matched_random_paired", lambda *a, **k: {
         "match_status": "OK",
         "pairing_status": "VALID",
@@ -86,22 +101,27 @@ def _install_stage_driver(monkeypatch, *, validation_net: float | None,
         "beats_matched_random": True,
         "paired_lower_bound_eur": 0.1,
         "coverage": 1.0,
+        "authority_status": "CANONICAL_AUTHORITY_VALID",
     })
     return CT, calls
 
 
 def _evaluate(CT):
+    from app.labs.v10_46 import campaign_authority as CA
+
     stage = lambda name: [{"stage": name}]
     exit_params = {"stop_frac": 0.01, "tp_frac": 0.02, "time_exit": 2}
     decider = lambda *a, **k: {}
+    authorization = dataclasses.replace(
+        CA.authorize_pairing(
+            campaign_id=CA.CAMPAIGN_ID, symbol="BTCUSDT", timeframe="1m",
+        ),
+        full_context_verified=True,
+    )
     result = CT.evaluate_candidate(
         stage("train"), [None], stage("validation"), [None],
-        stage("walk_forward"), [None], decider, exit_params,
-        symbol="X", timeframe="1m", m_unique=10,
-        policy_fingerprint="a" * 64,
-        registry_hash="b" * 64,
-        baseline_spec_hash="c" * 64,
-        campaign_registry=CT.preregister_campaign(),
+        stage("walk_forward"), lambda: [None], decider, exit_params,
+        authorization=authorization, hypothesis_id="P11_LONG",
     )
     return result, exit_params, decider
 
@@ -144,31 +164,94 @@ def test_positive_validation_calls_walk_forward_exactly_once(monkeypatch):
     assert result["walk_forward_metrics"] is not None
 
 
+def test_failed_selection_component_gate_keeps_walk_forward_closed(monkeypatch):
+    CT, calls = _install_stage_driver(monkeypatch, validation_net=1.0)
+    monkeypatch.setattr(CT.CS, "matched_random_paired", lambda *a, **k: {
+        "match_status": "OK",
+        "pairing_status": "VALID",
+        "integrity_status": "PASS",
+        "beats_matched_random": False,
+        "paired_lower_bound_eur": -0.1,
+        "coverage": 1.0,
+        "authority_status": "CANONICAL_AUTHORITY_VALID",
+    })
+    result, _, _ = _evaluate(CT)
+    assert result["validation_gate"] is False
+    assert result["walk_forward_called"] is False
+    assert "beats_matched_random_paired" in result["validation_rejection_reason"]
+    assert not any(stage == "walk_forward" for stage, _ in calls)
+
+
+def test_nonfinite_validation_is_rejected_without_walk_forward(monkeypatch):
+    CT, calls = _install_stage_driver(monkeypatch, validation_net=math.nan)
+    result, _, _ = _evaluate(CT)
+    assert result["validation_rejection_reason"] == "VALIDATION_METRICS_INVALID"
+    assert result["walk_forward_called"] is False
+    assert not any(stage == "walk_forward" for stage, _ in calls)
+
+
+def test_stage_parameter_mutation_is_rejected_without_walk_forward(monkeypatch):
+    CT, calls = _install_stage_driver(
+        monkeypatch, validation_net=1.0, mutate_params_stage="validation",
+    )
+    result, original, _ = _evaluate(CT)
+    assert original == {"stop_frac": 0.01, "tp_frac": 0.02, "time_exit": 2}
+    assert result["validation_rejection_reason"] == "POLICY_IDENTITY_CHANGED"
+    assert result["walk_forward_called"] is False
+    assert not any(stage == "walk_forward" for stage, _ in calls)
+
+
 def test_candidate_parameters_are_not_refit_after_validation(monkeypatch):
     CT, _ = _install_stage_driver(monkeypatch, validation_net=1.0)
     result, exit_params, decider = _evaluate(CT)
     assert exit_params == {"stop_frac": 0.01, "tp_frac": 0.02, "time_exit": 2}
-    assert result["policy_identity"]["decider_fingerprint"] == "a" * 64
+    assert result["policy_identity"]["decider_fingerprint"] == "b" * 64
+    assert result["policy_identity"]["participant_spec_hash"] == "a" * 64
     assert result["policy_identity"]["callable_unchanged"] is True
     assert "decider_object_id" not in result["policy_identity"]
     assert result["policy_identity"]["parameters_unchanged"] is True
 
 
-def test_candidate_requires_preregistered_policy_fingerprint(monkeypatch):
-    CT, _ = _install_stage_driver(monkeypatch, validation_net=1.0)
-    with pytest.raises(ValueError, match="preregistered 64-hex"):
-        CT.evaluate_candidate(
-            [{"stage": "train"}], [None],
-            [{"stage": "validation"}], [None],
-            [{"stage": "walk_forward"}], [None],
-            lambda *a, **k: {},
-            {"stop_frac": 0.01, "tp_frac": 0.02, "time_exit": 2},
-            symbol="X", timeframe="1m", m_unique=10,
-            policy_fingerprint="not-a-registry-fingerprint",
-            registry_hash="b" * 64,
-            baseline_spec_hash="c" * 64,
-            campaign_registry=CT.preregister_campaign(),
+def test_candidate_policy_identity_is_derived_not_caller_controlled():
+    from app.labs.v10_46 import causal_tournament as CT
+
+    parameters = inspect.signature(CT.evaluate_candidate).parameters
+    assert "policy_fingerprint" not in parameters
+    assert {"symbol", "timeframe", "campaign_id"}.isdisjoint(parameters)
+    authorization = dataclasses.replace(
+        CT.CA.authorize_pairing(
+            campaign_id=CT.CA.CAMPAIGN_ID, symbol="BTCUSDT", timeframe="1m",
+        ),
+        full_context_verified=True,
+        _full_context_capability=CT.CA._FULL_CONTEXT_CAPABILITY,
+    )
+    registry = CT.preregister(
+        "BTCUSDT", "bitget", "1m",
+        authorization.entry["dataset_source_generation_id"],
+    )
+    exit_params = registry["deciders"]["P11_LONG"][1]
+    with pytest.raises(
+            CT.CA.CampaignAuthorityError,
+            match="POLICY_CALLABLE_AUTHORITY_MISMATCH"):
+        CT._authorize_candidate_policy(
+            decide_fn=lambda *a, **k: {}, exit_params=exit_params,
+            hypothesis_id="P11_LONG", authorization=authorization,
         )
+
+
+def test_full_authorization_cannot_be_self_signed_by_caller():
+    from app.labs.v10_46 import campaign_authority as CA
+
+    self_signed = dataclasses.replace(
+        CA.authorize_pairing(
+            campaign_id=CA.CAMPAIGN_ID, symbol="BTCUSDT", timeframe="1m",
+        ),
+        full_context_verified=True,
+    )
+    with pytest.raises(
+            CA.CampaignAuthorityError,
+            match="TOURNAMENT_AUTHORIZATION_NOT_FACTORY_ISSUED"):
+        CA.validate_full_authorization(self_signed)
 
 
 def test_policy_identity_output_is_deterministic(monkeypatch):
@@ -186,6 +269,8 @@ def test_tournament_accepts_discovery_partitions_not_full_series():
     params = inspect.signature(CT.run_causal_tournament).parameters
     assert "discovery_partitions" in params
     assert "bars" not in params
+    assert "ref_bars_by_ts" not in params
+    assert "holdout_commitment" not in params
     src = inspect.getsource(CT.run_causal_tournament)
     assert "bars[hstart:]" not in src
     assert "SealedHoldout" not in src

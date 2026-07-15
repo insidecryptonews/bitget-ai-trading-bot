@@ -66,7 +66,8 @@ def _cluster(symbol: str, ts: int, timeframe: str) -> str:
 def drive_causal(bars: list[dict], sigs: list, decide_fn: Callable,
                  exit_params: dict, *, symbol: str, timeframe: str,
                  scenario_money: str = "5eur", scenario_cost: str = "observed",
-                 cooldown_clusters: int = 1, warmup: int = WARMUP) -> dict:
+                 cooldown_clusters: int = 1, warmup: int = WARMUP,
+                 hypothesis_id: str = "UNSPECIFIED") -> dict:
     """Drive a decider causally with single-position, first-causal-signal,
     append-only accounting. See module docstring for the rules."""
     interval_ms = EC.interval_ms_for(timeframe)
@@ -79,7 +80,11 @@ def drive_causal(bars: list[dict], sigs: list, decide_fn: Callable,
     trades: list[dict] = []
     opportunities: list[dict] = []           # eligible entries (for baselines)
     entered_clusters: dict[str, int] = {}     # cluster -> bar index of entry
-    busy_until_index = -1                     # last bar occupied by open position
+    # First candle boundary at which the position is no longer open. A signal
+    # observed on the immediately preceding candle would enter at that same
+    # boundary, so it remains blocked conservatively; the following signal is
+    # the first one eligible for a new position.
+    busy_until_index = -1
 
     n_raw = n_eligible = n_exec = 0
     n_skip_pos = n_skip_cd = 0
@@ -104,7 +109,7 @@ def drive_causal(bars: list[dict], sigs: list, decide_fn: Callable,
             continue
         n_raw += 1
         # ---- causal eligibility gates (order matters, all causal) ----
-        if i <= busy_until_index:
+        if i + 1 <= busy_until_index:
             n_skip_pos += 1
             ledger.append("skip", bar=i, ts=ts_i, cluster=cluster,
                           reason="POSITION_ALREADY_OPEN",
@@ -131,13 +136,19 @@ def drive_causal(bars: list[dict], sigs: list, decide_fn: Callable,
         # ---- eligible: this is the FIRST causal signal we may act on ----
         n_eligible += 1
         opportunities.append({"bar": i, "ts": ts_i, "cluster": cluster,
+                              "global_event_id": event_id,
+                              "dependency_cluster_id": cluster,
+                              "hypothesis_id": hypothesis_id,
                               "side": d["side"], "prob": d.get(
                                   "calibrated_probability", 0.5)})
         ledger.append("decision", bar=i, ts=ts_i, cluster=cluster,
                       side=d["side"], prob=d.get("calibrated_probability", 0.5),
-                      immutable=True)
+                      global_event_id=event_id, dependency_cluster_id=cluster,
+                      hypothesis_id=hypothesis_id, immutable=True)
         entry_bar = bars[i + 1]
-        exit_bars = bars[i + 2: i + 2 + time_exit]
+        # The entry candle itself is the first interval of exposure in SimOMS;
+        # only time_exit-1 subsequent candles are required.
+        exit_bars = bars[i + 2: i + 1 + time_exit]
         # ---- risk sizing: real ATR-multiple stop when requested (else fixed) ----
         atr_entry = None
         stop_atr_mult = exit_params.get("stop_atr_mult")
@@ -170,7 +181,8 @@ def drive_causal(bars: list[dict], sigs: list, decide_fn: Callable,
             atr_entry=atr_entry, atr_period=atr_period,
             atr_multiplier=float(stop_atr_mult) if stop_atr_mult is not None else None,
             risk_model_id=risk_model_id, signal_timestamp=ts_i,
-            immutable=True,
+            global_event_id=event_id, dependency_cluster_id=cluster,
+            hypothesis_id=hypothesis_id, immutable=True,
         )
         res = S.simulate_trade(
             side=d["side"], entry_bar=entry_bar, exit_bars=exit_bars,
@@ -196,15 +208,23 @@ def drive_causal(bars: list[dict], sigs: list, decide_fn: Callable,
                 if d["side"] == "LONG" else entry_px * (1 - t_trail_act)
         trade_id = f"{symbol}:{timeframe}:{int(entry_bar['ts'])}:{d['side']}:{n_exec}"
         ledger.append("order", bar=entry_index, ts=int(entry_bar["ts"]),
-                      cluster=cluster, side=d["side"])
+                      cluster=cluster, side=d["side"], global_event_id=event_id,
+                      underlying_trade_id=trade_id,
+                      dependency_cluster_id=cluster, hypothesis_id=hypothesis_id)
         ledger.append("entry", bar=entry_index, ts=int(entry_bar["ts"]),
                       cluster=cluster, side=d["side"],
-                      entry_price=res["entry_price"])
+                      entry_price=res["entry_price"], global_event_id=event_id,
+                      underlying_trade_id=trade_id,
+                      dependency_cluster_id=cluster, hypothesis_id=hypothesis_id)
         ledger.append("position", entry_bar=entry_index, exit_index=exit_index,
-                      cluster=cluster, side=d["side"], bars_held=bars_held)
+                      cluster=cluster, side=d["side"], bars_held=bars_held,
+                      global_event_id=event_id, underlying_trade_id=trade_id,
+                      dependency_cluster_id=cluster, hypothesis_id=hypothesis_id)
         ledger.append("exit", bar=exit_index, ts=int(res["exit_ts_ms"]),
                       cluster=cluster, reason=res["exit_reason"],
-                      exit_price=res["exit_price"])
+                      exit_price=res["exit_price"], global_event_id=event_id,
+                      underlying_trade_id=trade_id,
+                      dependency_cluster_id=cluster, hypothesis_id=hypothesis_id)
         ledger.append(
             "ENTRY", trade_id=trade_id, bar=entry_index,
             ts=int(entry_bar["ts"]), cluster=cluster, side=d["side"],
@@ -215,7 +235,10 @@ def drive_causal(bars: list[dict], sigs: list, decide_fn: Callable,
             risk_eur=float(res["planned_max_loss_eur"]),
             notional_eur=float(res["notional_eur"]),
             margin_eur=float(res["margin_eur"]),
-            leverage_simulated=float(res["leverage"]), immutable=True,
+            leverage_simulated=float(res["leverage"]),
+            global_event_id=event_id, underlying_trade_id=trade_id,
+            dependency_cluster_id=cluster, hypothesis_id=hypothesis_id,
+            immutable=True,
         )
         ledger.append(
             "POSITION", trade_id=trade_id, cluster=cluster, side=d["side"],
@@ -223,6 +246,8 @@ def drive_causal(bars: list[dict], sigs: list, decide_fn: Callable,
             trailing_activation_price=trailing_activation_price,
             trailing_active=False,
             max_favorable_price=entry_px, state="ENTRY", immutable=True,
+            global_event_id=event_id, underlying_trade_id=trade_id,
+            dependency_cluster_id=cluster, hypothesis_id=hypothesis_id,
         )
         for stop_state in res.get("stop_audit", []):
             ledger.append(
@@ -236,7 +261,9 @@ def drive_causal(bars: list[dict], sigs: list, decide_fn: Callable,
                 derived_from_bar_ts=stop_state["derived_from_bar_ts"],
                 pending_stop_next_bar=stop_state["pending_stop_next_bar"],
                 pending_stop_effective_ts=stop_state["pending_stop_effective_ts"],
-                state="BAR_AUDIT", immutable=True,
+                state="BAR_AUDIT", global_event_id=event_id,
+                underlying_trade_id=trade_id, dependency_cluster_id=cluster,
+                hypothesis_id=hypothesis_id, immutable=True,
             )
         ledger.append(
             "CLOSE", trade_id=trade_id, bar=exit_index,
@@ -245,10 +272,17 @@ def drive_causal(bars: list[dict], sigs: list, decide_fn: Callable,
             final_stop=float(res["stop_price"]),
             exit_price=float(res["exit_price"]), exit_reason=res["exit_reason"],
             realised_loss_at_initial_stop_eur=-float(res["planned_max_loss_eur"]),
-            actual_pnl_eur=float(res["net_pnl_eur"]), immutable=True,
+            actual_pnl_eur=float(res["net_pnl_eur"]),
+            global_event_id=event_id, underlying_trade_id=trade_id,
+            dependency_cluster_id=cluster, hypothesis_id=hypothesis_id,
+            immutable=True,
         )
         trade = {
             "trade_id": trade_id, "candidate_trade_id": trade_id,
+            "underlying_trade_id": trade_id,
+            "global_event_id": event_id,
+            "dependency_cluster_id": cluster,
+            "hypothesis_id": hypothesis_id,
             "opportunity_bar": i, "entry_bar": entry_index,
             "exit_index": exit_index, "entry_ts": int(entry_bar["ts"]),
             "exit_ts": int(res["exit_ts_ms"]), "cluster": cluster,
@@ -272,7 +306,9 @@ def drive_causal(bars: list[dict], sigs: list, decide_fn: Callable,
             "slippage_model_id": f"{scenario_cost}:SLIPPAGE_V1",
             "funding_settlements_crossed": int(res["settlements_crossed"]),
             "funding_cost_eur": float(res["funding_eur"]),
-            "net_eur": res["net_pnl_eur"], "gross_eur": res["gross_pnl_eur"],
+            "net_eur": res["net_pnl_eur"],
+            "candidate_net_eur": res["net_pnl_eur"],
+            "gross_eur": res["gross_pnl_eur"],
             "fee_eur": res["fee_eur"], "spread_eur": res["spread_eur"],
             "slippage_eur": res["slippage_eur"], "funding_eur": res["funding_eur"],
             "bars_held": bars_held, "exit_reason": res["exit_reason"],
@@ -286,8 +322,12 @@ def drive_causal(bars: list[dict], sigs: list, decide_fn: Callable,
                 "stop_distance": abs(entry_px - initial_stop),
                 "stop_distance_pct": abs(entry_px - initial_stop) / entry_px})
         trades.append(trade)
-        ledger.append("trade", bar=entry_index, cluster=cluster,
-                      net_eur=res["net_pnl_eur"], gross_eur=res["gross_pnl_eur"])
+        ledger.append(
+            "trade", bar=entry_index, cluster=cluster,
+            global_event_id=event_id, underlying_trade_id=trade_id,
+            dependency_cluster_id=cluster, hypothesis_id=hypothesis_id,
+            net_eur=res["net_pnl_eur"], gross_eur=res["gross_pnl_eur"],
+        )
 
     counters = {
         "n_signals_raw": n_raw, "n_signals_eligible": n_eligible,

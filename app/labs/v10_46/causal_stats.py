@@ -12,12 +12,14 @@ import hashlib
 import json
 import math
 import random
+import re
 from collections import Counter
 from dataclasses import dataclass, field
 from typing import Any
 
 from . import event_clock as EC
 from . import sim_oms as S
+from . import campaign_authority as CA
 
 
 def _acf_neff(xs: list[float]) -> float:
@@ -58,36 +60,126 @@ def n_eff_estimate(trades: list[dict], *, timeframe: str) -> dict:
         return {
             "n_raw": 0, "n_executed": 0, "n_overlap": 0, "n_event": 0,
             "n_cluster": 0, "n_session": 0, "n_day": 0, "n_temporal": 0,
-            "n_acf": 0.0, "n_eff_final": 0.0,
+            "n_acf": 0.0, "n_dependency": 0, "n_underlying": 0,
+            "n_eff_final": 0.0,
             "cluster_source": "cluster_id_tf", "fallback_used": False,
             "degenerate_returns": False,
         }
-    clusters = {trade["cluster"] for trade in trades}
-    sessions = {trade.get("session") for trade in trades}
-    days = {trade.get("day") for trade in trades}
-    events = {trade["opportunity_bar"] for trade in trades}
-    intervals = [(trade["entry_bar"], trade["exit_index"]) for trade in trades]
+    required = (
+        "entry_ts", "cluster", "session", "day", "opportunity_bar",
+        "entry_bar", "exit_index", "net_eur",
+    )
+    invalid_reason = None
+    for trade in trades:
+        if not isinstance(trade, dict) or any(key not in trade for key in required):
+            invalid_reason = "MISSING_REQUIRED_N_EFF_FIELD"
+            break
+        if any(
+                type(trade[key]) is not str or not trade[key]
+                for key in ("cluster", "session", "day")):
+            invalid_reason = "INVALID_N_EFF_GROUP_ID"
+            break
+        if any(
+                type(trade[key]) is not int
+                for key in ("entry_ts", "opportunity_bar", "entry_bar", "exit_index")):
+            invalid_reason = "INVALID_N_EFF_INDEX"
+            break
+        if trade["entry_ts"] < 0 or trade["entry_bar"] > trade["exit_index"]:
+            invalid_reason = "INVALID_N_EFF_INTERVAL"
+            break
+        try:
+            outcome = float(trade["net_eur"])
+        except (TypeError, ValueError):
+            invalid_reason = "INVALID_N_EFF_RETURN"
+            break
+        if not math.isfinite(outcome):
+            invalid_reason = "NONFINITE_RETURN"
+            break
+    if invalid_reason:
+        return {
+            "n_raw": n, "n_executed": n, "n_overlap": 0,
+            "n_event": 0, "n_cluster": 0, "n_session": 0, "n_day": 0,
+            "n_temporal": 0, "n_acf": 0.0, "n_dependency": 0,
+            "n_underlying": 0, "n_eff_final": 0.0,
+            "cluster_source": "dependency_cluster_id+underlying_trade_id",
+            "fallback_used": False, "dependency_ids_complete": False,
+            "underlying_ids_complete": False, "degenerate_returns": False,
+            "input_valid": False, "invalid_reason": invalid_reason,
+        }
+    ordered = sorted(
+        trades,
+        key=lambda trade: (
+            int(trade["entry_ts"]), str(trade.get("underlying_trade_id", "")),
+        ),
+    )
+    clusters = {trade["cluster"] for trade in ordered}
+    sessions = {trade.get("session") for trade in ordered}
+    days = {trade.get("day") for trade in ordered}
+    events = {trade["opportunity_bar"] for trade in ordered}
+    intervals = [(trade["entry_bar"], trade["exit_index"]) for trade in ordered]
     n_overlap = _non_overlapping_count(intervals)
-    returns = [float(trade["net_eur"]) for trade in trades]
+    returns = [float(trade["net_eur"]) for trade in ordered]
+    if any(not math.isfinite(value) for value in returns):
+        return {
+            "n_raw": n, "n_executed": n, "n_overlap": n_overlap,
+            "n_event": len(events), "n_cluster": len(clusters),
+            "n_session": len(sessions), "n_day": len(days),
+            "n_temporal": 0, "n_acf": 0.0, "n_dependency": 0,
+            "n_underlying": 0, "n_eff_final": 0.0,
+            "cluster_source": "dependency_cluster_id+underlying_trade_id",
+            "fallback_used": False, "dependency_ids_complete": False,
+            "underlying_ids_complete": False, "degenerate_returns": False,
+            "invalid_reason": "NONFINITE_RETURN",
+        }
     n_acf = _acf_neff(returns)
-    block_ms = EC.cluster_block_ms(timeframe)
-    span = max(trade["entry_ts"] for trade in trades) - min(
-        trade["entry_ts"] for trade in trades
+    try:
+        block_ms = EC.cluster_block_ms(timeframe)
+    except ValueError:
+        return {
+            "n_raw": n, "n_executed": n, "n_overlap": n_overlap,
+            "n_event": len(events), "n_cluster": len(clusters),
+            "n_session": len(sessions), "n_day": len(days),
+            "n_temporal": 0, "n_acf": round(n_acf, 4), "n_dependency": 0,
+            "n_underlying": 0, "n_eff_final": 0.0,
+            "cluster_source": "dependency_cluster_id+underlying_trade_id",
+            "fallback_used": False, "dependency_ids_complete": False,
+            "underlying_ids_complete": False,
+            "degenerate_returns": len(set(returns)) <= 1,
+            "input_valid": False, "invalid_reason": "UNKNOWN_TIMEFRAME",
+        }
+    span = max(trade["entry_ts"] for trade in ordered) - min(
+        trade["entry_ts"] for trade in ordered
     )
     n_temporal = max(1, min(n, int(span // block_ms) + 1))
+    dependency_values = [trade.get("dependency_cluster_id") for trade in ordered]
+    underlying_values = [trade.get("underlying_trade_id") for trade in ordered]
+    dependency_complete = all(
+        type(value) is str and value for value in dependency_values
+    )
+    underlying_complete = all(
+        type(value) is str and value for value in underlying_values
+    )
+    n_dependency = len(set(dependency_values)) if dependency_complete else 0
+    n_underlying = len(set(underlying_values)) if underlying_complete else 0
     applicable = [
         len(events), n_overlap, len(clusters), len(sessions), len(days),
-        n_temporal, n_acf,
+        n_temporal, n_acf, n_dependency, n_underlying,
     ]
-    n_eff_final = max(1.0, float(min(applicable)))
+    n_eff_final = max(1.0, float(min(applicable))) \
+        if dependency_complete and underlying_complete else 0.0
     return {
         "n_raw": n, "n_executed": n, "n_overlap": n_overlap,
         "n_event": len(events), "n_cluster": len(clusters),
         "n_session": len(sessions), "n_day": len(days),
         "n_temporal": n_temporal, "n_acf": round(n_acf, 4),
+        "n_dependency": n_dependency, "n_underlying": n_underlying,
         "n_eff_final": round(n_eff_final, 4),
-        "cluster_source": "cluster_id_tf", "fallback_used": False,
+        "cluster_source": "dependency_cluster_id+underlying_trade_id",
+        "fallback_used": False,
+        "dependency_ids_complete": dependency_complete,
+        "underlying_ids_complete": underlying_complete,
         "degenerate_returns": len(set(returns)) <= 1,
+        "input_valid": True,
     }
 
 
@@ -183,7 +275,8 @@ def matched_random_null(bars: list[dict], trades: list[dict], *, symbol: str,
 
 BASELINE_MATCH_FIELDS = (
     "symbol", "timeframe", "side", "date", "session", "opportunity_id",
-    "cluster_id", "regime_id", "entry_timestamp", "entry_availability",
+    "global_event_id", "cluster_id", "dependency_cluster_id", "regime_id",
+    "entry_timestamp", "entry_availability",
     "max_holding_bars", "realised_holding_bars", "censoring_type",
     "end_of_dataset_censored", "notional_eur", "exposure_eur",
     "leverage_simulated", "fee_model_id", "spread_model_id",
@@ -208,16 +301,21 @@ def _canonical_hash(value: Any) -> str:
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
+_CANONICAL_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9:._/-]{0,255}$")
+
+
 def _id_problem(value: Any, missing_reason: str, *, require_hash: bool = False) -> str | None:
     if value is None or value == "":
         return missing_reason
     if type(value) is not str:
         return "INVALID_ID_TYPE"
-    if value != value.strip() or not value.isprintable():
+    if value != value.strip() or not value.isascii() or not value.isprintable():
         return "INVALID_ID_FORMAT"
     if require_hash and (
             len(value) != 64
             or any(char not in "0123456789abcdef" for char in value.lower())):
+        return "INVALID_ID_FORMAT"
+    if not require_hash and _CANONICAL_ID.fullmatch(value) is None:
         return "INVALID_ID_FORMAT"
     return None
 
@@ -225,7 +323,8 @@ def _id_problem(value: Any, missing_reason: str, *, require_hash: bool = False) 
 def deterministic_pair_id(*, candidate_trade_id: str, baseline_trade_id: str,
                           symbol: str, timeframe: str,
                           matching_spec_hash: str, baseline_spec_hash: str,
-                          registry_hash: str) -> str:
+                          registry_hash: str, campaign_authority_root: str,
+                          tournament_spec_hash: str) -> str:
     """Hash the complete preregistered identity of an exact pair."""
     payload = {
         "schema": "v10_47_23_deterministic_pair_id",
@@ -236,6 +335,8 @@ def deterministic_pair_id(*, candidate_trade_id: str, baseline_trade_id: str,
         "matching_spec_hash": matching_spec_hash,
         "baseline_spec_hash": baseline_spec_hash,
         "registry_hash": registry_hash,
+        "campaign_authority_root": campaign_authority_root,
+        "tournament_spec_hash": tournament_spec_hash,
     }
     return _canonical_hash(payload)
 
@@ -285,6 +386,9 @@ def _identity_inventory(rows: list[dict], key: str, missing_reason: str,
     valid_ids: list[str] = []
     reasons: Counter = Counter()
     for row in rows:
+        if not isinstance(row, dict):
+            reasons["INVALID_PAIR_ROW"] += 1
+            continue
         value = row.get(key)
         problem = _id_problem(value, missing_reason)
         if problem:
@@ -303,96 +407,124 @@ def _identity_inventory(rows: list[dict], key: str, missing_reason: str,
     }
 
 
-def _campaign_registry_problems(*, campaign_registry: dict | None,
-                                campaign_registry_sha: str | None,
-                                m_tournament: int, m_campaign: int | None,
-                                correction_method: str, alpha: float) -> Counter:
+_PAIR_NUMERIC_FIELDS = {
+    "entry_timestamp", "entry_availability", "max_holding_bars",
+    "realised_holding_bars", "notional_eur", "exposure_eur",
+    "leverage_simulated", "funding_settlements_crossed", "funding_cost_eur",
+}
+_PAIR_BOOLEAN_FIELDS = {"end_of_dataset_censored"}
+_PAIR_TEXT_FIELDS = set(BASELINE_MATCH_FIELDS) - _PAIR_NUMERIC_FIELDS - _PAIR_BOOLEAN_FIELDS
+
+
+def _pair_evidence_problems(rows: list[dict], *, candidate: bool,
+                            symbol: str, timeframe: str,
+                            participant_ids: set[str]) -> Counter:
     reasons: Counter = Counter()
-    if not isinstance(campaign_registry, dict):
-        reasons["MISSING_CAMPAIGN_REGISTRY"] += 1
-        return reasons
-    if not campaign_registry_sha:
-        reasons["MISSING_CAMPAIGN_REGISTRY_SHA"] += 1
-    elif _canonical_hash(campaign_registry) != campaign_registry_sha:
-        reasons["CAMPAIGN_REGISTRY_SHA_MISMATCH"] += 1
-    multiplicities = {
-        "effective": campaign_registry.get("m_campaign_effective_for_gate"),
-        "nominal": campaign_registry.get("m_campaign_nominal"),
-        "unique_hypotheses": campaign_registry.get("m_campaign_unique_hypotheses"),
-        "unique_results": campaign_registry.get("m_campaign_unique_results"),
-        "supplied": m_campaign,
-    }
-    if any(type(value) is not int for value in multiplicities.values()):
-        reasons["INVALID_CAMPAIGN_MULTIPLICITY"] += 1
-        effective = nominal = supplied = None
-        unique_hypotheses = unique_results = None
-    else:
-        effective = multiplicities["effective"]
-        nominal = multiplicities["nominal"]
-        unique_hypotheses = multiplicities["unique_hypotheses"]
-        unique_results = multiplicities["unique_results"]
-        supplied = multiplicities["supplied"]
-    if supplied is None or effective is None or nominal is None:
-        reasons["INVALID_CAMPAIGN_MULTIPLICITY"] += 1
-    else:
-        if (
-                supplied != effective
-                or supplied < int(m_tournament)
-                or nominal < int(m_tournament)
-                or effective > nominal
-                or unique_hypotheses is None
-                or unique_results is None
-                or not (1 <= unique_hypotheses <= nominal)
-                or not (1 <= unique_results <= nominal)):
-            reasons["INVALID_CAMPAIGN_MULTIPLICITY"] += 1
-        dedup_status = campaign_registry.get("deduplication_status")
-        if dedup_status == "AMBIGUOUS_USE_NOMINAL" and effective != nominal:
-            reasons["AMBIGUOUS_CAMPAIGN_DEDUP"] += 1
-        if effective < nominal:
-            if dedup_status != "SEMANTIC_EQUIVALENCE_PROVEN":
-                reasons["CAMPAIGN_DEDUP_NOT_PROVEN"] += 1
-            proof = campaign_registry.get("semantic_equivalence_proof")
-            proof_sha = campaign_registry.get("semantic_equivalence_proof_sha")
-            if not isinstance(proof, dict) or _canonical_hash(proof) != proof_sha:
-                reasons["CAMPAIGN_DEDUP_PROOF_INVALID"] += 1
-            else:
-                groups = proof.get("groups")
-                members_seen: set[str] = set()
-                reduction = 0
-                proof_invalid = not isinstance(groups, list) or not groups
-                for group in groups if isinstance(groups, list) else []:
-                    members = group.get("members") if isinstance(group, dict) else None
-                    fingerprint = (
-                        group.get("semantic_fingerprint")
-                        if isinstance(group, dict) else None
-                    )
-                    if (
-                            not isinstance(members, list)
-                            or len(members) < 2
-                            or len(set(members)) != len(members)
-                            or any(_id_problem(member, "MISSING_HYPOTHESIS_ID")
-                                   for member in members)
-                            or _id_problem(fingerprint, "MISSING_SEMANTIC_FINGERPRINT",
-                                           require_hash=True)):
-                        proof_invalid = True
-                        continue
-                    if members_seen.intersection(members):
-                        proof_invalid = True
-                    members_seen.update(members)
-                    reduction += len(members) - 1
-                if proof_invalid or reduction != nominal - effective:
-                    reasons["CAMPAIGN_DEDUP_PROOF_INVALID"] += 1
-    if campaign_registry.get("correction_method") != correction_method:
-        reasons["CAMPAIGN_CORRECTION_MISMATCH"] += 1
-    try:
-        registered_alpha = float(campaign_registry.get("alpha", -1.0))
-    except (TypeError, ValueError):
-        registered_alpha = -1.0
-    if registered_alpha != float(alpha):
-        reasons["CAMPAIGN_ALPHA_MISMATCH"] += 1
-    if campaign_registry.get("closed") is not True \
-            or campaign_registry.get("closed_before_metrics") is not True:
-        reasons["CAMPAIGN_REGISTRY_NOT_PREREGISTERED"] += 1
+    outcome_key = "candidate_net_eur" if candidate else "baseline_net_eur"
+    trade_key = "candidate_trade_id" if candidate else "baseline_trade_id"
+    identity_fields = (
+        trade_key, "global_event_id", "dependency_cluster_id",
+        "underlying_trade_id", "hypothesis_id",
+    )
+    for row in rows:
+        if not isinstance(row, dict):
+            reasons["INVALID_PAIR_ROW"] += 1
+            continue
+        for field in identity_fields:
+            problem = _id_problem(row.get(field), f"MISSING_{field.upper()}")
+            if problem:
+                reasons[problem] += 1
+        if row.get("symbol") != symbol or row.get("timeframe") != timeframe:
+            reasons["PAIR_SCOPE_MISMATCH"] += 1
+        if row.get("side") not in ("LONG", "SHORT"):
+            reasons["INVALID_PAIR_SIDE"] += 1
+        hypothesis = row.get("hypothesis_id")
+        if candidate and hypothesis not in participant_ids:
+            reasons["UNAUTHORIZED_HYPOTHESIS_ID"] += 1
+        if not candidate and hypothesis != "PREREGISTERED_RANDOM_BASELINE_V10_47_23":
+            reasons["UNAUTHORIZED_BASELINE_HYPOTHESIS"] += 1
+        for field in BASELINE_MATCH_FIELDS:
+            if field not in row or row[field] is None or row[field] == "":
+                reasons["MISSING_REQUIRED_PAIR_FIELD"] += 1
+                continue
+            value = row[field]
+            if field in _PAIR_BOOLEAN_FIELDS and type(value) is not bool:
+                reasons["INVALID_REQUIRED_PAIR_FIELD"] += 1
+            if field in _PAIR_TEXT_FIELDS and (
+                    type(value) is not str or value != value.strip()
+                    or not value.isascii() or not value.isprintable()):
+                reasons["INVALID_REQUIRED_PAIR_FIELD"] += 1
+            if field in _PAIR_NUMERIC_FIELDS:
+                try:
+                    number = float(value)
+                except (TypeError, ValueError):
+                    reasons["INVALID_REQUIRED_PAIR_FIELD"] += 1
+                else:
+                    if not math.isfinite(number):
+                        reasons["NONFINITE_PAIR_FIELD"] += 1
+        numeric_ranges = {
+            "entry_timestamp": (0.0, None),
+            "entry_availability": (0.0, None),
+            "max_holding_bars": (1.0, None),
+            "realised_holding_bars": (1.0, None),
+            "notional_eur": (1e-12, None),
+            "exposure_eur": (1e-12, None),
+            "leverage_simulated": (1.0, 1.0),
+            "funding_settlements_crossed": (0.0, None),
+        }
+        for field, (minimum, maximum) in numeric_ranges.items():
+            try:
+                number = float(row[field])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if not math.isfinite(number) or number < minimum \
+                    or (maximum is not None and number > maximum):
+                reasons["PAIR_FIELD_OUT_OF_RANGE"] += 1
+        try:
+            realised = float(row["realised_holding_bars"])
+            maximum_hold = float(row["max_holding_bars"])
+        except (KeyError, TypeError, ValueError):
+            pass
+        else:
+            if math.isfinite(realised) and math.isfinite(maximum_hold) \
+                    and realised > maximum_hold:
+                reasons["PAIR_FIELD_OUT_OF_RANGE"] += 1
+        for field in (
+                "entry_timestamp", "entry_availability", "max_holding_bars",
+                "realised_holding_bars", "funding_settlements_crossed"):
+            if field in row and type(row[field]) is not int:
+                reasons["INVALID_REQUIRED_PAIR_FIELD"] += 1
+        try:
+            if int(row["entry_availability"]) > int(row["entry_timestamp"]):
+                reasons["ENTRY_AVAILABLE_AFTER_ENTRY"] += 1
+            if not math.isclose(
+                    float(row["exposure_eur"]), float(row["notional_eur"]),
+                    rel_tol=0.0, abs_tol=1e-9):
+                reasons["EXPOSURE_NOTIONAL_MISMATCH"] += 1
+        except (KeyError, TypeError, ValueError):
+            pass
+        if outcome_key not in row:
+            reasons["MISSING_CANONICAL_PAIR_OUTCOME"] += 1
+            continue
+        try:
+            outcome = float(row[outcome_key])
+        except (TypeError, ValueError):
+            reasons["INVALID_PAIR_OUTCOME"] += 1
+        else:
+            if not math.isfinite(outcome):
+                reasons["NONFINITE_PAIR_OUTCOME"] += 1
+    # A dependency cluster is intentionally allowed to repeat: n_eff uses that
+    # repetition to cap pseudo-replication. Event and underlying trade identity
+    # remain one-to-one within each candidate/baseline stream.
+    for key, reason in (
+        ("global_event_id", "DUPLICATE_GLOBAL_EVENT_ID"),
+        ("underlying_trade_id", "DUPLICATE_UNDERLYING_TRADE_ID"),
+    ):
+        values = [row.get(key) for row in rows if isinstance(row, dict)]
+        valid = [value for value in values if _id_problem(value, "MISSING") is None]
+        duplicates = sum(count - 1 for count in Counter(valid).values() if count > 1)
+        if duplicates:
+            reasons[reason] += duplicates
     return reasons
 
 
@@ -425,21 +557,28 @@ def _bootstrap_block_from_pairs(pairs: list[dict], timeframe: str) -> int:
 
 
 def matched_random_paired(*, candidate_trades: list[dict],
-                          baseline_trades: list[dict], timeframe: str,
-                          m_global: int, alpha: float = 0.05,
-                          correction_method: str = "bonferroni",
-                          tolerance_spec: dict | None = None,
-                          m_campaign: int | None = None,
-                          campaign_registry: dict | None = None,
-                          campaign_registry_sha: str | None = None,
-                          baseline_spec_hash: str | None = None,
-                          registry_hash: str | None = None) -> dict:
-    """Bijective exact-match comparison with campaign-wide FWER correction."""
-    if correction_method != "bonferroni":
-        raise ValueError("only preregistered bonferroni correction is supported")
-    if int(m_global) < 1:
-        raise ValueError("m_global must be preregistered and positive")
-    tolerances = json.loads(json.dumps(tolerance_spec or BASELINE_TOLERANCE_SPEC))
+                          baseline_trades: list[dict], campaign_id: str,
+                          symbol: str, timeframe: str) -> dict:
+    """Order-independent exact pairing under the tracked campaign authority.
+
+    Multiplicity, alpha, correction, tolerances and identity hashes are loaded
+    internally. They are deliberately absent from this caller-facing API.
+    """
+    authority_reasons: Counter = Counter()
+    try:
+        context = CA.authorize_pairing(
+            campaign_id=campaign_id, symbol=symbol, timeframe=timeframe,
+        )
+        authority = CA.load_campaign_authority(campaign_id)
+    except CA.CampaignAuthorityError as exc:
+        context, authority = None, None
+        authority_reasons[str(exc)] += 1
+    m_tournament = context.m_tournament if context else 0
+    m_campaign = context.m_campaign if context else 0
+    correction_method = context.correction_method if context else "bonferroni"
+    alpha = context.alpha if context else 0.05
+    entry = context.entry if context else {}
+    tolerances = json.loads(json.dumps(BASELINE_TOLERANCE_SPEC))
     matching_spec_hash = _canonical_hash(tolerances)
     candidate_inventory = _identity_inventory(
         candidate_trades, "candidate_trade_id", "MISSING_CANDIDATE_TRADE_ID",
@@ -451,22 +590,20 @@ def matched_random_paired(*, candidate_trades: list[dict],
     )
     preflight_reasons: Counter = Counter(candidate_inventory["reasons"])
     preflight_reasons.update(baseline_inventory["reasons"])
-    preflight_reasons.update(_campaign_registry_problems(
-        campaign_registry=campaign_registry,
-        campaign_registry_sha=campaign_registry_sha,
-        m_tournament=int(m_global), m_campaign=m_campaign,
-        correction_method=correction_method, alpha=alpha,
+    preflight_reasons.update(authority_reasons)
+    participant_ids = set(
+        authority.get("participant_spec_hashes", {}) if authority else {}
+    )
+    preflight_reasons.update(_pair_evidence_problems(
+        candidate_trades, candidate=True, symbol=symbol, timeframe=timeframe,
+        participant_ids=participant_ids,
     ))
-    baseline_hash_problem = _id_problem(
-        baseline_spec_hash, "MISSING_BASELINE_SPEC_HASH", require_hash=True
-    )
-    if baseline_hash_problem:
-        preflight_reasons[baseline_hash_problem] += 1
-    registry_hash_problem = _id_problem(
-        registry_hash, "MISSING_TOURNAMENT_REGISTRY_HASH", require_hash=True
-    )
-    if registry_hash_problem:
-        preflight_reasons[registry_hash_problem] += 1
+    preflight_reasons.update(_pair_evidence_problems(
+        baseline_trades, candidate=False, symbol=symbol, timeframe=timeframe,
+        participant_ids=participant_ids,
+    ))
+    if context and matching_spec_hash != entry.get("matching_spec_hash"):
+        preflight_reasons["CANONICAL_MATCHING_SPEC_MISMATCH"] += 1
 
     def integrity_fields(*, registry: PairingRegistry | None = None,
                          pair_rows_received: int = 0) -> dict:
@@ -526,22 +663,23 @@ def matched_random_paired(*, candidate_trades: list[dict],
             "corrected_p_value": None,
             "correction_method": correction_method,
             "method": correction_method,
-            "m_global": int(m_global),
-            "m_tournament": int(m_global),
-            "m_campaign": int(m_campaign) if m_campaign is not None else None,
-            "m_campaign_nominal": (
-                campaign_registry.get("m_campaign_nominal")
-                if isinstance(campaign_registry, dict) else None
+            "m_global": m_tournament or None,
+            "m_tournament": m_tournament or None,
+            "m_campaign": m_campaign or None,
+            "m_campaign_nominal": m_campaign or None,
+            "m_campaign_unique_hypotheses": m_campaign or None,
+            "m_campaign_unique_results": m_campaign or None,
+            "campaign_registry_sha": (
+                context.root_anchor_sha256 if context else None
             ),
-            "m_campaign_unique_hypotheses": (
-                campaign_registry.get("m_campaign_unique_hypotheses")
-                if isinstance(campaign_registry, dict) else None
+            "campaign_authority_root": (
+                context.root_anchor_sha256 if context else None
             ),
-            "m_campaign_unique_results": (
-                campaign_registry.get("m_campaign_unique_results")
-                if isinstance(campaign_registry, dict) else None
+            "campaign_id": campaign_id,
+            "authority_status": (
+                "CANONICAL_AUTHORITY_VALID" if context else "AUTHORITY_INVALID"
             ),
-            "campaign_registry_sha": campaign_registry_sha,
+            "tournament_spec_hash": entry.get("tournament_spec_hash"),
             "alpha": float(alpha),
             "match_status": "BASELINE_PAIRING_INVALID",
             "pairing_status": "INVALID",
@@ -557,8 +695,8 @@ def matched_random_paired(*, candidate_trades: list[dict],
             "tolerance_spec": tolerances,
             "tolerance_spec_hash": matching_spec_hash,
             "matching_spec_hash": matching_spec_hash,
-            "baseline_spec_hash": baseline_spec_hash,
-            "registry_hash": registry_hash,
+            "baseline_spec_hash": entry.get("baseline_spec_hash"),
+            "registry_hash": entry.get("tournament_registry_hash"),
             "research_only": True,
             "final_recommendation": "NO LIVE",
         }
@@ -569,27 +707,23 @@ def matched_random_paired(*, candidate_trades: list[dict],
     by_opportunity: dict[Any, list[dict]] = {}
     for baseline in baseline_trades:
         by_opportunity.setdefault(baseline.get("opportunity_id"), []).append(baseline)
-    consumed_baselines: set[str] = set()
+    candidates_by_opportunity: dict[Any, list[dict]] = {}
+    for candidate in candidate_trades:
+        candidates_by_opportunity.setdefault(
+            candidate.get("opportunity_id"), []
+        ).append(candidate)
     pairing_registry = PairingRegistry()
     pairs: list[dict] = []
     compatible_pairs: list[dict] = []
     impossible = incompatible = 0
     pair_rows_received = 0
     rejection_reasons: Counter = Counter()
-    for candidate in candidate_trades:
+    for candidate in sorted(candidate_trades, key=lambda row: row["candidate_trade_id"]):
         candidate_id = candidate["candidate_trade_id"]
-        options = [
-            row for row in by_opportunity.get(candidate.get("opportunity_id"), [])
-            if row["baseline_trade_id"] not in consumed_baselines
-        ]
-        if not options:
-            remaining = [
-                row for row in baseline_trades
-                if row["baseline_trade_id"] not in consumed_baselines
-            ]
-            if len(remaining) == 1:
-                options = remaining
-        if len(options) != 1:
+        opportunity_id = candidate.get("opportunity_id")
+        options = by_opportunity.get(opportunity_id, [])
+        candidate_group = candidates_by_opportunity.get(opportunity_id, [])
+        if len(options) != 1 or len(candidate_group) != 1:
             impossible += 1
             rejection_reasons["NO_UNIQUE_BASELINE_FOR_OPPORTUNITY"] += 1
             pairs.append({
@@ -610,8 +744,10 @@ def matched_random_paired(*, candidate_trades: list[dict],
             symbol=candidate.get("symbol"),
             timeframe=candidate.get("timeframe"),
             matching_spec_hash=matching_spec_hash,
-            baseline_spec_hash=baseline_spec_hash,
-            registry_hash=registry_hash,
+            baseline_spec_hash=entry["baseline_spec_hash"],
+            registry_hash=entry["tournament_registry_hash"],
+            campaign_authority_root=context.root_anchor_sha256,
+            tournament_spec_hash=entry["tournament_spec_hash"],
         )
         pair = {
             "pair_id": pair_id,
@@ -634,7 +770,6 @@ def matched_random_paired(*, candidate_trades: list[dict],
             pairing_registry.rejected_pairs.append(copy_value(pair))
             pairs.append(pair)
             continue
-        consumed_baselines.add(baseline_id)
         mismatch = next(
             (
                 field for field in BASELINE_MATCH_FIELDS
@@ -648,20 +783,16 @@ def matched_random_paired(*, candidate_trades: list[dict],
             incompatible += 1
             rejection_reasons["PAIR_FIELD_INCOMPATIBLE"] += 1
             pair.update({
-                "candidate_net_eur": float(candidate.get("candidate_net_eur",
-                                                          candidate.get("net_eur", 0.0))),
-                "baseline_net_eur": float(baseline.get("baseline_net_eur",
-                                                        baseline.get("net_eur", 0.0))),
+                "candidate_net_eur": float(candidate["candidate_net_eur"]),
+                "baseline_net_eur": float(baseline["baseline_net_eur"]),
                 "paired_delta_eur": None,
                 "match_status": "INCOMPATIBLE",
                 "unmatched_reason": f"PAIR_FIELD_INCOMPATIBLE:{mismatch.upper()}",
             })
             pairing_registry.rejected_pairs.append(copy_value(pair))
         else:
-            candidate_net = float(candidate.get("candidate_net_eur",
-                                                candidate.get("net_eur", 0.0)))
-            baseline_net = float(baseline.get("baseline_net_eur",
-                                              baseline.get("net_eur", 0.0)))
+            candidate_net = float(candidate["candidate_net_eur"])
+            baseline_net = float(baseline["baseline_net_eur"])
             pair.update({
                 "candidate_net_eur": candidate_net,
                 "baseline_net_eur": baseline_net,
@@ -684,15 +815,21 @@ def matched_random_paired(*, candidate_trades: list[dict],
     requested = len(candidate_trades)
     found = len(compatible_pairs)
     coverage = found / requested if requested else 1.0
-    deltas = [float(pair["paired_delta_eur"]) for pair in compatible_pairs]
-    block = _bootstrap_block_from_pairs(compatible_pairs, timeframe)
-    bootstrap = block_bootstrap_mean_lb(deltas, block=block) if deltas else {
+    statistical_pairs = sorted(
+        compatible_pairs,
+        key=lambda pair: (pair["entry_timestamp"], pair["pair_id"]),
+    )
+    deltas = [float(pair["paired_delta_eur"]) for pair in statistical_pairs]
+    block = _bootstrap_block_from_pairs(statistical_pairs, timeframe)
+    bootstrap = block_bootstrap_mean_lb(
+        deltas, block=block, alpha=float(alpha)
+    ) if deltas else {
         "mean": 0.0, "mean_lb": 0.0, "total_lb": 0.0, "reps": 0, "n": 0,
     }
     ordered = sorted(deltas)
     median = ordered[len(ordered) // 2] if ordered else 0.0
     raw_p = _one_sided_sign_p_value(deltas)
-    tournament_corrected = min(1.0, raw_p * int(m_global))
+    tournament_corrected = min(1.0, raw_p * m_tournament)
     campaign_corrected = min(1.0, raw_p * int(m_campaign))
     complete = (
         coverage >= float(tolerances["coverage_threshold"])
@@ -739,15 +876,17 @@ def matched_random_paired(*, candidate_trades: list[dict],
         "corrected_p_value": round(campaign_corrected, 10),
         "correction_method": correction_method,
         "method": correction_method,
-        "m_global": int(m_global),
-        "m_tournament": int(m_global),
+        "m_global": m_tournament,
+        "m_tournament": m_tournament,
         "m_campaign": int(m_campaign),
-        "m_campaign_nominal": campaign_registry["m_campaign_nominal"],
-        "m_campaign_unique_hypotheses": (
-            campaign_registry["m_campaign_unique_hypotheses"]
-        ),
-        "m_campaign_unique_results": campaign_registry["m_campaign_unique_results"],
-        "campaign_registry_sha": campaign_registry_sha,
+        "m_campaign_nominal": m_campaign,
+        "m_campaign_unique_hypotheses": m_campaign,
+        "m_campaign_unique_results": m_campaign,
+        "campaign_registry_sha": context.root_anchor_sha256,
+        "campaign_authority_root": context.root_anchor_sha256,
+        "campaign_id": campaign_id,
+        "authority_status": "CANONICAL_AUTHORITY_VALID",
+        "tournament_spec_hash": entry["tournament_spec_hash"],
         "alpha": float(alpha),
         "match_status": "OK" if complete else "BASELINE_MATCH_INCOMPLETE",
         "pairing_status": "VALID",
@@ -757,14 +896,15 @@ def matched_random_paired(*, candidate_trades: list[dict],
         "rejection_reasons": dict(sorted(rejection_reasons.items())),
         "baseline_gate": beats,
         "beats_matched_random": beats,
-        "promotion_allowed": beats,
+        "promotion_allowed": False,
+        "promotion_scope": "BASELINE_COMPONENT_GATE_ONLY",
         "pairs": pairs,
         "baseline_simulations_per_candidate": 1,
         "tolerance_spec": tolerances,
         "tolerance_spec_hash": matching_spec_hash,
         "matching_spec_hash": matching_spec_hash,
-        "baseline_spec_hash": baseline_spec_hash,
-        "registry_hash": registry_hash,
+        "baseline_spec_hash": entry["baseline_spec_hash"],
+        "registry_hash": entry["tournament_registry_hash"],
         "research_only": True,
         "final_recommendation": "NO LIVE",
     }

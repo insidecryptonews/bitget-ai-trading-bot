@@ -15,7 +15,6 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from app.labs.v10_46 import causal_tournament as CT  # noqa: E402
-from app.labs.v10_46 import sealed_holdout as SH  # noqa: E402
 from app.labs.v10_46.discovery_dataset import (  # noqa: E402
     DiscoveryDatasetLoader,
     audit_dataset_isolation,
@@ -70,18 +69,6 @@ def atomic_json(path: Path, value: dict) -> None:
     os.replace(temporary, path)
 
 
-def load_reference(discovery_root: Path) -> dict[int, float] | None:
-    path = discovery_root / "reference" / "bars.json"
-    if not path.exists():
-        return None
-    if path.is_symlink() or not path.resolve(strict=True).is_relative_to(
-        discovery_root.resolve(strict=True)
-    ):
-        raise RuntimeError("unsafe reference discovery path")
-    rows = json.loads(path.read_text(encoding="utf-8"))
-    return {int(row["ts"]): float(row["close"]) for row in rows}
-
-
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--symbol", required=True)
@@ -96,16 +83,13 @@ def main(argv: list[str] | None = None) -> int:
     if not isolation["ok"]:
         raise RuntimeError(f"dataset isolation failed: {isolation['problems']}")
     partitions = DiscoveryDatasetLoader(discovery_root).load()
-    commitment = SH.load_commitment(sealed_root / "commitment.json")
     dataset_manifest = json.loads(
         (combo / "dataset_manifest.json").read_text(encoding="utf-8")
     )
-    reference = load_reference(discovery_root)
     output_path = safe_output(args.output)
     result = CT.run_causal_tournament(
         partitions, symbol=symbol, venue=dataset_manifest["venue"],
         timeframe=timeframe, gen=dataset_manifest["source_generation_id"],
-        holdout_commitment=commitment, ref_bars_by_ts=reference,
         log=lambda message: print(message, flush=True),
     )
     result["execution_provenance"] = {

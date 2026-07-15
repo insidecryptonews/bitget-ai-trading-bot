@@ -55,6 +55,37 @@ COST_SCENARIOS = {
 }
 
 
+def _finite(value: Any) -> bool:
+    return type(value) in (int, float) and not isinstance(value, bool) \
+        and math.isfinite(float(value))
+
+
+def _bar_problem(bar: Any) -> str | None:
+    if not isinstance(bar, dict):
+        return "BAR_NOT_OBJECT"
+    required = ("ts", "open", "high", "low", "close")
+    if any(field not in bar for field in required):
+        return "BAR_FIELD_MISSING"
+    if type(bar["ts"]) is not int:
+        return "BAR_TIMESTAMP_INVALID"
+    if any(not _finite(bar[field]) for field in ("open", "high", "low", "close")):
+        return "BAR_PRICE_NONFINITE"
+    op, hi, lo, close = (float(bar[field]) for field in ("open", "high", "low", "close"))
+    if min(op, hi, lo, close) <= 0 or hi < max(op, close) or lo > min(op, close) \
+            or hi < lo:
+        return "BAR_OHLC_INVALID"
+    return None
+
+
+def _invalid_trade(reason: str, scenario_money: Any,
+                   scenario_cost: Any) -> dict:
+    return {
+        "status": "INVALID_INPUT", "reason": reason,
+        **_zero_money(str(scenario_money), str(scenario_cost)),
+        "research_only": True, "final_recommendation": "NO LIVE",
+    }
+
+
 def settlements_crossed(entry_ms: int, exit_ms: int) -> int:
     """Number of 0/8/16 UTC settlement instants in (entry_ms, exit_ms]."""
     if exit_ms <= entry_ms:
@@ -76,6 +107,17 @@ def plan_position(scenario: str, entry_price: float, stop_price: float,
     """Compute euro sizing + planned/worst-case loss for a fixed-exposure
     scenario. worst_case_loss is the stop distance loss plus a gap buffer;
     a trade is only allowed if worst_case_loss <= planned_max_loss."""
+    if scenario not in MONEY_SCENARIOS or side not in ("LONG", "SHORT") \
+            or not _finite(entry_price) or not _finite(stop_price) \
+            or float(entry_price) <= 0 or float(stop_price) <= 0:
+        return {
+            "scenario": scenario, "notional_eur": 0.0, "margin_eur": 0.0,
+            "leverage": 0.0, "position_size": 0.0,
+            "entry_price": entry_price, "stop_price": stop_price,
+            "stop_loss_frac": 0.0, "planned_max_loss_eur": 0.0,
+            "worst_case_loss_eur": 0.0, "allowed": False,
+            "reason": "INVALID_INPUT",
+        }
     ms = MONEY_SCENARIOS[scenario]
     notional = ms["notional_eur"] * ms["leverage"]
     qty = notional / entry_price
@@ -112,14 +154,42 @@ def simulate_fill(order: dict, bar: dict, cost: dict, rng=None) -> dict:
       * partial fills and non-fills per the scenario knobs.
     Cost is charged EXACTLY ONCE here and never again for the same fill."""
     import random as _r
+    if not isinstance(order, dict):
+        return {"fill_status": "INVALID_INPUT", "reason": "ORDER_NOT_OBJECT"}
+    side = order.get("side")
+    otype = order.get("order_type")
+    qty = order.get("qty")
+    if side not in ("LONG", "SHORT"):
+        return {"fill_status": "INVALID_INPUT", "reason": "SIDE_INVALID"}
+    if otype not in ("market", "taker", "limit", "maker", "post-only"):
+        return {"fill_status": "INVALID_INPUT", "reason": "ORDER_TYPE_INVALID"}
+    if not _finite(qty) or float(qty) <= 0:
+        return {"fill_status": "INVALID_INPUT", "reason": "ORDER_QTY_INVALID"}
+    problem = _bar_problem(bar)
+    if problem:
+        return {"fill_status": "INVALID_INPUT", "reason": problem}
+    required_costs = (
+        "taker_fee_bps", "maker_fee_bps", "spread_bps", "slippage_bps",
+        "maker_fill_prob", "partial_prob",
+    )
+    if not isinstance(cost, dict) or any(
+            key not in cost or not _finite(cost[key]) for key in required_costs):
+        return {"fill_status": "INVALID_INPUT", "reason": "COST_MODEL_INVALID"}
+    if any(float(cost[key]) < 0 for key in (
+            "taker_fee_bps", "maker_fee_bps", "spread_bps", "slippage_bps")) \
+            or any(not 0 <= float(cost[key]) <= 1 for key in (
+                "maker_fill_prob", "partial_prob")):
+        return {"fill_status": "INVALID_INPUT", "reason": "COST_MODEL_INVALID"}
+    if otype not in ("market", "taker") and (
+            not _finite(order.get("limit_price"))
+            or float(order["limit_price"]) <= 0):
+        return {"fill_status": "INVALID_INPUT", "reason": "LIMIT_PRICE_INVALID"}
     rng = rng or _r.Random(0)
-    side = order["side"]
     long = side == "LONG"
     op, hi, lo = bar["open"], bar["high"], bar["low"]
     half_spread = cost["spread_bps"] / 2 / 10_000.0
     slip = cost["slippage_bps"] / 10_000.0
-    otype = order["order_type"]
-    qty = order["qty"]
+    qty = float(qty)
     if otype in ("market", "taker"):
         raw = op * (1 + half_spread + slip) if long else op * (1 - half_spread - slip)
         fee_frac = cost["taker_fee_bps"] / 10_000.0
@@ -174,6 +244,49 @@ def simulate_trade(*, side: str, entry_bar: dict, exit_bars: list[dict],
     no longer mis-stamped at a 1-minute cadence. Trailing is strictly causal:
     an update computed from a COMPLETED bar's high/low takes effect on the NEXT
     bar, never within the same bar it was derived from."""
+    if side not in ("LONG", "SHORT"):
+        return _invalid_trade("SIDE_INVALID", scenario_money, scenario_cost)
+    if scenario_money not in MONEY_SCENARIOS:
+        return _invalid_trade("MONEY_SCENARIO_INVALID", scenario_money, scenario_cost)
+    if scenario_cost not in COST_SCENARIOS:
+        return _invalid_trade("COST_SCENARIO_INVALID", scenario_money, scenario_cost)
+    if type(entry_ts_ms) is not int or type(time_exit) is not int \
+            or type(interval_ms) is not int or time_exit < 1 or interval_ms < 1:
+        return _invalid_trade("TIME_CONTRACT_INVALID", scenario_money, scenario_cost)
+    numeric_parameters = (stop_frac, tp_frac)
+    if any(not _finite(value) or float(value) <= 0
+           for value in numeric_parameters):
+        return _invalid_trade("EXIT_FRACTION_INVALID", scenario_money, scenario_cost)
+    if trailing_frac is not None and (
+            not _finite(trailing_frac) or not 0 < float(trailing_frac) < 1):
+        return _invalid_trade("TRAILING_FRACTION_INVALID", scenario_money, scenario_cost)
+    if trailing_activate_frac is not None and (
+            not _finite(trailing_activate_frac)
+            or not 0 <= float(trailing_activate_frac) < 1):
+        return _invalid_trade("TRAILING_ACTIVATION_INVALID", scenario_money, scenario_cost)
+    entry_problem = _bar_problem(entry_bar)
+    if entry_problem:
+        return _invalid_trade(entry_problem, scenario_money, scenario_cost)
+    if entry_ts_ms != int(entry_bar["ts"]):
+        return _invalid_trade("ENTRY_TIMESTAMP_MISMATCH", scenario_money,
+                              scenario_cost)
+    if not isinstance(exit_bars, list):
+        return _invalid_trade("EXIT_BARS_INVALID", scenario_money, scenario_cost)
+    # The entry happens at the entry candle open, so that candle is the first
+    # real interval of exposure and must participate in SL/TP ambiguity. Only
+    # the future bars required by the fixed horizon are inspected; an unused
+    # bar after the exit cannot influence acceptance or the outcome.
+    required_exit_bars = exit_bars[:max(0, time_exit - 1)]
+    last_ts = int(entry_bar["ts"])
+    for bar in required_exit_bars:
+        problem = _bar_problem(bar)
+        if problem:
+            return _invalid_trade(problem, scenario_money, scenario_cost)
+        if int(bar["ts"]) != last_ts + interval_ms:
+            reason = "EXIT_TIMESTAMPS_NOT_MONOTONE" if int(bar["ts"]) <= last_ts \
+                else "EXIT_BAR_INTERVAL_GAP"
+            return _invalid_trade(reason, scenario_money, scenario_cost)
+        last_ts = int(bar["ts"])
     cost = COST_SCENARIOS[scenario_cost]
     ms = MONEY_SCENARIOS[scenario_money]
     long = side == "LONG"
@@ -181,7 +294,7 @@ def simulate_trade(*, side: str, entry_bar: dict, exit_bars: list[dict],
     slip = cost["slippage_bps"] / 10_000.0
     per_side_px = half_spread + slip
     taker = cost["taker_fee_bps"] / 10_000.0
-    entry_px_raw = entry_bar["open"]
+    entry_px_raw = float(entry_bar["open"])
     entry_px = entry_px_raw * (1 + per_side_px) if long \
         else entry_px_raw * (1 - per_side_px)
     stop_px = entry_px_raw * (1 - stop_frac) if long else entry_px_raw * (1 + stop_frac)
@@ -207,8 +320,9 @@ def simulate_trade(*, side: str, entry_bar: dict, exit_bars: list[dict],
     trail_stop = None
     trail_source_ts = None
     stop_audit: list[dict] = []
-    for k, b in enumerate(exit_bars):
-        hi, lo, op, cl = b["high"], b["low"], b["open"], b["close"]
+    lifecycle_bars = [entry_bar, *required_exit_bars]
+    for k, b in enumerate(lifecycle_bars):
+        hi, lo, op, cl = (float(b[field]) for field in ("high", "low", "open", "close"))
         # activate any trailing level derived from a PREVIOUS completed bar
         previous_active_stop = stop_px
         if trail_stop is not None:
@@ -238,22 +352,27 @@ def simulate_trade(*, side: str, entry_bar: dict, exit_bars: list[dict],
         mae = max(mae, dn)
         diagnostic_hwm = max(hwm, hi) if long else min(hwm, lo)
         stop_row["max_favorable_price"] = round(diagnostic_hwm, 8)
-        was_trailing = trailing_frac is not None and trail_stop is not None
+        was_trailing = bool(stop_row["trailing_active"])
         hit_stop = (lo <= stop_px) if long else (hi >= stop_px)
         hit_tp = (hi >= tp_px) if long else (lo <= tp_px)
         if hit_stop:                                   # stop first (conservative)
             # gap-through: if the bar OPENS beyond the stop, fill at open (worse)
-            if (long and op <= stop_px) or (not long and op >= stop_px):
+            gap_at_open = (long and op <= stop_px) or (not long and op >= stop_px)
+            if gap_at_open:
                 exit_px_raw = op
             else:
                 exit_px_raw = stop_px
             exit_reason = "TRAIL" if was_trailing else "SL"
-            exit_ts = b["ts"] + interval_ms
+            # A gap-through fill occurs at the candle open, whose timestamp is
+            # known exactly. Intrabar threshold ordering is only observable at
+            # candle close and therefore remains timestamped at close.
+            exit_ts = b["ts"] if gap_at_open else b["ts"] + interval_ms
             break
         if hit_tp:
-            exit_px_raw = tp_px if ((long and op < tp_px) or (not long and op > tp_px)) else op
+            gap_at_open = (long and op >= tp_px) or (not long and op <= tp_px)
+            exit_px_raw = op if gap_at_open else tp_px
             exit_reason = "TP"
-            exit_ts = b["ts"] + interval_ms
+            exit_ts = b["ts"] if gap_at_open else b["ts"] + interval_ms
             break
         if k + 1 >= time_exit:
             exit_px_raw = cl
@@ -274,8 +393,9 @@ def simulate_trade(*, side: str, entry_bar: dict, exit_bars: list[dict],
                 stop_row["pending_stop_effective_ts"] = int(b["ts"]) + interval_ms
                 stop_row["max_favorable_price"] = round(hwm, 8)
     if exit_px_raw is None:
-        exit_px_raw = exit_bars[-1]["close"] if exit_bars else entry_px_raw
-        exit_ts = (exit_bars[-1]["ts"] + interval_ms) if exit_bars else entry_ts_ms
+        final_bar = lifecycle_bars[-1]
+        exit_px_raw = final_bar["close"]
+        exit_ts = final_bar["ts"] + interval_ms
         exit_reason = "END"
     exit_px = exit_px_raw * (1 - per_side_px) if long else exit_px_raw * (1 + per_side_px)
     fee_close = notional * taker

@@ -18,15 +18,8 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 def _pairing_context():
-    CT = importlib.import_module("app.labs.v10_46.causal_tournament")
-    campaign = CT.preregister_campaign()
-    return {
-        "m_campaign": campaign["m_campaign_effective_for_gate"],
-        "campaign_registry": campaign["campaign_registry_contract"],
-        "campaign_registry_sha": campaign["campaign_registry_sha"],
-        "baseline_spec_hash": "b" * 64,
-        "registry_hash": "c" * 64,
-    }
+    CA = importlib.import_module("app.labs.v10_46.campaign_authority")
+    return {"campaign_id": CA.CAMPAIGN_ID, "symbol": "BTCUSDT"}
 
 
 # --------------------------------------------------------------------------- #
@@ -109,16 +102,25 @@ def test_matched_baseline_is_paired_with_explicit_pairs():
     assert hasattr(CS, "matched_random_paired")
     common = {field: f"v-{field}" for field in CS.BASELINE_MATCH_FIELDS}
     common.update({
+        "symbol": "BTCUSDT", "timeframe": "1m", "side": "LONG",
         "notional_eur": 5.0, "exposure_eur": 5.0,
         "leverage_simulated": 1.0, "funding_cost_eur": 0.0,
         "funding_settlements_crossed": 0, "max_holding_bars": 2,
         "realised_holding_bars": 2, "end_of_dataset_censored": False,
+        "entry_timestamp": 60_000, "entry_availability": 60_000,
     })
-    candidate = {**common, "candidate_trade_id": "C1", "candidate_net_eur": 0.1}
-    baseline = {**common, "baseline_trade_id": "B1", "baseline_net_eur": 0.0}
+    candidate = {
+        **common, "candidate_trade_id": "C1", "underlying_trade_id": "U1",
+        "hypothesis_id": "P11_LONG", "candidate_net_eur": 0.1,
+    }
+    baseline = {
+        **common, "baseline_trade_id": "B1", "underlying_trade_id": "BU1",
+        "hypothesis_id": "PREREGISTERED_RANDOM_BASELINE_V10_47_23",
+        "baseline_net_eur": 0.0,
+    }
     r = CS.matched_random_paired(
         candidate_trades=[candidate], baseline_trades=[baseline],
-        timeframe="1m", m_global=10, **_pairing_context(),
+        timeframe="1m", **_pairing_context(),
     )
     for k in ("pairs_requested", "pairs_found", "coverage", "paired_mean_eur",
               "paired_lower_bound_eur", "match_status"):
@@ -258,10 +260,19 @@ def test_registry_semantic_dedup_reports_results():
 def test_baseline_incomplete_fails_gate():
     CS = importlib.import_module("app.labs.v10_46.causal_stats")
     candidate = {field: f"v-{field}" for field in CS.BASELINE_MATCH_FIELDS}
-    candidate.update({"candidate_trade_id": "C1", "candidate_net_eur": 0.5})
+    candidate.update({
+        "symbol": "BTCUSDT", "timeframe": "1m", "side": "LONG",
+        "candidate_trade_id": "C1", "underlying_trade_id": "U1",
+        "hypothesis_id": "P11_LONG", "candidate_net_eur": 0.5,
+        "notional_eur": 5.0, "exposure_eur": 5.0,
+        "leverage_simulated": 1.0, "funding_cost_eur": 0.0,
+        "funding_settlements_crossed": 0, "max_holding_bars": 2,
+        "realised_holding_bars": 2, "end_of_dataset_censored": False,
+        "entry_timestamp": 60_000, "entry_availability": 60_000,
+    })
     r = CS.matched_random_paired(
         candidate_trades=[candidate], baseline_trades=[],
-        timeframe="1m", m_global=10, **_pairing_context(),
+        timeframe="1m", **_pairing_context(),
     )
     assert r["match_status"] == "BASELINE_MATCH_INCOMPLETE"
     assert r["beats_matched_random"] is False                 # cannot pass the gate

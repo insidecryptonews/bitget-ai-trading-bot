@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import dataclasses
 import inspect
 
 import pytest
@@ -12,11 +13,14 @@ def _pair_rows(n: int = 1):
     candidates, baselines = [], []
     for index in range(n):
         common = {
-            "symbol": "X", "timeframe": "1m", "side": "LONG",
+            "symbol": "BTCUSDT", "timeframe": "1m", "side": "LONG",
             "date": "2026-01-01", "session": "ASIA",
             "opportunity_id": f"OP-{index}", "cluster_id": f"C-{index}",
+            "global_event_id": f"EVENT-{index}",
+            "dependency_cluster_id": f"DEPENDENCY-{index}",
+            "underlying_trade_id": f"UNDERLYING-{index}",
             "regime_id": "RANGE", "entry_timestamp": index * 60_000,
-            "entry_availability": index * 60_000 + 1,
+            "entry_availability": index * 60_000,
             "max_holding_bars": 4, "realised_holding_bars": 4,
             "censoring_type": "NONE", "end_of_dataset_censored": False,
             "notional_eur": 5.0, "exposure_eur": 5.0,
@@ -26,81 +30,26 @@ def _pair_rows(n: int = 1):
         }
         candidates.append({
             **common, "candidate_trade_id": f"CAND-{index}",
-            "candidate_net_eur": 1.0,
+            "candidate_net_eur": 1.0, "hypothesis_id": "P11_LONG",
         })
         baselines.append({
             **common, "baseline_trade_id": f"BASE-{index}",
             "baseline_net_eur": 0.0,
+            "hypothesis_id": "PREREGISTERED_RANDOM_BASELINE_V10_47_23",
         })
     return candidates, baselines
 
 
-def _campaign_contract(*, m_campaign: int = 564, nominal: int | None = None,
-                       deduplication_status: str | None = None,
-                       include_valid_proof: bool = False):
+def _call(candidates, baselines, *, campaign_id=None):
+    """Call the canonical API; authority values are not caller inputs."""
+    from app.labs.v10_46 import campaign_authority as CA
     from app.labs.v10_46 import causal_stats as CS
 
-    nominal = m_campaign if nominal is None else nominal
-    deduplication_status = deduplication_status or (
-        "AMBIGUOUS_USE_NOMINAL" if m_campaign == nominal
-        else "SEMANTIC_EQUIVALENCE_PROVEN"
+    return CS.matched_random_paired(
+        candidate_trades=candidates, baseline_trades=baselines,
+        campaign_id=campaign_id or CA.CAMPAIGN_ID,
+        symbol="BTCUSDT", timeframe="1m",
     )
-    contract = {
-        "schema": "v10_47_23_campaign_registry",
-        "symbols": ["BTCUSDT", "DOGEUSDT", "ETHUSDT", "XRPUSDT"],
-        "timeframes": ["1m", "5m", "15m"],
-        "tournament_combinations": 12,
-        "participants_per_tournament": 47,
-        "m_campaign_nominal": nominal,
-        "m_campaign_unique_hypotheses": nominal,
-        "m_campaign_unique_results": m_campaign,
-        "m_campaign_effective_for_gate": m_campaign,
-        "deduplication_status": deduplication_status,
-        "correction_method": "bonferroni",
-        "alpha": 0.05,
-        "closed": True,
-        "closed_before_metrics": True,
-    }
-    if include_valid_proof:
-        members = [f"HYP-{index}" for index in range(nominal - m_campaign + 1)]
-        proof = {
-            "schema": "v10_47_23_semantic_equivalence_proof",
-            "groups": [{
-                "semantic_fingerprint": "d" * 64,
-                "members": members,
-            }],
-        }
-        contract["semantic_equivalence_proof"] = proof
-        contract["semantic_equivalence_proof_sha"] = CS._canonical_hash(proof)
-    return contract, CS._canonical_hash(contract)
-
-
-def _call(candidates, baselines, *, m_tournament: int = 47,
-          m_campaign: int = 564, contract=None, registry_sha=None,
-          baseline_spec_hash: str = "b" * 64, registry_hash: str = "c" * 64):
-    """Call both the pre-fix and repaired API so the RED is reproducible."""
-    from app.labs.v10_46 import causal_stats as CS
-
-    if contract is None and registry_sha is None:
-        contract, registry_sha = _campaign_contract(m_campaign=m_campaign)
-    kwargs = {
-        "candidate_trades": candidates,
-        "baseline_trades": baselines,
-        "timeframe": "1m",
-        "m_global": m_tournament,
-    }
-    parameters = inspect.signature(CS.matched_random_paired).parameters
-    optional = {
-        "m_campaign": m_campaign,
-        "campaign_registry": contract,
-        "campaign_registry_sha": registry_sha,
-        "baseline_spec_hash": baseline_spec_hash,
-        "registry_hash": registry_hash,
-    }
-    for name, value in optional.items():
-        if name in parameters:
-            kwargs[name] = value
-    return CS.matched_random_paired(**kwargs)
 
 
 def _assert_invalid(result, reason: str):
@@ -229,7 +178,8 @@ def test_pair_id_is_deterministic_and_binds_every_required_component():
         "candidate_trade_id": "C1", "baseline_trade_id": "B1",
         "symbol": "BTCUSDT", "timeframe": "1m",
         "matching_spec_hash": "a" * 64, "baseline_spec_hash": "b" * 64,
-        "registry_hash": "c" * 64,
+        "registry_hash": "c" * 64, "campaign_authority_root": "d" * 64,
+        "tournament_spec_hash": "e" * 64,
     }
     first = CS.deterministic_pair_id(**kwargs)
     assert first == CS.deterministic_pair_id(**dict(reversed(list(kwargs.items()))))
@@ -253,7 +203,7 @@ def test_integrity_metrics_hold_for_valid_bijection():
 
 def test_campaign_correction_rejects_result_that_local_47_would_accept():
     candidates, baselines = _pair_rows(11)
-    result = _call(candidates, baselines, m_tournament=47, m_campaign=564)
+    result = _call(candidates, baselines)
     assert result["raw_p_value"] == pytest.approx(0.0004882812)
     assert result["p_raw"] == result["raw_p_value"]
     assert result["p_tournament_corrected"] < 0.05
@@ -266,96 +216,42 @@ def test_campaign_correction_rejects_result_that_local_47_would_accept():
     assert result["promotion_allowed"] is False
 
 
-def test_changing_campaign_m_changes_gate():
-    candidates, baselines = _pair_rows(11)
-    local = _call(candidates, baselines, m_campaign=100)
-    campaign = _call(candidates, baselines, m_campaign=564)
-    assert local["p_campaign_corrected"] < 0.05
-    assert campaign["p_campaign_corrected"] > 0.05
-    assert local["beats_matched_random"] is True
-    assert campaign["beats_matched_random"] is False
-
-
-def test_missing_campaign_registry_fails_closed():
-    candidates, baselines = _pair_rows(12)
-    result = _call(candidates, baselines, contract=None, registry_sha="")
-    _assert_invalid(result, "MISSING_CAMPAIGN_REGISTRY")
-
-
-def test_missing_campaign_m_fails_closed():
+def test_campaign_authority_controls_are_absent_from_caller_api():
     from app.labs.v10_46 import causal_stats as CS
 
+    parameters = inspect.signature(CS.matched_random_paired).parameters
+    forbidden = {
+        "m_global", "m_campaign", "alpha", "campaign_registry",
+        "campaign_registry_sha", "baseline_spec_hash", "registry_hash",
+        "matching_spec_hash", "tolerance_spec",
+    }
+    assert forbidden.isdisjoint(parameters)
+
+
+def test_unknown_campaign_id_fails_closed():
     candidates, baselines = _pair_rows(12)
-    contract, sha = _campaign_contract()
-    result = CS.matched_random_paired(
-        candidate_trades=candidates,
-        baseline_trades=baselines,
-        timeframe="1m",
-        m_global=47,
-        campaign_registry=contract,
-        campaign_registry_sha=sha,
-        baseline_spec_hash="b" * 64,
-        registry_hash="c" * 64,
-    )
-    _assert_invalid(result, "INVALID_CAMPAIGN_MULTIPLICITY")
+    result = _call(candidates, baselines, campaign_id="UNTRACKED_CAMPAIGN")
+    _assert_invalid(result, "UNAUTHORIZED_CAMPAIGN_ID")
 
 
-def test_campaign_m_smaller_than_tournament_fails_closed():
-    candidates, baselines = _pair_rows(12)
-    contract, sha = _campaign_contract(m_campaign=46)
-    result = _call(candidates, baselines, m_tournament=47, m_campaign=46,
-                   contract=contract, registry_sha=sha)
-    _assert_invalid(result, "INVALID_CAMPAIGN_MULTIPLICITY")
+def test_mutating_a_loaded_copy_cannot_change_campaign_m():
+    from app.labs.v10_46 import campaign_authority as CA
+
+    supplied = CA.load_campaign_authority()
+    supplied["m_campaign"] = 1
+    candidates, baselines = _pair_rows(11)
+    result = _call(candidates, baselines)
+    assert result["m_campaign"] == 564
+    assert result["p_campaign_corrected"] > 0.05
 
 
-def test_missing_campaign_registry_sha_fails_closed():
-    candidates, baselines = _pair_rows(12)
-    contract, _ = _campaign_contract()
-    result = _call(candidates, baselines, contract=contract, registry_sha="")
-    _assert_invalid(result, "MISSING_CAMPAIGN_REGISTRY_SHA")
+def test_mutated_authority_body_is_rejected_by_root_anchor():
+    from app.labs.v10_46 import campaign_authority as CA
 
-
-def test_mutated_campaign_registry_invalidates_evidence():
-    candidates, baselines = _pair_rows(12)
-    contract, sha = _campaign_contract()
-    contract["m_campaign_nominal"] = 563
-    result = _call(candidates, baselines, contract=contract, registry_sha=sha)
-    _assert_invalid(result, "CAMPAIGN_REGISTRY_SHA_MISMATCH")
-
-
-def test_campaign_dedup_requires_hashed_semantic_equivalence_proof():
-    candidates, baselines = _pair_rows(12)
-    contract, sha = _campaign_contract(
-        m_campaign=100, nominal=564,
-        deduplication_status="SEMANTIC_EQUIVALENCE_PROVEN",
-    )
-    result = _call(candidates, baselines, m_campaign=100,
-                   contract=contract, registry_sha=sha)
-    _assert_invalid(result, "CAMPAIGN_DEDUP_PROOF_INVALID")
-
-
-def test_hashed_semantic_equivalence_proof_can_reduce_campaign_m():
-    candidates, baselines = _pair_rows(12)
-    contract, sha = _campaign_contract(
-        m_campaign=100, nominal=564,
-        deduplication_status="SEMANTIC_EQUIVALENCE_PROVEN",
-        include_valid_proof=True,
-    )
-    result = _call(candidates, baselines, m_campaign=100,
-                   contract=contract, registry_sha=sha)
-    assert result["pairing_status"] == "VALID"
-    assert result["m_campaign"] == 100
-
-
-def test_ambiguous_campaign_dedup_must_use_nominal_count():
-    candidates, baselines = _pair_rows(12)
-    contract, sha = _campaign_contract(
-        m_campaign=100, nominal=564,
-        deduplication_status="AMBIGUOUS_USE_NOMINAL",
-    )
-    result = _call(candidates, baselines, m_campaign=100,
-                   contract=contract, registry_sha=sha)
-    _assert_invalid(result, "AMBIGUOUS_CAMPAIGN_DEDUP")
+    supplied = CA.load_campaign_authority()
+    supplied["participants_per_tournament"] = 46
+    with pytest.raises(CA.CampaignAuthorityError, match="AUTHORITY_ROOT_ANCHOR_MISMATCH"):
+        CA._validate_authority(supplied)
 
 
 def test_campaign_p_value_is_clamped_to_one():
@@ -373,11 +269,13 @@ def test_campaign_registry_is_closed_before_metrics_and_uses_nominal_fallback():
     assert contract["closed_before_metrics"] is True
     assert contract["m_campaign_nominal"] == 564
     assert contract["m_campaign_effective_for_gate"] == 564
-    assert contract["deduplication_status"] == "AMBIGUOUS_USE_NOMINAL"
-    assert registry["campaign_registry_sha"] == CT.C.canonical_hash(contract)
+    assert contract["deduplication_status"] == "CANONICAL_NOMINAL_REQUIRED"
+    assert registry["campaign_registry_sha"] == contract["root_anchor_sha256"]
+    assert registry["authority_status"] == "CANONICAL_AUTHORITY_VALID"
 
 
-def test_run_closes_campaign_before_real_market_signal_computation(monkeypatch):
+def test_run_closes_campaign_before_real_market_signal_computation(monkeypatch,
+                                                                    tmp_path):
     from app.labs.v10_46 import causal_tournament as CT
     from app.labs.v10_46.discovery_dataset import DiscoveryPartitions
 
@@ -387,6 +285,14 @@ def test_run_closes_campaign_before_real_market_signal_computation(monkeypatch):
     def close_campaign():
         events.append("campaign_closed")
         return copy.deepcopy(campaign)
+
+    def authorize(**kwargs):
+        events.append("campaign_authorized")
+        context = CT.CA.authorize_pairing(
+            campaign_id=kwargs["campaign_id"], symbol=kwargs["symbol"],
+            timeframe=kwargs["timeframe"],
+        )
+        return dataclasses.replace(context, full_context_verified=True)
 
     fake_registry = {
         "deciders": {}, "specs": {}, "fingerprints": {},
@@ -400,21 +306,40 @@ def test_run_closes_campaign_before_real_market_signal_computation(monkeypatch):
         "closed": True, "closed_before_metrics": True,
     }
     monkeypatch.setattr(CT, "preregister_campaign", close_campaign)
+    monkeypatch.setattr(CT.CA, "authorize_tournament", authorize)
+    monkeypatch.setattr(
+        CT.CA, "validate_full_authorization", lambda authorization: authorization,
+    )
+    monkeypatch.setattr(
+        CT, "verify_discovery_partitions",
+        lambda *a, **k: {"status": "SYNTHETIC_FIXTURE_VERIFIED"},
+    )
+    monkeypatch.setattr(
+        CT, "load_verified_reference",
+        lambda *a, **k: (None, {"status": "REFERENCE_NOT_AVAILABLE"}),
+    )
+    monkeypatch.setattr(
+        CT, "load_verified_holdout_commitment",
+        lambda *a, **k: ({
+            "state": "SEALED", "commitment_sha256": "e" * 64,
+            "index_range": [3, 4], "n_bars": 1,
+        }, {"status": "HOLDOUT_COMMITMENT_VERIFIED", "sealed_data_opened": False}),
+    )
     monkeypatch.setattr(CT, "preregister", lambda *a, **k: fake_registry)
     monkeypatch.setattr(
         CT.ES, "precompute_sigs",
         lambda bars: events.append("real_market_signals") or [None] * len(bars),
     )
+    discovery_root = tmp_path / "discovery"
+    discovery_root.mkdir()
     partitions = DiscoveryPartitions(
         train=({"ts": 1},), validation=({"ts": 2},),
-        walk_forward=({"ts": 3},), source_root="synthetic",
+        walk_forward=({"ts": 3},), source_root=str(discovery_root),
     )
     CT.run_causal_tournament(
         partitions, symbol="BTCUSDT", venue="bitget", timeframe="1m",
-        gen="synthetic", holdout_commitment={
-            "state": "SEALED", "commitment_sha256": "e" * 64,
-            "index_range": [3, 4], "n_bars": 1,
-        },
+        gen="synthetic",
     )
     assert events[0] == "campaign_closed"
+    assert events.index("campaign_authorized") < events.index("real_market_signals")
     assert events.index("campaign_closed") < events.index("real_market_signals")

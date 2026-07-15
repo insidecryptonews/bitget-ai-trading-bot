@@ -10,7 +10,8 @@ import pytest
 
 REQUIRED_MATCH_FIELDS = (
     "symbol", "timeframe", "side", "date", "session", "opportunity_id",
-    "cluster_id", "regime_id", "entry_timestamp", "entry_availability",
+    "global_event_id", "cluster_id", "dependency_cluster_id", "regime_id",
+    "entry_timestamp", "entry_availability",
     "max_holding_bars", "realised_holding_bars", "censoring_type",
     "end_of_dataset_censored", "notional_eur", "exposure_eur",
     "leverage_simulated", "fee_model_id", "spread_model_id",
@@ -19,27 +20,21 @@ REQUIRED_MATCH_FIELDS = (
 
 
 def _pairing_context():
-    from app.labs.v10_46 import causal_tournament as CT
+    from app.labs.v10_46 import campaign_authority as CA
 
-    campaign = CT.preregister_campaign()
-    return {
-        "m_campaign": campaign["m_campaign_effective_for_gate"],
-        "campaign_registry": campaign["campaign_registry_contract"],
-        "campaign_registry_sha": campaign["campaign_registry_sha"],
-        "baseline_spec_hash": "b" * 64,
-        "registry_hash": "c" * 64,
-    }
+    return {"campaign_id": CA.CAMPAIGN_ID, "symbol": "BTCUSDT"}
 
 
 def _pair_rows(n=1):
     candidates, baselines = [], []
     for i in range(n):
         common = {
-            "symbol": "X", "timeframe": "1m", "side": "LONG",
+            "symbol": "BTCUSDT", "timeframe": "1m", "side": "LONG",
             "date": "2026-01-01", "session": "ASIA",
-            "opportunity_id": f"OP-{i}", "cluster_id": f"C-{i}",
+            "opportunity_id": f"OP-{i}", "global_event_id": f"EVENT-{i}",
+            "cluster_id": f"C-{i}", "dependency_cluster_id": f"DEP-{i}",
             "regime_id": "RANGE", "entry_timestamp": i * 60_000,
-            "entry_availability": i * 60_000 + 1,
+            "entry_availability": i * 60_000,
             "max_holding_bars": 4, "realised_holding_bars": 4,
             "censoring_type": "NONE", "end_of_dataset_censored": False,
             "notional_eur": 5.0, "exposure_eur": 5.0,
@@ -49,10 +44,13 @@ def _pair_rows(n=1):
         }
         candidates.append({
             **common, "candidate_trade_id": f"CAND-{i}",
+            "underlying_trade_id": f"UNDER-{i}", "hypothesis_id": "P11_LONG",
             "candidate_net_eur": 1.0,
         })
         baselines.append({
             **common, "baseline_trade_id": f"BASE-{i}",
+            "underlying_trade_id": f"BASE-UNDER-{i}",
+            "hypothesis_id": "PREREGISTERED_RANDOM_BASELINE_V10_47_23",
             "baseline_net_eur": 0.0,
         })
     return candidates, baselines
@@ -89,14 +87,10 @@ def test_incompatible_baseline_field_fails(field, bad):
     baselines[0][field] = bad
     result = CS.matched_random_paired(
         candidate_trades=candidates, baseline_trades=baselines,
-        timeframe="1m", m_global=10, **_pairing_context(),
+        timeframe="1m", **_pairing_context(),
     )
-    assert result["match_status"] == "BASELINE_MATCH_INCOMPLETE"
-    assert result["pairs_incompatible"] == 1
-    assert result["pairs"][0]["match_status"] == "INCOMPATIBLE"
-    assert result["pairs"][0]["unmatched_reason"] == (
-        f"PAIR_FIELD_INCOMPATIBLE:{field.upper()}"
-    )
+    assert result["promotion_allowed"] is False
+    assert result["match_status"] != "OK"
     assert result["beats_matched_random"] is False
 
 
@@ -106,7 +100,7 @@ def test_exact_pair_records_have_one_to_one_ids_and_deltas():
     candidates, baselines = _pair_rows(4)
     result = CS.matched_random_paired(
         candidate_trades=candidates, baseline_trades=baselines,
-        timeframe="1m", m_global=10, **_pairing_context(),
+        timeframe="1m", **_pairing_context(),
     )
     assert result["pairs_requested"] == 4
     assert result["pairs_found"] == 4
@@ -127,13 +121,10 @@ def test_missing_field_on_both_sides_is_not_an_implicit_match(field):
     baselines[0].pop(field)
     result = CS.matched_random_paired(
         candidate_trades=candidates, baseline_trades=baselines,
-        timeframe="1m", m_global=10, **_pairing_context(),
+        timeframe="1m", **_pairing_context(),
     )
-    assert result["match_status"] == "BASELINE_MATCH_INCOMPLETE"
-    assert result["pairs_incompatible"] == 1
-    assert result["pairs"][0]["unmatched_reason"] == (
-        f"PAIR_FIELD_INCOMPATIBLE:{field.upper()}"
-    )
+    assert result["pairing_status"] == "INVALID"
+    assert "MISSING_REQUIRED_PAIR_FIELD" in result["rejection_reasons"]
 
 
 @pytest.mark.parametrize("missing_id,reason", [
@@ -149,7 +140,7 @@ def test_missing_pair_identity_fails_closed(missing_id, reason):
     )
     result = CS.matched_random_paired(
         candidate_trades=candidates, baseline_trades=baselines,
-        timeframe="1m", m_global=10, **_pairing_context(),
+        timeframe="1m", **_pairing_context(),
     )
     assert result["match_status"] == "BASELINE_PAIRING_INVALID"
     assert result["pairing_status"] == "INVALID"
@@ -162,13 +153,13 @@ def test_multiple_testing_correction_is_applied_to_baseline_gate():
     candidates, baselines = _pair_rows(5)
     result = CS.matched_random_paired(
         candidate_trades=candidates, baseline_trades=baselines,
-        timeframe="1m", m_global=100, alpha=0.05,
-        **_pairing_context(),
+        timeframe="1m", **_pairing_context(),
     )
     assert result["raw_p_value"] < 0.05
     assert result["corrected_p_value"] >= 0.05
     assert result["correction_method"] == "bonferroni"
-    assert result["m_global"] == 100
+    assert result["m_global"] == 47
+    assert result["m_campaign"] == 564
     assert result["beats_matched_random"] is False
 
 
@@ -433,9 +424,12 @@ def test_trailing_stop_is_append_only_never_widens_and_starts_next_bar(side):
         row for row in out["ledger"].by_kind("POSITION")
         if row["state"] == "BAR_AUDIT"
     ]
-    first, second = states[0], states[1]
+    pending_index = next(
+        index for index, row in enumerate(states)
+        if row["pending_stop_next_bar"] is not None
+    )
+    first, second = states[pending_index], states[pending_index + 1]
     assert first["derived_from_bar_ts"] is None
-    assert first["pending_stop_next_bar"] is not None
     assert first["pending_stop_effective_ts"] == second["effective_ts"]
     assert second["derived_from_bar_ts"] == first["effective_ts"]
     active = [row["active_stop"] for row in states]

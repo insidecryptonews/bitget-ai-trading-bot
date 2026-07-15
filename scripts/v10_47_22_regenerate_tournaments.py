@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import re
 import queue
@@ -68,6 +69,29 @@ def summarize(value: dict) -> dict:
     for row in value.get("results", {}).values():
         classification = row.get("metrics", {}).get("classification", "UNKNOWN")
         classifications[classification] = classifications.get(classification, 0) + 1
+
+    def finite_gate_values(field: str) -> list[float]:
+        values: list[float] = []
+        for gate in gates:
+            raw = gate.get("matched_random_paired", {}).get(field)
+            try:
+                number = float(raw)
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(number):
+                values.append(number)
+        return values
+
+    coverage_values = finite_gate_values("coverage")
+    corrected_values = finite_gate_values("corrected_p_value")
+    n_eff_values = []
+    for row in value.get("results", {}).values():
+        try:
+            number = float(row.get("metrics", {}).get("n_eff_final"))
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(number):
+            n_eff_values.append(number)
     return {
         "status": "COMPLETE",
         "symbol": value["symbol"],
@@ -90,18 +114,9 @@ def summarize(value: dict) -> dict:
             int(gate.get("matched_random_paired", {}).get("pairs_incompatible", 0))
             for gate in gates
         ),
-        "minimum_baseline_coverage": min(
-            (float(gate.get("matched_random_paired", {}).get("coverage", 0.0))
-             for gate in gates), default=None,
-        ),
-        "minimum_corrected_p_value": min(
-            (float(gate.get("matched_random_paired", {}).get("corrected_p_value", 1.0))
-             for gate in gates), default=None,
-        ),
-        "maximum_n_eff": max(
-            (float(row.get("metrics", {}).get("n_eff_final", 0.0))
-             for row in value.get("results", {}).values()), default=0.0,
-        ),
+        "minimum_baseline_coverage": min(coverage_values, default=None),
+        "minimum_corrected_p_value": min(corrected_values, default=None),
+        "maximum_n_eff": max(n_eff_values, default=0.0),
         "holdout_state": value.get("holdout", {}).get("state"),
         "holdout_physically_loaded": value.get("holdout", {}).get("physically_loaded"),
         "final_recommendation": "NO LIVE",
