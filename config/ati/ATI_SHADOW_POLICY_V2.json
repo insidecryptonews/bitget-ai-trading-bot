@@ -1,0 +1,107 @@
+{
+  "policy_name": "ATI_SHADOW_POLICY_V2",
+  "mode": "SHADOW_RESEARCH_ONLY",
+  "can_send_real_orders": false,
+  "paper_filter_enabled": false,
+  "purpose": "Convert Adrian's 20-case discretionary method into deterministic candidate rules and evaluate them without execution.",
+  "feature_config": {
+    "base_timeframe": "15m",
+    "higher_timeframes": ["1h", "4h"],
+    "atr_period": 14,
+    "level_lookback_bars": 96,
+    "pivot_left": 3,
+    "pivot_right": 3,
+    "minimum_level_touches": 2,
+    "minimum_touch_separation_bars": 3,
+    "strong_body_threshold": 0.55,
+    "level_price_tolerance": 0.0015,
+    "level_atr_tolerance": 0.35,
+    "break_price_buffer": 0.0002,
+    "break_atr_buffer": 0.05
+  },
+  "scoring": {
+    "start_score": 0,
+    "bonuses": {
+      "4h_direction_alignment": 1,
+      "1h_direction_alignment": 1,
+      "15m_exact_trigger": 2,
+      "repeated_level_test": 1,
+      "strong_body_in_signal_direction": 1,
+      "retest_holds": 1
+    },
+    "penalties": {
+      "timeframe_conflict": -2,
+      "first_breakout_without_hold_or_retest": -2,
+      "trigger_is_vague": -2,
+      "nearest_opposing_level_too_close": -1,
+      "high_volatility_without_structure": -1
+    },
+    "decision_thresholds": {
+      "score_gte_5": "SHADOW_CANDIDATE",
+      "score_3_to_4": "WAIT",
+      "score_lte_2": "REJECT"
+    }
+  },
+  "rules": [
+    {
+      "rule_id": "SHORT_R1",
+      "name": "Resistance rejection",
+      "direction": "SHORT",
+      "entry": "next_15m_open",
+      "invalidation": "confirmed_15m_close_above_resistance",
+      "base_score": 5,
+      "status": "PROMISING_RESEARCH_PRIOR"
+    },
+    {
+      "rule_id": "SHORT_S1",
+      "name": "Support fatigue and confirmed break",
+      "direction": "SHORT",
+      "entry": "open_after_non_recovery_confirmation",
+      "invalidation": "confirmed_15m_close_back_above_support",
+      "base_score": 5,
+      "status": "PROMISING_RESEARCH_PRIOR"
+    },
+    {
+      "rule_id": "LONG_R1",
+      "name": "Resistance break with hold or defended retest",
+      "direction": "LONG",
+      "entry": "open_after_hold_or_retest",
+      "invalidation": "confirmed_15m_close_below_old_resistance",
+      "base_score": 4,
+      "status": "REQUIRES_RETEST_FILTER"
+    },
+    {
+      "rule_id": "LONG_S1",
+      "name": "Objective support defence",
+      "direction": "LONG",
+      "entry": "next_15m_open",
+      "invalidation": "confirmed_15m_close_below_support",
+      "base_score": 4,
+      "status": "NEEDS_MORE_DATA"
+    }
+  ],
+  "risk_research": {
+    "evaluate_underlying_at_1x_first": true,
+    "do_not_use_leverage_to_create_edge": true,
+    "leverage_is_diagnostic_only": true,
+    "diagnostic_leverage_values": [3, 5],
+    "current_bot_leverage_changes_allowed": false
+  },
+  "profit_protection_grid": {
+    "activation_underlying_pct": [0.15, 0.25, 0.40],
+    "trail_distance_underlying_pct": [0.10, 0.20, 0.30],
+    "atr_variant": {
+      "activation": "after_net_profit_exceeds_costs",
+      "distance": "1.0_ATR14_15m"
+    }
+  },
+  "promotion_gate": {
+    "minimum_trades_per_rule": 40,
+    "minimum_net_ev_after_costs": 0.0,
+    "minimum_profit_factor": 1.15,
+    "max_rule_share_of_total_profit": 0.4,
+    "walk_forward_required": true,
+    "paper_forward_required_days": 30,
+    "current_decision": "NO_LIVE"
+  }
+}

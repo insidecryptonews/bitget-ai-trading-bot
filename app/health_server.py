@@ -40,6 +40,7 @@ DASHBOARD_PATH = STATIC_DIR / "dashboard.html"
 _DASHBOARD_LAB_CACHE: dict[str, dict[str, Any]] = {}
 _DASHBOARD_FULL_REPORT_CACHE: dict[str, dict[str, Any]] = {}
 _DASHBOARD_SHORT_REPORT_CACHE: dict[str, dict[str, Any]] = {}
+_ATI_REPORT_DIR = Path(__file__).resolve().parents[1] / "reports" / "research" / "ati"
 
 
 def start_health_server(
@@ -58,7 +59,9 @@ def start_health_server(
             path = parsed.path
             query = parse_qs(parsed.query)
             if path == "/health":
-                self._send_json(state.payload())
+                payload = state.payload()
+                payload["ati_shadow"] = _ati_shadow_status_payload()
+                self._send_json(payload)
                 return
             if not _dashboard_enabled(config):
                 self._send_status(404, "not found")
@@ -69,6 +72,8 @@ def start_health_server(
             if path in {
                 "/dashboard",
                 "/api/training/status",
+                "/api/training/ati-shadow",
+                "/api/research/ati-shadow",
                 "/api/training/summary",
                 "/api/training/acceleration-plan",
                 "/api/training/shadow-opportunity",
@@ -259,6 +264,9 @@ def start_health_server(
                 return
             if path == "/api/training/status":
                 self._send_json(_training_status(config, db, training_pulse, telegram_notifier))
+                return
+            if path in {"/api/training/ati-shadow", "/api/research/ati-shadow"}:
+                self._send_json(_ati_shadow_status_payload())
                 return
             if path == "/api/training/summary":
                 self._send_json(_training_summary(config, db, query))
@@ -900,6 +908,113 @@ def _training_status(config: Any | None, db: Any | None, training_pulse: Any | N
     except Exception:
         payload["git_version"] = "unknown"
     return payload
+
+
+def _ati_shadow_status_payload(report_dir: Path | None = None) -> dict[str, Any]:
+    """Read only the whitelisted ATI report contract; never runs a heavy lab."""
+    declared_root = report_dir or _ATI_REPORT_DIR
+    root_unsafe = declared_root.exists() and declared_root.is_symlink()
+    root = declared_root.resolve()
+
+    def read_object(name: str) -> dict[str, Any]:
+        if root_unsafe:
+            return {}
+        path = root / name
+        if path.parent.resolve() != root or not path.is_file() or path.is_symlink():
+            return {}
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+        return value if isinstance(value, dict) else {}
+
+    health = read_object("ati_health.json")
+    summary = read_object("ati_summary.json")
+    forward = read_object("ati_forward_state.json")
+    ran_at = health.get("last_run_at") or summary.get("generated_at")
+    report_age_seconds = None
+    if ran_at:
+        try:
+            parsed = datetime.fromisoformat(str(ran_at).replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            report_age_seconds = max(0.0, (datetime.now(timezone.utc) - parsed.astimezone(timezone.utc)).total_seconds())
+        except ValueError:
+            report_age_seconds = None
+    dataset_available_at = (
+        health.get("dataset_available_at")
+        or summary.get("dataset_available_at")
+        or health.get("dataset_last_bar_at")
+    )
+    dataset_age_seconds = None
+    if dataset_available_at:
+        try:
+            parsed_data = datetime.fromisoformat(str(dataset_available_at).replace("Z", "+00:00"))
+            if parsed_data.tzinfo is None:
+                parsed_data = parsed_data.replace(tzinfo=timezone.utc)
+            dataset_age_seconds = max(
+                0.0,
+                (datetime.now(timezone.utc) - parsed_data.astimezone(timezone.utc)).total_seconds(),
+            )
+        except ValueError:
+            dataset_age_seconds = None
+    status = str(health.get("status") or "NO_DATA")
+    stale = dataset_age_seconds is None or dataset_age_seconds > 30 * 60
+    if status == "HEALTHY" and stale:
+        status = "DEGRADED"
+    allowed_setup_fields = {
+        "setup_id", "setup_variant", "trades", "net_ev", "gross_ev",
+        "profit_factor", "win_rate", "max_drawdown", "average_mfe",
+        "average_mae", "result_status", "ci95_lower", "ci95_upper",
+    }
+    by_setup = [
+        {key: row.get(key) for key in allowed_setup_fields}
+        for row in (summary.get("by_setup") or [])
+        if isinstance(row, dict)
+    ]
+    overall = summary.get("overall_baseline") if isinstance(summary.get("overall_baseline"), dict) else {}
+    return {
+        "status": status,
+        "result_status": summary.get("status") or forward.get("status") or "NO_DATA",
+        "last_run_at": ran_at,
+        "age_seconds": report_age_seconds,
+        "report_age_seconds": report_age_seconds,
+        "dataset_age_seconds": dataset_age_seconds,
+        "stale": stale,
+        "stale_reason": "dataset_missing_or_older_than_30m" if stale else None,
+        "dataset_last_bar_at": health.get("dataset_last_bar_at"),
+        "dataset_available_at": dataset_available_at,
+        "dataset_snapshot_sha256": health.get("dataset_snapshot_sha256") or summary.get("dataset_snapshot_sha256"),
+        "history_days": summary.get("history_days"),
+        "policy_version": (summary.get("policy") or {}).get("policy_version"),
+        "feature_version": (summary.get("policy") or {}).get("feature_version"),
+        "signals_total": int(health.get("signals_total") or summary.get("signals_total") or 0),
+        "shadow_candidates": int(summary.get("shadow_candidates") or 0),
+        "open_positions": int(forward.get("open_positions") or health.get("open_positions") or 0),
+        "historical_trades": int(summary.get("baseline_trades") or 0),
+        "closed_shadow_trades": int(forward.get("closed_outcomes", 0) or 0),
+        "net_ev": overall.get("net_ev"),
+        "profit_factor": overall.get("profit_factor"),
+        "win_rate": overall.get("win_rate"),
+        "max_drawdown": overall.get("max_drawdown"),
+        "by_setup": by_setup,
+        "blockers": [str(item) for item in (summary.get("blockers") or [])],
+        "last_error": health.get("last_error"),
+        "cli_replay": "python -m app.research_lab ati-shadow-replay-v2 --symbols BTCUSDT,ETHUSDT",
+        "cli_forward": "python -m app.research_lab ati-shadow-forward-once-v2 --symbols BTCUSDT,ETHUSDT",
+        "mode": "SHADOW_RESEARCH_ONLY",
+        "research_only": True,
+        "shadow_only": True,
+        "paper_execution_used": False,
+        "paper_filter_enabled": False,
+        "live_trading": False,
+        "can_send_real_orders": False,
+        "activation": "disabled",
+        "edge_validated": False,
+        "paper_ready": False,
+        "live_ready": False,
+        "final_recommendation": "NO LIVE",
+    }
 
 
 def _training_summary(config: Any | None, db: Any | None, query: dict[str, list[str]]) -> dict[str, Any]:

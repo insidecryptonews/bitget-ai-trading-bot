@@ -945,6 +945,8 @@
     $("phase9QuickBtn")?.addEventListener("click", () => loadPhase9Labs({ hours: 72, symbols: "DOTUSDT" }));
     $("phase9FullBtn")?.addEventListener("click", () => loadPhase9Labs({ hours: 720, symbols: "DOTUSDT" }));
     $("researchPackBtn")?.addEventListener("click", loadResearchPack);
+    $("atiShadowRefreshBtn")?.addEventListener("click", loadAtiShadow);
+    $("atiShadowCliBtn")?.addEventListener("click", showAtiReplayCli);
 
     // --- ResearchOps V5 ---
     $("v5FreshnessRefreshBtn")?.addEventListener("click", loadV5FreshnessMatrix);
@@ -1648,6 +1650,77 @@
     }
   }
 
+  function atiMetric(value, digits = 6) {
+    if (value === null || value === undefined || value === "") return "N/A";
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed.toFixed(digits) : "N/A";
+  }
+
+  function showAtiReplayCli() {
+    setText("atiShadowOutput", [
+      "python -m app.research_lab ati-shadow-replay-v2 --symbols BTCUSDT,ETHUSDT",
+      "python -m app.research_lab ati-shadow-forward-once-v2 --symbols BTCUSDT,ETHUSDT",
+      "",
+      "Research only. The dashboard never starts the heavy replay.",
+      "paper_filter_enabled=false",
+      "can_send_real_orders=false",
+      "final_recommendation=NO LIVE",
+    ].join("\n"));
+  }
+
+  async function loadAtiShadow() {
+    const button = $("atiShadowRefreshBtn");
+    setButtonLoading(button, true);
+    try {
+      const payload = await fetchJson("/api/research/ati-shadow");
+      setText("atiEngineStatus", payload.status || "NO_DATA");
+      setText("atiEngineFreshness", payload.last_run_at
+        ? `last run ${payload.last_run_at} | report age ${atiMetric(payload.report_age_seconds, 0)}s | data age ${atiMetric(payload.dataset_age_seconds, 0)}s | stale=${String(payload.stale)}`
+        : "No ATI run loaded.");
+      setText("atiEvidenceStatus", payload.result_status || "INSUFFICIENT_DATA");
+      setText("atiEvidenceText", (payload.blockers || []).length
+        ? `blocked: ${(payload.blockers || []).join(", ")}`
+        : "No blocker list available; manual research review remains mandatory.");
+      setText("atiShadowCounts", `${payload.signals_total || 0} signals | ${payload.historical_trades || 0} historical trades`);
+      setText("atiShadowPositions", `${payload.closed_shadow_trades || 0} forward outcomes | ${payload.open_positions || 0} simulated open positions | actionable=false`);
+      setText("atiNetEvidence", `EV ${atiMetric(payload.net_ev)} | PF ${atiMetric(payload.profit_factor, 4)}`);
+      setText("atiNetEvidenceText", `win ${atiMetric(payload.win_rate, 4)} | max DD ${atiMetric(payload.max_drawdown, 6)}`);
+      const rows = Array.isArray(payload.by_setup) ? payload.by_setup : [];
+      const target = $("atiSetupRows");
+      if (target) {
+        target.innerHTML = rows.length ? rows.map((row) => `<tr>
+          <td>${escapeHtml(row.setup_id || "-")}</td>
+          <td>${escapeHtml(row.setup_variant || "-")}</td>
+          <td>${escapeHtml(String(row.trades || 0))}</td>
+          <td>${escapeHtml(atiMetric(row.net_ev))}</td>
+          <td>${escapeHtml(atiMetric(row.profit_factor, 4))}</td>
+          <td>${escapeHtml(atiMetric(row.win_rate, 4))}</td>
+          <td>${escapeHtml(atiMetric(row.ci95_lower))}</td>
+          <td>${escapeHtml(row.result_status || "INSUFFICIENT_DATA")}</td>
+        </tr>`).join("") : "<tr><td colspan=\"8\">No ATI report loaded.</td></tr>";
+      }
+      setText("atiShadowOutput", JSON.stringify({
+        status: payload.status,
+        result_status: payload.result_status,
+        policy_version: payload.policy_version,
+        feature_version: payload.feature_version,
+        dataset_last_bar_at: payload.dataset_last_bar_at,
+        dataset_snapshot_sha256: payload.dataset_snapshot_sha256,
+        research_only: payload.research_only,
+        shadow_only: payload.shadow_only,
+        paper_filter_enabled: payload.paper_filter_enabled,
+        can_send_real_orders: payload.can_send_real_orders,
+        edge_validated: payload.edge_validated,
+        final_recommendation: payload.final_recommendation,
+      }, null, 2));
+    } catch (error) {
+      setText("atiEngineStatus", "ERROR");
+      setText("atiEngineFreshness", `ATI status error: ${error.message}`);
+    } finally {
+      setButtonLoading(button, false);
+    }
+  }
+
   document.addEventListener("DOMContentLoaded", () => {
     bindActions();
     localTimes();
@@ -1664,6 +1737,7 @@
     refreshV75Strip().catch(() => {});
     $("v8v9RefreshBtn")?.addEventListener("click", refreshV8V9Strip);
     refreshV8V9Strip().catch(() => {});
+    loadAtiShadow().catch(() => {});
   });
 
   // ResearchOps V7.5 helpers --------------------------------------------------

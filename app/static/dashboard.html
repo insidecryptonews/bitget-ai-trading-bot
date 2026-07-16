@@ -28,6 +28,7 @@
         <button type="button" class="nav-link nav-item" data-target="exit-labs">Exit Labs</button>
         <button type="button" class="nav-link nav-item" data-target="phase8-research">Phase 8 Labs</button>
         <button type="button" class="nav-link nav-item" data-target="phase9-readiness">Phase 9 Readiness</button>
+        <button type="button" class="nav-link nav-item" data-target="ati-shadow">ATI Shadow</button>
         <button type="button" class="nav-link nav-item" data-target="score-incubator">Score &amp; Incubator</button>
         <button type="button" class="nav-link nav-item" data-target="pipeline-cost">Pipeline &amp; Costs</button>
         <button type="button" class="nav-link nav-item" data-target="time-death">Time Death</button>
@@ -76,6 +77,7 @@
         <button type="button" class="mobile-nav-item" data-target="exit-labs">Exits</button>
         <button type="button" class="mobile-nav-item" data-target="phase8-research">P8</button>
         <button type="button" class="mobile-nav-item" data-target="phase9-readiness">P9</button>
+        <button type="button" class="mobile-nav-item" data-target="ati-shadow">ATI</button>
         <button type="button" class="mobile-nav-item" data-target="score-incubator">Score</button>
         <button type="button" class="mobile-nav-item" data-target="pipeline-cost">Costs</button>
         <button type="button" class="mobile-nav-item" data-target="execution-safety">Safety</button>
@@ -1020,6 +1022,68 @@
           <details class="report-details">
             <summary>Ver salida tecnica Phase 9 / Research Pack</summary>
             <pre id="phase9Output">Sin cargar todavia.</pre>
+          </details>
+        </section>
+
+        <section id="ati-shadow" class="section">
+          <div class="section-title">
+            <div>
+              <span class="eyebrow">Deterministic multi-timeframe research</span>
+              <h2>Adrian Trading Intelligence — Shadow</h2>
+            </div>
+            <p>SHADOW ONLY. Entradas simuladas next-bar-open, costes incluidos y cero rutas de orden.</p>
+          </div>
+          <div class="replay-controls">
+            <button id="atiShadowRefreshBtn" class="btn btn-primary">Refresh ATI status</button>
+            <button id="atiShadowCliBtn" class="btn btn-secondary">Show replay CLI</button>
+            <span class="badge badge-info">can_send_real_orders=false</span>
+            <span class="badge badge-danger">NO LIVE</span>
+          </div>
+          <div class="decision-grid">
+            <article class="decision-card info">
+              <span class="panel-label">Engine</span>
+              <strong id="atiEngineStatus">NO_DATA</strong>
+              <p id="atiEngineFreshness">No ATI run loaded.</p>
+            </article>
+            <article class="decision-card warning">
+              <span class="panel-label">Evidence</span>
+              <strong id="atiEvidenceStatus">INSUFFICIENT_DATA</strong>
+              <p id="atiEvidenceText">90d can research; 180/365d and forward OOS validate.</p>
+            </article>
+            <article class="decision-card info">
+              <span class="panel-label">Shadow ledger</span>
+              <strong id="atiShadowCounts">0 signals · 0 trades</strong>
+              <p id="atiShadowPositions">0 simulated open positions.</p>
+            </article>
+            <article class="decision-card warning">
+              <span class="panel-label">Net evidence</span>
+              <strong id="atiNetEvidence">N/A</strong>
+              <p id="atiNetEvidenceText">No gross-only promotion; costs and uncertainty are mandatory.</p>
+            </article>
+            <article class="decision-card danger">
+              <span class="panel-label">Activation</span>
+              <strong>DISABLED</strong>
+              <p>Paper filter OFF. Leverage 3–5 is diagnostic only, never sizing.</p>
+            </article>
+            <article class="decision-card danger">
+              <span class="panel-label">Final recommendation</span>
+              <strong>NO LIVE</strong>
+              <p>ATI cannot send orders or auto-promote a setup.</p>
+            </article>
+          </div>
+          <div class="table-shell">
+            <table class="compact">
+              <thead><tr><th>setup</th><th>variant</th><th>trades</th><th>net EV</th><th>PF</th><th>win rate</th><th>CI lower</th><th>status</th></tr></thead>
+              <tbody id="atiSetupRows"><tr><td colspan="8">No ATI report loaded.</td></tr></tbody>
+            </table>
+          </div>
+          <details class="report-details">
+            <summary>Technical ATI contract</summary>
+            <pre id="atiShadowOutput">research_only=true
+shadow_only=true
+paper_filter_enabled=false
+can_send_real_orders=false
+final_recommendation=NO LIVE</pre>
           </details>
         </section>
 

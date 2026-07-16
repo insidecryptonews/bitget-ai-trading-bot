@@ -1,0 +1,33 @@
+{
+  "source": "20 independent real blind validation cases",
+  "status": "research_prior_only",
+  "counts": {
+    "clear_wins": 8,
+    "mixed": 6,
+    "clear_losses": 2,
+    "no_trade_correct": 2,
+    "no_trade_ambiguous": 2,
+    "total": 20
+  },
+  "fractional_scoring": {
+    "clear_win_weight": 1.0,
+    "mixed_weight": 0.5,
+    "clear_loss_weight": 0.0,
+    "actionable_cases": 16,
+    "weighted_successes": 11.0,
+    "naive_weighted_success_rate": 0.6875
+  },
+  "bayesian_summary": {
+    "prior": "Beta(1,1)",
+    "posterior_alpha": 12.0,
+    "posterior_beta": 6.0,
+    "posterior_mean": 0.6666666666666666,
+    "credible_interval_95": [0.4404172812456628, 0.857902516889779],
+    "interpretation": "Twenty cases are insufficient to demonstrate edge; this is only a research prior."
+  },
+  "directional_prior": {
+    "SHORT": {"weight": 1.25, "reason": "Seed cases favored resistance rejection and support loss."},
+    "LONG": {"weight": 0.75, "reason": "Several first-breakout attempts became false breakouts."}
+  },
+  "live_decision": "NO_LIVE"
+}

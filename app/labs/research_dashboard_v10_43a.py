@@ -91,12 +91,17 @@ def gather_state(symbol: str = "BTCUSDT") -> dict[str, Any]:
     shadow = _read_json(rd / "shadow_simulation" / "shadow_summary_v1040.json")
     scoreboard = _read_csv(rd / "shadow_simulation" / "shadow_scoreboard_v1040.csv")
     bankroll = _read_json(rd / "shadow_simulation" / "shadow_bankroll_20eur_v1040.json")
+    ati_health = _read_json(rd / "ati" / "ati_health.json")
+    ati_summary = _read_json(rd / "ati" / "ati_summary.json")
+    ati_forward = _read_json(rd / "ati" / "ati_forward_state.json")
     readiness = _readiness(view, dq, shadow)
     return {"tool_version": TOOL_VERSION, "symbol": symbol,
             "generated_at": datetime.now(timezone.utc).isoformat(),
             "git_head": _git_head(),
             "health": health, "view": view, "data_quality": dq,
             "shadow": shadow, "scoreboard": scoreboard, "bankroll": bankroll,
+            "ati": {"health": ati_health, "summary": ati_summary,
+                    "forward": ati_forward},
             "ws_dataset": _ws_dataset_meta(),
             "readiness": readiness, **_safety()}
 
@@ -155,6 +160,7 @@ def render_html(d: dict) -> str:
     sh = d.get("shadow")
     board = d.get("scoreboard", [])
     bank = d.get("bankroll")
+    ati = d.get("ati") or {}
     ws = d.get("ws_dataset", {})
     rd = d.get("readiness", {})
 
@@ -231,6 +237,24 @@ def render_html(d: dict) -> str:
     # --- probability lattice (real TP/SL/TIME from best policy, else N/A)
     lattice = _lattice(sh)
 
+    ati_health = ati.get("health") or {}
+    ati_summary = ati.get("summary") or {}
+    ati_forward = ati.get("forward") or {}
+    ati_overall = ati_summary.get("overall_baseline") or {}
+    ati_card = (
+        _kv("Engine", ati_health.get("status") or "NO_DATA",
+            _state_kind(ati_health.get("status") or "NO_DATA")) +
+        _kv("Evidence", ati_summary.get("status") or "INSUFFICIENT_DATA") +
+        _kv("Signals", ati_health.get("signals_total") or 0) +
+        _kv("Closed shadow trades", ati_forward.get("closed_outcomes") or 0) +
+        _kv("Open simulated positions", ati_forward.get("open_positions") or 0) +
+        _kv("Net EV after costs", ati_overall.get("net_ev")) +
+        _kv("Profit factor", ati_overall.get("profit_factor")) +
+        _kv("Dataset last bar", ati_health.get("dataset_last_bar_at")) +
+        _kv("can_send_real_orders", "false", "ok") +
+        _kv("Final recommendation", "NO LIVE", "bad")
+    )
+
     # --- relationship graph
     graph = _relationship_graph(v.get("forward_verdict"))
 
@@ -258,6 +282,7 @@ def render_html(d: dict) -> str:
         generated=html.escape(d.get("generated_at", "")),
         sys_rows=sys_rows, dq_rows=dq_rows, dq_bar=dq_bar, snap=snap,
         tour=tour, bankp=bankp, lattice=lattice, graph=graph,
+        ati_card=ati_card,
         gate_primary=html.escape(prim), gate_kind=gate_kind,
         gate_badges=gate_badges, logs=logs, memo_note=html.escape(memo_note))
 
@@ -437,6 +462,9 @@ _PAGE = """<!doctype html><html lang="en"><head><meta charset="utf-8">
   <div class="card"><h3>Strategy Tournament</h3>{tour}</div>
 
   <div class="card"><h3>Probability Lattice</h3>{lattice}</div>
+
+  <div class="card"><h3>Adrian Trading Intelligence — Shadow</h3>{ati_card}
+    <div class="sub">SHADOW ONLY · next-bar-open · costs included · no auto-promotion</div></div>
 
   <div class="card"><h3>Relationship Graph</h3>{graph}</div>
 

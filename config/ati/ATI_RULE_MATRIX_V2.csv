@@ -1,0 +1,5 @@
+rule_id,name,direction,base_score,status,entry,invalidation
+SHORT_R1,Resistance rejection,SHORT,5,PROMISING_RESEARCH_PRIOR,next_15m_open,confirmed_15m_close_above_resistance
+SHORT_S1,Support fatigue and confirmed break,SHORT,5,PROMISING_RESEARCH_PRIOR,open_after_non_recovery_confirmation,confirmed_15m_close_back_above_support
+LONG_R1,Resistance break with hold or defended retest,LONG,4,REQUIRES_RETEST_FILTER,open_after_hold_or_retest,confirmed_15m_close_below_old_resistance
+LONG_S1,Objective support defence,LONG,4,NEEDS_MORE_DATA,next_15m_open,confirmed_15m_close_below_support

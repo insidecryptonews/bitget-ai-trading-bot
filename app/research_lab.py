@@ -7504,6 +7504,53 @@ class ResearchLab:
         }
         return json.dumps(payload, sort_keys=True, default=str)
 
+    def ati_shadow_replay_v2_cli(self, *, sample_dir="", symbols="",
+                                 output_dir="", seed=7) -> str:
+        """Run ATI V2 historical replay without config, DB, keys, or orders."""
+        from .labs.ati.report import render_replay_text, run_historical_replay
+        requested = self._v107_csv_arg(symbols) or ["BTCUSDT", "ETHUSDT"]
+        result = run_historical_replay(
+            sample_dir=sample_dir or None,
+            symbols=requested,
+            output_dir=output_dir or None,
+            seed=int(seed),
+            write=True,
+        )
+        return render_replay_text(result)
+
+    def ati_shadow_forward_once_v2_cli(self, *, sample_dir="", symbols="",
+                                       output_dir="", seed=7) -> str:
+        """Advance the isolated ATI forward-shadow ledger once."""
+        from .labs.ati.shadow_engine import render_shadow_text, run_shadow_once
+        requested = self._v107_csv_arg(symbols) or ["BTCUSDT", "ETHUSDT"]
+        result = run_shadow_once(
+            sample_dir=sample_dir or None,
+            symbols=requested,
+            output_dir=output_dir or None,
+            seed=int(seed),
+        )
+        return render_shadow_text(result)
+
+    def ati_shadow_run_v2_cli(self, *, sample_dir="", symbols="",
+                              output_dir="", interval_seconds=60.0,
+                              max_scans=1, seed=7) -> str:
+        """Poll externally refreshed files; Ctrl+C is a clean shadow stop."""
+        from .labs.ati.shadow_engine import run_shadow_loop
+        requested = self._v107_csv_arg(symbols) or ["BTCUSDT", "ETHUSDT"]
+        result = run_shadow_loop(
+            sample_dir=sample_dir or None,
+            symbols=requested,
+            output_dir=output_dir or None,
+            interval_seconds=float(interval_seconds),
+            max_cycles=int(max_scans),
+            seed=int(seed),
+        )
+        return json.dumps(result, sort_keys=True, default=str)
+
+    def ati_shadow_status_v2_cli(self, *, output_dir="") -> str:
+        from .labs.ati.shadow_engine import read_shadow_status, render_shadow_text
+        return render_shadow_text(read_shadow_status(output_dir or None))
+
     def opportunity_scanner_run_v1028_cli(self, *, universe="", timeframe="15m", days=5,
                                           interval_seconds=60.0, max_scans=1, request_budget=6,
                                           output_dir="", bars_provider=None, sleep_fn=None,
@@ -8813,6 +8860,10 @@ def build_argument_parser() -> argparse.ArgumentParser:
             "opportunity-scanner-run-v1028",
             "p11-forward-observer-once",
             "p11-forward-observer-run",
+            "ati-shadow-replay-v2",
+            "ati-shadow-forward-once-v2",
+            "ati-shadow-run-v2",
+            "ati-shadow-status-v2",
             "free-microstructure-assembler-plan-v1029",
             "free-microstructure-assemble-sample-v1029",
             "free-microstructure-readiness-status-v1029",
@@ -9098,6 +9149,10 @@ PUBLIC_RESEARCH_ONLY_COMMANDS = frozenset({
     "opportunity-scanner-run-v1028",
     "p11-forward-observer-once",
     "p11-forward-observer-run",
+    "ati-shadow-replay-v2",
+    "ati-shadow-forward-once-v2",
+    "ati-shadow-run-v2",
+    "ati-shadow-status-v2",
     "free-microstructure-assembler-plan-v1029",
     "free-microstructure-assemble-sample-v1029",
     "free-microstructure-readiness-status-v1029",
@@ -9232,6 +9287,21 @@ def _dispatch_public_research_only(args) -> None:
         print(lab.p11_forward_observer_once_cli())
     elif args.command == "p11-forward-observer-run":
         print(lab.p11_forward_observer_run_cli())
+    elif args.command == "ati-shadow-replay-v2":
+        print(lab.ati_shadow_replay_v2_cli(
+            sample_dir=args.sample_dir, symbols=args.symbols,
+            output_dir=args.output_dir, seed=args.seed))
+    elif args.command == "ati-shadow-forward-once-v2":
+        print(lab.ati_shadow_forward_once_v2_cli(
+            sample_dir=args.sample_dir, symbols=args.symbols,
+            output_dir=args.output_dir, seed=args.seed))
+    elif args.command == "ati-shadow-run-v2":
+        print(lab.ati_shadow_run_v2_cli(
+            sample_dir=args.sample_dir, symbols=args.symbols,
+            output_dir=args.output_dir, interval_seconds=args.interval_seconds,
+            max_scans=args.max_scans, seed=args.seed))
+    elif args.command == "ati-shadow-status-v2":
+        print(lab.ati_shadow_status_v2_cli(output_dir=args.output_dir))
     elif args.command == "free-microstructure-assembler-plan-v1029":
         print(lab.free_microstructure_assembler_plan_v1029_cli())
     elif args.command == "free-microstructure-assemble-sample-v1029":
