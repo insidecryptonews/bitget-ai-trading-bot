@@ -216,7 +216,9 @@ def _cached_base_state(symbol: str, out_dir: Path) -> dict[str, Any]:
         "tool_version": A.TOOL_VERSION,
         "symbol": symbol,
         "generated_at": _utc_now(),
-        "git_head": previous.get("git_head") if same_symbol else A._git_head(),
+        # Git provenance is cheap and must reflect the code rendering this
+        # artifact even when all heavy research metrics remain cached.
+        "git_head": A._git_head(),
         "base_metrics": {
             "source": source,
             "refreshed_at": refreshed_at or "STALE_UNKNOWN",

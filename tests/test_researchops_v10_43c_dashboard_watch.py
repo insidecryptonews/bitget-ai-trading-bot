@@ -146,6 +146,7 @@ def test_fast_watcher_is_artifact_only_when_source_cache_is_stale(
     }), encoding="utf-8")
     monkeypatch.setattr(DASH, "_source_signature",
                         lambda symbol: {"symbol": symbol, "size": 2, "mtime": 2})
+    monkeypatch.setattr(DASH.A, "_git_head", lambda: "new-render-head")
     monkeypatch.setattr(DASH.PWS, "ws_persistent_health",
                         lambda symbol: {"status": "HEALTHY"})
 
@@ -162,6 +163,7 @@ def test_fast_watcher_is_artifact_only_when_source_cache_is_stale(
     assert state["fast_metrics"]["heavy_analysis_executed"] is False
     assert state["slow_metrics"]["source_metrics_cache"] == "STALE_HIT"
     assert state["slow_metrics"]["source_metrics_stale"] is True
+    assert state["git_head"] == "new-render-head"
     assert "SOURCE_METRICS_STALE_EXPLICIT_REFRESH_REQUIRED" in (
         state["readiness_v1043c"]["blockers"])
     assert state["can_send_real_orders"] is False
@@ -323,6 +325,8 @@ def test_p11_snapshot_panel_and_local_exports_are_visible(tmp_path: Path, monkey
     assert 'download="reconciliation_report.json"' in html
     assert 'download="summary.txt"' in html
     assert "overflow-wrap:anywhere" in html
+    assert ".card{grid-column:span 4" in html and "min-width:0" in html
+    assert ".gate .big" in html and "word-break:break-word" in html
     assert "can_send_real_orders=true" not in html
 
 

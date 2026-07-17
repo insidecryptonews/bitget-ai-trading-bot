@@ -401,12 +401,12 @@ border-radius:14px;padding:14px 18px;margin-bottom:14px}
 .chips{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
 .grid{display:grid;grid-template-columns:repeat(12,1fr);gap:14px}
 .card{grid-column:span 4;border:1px solid var(--line);background:var(--panel);
-border-radius:14px;padding:14px;min-height:120px}
+border-radius:14px;padding:14px;min-height:120px;min-width:0}
 .card.wide{grid-column:span 8}.card.full{grid-column:span 12}
 .card h3{margin:0 0 10px;font-size:12px;letter-spacing:1.5px;color:var(--muted);
 text-transform:uppercase;border-bottom:1px solid var(--line);padding-bottom:8px}
-.kv{display:flex;justify-content:space-between;padding:3px 0;border-bottom:1px dashed #141c27}
-.kv .k{color:var(--muted)}.kv .v{font-variant-numeric:tabular-nums}
+.kv{display:flex;justify-content:space-between;gap:10px;min-width:0;padding:3px 0;border-bottom:1px dashed #141c27}
+.kv .k{color:var(--muted);min-width:0}.kv .v{min-width:0;font-variant-numeric:tabular-nums;overflow-wrap:anywhere;word-break:break-word;text-align:right}
 .val-ok{color:var(--ok)}.val-warn{color:var(--warn)}.val-bad{color:var(--bad)}.val-muted{color:var(--muted)}
 .badge{display:inline-block;padding:2px 9px;border-radius:999px;font-size:11px;
 font-weight:600;border:1px solid}
@@ -428,12 +428,12 @@ border-radius:6px;overflow:hidden;margin:8px 0}
 .cell{border:1px solid var(--line);border-radius:8px;background:#0d141d;padding:10px;text-align:center}
 .cell-h{color:var(--muted);font-size:11px;letter-spacing:1px}
 .cell-v{font-size:18px;font-weight:700;margin-top:4px}
-.gate{grid-column:span 4;border-radius:14px;padding:16px;border:1px solid}
+.gate{grid-column:span 4;border-radius:14px;padding:16px;border:1px solid;min-width:0}
 .gate.ok{border-color:#1c5c40;background:linear-gradient(180deg,#0f2a1e,#0c1a14)}
 .gate.warn{border-color:#5c4a1c;background:linear-gradient(180deg,#2a220f,#1a150c)}
 .gate.bad{border-color:#5c1c1f;background:linear-gradient(180deg,#2a0f11,#1a0c0d)}
 .gate.muted{border-color:#2a3340;background:#0f1620}
-.gate .big{font-size:20px;font-weight:800;letter-spacing:.5px;margin:6px 0 10px}
+.gate .big{font-size:20px;font-weight:800;letter-spacing:.5px;margin:6px 0 10px;overflow-wrap:anywhere;word-break:break-word}
 ul.next{margin:6px 0 0;padding-left:18px}ul.next li{margin:4px 0;color:#c6cdd8}
 .foot{color:var(--muted);text-align:center;margin:16px 0 4px;font-size:11px}
 @media(max-width:900px){.card,.card.wide,.card.full,.gate{grid-column:span 12}}
