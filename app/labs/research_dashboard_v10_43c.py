@@ -1158,7 +1158,7 @@ _EXTRA = """
   <div class="card full p11-panel"><h3>Reports &amp; Exports — P11_SHORT</h3>{p11_exports}</div>
   <div class="section-band">C. CACHED / HISTORICAL RESEARCH ARTIFACTS <span>timestamps and staleness shown explicitly</span></div>
   <div class="card wide"><h3>Persistent WS Panel</h3>{pws}</div>
-  <div class="card wide"><h3>REST fragments vs WS snapshots vs Persistent WS</h3>{compare}<div class="sub">REST and WS sources have different collection contracts; coverage percentages are not interchangeable.</div></div>
+  <div class="card wide"><h3>REST vs WS vs WS Persistent</h3>{compare}<div class="sub">REST fragments, WS snapshots, and persistent WS have different collection contracts; coverage percentages are not interchangeable.</div></div>
   <div class="card wide"><h3>Alpha Factory V10.44</h3>{alpha}</div>
   <div class="card wide"><h3>AI Research Co-Pilot V10.45</h3>{ai}</div>
   <div class="card wide"><h3>Multi-AI Edge Discovery V10.45.1</h3>{edge}</div>
