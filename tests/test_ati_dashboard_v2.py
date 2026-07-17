@@ -81,6 +81,19 @@ def test_health_components_are_separate_and_fail_closed_on_stale_heavy_metrics(
             "interval_seconds": 30,
         },
         "slow_metrics": {"strategy_stale": True, "exit_stale": True},
+        "p11_short_forward_observer": {
+            "observer_status": "OBSERVER_CONNECTED",
+            "activation_state": ["OBSERVER_CONNECTED", "FORWARD_BOUNDARY_FROZEN"],
+            "boundary": {"forward_start_timestamp": "2026-01-01T00:00:00+00:00"},
+            "heartbeat": {
+                "observer_heartbeat": "2026-01-01T00:15:03+00:00",
+                "last_closed_bar": "2026-01-01T00:15:00+00:00",
+                "observer_lag_seconds": 3.0,
+                "last_error": None,
+            },
+            "metrics": {"reconciliation_status": "PASS"},
+            "reconciliation": {"status": "PASS"},
+        },
     }), encoding="utf-8")
     monkeypatch.setattr(health_server, "_RESEARCH_DASHBOARD_V1043C", dashboard)
     monkeypatch.setattr(health_server, "_ati_shadow_status_payload", lambda: {
@@ -105,6 +118,15 @@ def test_health_components_are_separate_and_fail_closed_on_stale_heavy_metrics(
     assert payload["components"]["heavy_research"]["status"] == "DEGRADED"
     assert payload["overall_status"] == "DEGRADED"
     assert payload["components"]["safety"]["can_send_real_orders"] is False
+    p11 = payload["components"]["p11_forward_observer"]
+    assert p11["status"] == "OBSERVER_CONNECTED"
+    assert p11["last_cycle_at"] == "2026-01-01T00:15:03+00:00"
+    assert p11["reconciliation_status"] == "PASS"
+    assert p11["forward_boundary"] == "FORWARD_BOUNDARY_FROZEN"
+    assert p11["forward_start_timestamp"] == "2026-01-01T00:00:00+00:00"
+    assert p11["last_closed_bar"] == "2026-01-01T00:15:00+00:00"
+    assert p11["observer_lag_seconds"] == 3.0
+    assert p11["last_error"] is None
     assert payload["reason_codes"]
 
 

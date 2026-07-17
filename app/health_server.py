@@ -1198,6 +1198,20 @@ def _research_components_status_payload(state: HealthState) -> dict[str, Any]:
         dashboard.get("p11_short_forward_observer")
         if isinstance(dashboard.get("p11_short_forward_observer"), dict) else {}
     )
+    p11_boundary = p11.get("boundary") if isinstance(p11.get("boundary"), dict) else {}
+    p11_heartbeat = p11.get("heartbeat") if isinstance(p11.get("heartbeat"), dict) else {}
+    p11_metrics = p11.get("metrics") if isinstance(p11.get("metrics"), dict) else {}
+    p11_reconciliation = (
+        p11.get("reconciliation") if isinstance(p11.get("reconciliation"), dict) else {}
+    )
+    p11_activation = p11.get("activation_state")
+    p11_boundary_status = p11.get("boundary_status") or p11.get("forward_boundary")
+    if (
+        not p11_boundary_status
+        and isinstance(p11_activation, list)
+        and "FORWARD_BOUNDARY_FROZEN" in p11_activation
+    ):
+        p11_boundary_status = "FORWARD_BOUNDARY_FROZEN"
     scheduler = read_heavy_scheduler()
     research_root = _RESEARCH_DASHBOARD_V1043C.parent.parent
     heavy_alpha_age = file_age(
@@ -1321,9 +1335,26 @@ def _research_components_status_payload(state: HealthState) -> dict[str, Any]:
             "status": str(
                 p11.get("observer_status") or p11.get("status") or "WAITING_FOR_SIGNAL"
             ),
-            "last_cycle_at": p11.get("observer_last_cycle_at") or p11.get("last_cycle_at"),
-            "reconciliation_status": p11.get("reconciliation_status"),
-            "forward_boundary": p11.get("boundary_status") or p11.get("forward_boundary"),
+            "last_cycle_at": (
+                p11.get("observer_last_cycle_at") or p11.get("last_cycle_at")
+                or p11_heartbeat.get("observer_heartbeat")
+            ),
+            "reconciliation_status": (
+                p11.get("reconciliation_status") or p11_reconciliation.get("status")
+                or p11_metrics.get("reconciliation_status")
+            ),
+            "forward_boundary": p11_boundary_status,
+            "forward_start_timestamp": p11_boundary.get("forward_start_timestamp"),
+            "last_closed_bar": (
+                p11.get("last_closed_bar") or p11_heartbeat.get("last_closed_bar")
+                or p11_metrics.get("last_closed_bar")
+            ),
+            "observer_lag_seconds": (
+                p11.get("observer_lag_seconds")
+                if p11.get("observer_lag_seconds") is not None
+                else p11_heartbeat.get("observer_lag_seconds")
+            ),
+            "last_error": p11.get("last_error") or p11_heartbeat.get("last_error"),
             "can_send_real_orders": False,
             "final_recommendation": "NO LIVE",
         },
