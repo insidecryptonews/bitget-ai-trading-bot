@@ -113,6 +113,7 @@ class CrossVenueService:
         self.events_processed = 0; self.observations_recorded = 0; self.signals_recorded = 0; self.outcomes_recorded = 0
         self.late_events_dropped = 0
         self.max_late_event_lag_ms = 0.0
+        self.stream_rollovers_observed = 0
         self.last_event_at: str | None = None; self.errors: list[str] = []
         self.started_at = utc_now()
 
@@ -159,9 +160,26 @@ class CrossVenueService:
                     self.errors.append(f"{venue}:STREAM_RECREATED_FORWARD_BOUNDARY_REFROZEN")
                     continue
                 if old_offset < 0 or old_offset > snapshot_size:
-                    self.offsets[venue] = snapshot_size
-                    self.errors.append(f"{venue}:STREAM_CHANGED_FORWARD_BOUNDARY_REFROZEN")
-                    continue
+                    persisted = read_json(OFFSETS_PATH, {}) or {}
+                    try:
+                        persisted_offset = int(persisted.get(venue))
+                    except (AttributeError, TypeError, ValueError):
+                        persisted_offset = -1
+                    coordinated_rollover = (
+                        isinstance(persisted, dict)
+                        and str(persisted.get("_schema") or "").startswith(
+                            "cross_venue_stream_offsets.v"
+                        )
+                        and 0 <= persisted_offset <= snapshot_size
+                    )
+                    if coordinated_rollover:
+                        self.offsets[venue] = persisted_offset
+                        old_offset = persisted_offset
+                        self.stream_rollovers_observed += 1
+                    else:
+                        self.offsets[venue] = snapshot_size
+                        self.errors.append(f"{venue}:STREAM_CHANGED_FORWARD_BOUNDARY_REFROZEN")
+                        continue
                 handle = stack.enter_context(stream.open("rb"))
                 handle.seek(old_offset)
                 cursors[venue] = (handle, snapshot_size)
@@ -359,6 +377,7 @@ class CrossVenueService:
             "forward_boundary": self.forward_boundary,
             "late_events_dropped_causal_guard": self.late_events_dropped,
             "max_late_event_lag_ms": self.max_late_event_lag_ms,
+            "stream_rollovers_observed": self.stream_rollovers_observed,
             "causal_reorder_buffer_ms": float(self.config.get("causal_reorder_buffer_ms", 250.0)),
             "last_event_at": self.last_event_at, "errors": self.errors[-20:],
             "collectors": venues, "components": logical, **safety_envelope(),

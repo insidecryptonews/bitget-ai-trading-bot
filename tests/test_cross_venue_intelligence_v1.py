@@ -573,6 +573,39 @@ def test_service_reorder_buffer_holds_recent_rows_without_advancing_offset(tmp_p
     assert service.offsets["bitget"] == path.stat().st_size
 
 
+def test_service_adopts_only_coordinated_persisted_rollover_cursor(tmp_path, monkeypatch):
+    root = tmp_path / "external_data" / "staging" / "cross_venue_v1"
+    monkeypatch.setattr(S, "STAGING_ROOT", root)
+    runtime = tmp_path / "runtime"
+    monkeypatch.setattr(SV, "RUNTIME_ROOT", runtime)
+    monkeypatch.setattr(SV, "OFFSETS_PATH", runtime / "offsets.json")
+    monkeypatch.setattr(SV, "ENGINE_STATUS_PATH", runtime / "status.json")
+    monkeypatch.setattr(SV, "ENGINE_SNAPSHOT_PATH", runtime / "snapshot.json")
+    monkeypatch.setattr(SV.time, "monotonic_ns", lambda: 2_000_000_000)
+    config = dict(load_config())
+    config["active_venues"] = ["bitget"]
+    config["causal_reorder_buffer_ms"] = 250
+    stream = root / "bitget" / "normalized" / "current.jsonl"
+    stream.parent.mkdir(parents=True, exist_ok=True)
+    old = json.dumps(_event("bitget", 1_000_000_000, 100, bid=99.99, ask=100.01)) + "\n"
+    stream.write_text(old * 3, encoding="utf-8")
+    service = SV.CrossVenueService(
+        config=config, root=root,
+        ledger=CrossVenueLedger(runtime / "paper.sqlite"), bootstrap_existing=True,
+    )
+    service.offsets["bitget"] = len((old * 3).encode("utf-8"))
+    new = json.dumps(_event("bitget", 1_500_000_000, 101, bid=100.99, ask=101.01)) + "\n"
+    stream.write_text(new, encoding="utf-8")
+    S.atomic_json(SV.OFFSETS_PATH, {
+        "_schema": "cross_venue_stream_offsets.v2", "bitget": 0,
+        "_last_processed_monotonic_ns": 0,
+    })
+    result = service.cycle()
+    assert result["cycle_events"] == 1
+    assert service.stream_rollovers_observed == 1
+    assert not any("STREAM_CHANGED_FORWARD_BOUNDARY" in error for error in service.errors)
+
+
 def test_rejected_observations_do_not_make_leadlag_signal_healthy(tmp_path, monkeypatch):
     root=tmp_path/"external_data"/"staging"/"cross_venue_v1"; monkeypatch.setattr(S,"STAGING_ROOT",root)
     runtime=tmp_path/"runtime"; monkeypatch.setattr(SV,"RUNTIME_ROOT",runtime)
