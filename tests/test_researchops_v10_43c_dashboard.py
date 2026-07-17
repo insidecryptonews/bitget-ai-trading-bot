@@ -85,7 +85,7 @@ def test_dashboard_no_external_fetch_or_fake_metrics(tmp_path):
         assert forbidden not in h
     local_paths = re.findall(r"get\(['`]([^'`]+)['`]\)", h)
     assert local_paths
-    assert all(path.startswith("/api/ati-paper/") for path in local_paths)
+    assert all(path.startswith(("/api/ati-paper/", "/api/cross-venue")) for path in local_paths)
 
 
 def test_cli_registered():

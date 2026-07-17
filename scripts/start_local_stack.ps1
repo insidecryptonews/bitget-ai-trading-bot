@@ -1,6 +1,8 @@
 $ErrorActionPreference = "Stop"
 . (Join-Path $PSScriptRoot "local_stack_common.ps1")
 Set-Location -LiteralPath $script:RepoRoot
+$stackStop = Join-Path $script:RuntimeRoot "stack.stop"
+Remove-Item -LiteralPath $stackStop -Force -ErrorAction SilentlyContinue
 
 Write-Host "Validating SAFE_PAPER_ONLY before starting local research stack..." -ForegroundColor Cyan
 $audit = & $script:Python -m app.research_lab security-audit 2>&1 | Out-String

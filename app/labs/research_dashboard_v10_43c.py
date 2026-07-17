@@ -68,6 +68,22 @@ def _ati_paper_snapshot() -> dict[str, Any]:
         }
 
 
+def _cross_venue_snapshot() -> dict[str, Any]:
+    try:
+        from .cross_venue.api import dashboard_snapshot
+
+        return dashboard_snapshot()
+    except Exception as exc:
+        return {
+            "status": "ERROR", "error": f"{type(exc).__name__}:{str(exc)[:180]}",
+            "venues": [], "signals": [], "positions": [], "trades": [], "equity": [],
+            "normalized_price_series": {}, "leadlag": {"leaderboard": []},
+            "leverage": {"scenarios": []}, "health": {"status": "ERROR"},
+            "simulation_only": True, "research_only": True,
+            "can_send_real_orders": False, "final_recommendation": "NO LIVE",
+        }
+
+
 def gather_state(symbol: str = "BTCUSDT") -> dict[str, Any]:
     base = A.gather_state(symbol)
     try:
@@ -105,7 +121,7 @@ def gather_state(symbol: str = "BTCUSDT") -> dict[str, Any]:
                              "refreshed_at": _utc_now(),
                              "refresh_mode": "MANUAL_OR_EXPLICIT_CLI"},
             "p11_short_forward_observer": _load_p11_observer_status(),
-            "ati_paper": _ati_paper_snapshot(), **_safety()}
+            "ati_paper": _ati_paper_snapshot(), "cross_venue": _cross_venue_snapshot(), **_safety()}
 
 
 def gather_state_fast(symbol: str = "BTCUSDT") -> dict[str, Any]:
@@ -138,6 +154,7 @@ def gather_state_fast(symbol: str = "BTCUSDT") -> dict[str, Any]:
             "exit_optimization": exits, "readiness_v1043c": readiness,
             "p11_short_forward_observer": _load_p11_observer_status(),
             "ati_paper": _ati_paper_snapshot(),
+            "cross_venue": _cross_venue_snapshot(),
             "fast_metrics": {"last_updated_at": _utc_now(),
                              "source": "ARTIFACT_ONLY_FAST_WATCHER",
                              "heavy_analysis_executed": False},
@@ -605,6 +622,67 @@ def _panel_ati_paper(d: dict) -> str:
 </div>'''
 
 
+def _panel_cross_venue(d: dict) -> str:
+    snapshot = d.get("cross_venue") if isinstance(d.get("cross_venue"), dict) else {}
+    health = snapshot.get("health") if isinstance(snapshot.get("health"), dict) else {}
+    account = snapshot.get("account") if isinstance(snapshot.get("account"), dict) else {}
+    venues = snapshot.get("venues") if isinstance(snapshot.get("venues"), list) else []
+    signals = snapshot.get("signals") if isinstance(snapshot.get("signals"), list) else []
+    positions = snapshot.get("positions") if isinstance(snapshot.get("positions"), list) else []
+    trades = snapshot.get("trades") if isinstance(snapshot.get("trades"), list) else []
+    venue_rows = "".join(
+        "<tr>" + "".join(f"<td>{html.escape(str(value if value is not None else 'N/A'))}</td>" for value in (
+            row.get("venue"), row.get("symbol"), row.get("price"), row.get("best_bid"), row.get("best_ask"),
+            row.get("spread_bps"), row.get("microprice"), row.get("book_imbalance_l1"),
+            row.get("trade_events_1s"), row.get("funding_rate"), row.get("open_interest"),
+            row.get("last_event_age_ms"), row.get("collector_status"), row.get("signal_eligible"),
+        )) + "</tr>" for row in venues[:30]
+    ) or '<tr><td colspan="14">WAITING FOR REAL PUBLIC EVENTS</td></tr>'
+    signal_rows = "".join(
+        "<tr>" + "".join(f"<td>{html.escape(str(value if value is not None else 'N/A'))}</td>" for value in (
+            row.get("symbol"), row.get("direction"), ",".join(row.get("leader_venues") or []),
+            row.get("expected_remaining_move_bps"), row.get("estimated_total_cost_bps"),
+            row.get("unlevered_net_edge_bps"), row.get("status"), row.get("rejection_reason"),
+        )) + "</tr>" for row in signals[-20:]
+    ) or '<tr><td colspan="8">WAITING FOR SIGNAL; NO ACTIVITY IS FORCED</td></tr>'
+    return f'''
+<div class="cv-shell" id="crossVenuePanel">
+  <div class="cv-head"><div><h3>CROSS-VENUE INTELLIGENCE - PAPER RESEARCH</h3>
+    <div class="sub">Causal public-feed research. Local monotonic ordering. Exchange clocks are diagnostic only.</div></div>
+    <div class="cv-badges"><span>SIMULATION ONLY</span><span>RESEARCH ONLY</span><span>NOT ACTIONABLE</span><span>NO LIVE</span></div></div>
+  <div class="cv-status" id="cvPollStatus">Static snapshot; connecting to local read-only API...</div>
+  <div class="cv-metrics">
+    {_ati_metric("System", health.get("status") or "CONNECTING", "cvSystemStatus")}
+    {_ati_metric("Venues", len(venues), "cvVenueCount")}
+    {_ati_metric("Signals observed", len(signals), "cvSignalCount")}
+    {_ati_metric("Open simulated", len(positions), "cvPositionCount")}
+    {_ati_metric("Closed simulated", len(trades), "cvTradeCount")}
+    {_ati_metric("Account", account.get("account_id") or "CROSS_VENUE_PAPER_50", "cvAccountId")}
+    {_ati_metric("Cash USDT", account.get("cash"), "cvCash")}
+    {_ati_metric("Equity USDT", account.get("total_equity"), "cvEquity")}
+    {_ati_metric("Realized PnL", account.get("realized_pnl"), "cvRealized")}
+    {_ati_metric("Fees", account.get("fees"), "cvFees")}
+    {_ati_metric("Slippage", account.get("slippage"), "cvSlippage")}
+    {_ati_metric("Max drawdown", account.get("max_drawdown_pct"), "cvMaxDrawdown")}
+    {_ati_metric("Edge validated", "false", "cvEdgeValidated")}
+  </div>
+  <div class="cv-grid">
+    <section><h4>Venue Matrix</h4><div class="cv-scroll"><table class="tbl"><thead><tr><th>Venue</th><th>Symbol</th><th>Price</th><th>Bid</th><th>Ask</th><th>Spread bps</th><th>Microprice</th><th>Book imbalance</th><th>Trades 1s</th><th>Funding</th><th>OI</th><th>Age ms</th><th>Feed</th><th>Eligible</th></tr></thead><tbody id="cvVenues">{venue_rows}</tbody></table></div></section>
+    <section><h4>Synchronized normalized prices</h4><canvas id="cvPriceChart" width="900" height="270"></canvas><div class="sub">Receive-time aligned; each venue rebased to 100. No interpolation.</div></section>
+    <section><h4>Order-flow / book pressure</h4><div class="cv-scroll"><table class="tbl"><thead><tr><th>Venue</th><th>Symbol</th><th>Trades 1s</th><th>Buy volume</th><th>Sell volume</th><th>Net aggressor</th><th>Book imbalance</th><th>Microprice</th></tr></thead><tbody id="cvOrderflow"><tr><td colspan="8">NEED_DATA</td></tr></tbody></table></div></section>
+    <section><h4>Leader Board / validation</h4><div class="cv-scroll"><table class="tbl"><thead><tr><th>Venue</th><th>Symbol</th><th>Horizon</th><th>N</th><th>Continuation</th><th>Reversal</th><th>Status</th></tr></thead><tbody id="cvLeaders"><tr><td colspan="7">NEED_MORE_DATA</td></tr></tbody></table></div></section>
+    <section><h4>Lead-lag horizon heatmap</h4><div class="cv-heatmap" id="cvHeatmap">NEED_MORE_DATA - no historical reliability is inferred</div></section>
+    <section><h4>Signal candidates and rejections</h4><div class="cv-scroll"><table class="tbl"><thead><tr><th>Symbol</th><th>Side</th><th>Leaders</th><th>Remaining bps</th><th>Cost bps</th><th>Net edge bps</th><th>Status</th><th>Reason</th></tr></thead><tbody id="cvSignals">{signal_rows}</tbody></table></div></section>
+    <section><h4>CROSS_VENUE_PAPER_50</h4><div class="cv-scroll"><table class="tbl"><thead><tr><th>UTC</th><th>Symbol</th><th>Side</th><th>Net</th><th>Fees</th><th>Slippage</th><th>Exit</th></tr></thead><tbody id="cvTrades"><tr><td colspan="7">No simulated forward trades</td></tr></tbody></table></div></section>
+    <section><h4>Paper equity curve</h4><canvas id="cvEquityChart" width="900" height="240"></canvas><div class="sub">Isolated simulated account. No ATI/P11 balance is read or modified.</div></section>
+    <section><h4>Leverage Lab - same fill and path</h4><div class="cv-scroll"><table class="tbl"><thead><tr><th>x</th><th>N</th><th>PnL</th><th>Equity</th><th>Net EV</th><th>PF</th><th>DD</th><th>Liquidations</th><th>Status</th></tr></thead><tbody id="cvLeverage"><tr><td colspan="9">NEED_MORE_DATA</td></tr></tbody></table></div></section>
+    <section><h4>Component health</h4><div class="cv-scroll"><table class="tbl"><thead><tr><th>Component</th><th>Status</th><th>Last age ms</th><th>Reconnects</th><th>Gaps</th><th>Error</th></tr></thead><tbody id="cvHealth"><tr><td colspan="6">CONNECTING</td></tr></tbody></table></div></section>
+    <section><h4>Activity feed</h4><div class="cv-activity" id="cvActivity">No simulated account events yet</div></section>
+  </div>
+  <div class="cv-foot"><span id="cvReconciliation">RECONCILIATION: waiting</span><span>Public feeds only</span><span>can_send_real_orders=false</span><span>FINAL_RECOMMENDATION: NO LIVE</span></div>
+</div>'''
+
+
 def _p11_pick(snapshot: dict[str, Any], *paths: str) -> Any:
     """First present value across flat and nested snapshot schema spellings."""
     for path in paths:
@@ -935,9 +1013,9 @@ def _panel_lattice(d: dict) -> str:
 def render_html(d: dict, auto_refresh_seconds: int | None = None) -> str:
     base = A.render_html({**d, "readiness": d.get("readiness_v1043c") or d.get("readiness")})
     base = _remove_legacy_probability_lattice(base)
-    base = base.replace("</style>", _P11_CSS + _ATI_PAPER_CSS + "</style>", 1)
+    base = base.replace("</style>", _P11_CSS + _ATI_PAPER_CSS + _CROSS_VENUE_CSS + "</style>", 1)
     extra = _EXTRA.format(
-        watch=_panel_watch(d), ati_paper=_panel_ati_paper(d),
+        watch=_panel_watch(d), ati_paper=_panel_ati_paper(d), cross_venue=_panel_cross_venue(d),
         pws=_panel_persistent_ws(d), compare=_panel_compare(d),
         p11=_panel_p11_forward_observer(d),
         p11_exports=_panel_p11_exports(d),
@@ -950,7 +1028,7 @@ def render_html(d: dict, auto_refresh_seconds: int | None = None) -> str:
         gen=html.escape(datetime.now(timezone.utc).isoformat()))
     marker = '<div class="foot">'
     base = base.replace(marker, extra + marker, 1) if marker in base else base.replace("</body>", extra + "</body>", 1)
-    base = base.replace("</body>", _ATI_PAPER_JS + "</body>", 1)
+    base = base.replace("</body>", _ATI_PAPER_JS + _CROSS_VENUE_JS + "</body>", 1)
     base = base.replace("V10.43A DASHBOARD", "V10.43C DASHBOARD")
     if auto_refresh_seconds:
         base = _inject_auto_refresh(base, auto_refresh_seconds)
@@ -983,6 +1061,7 @@ _EXTRA = """
 <div class="grid" style="margin-top:14px">
   <div class="card wide"><h3>Dashboard Auto Refresh</h3>{watch}</div>
   <div class="card full ati-paper-card">{ati_paper}</div>
+  <div class="card full cv-card">{cross_venue}</div>
   <div class="card full p11-panel"><h3>P11_SHORT FORWARD OBSERVER</h3>{p11}</div>
   <div class="card full p11-panel"><h3>Reports &amp; Exports — P11_SHORT</h3>{p11_exports}</div>
   <div class="card wide"><h3>Persistent WS Panel</h3>{pws}</div>
@@ -1034,6 +1113,23 @@ _ATI_PAPER_CSS = """
 .ati-paper-detail{margin:0;min-height:170px;max-height:260px;overflow:auto;white-space:pre-wrap;color:#c8d7e8;background:#0b0f14;border:1px solid #25313d;padding:10px;border-radius:4px;font-size:11px}
 @media(max-width:1100px){.ati-paper-metrics{grid-template-columns:repeat(4,minmax(0,1fr))}}
 @media(max-width:760px){.ati-paper-head{display:block}.ati-paper-badges{justify-content:flex-start;margin-top:9px}.ati-paper-metrics{grid-template-columns:repeat(2,minmax(0,1fr))}.ati-paper-charts,.ati-paper-columns{grid-template-columns:1fr}.ati-paper-charts canvas,#atiPaperEquityChart{height:210px}}
+"""
+
+
+_CROSS_VENUE_CSS = """
+.cv-card{grid-column:1/-1;padding:0!important;overflow:hidden}.cv-shell{padding:16px;min-width:0;background:#0d1419}
+.cv-head{display:flex;align-items:flex-start;justify-content:space-between;gap:14px;border-bottom:1px solid var(--line);padding-bottom:12px}
+.cv-head h3,.cv-shell h4{margin:0 0 6px;letter-spacing:0}.cv-head h3{font-size:18px}.cv-shell h4{font-size:11px;text-transform:uppercase;color:var(--muted)}
+.cv-badges{display:flex;flex-wrap:wrap;justify-content:flex-end;gap:6px}.cv-badges span{border:1px solid #b34c54;background:#35181d;color:#ffbac0;padding:5px 8px;border-radius:5px;font:700 10px ui-monospace,monospace}
+.cv-status{margin:10px 0;color:var(--muted);font-size:11px;overflow-wrap:anywhere}.cv-metrics{display:grid;grid-template-columns:repeat(8,minmax(0,1fr));gap:7px}
+.cv-metrics .ati-paper-metric{background:#111c23}.cv-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;margin-top:14px}
+.cv-grid section{min-width:0;border:1px solid var(--line);background:#111a21;padding:10px;border-radius:6px}.cv-scroll{overflow:auto;max-width:100%;max-height:300px}
+.cv-scroll .tbl{min-width:740px}.cv-grid canvas{display:block;width:100%;height:270px;background:#090f13;border:1px solid #273640;border-radius:4px}
+.cv-heatmap{display:grid;grid-template-columns:repeat(auto-fit,minmax(115px,1fr));gap:6px;min-height:80px;color:var(--muted);font:11px ui-monospace,monospace}
+.cv-heat-cell{border:1px solid #2a3945;background:#101920;padding:8px;border-radius:4px;overflow-wrap:anywhere}.cv-heat-cell[data-state="positive"]{border-color:#326c54;background:#10251d}.cv-heat-cell[data-state="negative"]{border-color:#76424a;background:#2a171b}
+.cv-activity{min-height:130px;max-height:260px;overflow:auto;white-space:pre-wrap;color:#c8d7e8;background:#090f13;border:1px solid #273640;padding:9px;border-radius:4px;font:10px ui-monospace,monospace}
+.cv-foot{display:flex;flex-wrap:wrap;gap:8px;margin-top:12px}.cv-foot span{border:1px solid var(--line);background:#111a21;padding:6px 8px;border-radius:4px;color:var(--muted);font:10px ui-monospace,monospace}
+@media(max-width:1200px){.cv-metrics{grid-template-columns:repeat(4,minmax(0,1fr))}}@media(max-width:800px){.cv-head{display:block}.cv-badges{justify-content:flex-start;margin-top:9px}.cv-metrics{grid-template-columns:repeat(2,minmax(0,1fr))}.cv-grid{grid-template-columns:1fr}.cv-grid canvas{height:220px}}
 """
 
 
@@ -1098,6 +1194,40 @@ _ATI_PAPER_JS = r"""
     const ac=a.account||{},sz=a.sizing||{};set('atiPaperExecutor',h.status);set('atiPaperAccount',ac.account_id);set('atiPaperInitial',num(ac.initial_balance));set('atiPaperCash',num(ac.cash_balance));set('atiPaperRealized',num(ac.realized_equity));set('atiPaperTotal',num(ac.total_equity));set('atiPaperUnrealized',num(ac.unrealized_pnl));set('atiPaperRealizedPnl',num(ac.realized_pnl_total));set('atiPaperDaily',num(a.daily_pnl));set('atiPaperReturn',`${num(a.cumulative_return_pct,2)}%`);set('atiPaperPeak',num(ac.equity_peak));set('atiPaperDrawdown',`${num(Number(ac.drawdown_pct)*100,2)}%`);set('atiPaperMaxDrawdown',`${num(Number(ac.max_drawdown_pct)*100,2)}%`);set('atiPaperExposure',num(a.open_exposure));set('atiPaperSizing',sz.method);set('atiPaperFraction',num(sz.configured_position_fraction,4));set('atiPaperTradesCount',perf.total_trades);set('atiPaperWinRate',perf.win_rate===null?'N/A':`${num(Number(perf.win_rate)*100,2)}%`);set('atiPaperProfitFactor',num(perf.profit_factor));set('atiPaperNetEv',perf.net_ev_pct===null?'N/A':`${num(perf.net_ev_pct,3)}%`);set('atiPaperHeartbeat',h.last_heartbeat);set('atiPaperMarketAge',h.market_data_age_seconds===null?'N/A':`${num(h.market_data_age_seconds,1)}s`);set('atiPaperPolicy',h.policy_version);set('atiPaperCommit',String(h.commit_hash||'N/A').slice(0,12));renderPositions(p.positions||[]);renderTrades(t.trades||[]);renderEvents(v.events||[]);drawEquity(e.equity||[]);const symbol=(p.positions&&p.positions[0]&&p.positions[0].symbol)||'BTCUSDT';drawMarket(await get(`/api/ati-paper/chart?symbol=${encodeURIComponent(symbol)}`));$('atiPaperPollStatus').textContent=`LIVE LOCAL API | ${new Date().toISOString()} | ${h.status} | SIMULATION ONLY | NO LIVE`;
   }catch(err){$('atiPaperPollStatus').textContent=`LOCAL API UNAVAILABLE: ${err.message} | static snapshot retained | NO LIVE`;}}
   refresh();setInterval(refresh,5000);window.addEventListener('resize',()=>refresh());
+})();
+</script>
+"""
+
+
+_CROSS_VENUE_JS = r"""
+<script>
+(() => {
+  "use strict";
+  const $ = id => document.getElementById(id); if (!$('crossVenuePanel')) return;
+  const get = async path => { const r=await fetch(path,{cache:'no-store',credentials:'same-origin'}); if(!r.ok) throw new Error(`${path} HTTP ${r.status}`); return r.json(); };
+  const text = v => (v===null||v===undefined||v===''?'N/A':String(v));
+  const num = (v,d=3) => { const n=Number(v); return Number.isFinite(n)?n.toFixed(d):'N/A'; };
+  const set = (id,v) => { const el=$(id); if(el) el.textContent=text(v); };
+  function rows(id,data,columns,empty){const body=$(id);body.textContent='';if(!data.length){const tr=document.createElement('tr'),td=document.createElement('td');td.colSpan=columns.length;td.textContent=empty;tr.append(td);body.append(tr);return;}data.forEach(item=>{const tr=document.createElement('tr');columns.forEach(fn=>{const td=document.createElement('td');td.textContent=text(fn(item));tr.append(td)});body.append(tr)});}
+  function draw(series){const c=$('cvPriceChart'),ratio=window.devicePixelRatio||1,rect=c.getBoundingClientRect(),w=Math.max(320,rect.width),h=Math.max(190,rect.height);c.width=Math.round(w*ratio);c.height=Math.round(h*ratio);const x=c.getContext('2d');x.setTransform(ratio,0,0,ratio,0,0);x.clearRect(0,0,w,h);const colors={bitget:'#58a6ff',binance:'#f0b90b',bybit:'#f4a261',okx:'#dfe7ee',hyperliquid:'#4ecb8d'};let lines=[];Object.entries(series||{}).forEach(([symbol,venues])=>Object.entries(venues||{}).forEach(([venue,points])=>{if(!points.length)return;const first=Number(points[0].price);if(!Number.isFinite(first)||first<=0)return;lines.push({name:`${symbol} ${venue}`,venue,pts:points.map(p=>[Number(p.monotonic_ns),Number(p.price)/first*100]).filter(p=>p.every(Number.isFinite))})}));if(!lines.length){x.fillStyle='#8291a2';x.fillText('WAITING FOR SYNCHRONIZED PUBLIC EVENTS',16,26);return;}const times=lines.flatMap(l=>l.pts.map(p=>p[0])),vals=lines.flatMap(l=>l.pts.map(p=>p[1]));const t0=Math.min(...times),t1=Math.max(...times),lo=Math.min(...vals),hi=Math.max(...vals),px=t=>12+(t-t0)/Math.max(1,t1-t0)*(w-24),py=v=>h-24-(v-lo)/Math.max(.000001,hi-lo)*(h-44);lines.forEach((l,j)=>{x.strokeStyle=colors[l.venue]||['#b388ff','#f06292','#80cbc4'][j%3];x.lineWidth=1.5;x.beginPath();l.pts.forEach((p,i)=>i?x.lineTo(px(p[0]),py(p[1])):x.moveTo(px(p[0]),py(p[1])));x.stroke();x.fillStyle=x.strokeStyle;x.fillText(l.name,14+(j%3)*145,14+Math.floor(j/3)*13)});}
+  function drawEquity(data){const c=$('cvEquityChart'),ratio=window.devicePixelRatio||1,rect=c.getBoundingClientRect(),w=Math.max(320,rect.width),h=Math.max(180,rect.height);c.width=Math.round(w*ratio);c.height=Math.round(h*ratio);const x=c.getContext('2d');x.setTransform(ratio,0,0,ratio,0,0);x.clearRect(0,0,w,h);const points=(data||[]).slice().reverse().map(r=>Number(r.total_equity)).filter(Number.isFinite);if(!points.length){x.fillStyle='#8291a2';x.fillText('WAITING FOR ISOLATED EQUITY LEDGER',16,26);return;}let lo=Math.min(...points),hi=Math.max(...points);const pad=Math.max((hi-lo)*.1,.01);lo-=pad;hi+=pad;const px=i=>12+i*(w-24)/Math.max(1,points.length-1),py=v=>h-18-(v-lo)/Math.max(.000001,hi-lo)*(h-36);x.strokeStyle='#58a6ff';x.lineWidth=2;x.beginPath();points.forEach((v,i)=>i?x.lineTo(px(i),py(v)):x.moveTo(px(i),py(v)));x.stroke();x.fillStyle='#8291a2';x.fillText(`${lo.toFixed(2)} - ${hi.toFixed(2)} simulated USDT`,14,14);}
+  function renderHeatmap(data){const box=$('cvHeatmap');box.textContent='';if(!data.length){box.textContent='NEED_MORE_DATA - no historical reliability is inferred';return;}data.forEach(r=>{const cell=document.createElement('div');cell.className='cv-heat-cell';const mature=Number(r.sample_size)>=200;const probability=Number(r.continuation_probability);cell.dataset.state=mature&&Number.isFinite(probability)?(probability>.5?'positive':'negative'):'neutral';cell.textContent=`${text(r.symbol)} | ${text(r.venue)} | ${text(r.horizon_ms)}ms | N=${text(r.sample_size)} | cont=${num(r.continuation_probability)} | ${text(r.status)}`;box.append(cell);});}
+  function renderActivity(data){const box=$('cvActivity');box.textContent='';if(!data.length){box.textContent='No simulated account events yet';return;}data.slice(0,80).forEach(r=>{const line=document.createElement('div');line.textContent=`${text(r.timestamp)} | ${text(r.event_type)} | ${text(r.correlation_id)}`;box.append(line);});}
+  function renderHealth(payload){const combined=[];Object.values(payload.collectors||{}).forEach(r=>combined.push(r));Object.entries(payload.components||{}).forEach(([name,r])=>combined.push({component:name,...r}));rows('cvHealth',combined,[r=>r.component||r.venue,r=>r.status,r=>num(r.last_event_age_ms,1),r=>r.reconnect_count,r=>r.gaps,r=>r.last_error],'CONNECTING');}
+  async function refresh(){try{
+    const paths=['/status','/venues','/prices','/orderflow','/leadlag','/signals','/account','/trades','/equity','/events','/leverage','/health'];
+    const [status,venues,prices,flow,lead,signals,account,trades,equity,events,lev,health]=await Promise.all(paths.map(p=>get('/api/cross-venue'+p)));
+    const vr=venues.venues||[],of=flow.orderflow||[],sg=signals.signals||[],tr=trades.trades||[],eq=equity.equity||[],ev=events.events||[],ac=account.account||{},leaders=(lead.leadlag||{}).leaderboard||[],sc=(lev.leverage||{}).scenarios||[];
+    set('cvSystemStatus',health.status);set('cvVenueCount',vr.length);set('cvSignalCount',sg.length);set('cvPositionCount',(status.counts||{}).positions||0);set('cvTradeCount',tr.length);set('cvAccountId',ac.account_id||'CROSS_VENUE_PAPER_50');set('cvCash',num(ac.cash));set('cvEquity',num(ac.total_equity));set('cvRealized',num(ac.realized_pnl));set('cvFees',num(ac.fees));set('cvSlippage',num(ac.slippage));set('cvMaxDrawdown',num(ac.max_drawdown_pct));set('cvEdgeValidated','false');
+    rows('cvVenues',vr,[r=>r.venue,r=>r.symbol,r=>num(r.price),r=>num(r.best_bid),r=>num(r.best_ask),r=>num(r.spread_bps),r=>num(r.microprice),r=>num(r.book_imbalance_l1),r=>r.trade_events_1s,r=>num(r.funding_rate,6),r=>num(r.open_interest),r=>num(r.last_event_age_ms??r.receive_age_ms,1),r=>r.collector_status,r=>r.signal_eligible],'WAITING FOR REAL PUBLIC EVENTS');
+    rows('cvOrderflow',of,[r=>r.venue,r=>r.symbol,r=>r.trade_events_1s,r=>num(r.buy_volume_1s),r=>num(r.sell_volume_1s),r=>num(r.net_aggressor_volume_1s),r=>num(r.book_imbalance_l1),r=>num(r.microprice)],'NEED_DATA');
+    rows('cvLeaders',leaders,[r=>r.venue,r=>r.symbol,r=>`${r.horizon_ms}ms`,r=>r.sample_size,r=>num(r.continuation_probability),r=>num(r.reversal_probability),r=>r.status],'NEED_MORE_DATA');
+    rows('cvSignals',sg.slice(-30),[r=>r.symbol,r=>r.direction,r=>(r.leader_venues||[]).join(','),r=>num(r.expected_remaining_move_bps),r=>num(r.estimated_total_cost_bps),r=>num(r.unlevered_net_edge_bps),r=>r.status,r=>r.rejection_reason],'WAITING FOR SIGNAL; NO ACTIVITY IS FORCED');
+    rows('cvTrades',tr,[r=>r.exit_ts,r=>r.symbol,r=>r.direction,r=>num(r.net_pnl),r=>num(r.fees),r=>num(r.slippage),r=>r.exit_reason],'No simulated forward trades');
+    rows('cvLeverage',sc,[r=>`${r.leverage}x`,r=>r.trades,r=>num(r.pnl),r=>num(r.equity),r=>num(r.net_ev),r=>num(r.profit_factor),r=>num(r.max_drawdown_pct),r=>r.liquidations,r=>r.status],'NEED_MORE_DATA');
+    draw(prices.normalized_price_series||{});drawEquity(eq);renderHeatmap(leaders);renderActivity(ev);renderHealth(health);set('cvReconciliation',`RECONCILIATION: ${text((status.reconciliation||{}).status)}`);$('cvPollStatus').textContent=`LOCAL READ-ONLY API | ${new Date().toISOString()} | ${health.status} | SIMULATION ONLY | NOT ACTIONABLE | NO LIVE`;
+  }catch(err){$('cvPollStatus').textContent=`LOCAL API UNAVAILABLE: ${err.message} | static snapshot retained | NO LIVE`;}}
+  refresh();setInterval(refresh,3000);window.addEventListener('resize',()=>refresh());
 })();
 </script>
 """

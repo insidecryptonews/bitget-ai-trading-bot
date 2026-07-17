@@ -31,6 +31,13 @@ $script:ManagedMarkers = @(
     "app.labs.ati_paper.cli run",
     "app.labs.ati_paper.server",
     "research-heavy-run-v1044"
+    "run_cross_venue_bitget_forever.ps1",
+    "run_cross_venue_binance_forever.ps1",
+    "run_cross_venue_bybit_forever.ps1",
+    "run_cross_venue_okx_forever.ps1",
+    "run_cross_venue_hyperliquid_forever.ps1",
+    "run_cross_venue_engine_forever.ps1",
+    "app.labs.cross_venue.cli"
 )
 
 function Get-LocalStackDefinitions {
@@ -44,6 +51,12 @@ function Get-LocalStackDefinitions {
         [pscustomobject]@{ Name="dashboard_watcher"; Kind="powershell"; Script="run_dashboard_watcher_forever.ps1" },
         [pscustomobject]@{ Name="research_health_server"; Kind="powershell"; Script="run_research_server.ps1" },
         [pscustomobject]@{ Name="heavy_research_scheduler"; Kind="powershell"; Script="run_heavy_research_scheduler.ps1" }
+        [pscustomobject]@{ Name="cross_venue_bitget"; Kind="powershell"; Script="run_cross_venue_bitget_forever.ps1" }
+        [pscustomobject]@{ Name="cross_venue_binance"; Kind="powershell"; Script="run_cross_venue_binance_forever.ps1" }
+        [pscustomobject]@{ Name="cross_venue_bybit"; Kind="powershell"; Script="run_cross_venue_bybit_forever.ps1" }
+        [pscustomobject]@{ Name="cross_venue_okx"; Kind="powershell"; Script="run_cross_venue_okx_forever.ps1" }
+        [pscustomobject]@{ Name="cross_venue_hyperliquid"; Kind="powershell"; Script="run_cross_venue_hyperliquid_forever.ps1" }
+        [pscustomobject]@{ Name="cross_venue_engine"; Kind="powershell"; Script="run_cross_venue_engine_forever.ps1" }
     )
 }
 

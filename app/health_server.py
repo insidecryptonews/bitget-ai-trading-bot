@@ -47,6 +47,7 @@ _RESEARCH_DASHBOARD_V1043C = (
 )
 _RESEARCH_DASHBOARD_V1043C_HTML = _RESEARCH_DASHBOARD_V1043C.parent / "index.html"
 _ATI_PAPER_API_PREFIX = "/api/ati-paper/"
+_CROSS_VENUE_API_PREFIX = "/api/cross-venue/"
 _HEAVY_SCHEDULER_STATUS = (
     Path(__file__).resolve().parents[1]
     / "data" / "runtime" / "heavy_research" / "scheduler_status.json"
@@ -77,6 +78,7 @@ def start_health_server(
                 payload["research_components"] = components["components"]
                 payload["ati_shadow"] = components["components"]["ati_shadow"]
                 payload["ati_paper_executor"] = components["components"]["ati_paper_executor"]
+                payload["cross_venue"] = components["components"].get("cross_venue", {})
                 self._send_json(payload)
                 return
             if path == "/favicon.ico":
@@ -269,7 +271,7 @@ def start_health_server(
                 "/api/training/export/candidates.csv",
                 "/api/training/short-report",
                 "/trader-terminal",
-            } or path.startswith("/api/researchops/v104/") or path.startswith(_ATI_PAPER_API_PREFIX):
+            } or path.startswith("/api/researchops/v104/") or path.startswith(_ATI_PAPER_API_PREFIX) or path.startswith(_CROSS_VENUE_API_PREFIX):
                 if not _authorized(config, query, self.headers):
                     self._send_json({"error": "unauthorized"}, status=401)
                     return
@@ -283,6 +285,12 @@ def start_health_server(
                 from .labs.ati_paper.api import api_payload
 
                 payload, status = api_payload(path, query)
+                self._send_json(payload, status=status)
+                return
+            if path.startswith(_CROSS_VENUE_API_PREFIX):
+                from .labs.cross_venue.api import api_payload as cross_venue_api_payload
+
+                payload, status = cross_venue_api_payload(path, query)
                 self._send_json(payload, status=status)
                 return
             # V10.4 — read-only Trader Terminal (GET only; no mutable routes).
@@ -1209,6 +1217,26 @@ def _research_components_status_payload(state: HealthState) -> dict[str, Any]:
             "simulation_only": True, "can_send_real_orders": False,
             "final_recommendation": "NO LIVE",
         }
+    try:
+        from .labs.cross_venue.api import (
+            health_components as cross_venue_health_components,
+            health_payload as cross_venue_health_payload,
+        )
+
+        cross_venue_components = cross_venue_health_components()
+        cross_venue_health = cross_venue_health_payload()
+    except Exception as exc:
+        cross_venue_components = {
+            "CROSS_VENUE_SYSTEM": {
+                "status": "ERROR", "last_error": f"{type(exc).__name__}:{str(exc)[:200]}",
+                "research_only": True, "can_send_real_orders": False,
+                "final_recommendation": "NO LIVE",
+            }
+        }
+        cross_venue_health = {"status": "ERROR"}
+    cross_venue_status = str(cross_venue_health.get("status") or "CONNECTING")
+    if cross_venue_status not in {"PAPER_RESEARCH", "CONNECTING", "STALE", "DEGRADED", "ERROR"}:
+        cross_venue_status = "DEGRADED"
     collector_status = str(collector.get("status") or "NO_DATA")
     persistent_status = str(persistent.get("status") or "NO_DATA")
     dataset_ready = bool(sources.get("ready_for_shadow_forward"))
@@ -1283,6 +1311,15 @@ def _research_components_status_payload(state: HealthState) -> dict[str, Any]:
         },
         "ati_shadow": ati,
         "ati_paper_executor": ati_paper,
+        "cross_venue": {
+            "status": cross_venue_status,
+            "components": cross_venue_components,
+            "research_only": True,
+            "simulation_only": True,
+            "can_send_real_orders": False,
+            "final_recommendation": "NO LIVE",
+        },
+        **cross_venue_components,
     }
     statuses = [str(item.get("status") or "NO_DATA") for item in components.values()]
     if any(item == "ERROR" for item in statuses):

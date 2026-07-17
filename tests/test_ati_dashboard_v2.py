@@ -91,10 +91,16 @@ def test_health_components_are_separate_and_fail_closed_on_stale_heavy_metrics(
         "simulation_only": True, "final_recommendation": "NO LIVE",
     })
     payload = health_server._research_components_status_payload(HealthState(mode="paper"))
-    assert set(payload["components"]) == {
+    assert {
         "mode", "safety", "bot", "collectors", "datasets",
         "dashboard_watcher", "heavy_research", "ati_shadow", "ati_paper_executor",
-    }
+    } <= set(payload["components"])
+    assert {
+        "cross_venue", "CROSS_VENUE_BITGET", "CROSS_VENUE_BINANCE",
+        "CROSS_VENUE_BYBIT", "CROSS_VENUE_OKX", "CROSS_VENUE_HYPERLIQUID",
+        "CROSS_VENUE_NORMALIZER", "CROSS_VENUE_LEADLAG", "CROSS_VENUE_PAPER",
+        "CROSS_VENUE_LEVERAGE_LAB",
+    } <= set(payload["components"])
     assert payload["components"]["heavy_research"]["status"] == "DEGRADED"
     assert payload["overall_status"] == "DEGRADED"
     assert payload["components"]["safety"]["can_send_real_orders"] is False

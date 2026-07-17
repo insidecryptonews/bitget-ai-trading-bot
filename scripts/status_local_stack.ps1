@@ -41,6 +41,12 @@ $artifactMap = @{
     dashboard_watcher = "reports\research\dashboard_v10_43c\dashboard_watch_status_v1043c.json"
     research_health_server = "reports\research\dashboard_v10_43c\index.html"
     heavy_research_scheduler = "data\runtime\heavy_research\scheduler_status.json"
+    cross_venue_bitget = "external_data\staging\cross_venue_v1\bitget\health.json"
+    cross_venue_binance = "external_data\staging\cross_venue_v1\binance\health.json"
+    cross_venue_bybit = "external_data\staging\cross_venue_v1\bybit\health.json"
+    cross_venue_okx = "external_data\staging\cross_venue_v1\okx\health.json"
+    cross_venue_hyperliquid = "external_data\staging\cross_venue_v1\hyperliquid\health.json"
+    cross_venue_engine = "data\runtime\cross_venue\engine_status.json"
 }
 
 function Get-DescendantPids([int[]]$RootPids) {
@@ -142,6 +148,7 @@ try {
             final_recommendation = $shadow.final_recommendation
         }
         ati_paper_executor = $rawHealth.ati_paper_executor
+        cross_venue = $rawHealth.cross_venue
         can_send_real_orders = $rawHealth.can_send_real_orders
         final_recommendation = $rawHealth.final_recommendation
     }
