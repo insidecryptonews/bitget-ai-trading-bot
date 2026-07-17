@@ -328,6 +328,18 @@ def test_incomplete_horizon_is_not_a_closed_outcome_but_early_stop_is() -> None:
     assert [row["signal_id"] for row in closed] == ["stopped"]
 
 
+def test_forward_outcome_ledger_keeps_only_canonical_policy_per_signal() -> None:
+    rows = [
+        {"signal_id": "s", "outcome_complete": True,
+         "policy": "baseline_structural_1_5R", "net_return": -0.01},
+        {"signal_id": "s", "outcome_complete": True,
+         "policy": "trail_a0.0015_d0.0010", "net_return": 0.02},
+        {"signal_id": "other", "outcome_complete": True,
+         "policy": "baseline_structural_1_5R", "net_return": 0.01},
+    ]
+    assert _closed_forward_trades(rows, {"s"}) == [rows[0]]
+
+
 def test_forward_boundary_uses_source_bar_close_not_open() -> None:
     boundary = _latest_available_at([{
         "last_timestamp": "2026-01-01T23:59:00+00:00",
@@ -396,6 +408,29 @@ def test_forward_merge_ignores_only_explicit_replay_provenance_fields() -> None:
     assert _merge_unique([original], [regenerated], "signal_id") == [original]
     with pytest.raises(ValueError, match="ATI_FORWARD_ID_COLLISION"):
         _merge_unique([original], [{**regenerated, "value": 2}], "signal_id")
+
+
+def test_forward_merge_accepts_only_machine_noise_float_drift() -> None:
+    original = {
+        "signal_id": "same", "decision_ts": "2026-01-01", "direction": "SHORT",
+        "timeframe_context": {"h4_ema50": 63736.3485396715},
+    }
+    regenerated = {
+        **original, "timeframe_context": {"h4_ema50": 63736.34853969643},
+    }
+    assert _merge_unique([original], [regenerated], "signal_id") == [original]
+
+
+def test_forward_merge_rejects_material_float_change() -> None:
+    original = {
+        "signal_id": "same", "decision_ts": "2026-01-01", "direction": "SHORT",
+        "timeframe_context": {"h4_ema50": 63736.3485396715},
+    }
+    changed = {
+        **original, "timeframe_context": {"h4_ema50": 63736.35},
+    }
+    with pytest.raises(ValueError, match="ATI_FORWARD_ID_COLLISION"):
+        _merge_unique([original], [changed], "signal_id")
 
 
 def test_paper_feed_metadata_blocks_preknown_and_stale_outcomes() -> None:

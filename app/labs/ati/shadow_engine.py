@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -27,6 +28,27 @@ _VOLATILE_REPLAY_FIELDS = frozenset({
     "dataset_source", "signal_idx", "entry_idx", "exit_idx",
 })
 _PAPER_FEED_MAX_DECISION_AGE_SECONDS = 30 * 60
+_CANONICAL_FORWARD_OUTCOME_POLICY = "baseline_structural_1_5R"
+
+
+def _semantic_equal(left: Any, right: Any) -> bool:
+    """Strict structural equality with machine-noise tolerance for floats."""
+    if isinstance(left, bool) or isinstance(right, bool):
+        return type(left) is type(right) and left == right
+    if isinstance(left, (int, float)) and isinstance(right, (int, float)):
+        a, b = float(left), float(right)
+        return math.isfinite(a) and math.isfinite(b) and math.isclose(
+            a, b, rel_tol=1e-12, abs_tol=1e-12,
+        )
+    if isinstance(left, dict) and isinstance(right, dict):
+        return left.keys() == right.keys() and all(
+            _semantic_equal(left[key], right[key]) for key in left
+        )
+    if isinstance(left, list) and isinstance(right, list):
+        return len(left) == len(right) and all(
+            _semantic_equal(a, b) for a, b in zip(left, right)
+        )
+    return type(left) is type(right) and left == right
 
 
 def _read_json(path: Path, default: Any) -> Any:
@@ -65,9 +87,7 @@ def _merge_unique(existing: list[dict[str, Any]], incoming: list[dict[str, Any]]
                 name: value for name, value in row.items()
                 if name not in _VOLATILE_REPLAY_FIELDS
             }
-            if json.dumps(current_semantic, sort_keys=True, default=str) != json.dumps(
-                incoming_semantic, sort_keys=True, default=str,
-            ):
+            if not _semantic_equal(current_semantic, incoming_semantic):
                 raise ValueError(f"ATI_FORWARD_ID_COLLISION:{identifier}")
             # Preserve the first durable row and its original provenance. A
             # regenerated replay must not silently rewrite forward history.
@@ -120,9 +140,16 @@ def _latest_available_at(audits: list[dict[str, Any]]) -> str:
 
 def _closed_forward_trades(trades: list[dict[str, Any]],
                            forward_ids: set[str]) -> list[dict[str, Any]]:
+    """Return one canonical realized path per signal.
+
+    Alternative trailing rows are counterfactual exit research and cannot
+    share the signal-keyed forward outcome ledger.
+    """
     return [
         row for row in trades
-        if row.get("signal_id") in forward_ids and row.get("outcome_complete") is True
+        if row.get("signal_id") in forward_ids
+        and row.get("outcome_complete") is True
+        and row.get("policy") == _CANONICAL_FORWARD_OUTCOME_POLICY
     ]
 
 
@@ -375,6 +402,7 @@ def run_shadow_once(*, sample_dir: Path | str | None = None,
         ),
         "open_positions": len(open_rows),
         "closed_outcomes": len(outcomes_ledger),
+        "canonical_forward_outcome_policy": _CANONICAL_FORWARD_OUTCOME_POLICY,
         "last_error": None,
         "reconciliation_status": reconciliation["status"],
         "reconciliation": reconciliation,
