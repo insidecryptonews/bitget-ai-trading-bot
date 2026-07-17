@@ -51,6 +51,23 @@ def _safety() -> dict[str, Any]:
             "not_actionable": True, "final_recommendation": FINAL_RECOMMENDATION_NO_LIVE}
 
 
+def _ati_paper_snapshot() -> dict[str, Any]:
+    try:
+        from .ati_paper.api import dashboard_snapshot
+
+        return dashboard_snapshot()
+    except Exception as exc:
+        return {
+            "status": "ERROR", "error": f"{type(exc).__name__}:{str(exc)[:180]}",
+            "account": {"account": None}, "positions": {"positions": []},
+            "trades": {"trades": []}, "equity": {"equity": []},
+            "events": {"events": []}, "signals": {"signals": []},
+            "health": {"status": "ERROR"}, "performance": {"sample_size": 0},
+            "simulation_only": True, "can_send_real_orders": False,
+            "final_recommendation": FINAL_RECOMMENDATION_NO_LIVE,
+        }
+
+
 def gather_state(symbol: str = "BTCUSDT") -> dict[str, Any]:
     base = A.gather_state(symbol)
     try:
@@ -87,7 +104,8 @@ def gather_state(symbol: str = "BTCUSDT") -> dict[str, Any]:
             "base_metrics": {"source": "EXPLICIT_HEAVY_BUILD",
                              "refreshed_at": _utc_now(),
                              "refresh_mode": "MANUAL_OR_EXPLICIT_CLI"},
-            "p11_short_forward_observer": _load_p11_observer_status(), **_safety()}
+            "p11_short_forward_observer": _load_p11_observer_status(),
+            "ati_paper": _ati_paper_snapshot(), **_safety()}
 
 
 def gather_state_fast(symbol: str = "BTCUSDT") -> dict[str, Any]:
@@ -119,6 +137,7 @@ def gather_state_fast(symbol: str = "BTCUSDT") -> dict[str, Any]:
             "strategy_hardening": strategy, "ws_persistent_tournament": tournament,
             "exit_optimization": exits, "readiness_v1043c": readiness,
             "p11_short_forward_observer": _load_p11_observer_status(),
+            "ati_paper": _ati_paper_snapshot(),
             "fast_metrics": {"last_updated_at": _utc_now(),
                              "source": "ARTIFACT_ONLY_FAST_WATCHER",
                              "heavy_analysis_executed": False},
@@ -521,6 +540,71 @@ def _panel_watch(d: dict) -> str:
         '<div class="sub">Fast watcher is artifact-only: it never scans growing datasets or runs strategy lab / tournament / exit optimization. Stale artifacts require an explicit dashboard build.</div>')
 
 
+def _ati_metric(label: str, value: Any, element_id: str) -> str:
+    display = "N/A" if value is None or value == "" else str(value)
+    return (
+        '<div class="ati-paper-metric"><span>' + html.escape(label) + '</span>'
+        f'<strong id="{html.escape(element_id, quote=True)}">{html.escape(display)}</strong></div>'
+    )
+
+
+def _panel_ati_paper(d: dict) -> str:
+    snapshot = d.get("ati_paper") or {}
+    account_wrap = snapshot.get("account") if isinstance(snapshot.get("account"), dict) else {}
+    account = account_wrap.get("account") if isinstance(account_wrap.get("account"), dict) else {}
+    health = snapshot.get("health") if isinstance(snapshot.get("health"), dict) else {}
+    perf = snapshot.get("performance") if isinstance(snapshot.get("performance"), dict) else {}
+    sizing = account_wrap.get("sizing") if isinstance(account_wrap.get("sizing"), dict) else {}
+    metrics = "".join((
+        _ati_metric("Executor", health.get("status") or "DEGRADED", "atiPaperExecutor"),
+        _ati_metric("Account", account.get("account_id") or "ATI_PAPER_50", "atiPaperAccount"),
+        _ati_metric("Initial USDT", account.get("initial_balance"), "atiPaperInitial"),
+        _ati_metric("Cash", account.get("cash_balance"), "atiPaperCash"),
+        _ati_metric("Realized equity", account.get("realized_equity"), "atiPaperRealized"),
+        _ati_metric("Total equity", account.get("total_equity"), "atiPaperTotal"),
+        _ati_metric("Unrealized PnL", account.get("unrealized_pnl"), "atiPaperUnrealized"),
+        _ati_metric("Realized PnL", account.get("realized_pnl_total"), "atiPaperRealizedPnl"),
+        _ati_metric("Daily PnL", account_wrap.get("daily_pnl"), "atiPaperDaily"),
+        _ati_metric("Return", account_wrap.get("cumulative_return_pct"), "atiPaperReturn"),
+        _ati_metric("Equity peak", account.get("equity_peak"), "atiPaperPeak"),
+        _ati_metric("Current DD", account.get("drawdown_pct"), "atiPaperDrawdown"),
+        _ati_metric("Max DD", account.get("max_drawdown_pct"), "atiPaperMaxDrawdown"),
+        _ati_metric("Open exposure", account_wrap.get("open_exposure"), "atiPaperExposure"),
+        _ati_metric("Sizing", sizing.get("method") or "realized_equity_fraction", "atiPaperSizing"),
+        _ati_metric("Sizing fraction", sizing.get("configured_position_fraction"), "atiPaperFraction"),
+        _ati_metric("Trades", perf.get("total_trades", 0), "atiPaperTradesCount"),
+        _ati_metric("Win rate", perf.get("win_rate"), "atiPaperWinRate"),
+        _ati_metric("Profit factor", perf.get("profit_factor"), "atiPaperProfitFactor"),
+        _ati_metric("Net EV", perf.get("net_ev_pct"), "atiPaperNetEv"),
+        _ati_metric("Last heartbeat", health.get("last_heartbeat"), "atiPaperHeartbeat"),
+        _ati_metric("Market age", health.get("market_data_age_seconds"), "atiPaperMarketAge"),
+        _ati_metric("Policy", health.get("policy_version") or "ATI_PAPER_SIMULATION_V1", "atiPaperPolicy"),
+        _ati_metric("Commit", health.get("commit_hash") or "N/A", "atiPaperCommit"),
+    ))
+    return f'''
+<div class="ati-paper-shell" id="atiPaperPanel">
+  <div class="ati-paper-head">
+    <div><h3>ATI PAPER TRADING - 50 USDT SIMULADOS</h3>
+      <div class="sub">Forward ATI V2 only. Persistent simulated ledger. No historical fills.</div></div>
+    <div class="ati-paper-badges"><span>SIMULATION ONLY</span><span>PAPER_TRADING=True</span><span>DRY_RUN=True</span><span>NO LIVE</span><span>can_send_real_orders=false</span></div>
+  </div>
+  <div class="ati-paper-status" id="atiPaperPollStatus">Static snapshot; connecting to local read-only API...</div>
+  <div class="ati-paper-metrics">{metrics}</div>
+  <div class="ati-paper-charts">
+    <div><h4>Public market + simulated levels</h4><canvas id="atiPaperMarketChart" width="900" height="300"></canvas></div>
+    <div><h4>Equity / drawdown</h4><canvas id="atiPaperEquityChart" width="900" height="220"></canvas></div>
+  </div>
+  <div class="ati-paper-columns">
+    <section><h4>Open positions</h4><div class="ati-paper-table-wrap"><table class="tbl"><thead><tr><th>Symbol</th><th>Side</th><th>Entry</th><th>Last</th><th>Stop</th><th>TP</th><th>Qty</th><th>Notional</th><th>Net mark</th><th>MFE / MAE</th></tr></thead><tbody id="atiPaperPositions"><tr><td colspan="10">No open simulated positions</td></tr></tbody></table></div></section>
+    <section><h4>Closed simulated trades</h4><div class="ati-paper-table-wrap"><table class="tbl"><thead><tr><th>Trade</th><th>UTC</th><th>Symbol</th><th>Side</th><th>Entry / exit</th><th>Notional</th><th>Fees</th><th>Slip</th><th>Net</th><th>Reason</th></tr></thead><tbody id="atiPaperTrades"><tr><td colspan="10">No forward trades</td></tr></tbody></table></div></section>
+  </div>
+  <div class="ati-paper-columns">
+    <section><h4>Audit feed</h4><div class="ati-paper-feed" id="atiPaperEvents">No paper events yet</div></section>
+    <section><h4>Selected trade / policy contract</h4><pre class="ati-paper-detail" id="atiPaperTradeDetail">SIMULATION ONLY\nSizing: realized equity fraction\nUnrealized PnL is never compounded\nSTOP_BEFORE_TP\nFunding: UNKNOWN unless verified\nFINAL_RECOMMENDATION: NO LIVE</pre></section>
+  </div>
+</div>'''
+
+
 def _p11_pick(snapshot: dict[str, Any], *paths: str) -> Any:
     """First present value across flat and nested snapshot schema spellings."""
     for path in paths:
@@ -851,9 +935,9 @@ def _panel_lattice(d: dict) -> str:
 def render_html(d: dict, auto_refresh_seconds: int | None = None) -> str:
     base = A.render_html({**d, "readiness": d.get("readiness_v1043c") or d.get("readiness")})
     base = _remove_legacy_probability_lattice(base)
-    base = base.replace("</style>", _P11_CSS + "</style>", 1)
+    base = base.replace("</style>", _P11_CSS + _ATI_PAPER_CSS + "</style>", 1)
     extra = _EXTRA.format(
-        watch=_panel_watch(d),
+        watch=_panel_watch(d), ati_paper=_panel_ati_paper(d),
         pws=_panel_persistent_ws(d), compare=_panel_compare(d),
         p11=_panel_p11_forward_observer(d),
         p11_exports=_panel_p11_exports(d),
@@ -866,6 +950,7 @@ def render_html(d: dict, auto_refresh_seconds: int | None = None) -> str:
         gen=html.escape(datetime.now(timezone.utc).isoformat()))
     marker = '<div class="foot">'
     base = base.replace(marker, extra + marker, 1) if marker in base else base.replace("</body>", extra + "</body>", 1)
+    base = base.replace("</body>", _ATI_PAPER_JS + "</body>", 1)
     base = base.replace("V10.43A DASHBOARD", "V10.43C DASHBOARD")
     if auto_refresh_seconds:
         base = _inject_auto_refresh(base, auto_refresh_seconds)
@@ -897,6 +982,7 @@ def _remove_legacy_probability_lattice(rendered: str) -> str:
 _EXTRA = """
 <div class="grid" style="margin-top:14px">
   <div class="card wide"><h3>Dashboard Auto Refresh</h3>{watch}</div>
+  <div class="card full ati-paper-card">{ati_paper}</div>
   <div class="card full p11-panel"><h3>P11_SHORT FORWARD OBSERVER</h3>{p11}</div>
   <div class="card full p11-panel"><h3>Reports &amp; Exports — P11_SHORT</h3>{p11_exports}</div>
   <div class="card wide"><h3>Persistent WS Panel</h3>{pws}</div>
@@ -923,6 +1009,97 @@ _P11_CSS = """
 .p11-export-link span{color:var(--muted);font-size:11px}
 .p11-export-link.missing{cursor:not-allowed;opacity:.72}
 @media(max-width:900px){.p11-metrics-grid{grid-template-columns:1fr}.p11-export-grid{grid-template-columns:1fr}.p11-panel .kv .v{max-width:60%}}
+"""
+
+
+_ATI_PAPER_CSS = """
+.ati-paper-card{grid-column:1/-1;padding:0!important;overflow:hidden}
+.ati-paper-shell{padding:16px;min-width:0;background:#10151b}
+.ati-paper-head{display:flex;align-items:flex-start;justify-content:space-between;gap:14px;border-bottom:1px solid var(--line);padding-bottom:12px}
+.ati-paper-head h3,.ati-paper-shell h4{margin:0 0 6px;letter-spacing:0;color:var(--txt)}
+.ati-paper-head h3{font-size:18px}.ati-paper-shell h4{font-size:11px;text-transform:uppercase;color:var(--muted)}
+.ati-paper-badges{display:flex;flex-wrap:wrap;justify-content:flex-end;gap:6px}
+.ati-paper-badges span{border:1px solid #ad3c45;background:#32171b;color:#ffb2b8;padding:5px 8px;border-radius:6px;font:700 10px ui-monospace,monospace}
+.ati-paper-status{margin:10px 0;color:var(--muted);font-size:11px;overflow-wrap:anywhere}
+.ati-paper-metrics{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:7px}
+.ati-paper-metric{min-width:0;border:1px solid var(--line);background:var(--panel2);padding:8px;border-radius:6px}
+.ati-paper-metric span{display:block;color:var(--muted);font-size:9px;text-transform:uppercase;margin-bottom:5px}
+.ati-paper-metric strong{display:block;color:var(--txt);font:600 11px ui-monospace,monospace;white-space:normal;overflow-wrap:anywhere}
+.ati-paper-charts,.ati-paper-columns{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;margin-top:14px}
+.ati-paper-charts>div,.ati-paper-columns>section{min-width:0;border:1px solid var(--line);background:var(--panel2);padding:10px;border-radius:6px}
+.ati-paper-charts canvas{display:block;width:100%;height:240px;background:#0b0f14;border:1px solid #25313d;border-radius:4px}
+#atiPaperEquityChart{height:240px}.ati-paper-table-wrap{max-width:100%;overflow:auto}
+.ati-paper-table-wrap .tbl{min-width:760px}.ati-paper-feed{max-height:260px;overflow:auto;font:11px ui-monospace,monospace}
+.ati-paper-feed div{border-bottom:1px solid var(--line);padding:7px 2px;overflow-wrap:anywhere}
+.ati-paper-detail{margin:0;min-height:170px;max-height:260px;overflow:auto;white-space:pre-wrap;color:#c8d7e8;background:#0b0f14;border:1px solid #25313d;padding:10px;border-radius:4px;font-size:11px}
+@media(max-width:1100px){.ati-paper-metrics{grid-template-columns:repeat(4,minmax(0,1fr))}}
+@media(max-width:760px){.ati-paper-head{display:block}.ati-paper-badges{justify-content:flex-start;margin-top:9px}.ati-paper-metrics{grid-template-columns:repeat(2,minmax(0,1fr))}.ati-paper-charts,.ati-paper-columns{grid-template-columns:1fr}.ati-paper-charts canvas,#atiPaperEquityChart{height:210px}}
+"""
+
+
+_ATI_PAPER_JS = r"""
+<script>
+(() => {
+  "use strict";
+  const $ = id => document.getElementById(id);
+  if (!$('atiPaperPanel')) return;
+  const safe = value => (value === null || value === undefined || value === '' ? 'N/A' : String(value));
+  const num = (value, digits=4) => {
+    const n = Number(value); return Number.isFinite(n) ? n.toFixed(digits) : 'N/A';
+  };
+  const set = (id, value) => { const el=$(id); if(el) el.textContent=safe(value); };
+  const get = async path => {
+    const response = await fetch(path, {cache:'no-store', credentials:'same-origin'});
+    if (!response.ok) throw new Error(`${path} HTTP ${response.status}`);
+    return response.json();
+  };
+  const escapeCell = value => { const td=document.createElement('td'); td.textContent=safe(value); return td; };
+  function renderPositions(rows) {
+    const body=$('atiPaperPositions'); body.textContent='';
+    if(!rows.length){const tr=document.createElement('tr');const td=escapeCell('No open simulated positions');td.colSpan=10;tr.append(td);body.append(tr);return;}
+    rows.forEach(p=>{const tr=document.createElement('tr');[
+      p.symbol,p.direction,num(p.entry_reference_price),num(p.last_price),num(p.stop_price),
+      num(p.take_profit_price),num(p.quantity,8),num(p.notional),num(p.estimated_net_pnl),
+      `${num(p.mfe)} / ${num(p.mae)}`].forEach(v=>tr.append(escapeCell(v)));
+      const show=()=>{$('atiPaperTradeDetail').textContent=JSON.stringify(p,null,2)};
+      tr.tabIndex=0;tr.addEventListener('click',show);tr.addEventListener('keydown',e=>{if(e.key==='Enter')show()});body.append(tr);});
+  }
+  function renderTrades(rows) {
+    const body=$('atiPaperTrades'); body.textContent='';
+    if(!rows.length){const tr=document.createElement('tr');const td=escapeCell('No forward trades');td.colSpan=10;tr.append(td);body.append(tr);return;}
+    rows.forEach(t=>{const tr=document.createElement('tr');tr.tabIndex=0;[
+      String(t.trade_id||'').slice(0,12),t.exit_ts,t.symbol,t.direction,
+      `${num(t.entry_reference_price)} / ${num(t.exit_reference_price)}`,num(t.notional),
+      num(t.fees),num(t.slippage),num(t.net_pnl),t.exit_reason].forEach(v=>tr.append(escapeCell(v)));
+      const show=()=>{$('atiPaperTradeDetail').textContent=JSON.stringify(t,null,2)};
+      tr.addEventListener('click',show);tr.addEventListener('keydown',e=>{if(e.key==='Enter')show()});body.append(tr);});
+  }
+  function renderEvents(rows) {
+    const feed=$('atiPaperEvents');feed.textContent='';
+    if(!rows.length){feed.textContent='No paper events yet';return;}
+    rows.slice(0,80).forEach(e=>{const line=document.createElement('div');
+      line.textContent=`${safe(e.timestamp)} | ${safe(e.event_type)} | ${safe(e.reason)}`;feed.append(line);});
+  }
+  function fit(canvas){const dpr=Math.max(1,Math.min(2,window.devicePixelRatio||1));const rect=canvas.getBoundingClientRect();
+    const w=Math.max(320,Math.floor(rect.width*dpr)),h=Math.max(160,Math.floor(rect.height*dpr));
+    if(canvas.width!==w||canvas.height!==h){canvas.width=w;canvas.height=h}return {w,h,dpr};}
+  function line(ctx,x1,y1,x2,y2,color,width=1){ctx.strokeStyle=color;ctx.lineWidth=width;ctx.beginPath();ctx.moveTo(x1,y1);ctx.lineTo(x2,y2);ctx.stroke()}
+  function drawMarket(payload){const canvas=$('atiPaperMarketChart');const {w,h}=fit(canvas),ctx=canvas.getContext('2d');ctx.clearRect(0,0,w,h);
+    const bars=(payload.bars||[]).slice(-120);if(!bars.length){ctx.fillStyle='#8291a2';ctx.fillText('WAITING FOR PUBLIC CLOSED BARS',16,26);return;}
+    let low=Math.min(...bars.map(b=>Number(b.low))),high=Math.max(...bars.map(b=>Number(b.high)));
+    (payload.positions||[]).forEach(p=>{low=Math.min(low,Number(p.stop_price),Number(p.take_profit_price));high=Math.max(high,Number(p.stop_price),Number(p.take_profit_price))});
+    const pad=Math.max((high-low)*.08,high*.0002);low-=pad;high+=pad;const y=v=>h-20-(Number(v)-low)/(high-low)*(h-38);const step=(w-24)/bars.length;
+    line(ctx,12,h-20,w-8,h-20,'#293642');bars.forEach((b,i)=>{const x=12+i*step+step/2,o=y(b.open),c=y(b.close),hi=y(b.high),lo=y(b.low),up=Number(b.close)>=Number(b.open),color=up?'#4ecb8d':'#ef6672';line(ctx,x,hi,x,lo,color,1);ctx.fillStyle=color;ctx.fillRect(x-Math.max(1,step*.28),Math.min(o,c),Math.max(2,step*.56),Math.max(1,Math.abs(c-o)));});
+    (payload.positions||[]).forEach(p=>{[[p.stop_price,'#ef6672','SL'],[p.take_profit_price,'#4ecb8d','TP'],[p.entry_reference_price,'#58a6ff','ENTRY'],[p.trailing_stop,'#d69e2e','TRAIL']].forEach(([v,c,label])=>{if(v===null||v===undefined)return;const yy=y(v);line(ctx,12,yy,w-8,yy,c,1.5);ctx.fillStyle=c;ctx.fillText(label,14,yy-3)});});}
+  function drawEquity(rows){const canvas=$('atiPaperEquityChart');const {w,h}=fit(canvas),ctx=canvas.getContext('2d');ctx.clearRect(0,0,w,h);rows=(rows||[]).slice(-500);
+    if(!rows.length){ctx.fillStyle='#8291a2';ctx.fillText('WAITING FOR EQUITY LEDGER',16,26);return;}const vals=rows.map(r=>Number(r.total_equity)).filter(Number.isFinite);let lo=Math.min(...vals),hi=Math.max(...vals);const pad=Math.max((hi-lo)*.12,.01);lo-=pad;hi+=pad;const y=v=>h-18-(Number(v)-lo)/(hi-lo)*(h-34),x=i=>12+i*(w-24)/Math.max(1,rows.length-1);ctx.strokeStyle='#58a6ff';ctx.lineWidth=2;ctx.beginPath();rows.forEach((r,i)=>{const yy=y(r.total_equity);i?ctx.lineTo(x(i),yy):ctx.moveTo(x(i),yy)});ctx.stroke();ctx.fillStyle='#8291a2';ctx.fillText(`${lo.toFixed(2)} - ${hi.toFixed(2)} USDT`,14,14);}
+  async function refresh(){try{
+    const [a,p,t,e,v,h,perf]=await Promise.all([get('/api/ati-paper/account'),get('/api/ati-paper/positions'),get('/api/ati-paper/trades'),get('/api/ati-paper/equity'),get('/api/ati-paper/events'),get('/api/ati-paper/health'),get('/api/ati-paper/performance')]);
+    const ac=a.account||{},sz=a.sizing||{};set('atiPaperExecutor',h.status);set('atiPaperAccount',ac.account_id);set('atiPaperInitial',num(ac.initial_balance));set('atiPaperCash',num(ac.cash_balance));set('atiPaperRealized',num(ac.realized_equity));set('atiPaperTotal',num(ac.total_equity));set('atiPaperUnrealized',num(ac.unrealized_pnl));set('atiPaperRealizedPnl',num(ac.realized_pnl_total));set('atiPaperDaily',num(a.daily_pnl));set('atiPaperReturn',`${num(a.cumulative_return_pct,2)}%`);set('atiPaperPeak',num(ac.equity_peak));set('atiPaperDrawdown',`${num(Number(ac.drawdown_pct)*100,2)}%`);set('atiPaperMaxDrawdown',`${num(Number(ac.max_drawdown_pct)*100,2)}%`);set('atiPaperExposure',num(a.open_exposure));set('atiPaperSizing',sz.method);set('atiPaperFraction',num(sz.configured_position_fraction,4));set('atiPaperTradesCount',perf.total_trades);set('atiPaperWinRate',perf.win_rate===null?'N/A':`${num(Number(perf.win_rate)*100,2)}%`);set('atiPaperProfitFactor',num(perf.profit_factor));set('atiPaperNetEv',perf.net_ev_pct===null?'N/A':`${num(perf.net_ev_pct,3)}%`);set('atiPaperHeartbeat',h.last_heartbeat);set('atiPaperMarketAge',h.market_data_age_seconds===null?'N/A':`${num(h.market_data_age_seconds,1)}s`);set('atiPaperPolicy',h.policy_version);set('atiPaperCommit',String(h.commit_hash||'N/A').slice(0,12));renderPositions(p.positions||[]);renderTrades(t.trades||[]);renderEvents(v.events||[]);drawEquity(e.equity||[]);const symbol=(p.positions&&p.positions[0]&&p.positions[0].symbol)||'BTCUSDT';drawMarket(await get(`/api/ati-paper/chart?symbol=${encodeURIComponent(symbol)}`));$('atiPaperPollStatus').textContent=`LIVE LOCAL API | ${new Date().toISOString()} | ${h.status} | SIMULATION ONLY | NO LIVE`;
+  }catch(err){$('atiPaperPollStatus').textContent=`LOCAL API UNAVAILABLE: ${err.message} | static snapshot retained | NO LIVE`;}}
+  refresh();setInterval(refresh,5000);window.addEventListener('resize',()=>refresh());
+})();
+</script>
 """
 
 

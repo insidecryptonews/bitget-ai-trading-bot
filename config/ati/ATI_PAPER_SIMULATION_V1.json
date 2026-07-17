@@ -1,0 +1,54 @@
+{
+  "schema": "ati_paper_simulation.v1",
+  "policy_name": "ATI_PAPER_SIMULATION_V1",
+  "source_policy": "ATI_SHADOW_POLICY_V2",
+  "mode": "PAPER_FORWARD_SIMULATION",
+  "execution_mode": "SIMULATION_ONLY",
+  "account_id": "ATI_PAPER_50",
+  "initial_balance_usdt": 50.0,
+  "can_send_real_orders": false,
+  "paper_filter_enabled": false,
+  "live_trading": false,
+  "sizing": {
+    "method": "realized_equity_fraction",
+    "position_fraction": 1.0,
+    "compound_from": "realized_equity_before_entry",
+    "use_unrealized_pnl": false,
+    "borrowing_enabled": false,
+    "notional_multiplier": 1.0,
+    "reserve_entry_costs": true
+  },
+  "execution": {
+    "fee_bps_per_side": 6.0,
+    "slippage_bps_per_side": 3.0,
+    "spread_bps_round_trip": 2.0,
+    "target_r_multiple": 1.5,
+    "max_holding_minutes": 240,
+    "ambiguity_rule": "STOP_BEFORE_TP",
+    "trailing_enabled": false,
+    "trailing_activation_r": 1.0,
+    "trailing_distance_r": 0.5,
+    "poll_interval_seconds": 15,
+    "market_data_stale_after_seconds": 120,
+    "funding_mode": "UNKNOWN_UNLESS_VERIFIED"
+  },
+  "instrument_rule_fallbacks": {
+    "BTCUSDT": {
+      "min_trade_num": 0.0001,
+      "min_trade_usdt": 5.0,
+      "quantity_step": 0.0001,
+      "volume_place": 4,
+      "price_place": 1,
+      "source": "BITGET_PUBLIC_CONTRACT_SNAPSHOT_2026-07-17"
+    },
+    "ETHUSDT": {
+      "min_trade_num": 0.01,
+      "min_trade_usdt": 5.0,
+      "quantity_step": 0.01,
+      "volume_place": 2,
+      "price_place": 2,
+      "source": "BITGET_PUBLIC_CONTRACT_SNAPSHOT_2026-07-17"
+    }
+  },
+  "final_recommendation": "NO LIVE"
+}

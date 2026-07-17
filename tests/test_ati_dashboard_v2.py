@@ -86,10 +86,14 @@ def test_health_components_are_separate_and_fail_closed_on_stale_heavy_metrics(
     monkeypatch.setattr(health_server, "_ati_shadow_status_payload", lambda: {
         "status": "HEALTHY", "can_send_real_orders": False,
     })
+    monkeypatch.setattr("app.labs.ati_paper.api.health_payload", lambda: {
+        "status": "WAITING_FOR_SIGNAL", "can_send_real_orders": False,
+        "simulation_only": True, "final_recommendation": "NO LIVE",
+    })
     payload = health_server._research_components_status_payload(HealthState(mode="paper"))
     assert set(payload["components"]) == {
         "mode", "safety", "bot", "collectors", "datasets",
-        "dashboard_watcher", "heavy_research", "ati_shadow",
+        "dashboard_watcher", "heavy_research", "ati_shadow", "ati_paper_executor",
     }
     assert payload["components"]["heavy_research"]["status"] == "DEGRADED"
     assert payload["overall_status"] == "DEGRADED"

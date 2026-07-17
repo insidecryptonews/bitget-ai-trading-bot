@@ -1,0 +1,19 @@
+$ErrorActionPreference = "Continue"
+$Repo = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+$Python = Join-Path $Repo ".venv\Scripts\python.exe"
+if (-not (Test-Path -LiteralPath $Python)) { $Python = "python" }
+Set-Location -LiteralPath $Repo
+$host.UI.RawUI.WindowTitle = "ATI PAPER 50 (SIMULATION ONLY - NO LIVE)"
+Write-Host "ATI PAPER TRADING - 50 USDT SIMULADOS" -ForegroundColor Cyan
+Write-Host "SIMULATION ONLY | PAPER_TRADING=True | LIVE_TRADING=False" -ForegroundColor Yellow
+Write-Host "NO PAPER FILTER | NO REAL ORDERS | can_send_real_orders=false" -ForegroundColor Yellow
+Write-Host "Ctrl+C stops the executor; the ledger and open positions remain persisted."
+while ($true) {
+    & $Python -m app.labs.ati_paper.cli run
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "ATI PAPER EXECUTOR ERROR. Controlled restart in 10 seconds." -ForegroundColor Red
+    } else {
+        Write-Host "ATI PAPER executor stopped; restart in 10 seconds unless this window is closed." -ForegroundColor Yellow
+    }
+    Start-Sleep -Seconds 10
+}

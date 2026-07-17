@@ -45,6 +45,12 @@ _RESEARCH_DASHBOARD_V1043C = (
     Path(__file__).resolve().parents[1]
     / "reports" / "research" / "dashboard_v10_43c" / "dashboard_data_v10_43c.json"
 )
+_RESEARCH_DASHBOARD_V1043C_HTML = _RESEARCH_DASHBOARD_V1043C.parent / "index.html"
+_ATI_PAPER_API_PREFIX = "/api/ati-paper/"
+_HEAVY_SCHEDULER_STATUS = (
+    Path(__file__).resolve().parents[1]
+    / "data" / "runtime" / "heavy_research" / "scheduler_status.json"
+)
 
 
 def start_health_server(
@@ -56,6 +62,7 @@ def start_health_server(
     db: Any | None = None,
     training_pulse: Any | None = None,
     telegram_notifier: Any | None = None,
+    host: str = "0.0.0.0",
 ) -> threading.Thread:
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:  # noqa: N802
@@ -69,6 +76,7 @@ def start_health_server(
                 payload["overall_status"] = components["overall_status"]
                 payload["research_components"] = components["components"]
                 payload["ati_shadow"] = components["components"]["ati_shadow"]
+                payload["ati_paper_executor"] = components["components"]["ati_paper_executor"]
                 self._send_json(payload)
                 return
             if not _dashboard_enabled(config):
@@ -79,6 +87,7 @@ def start_health_server(
                 return
             if path in {
                 "/dashboard",
+                "/research-dashboard",
                 "/api/training/status",
                 "/api/training/ati-shadow",
                 "/api/research/ati-shadow",
@@ -255,12 +264,21 @@ def start_health_server(
                 "/api/training/export/candidates.csv",
                 "/api/training/short-report",
                 "/trader-terminal",
-            } or path.startswith("/api/researchops/v104/"):
+            } or path.startswith("/api/researchops/v104/") or path.startswith(_ATI_PAPER_API_PREFIX):
                 if not _authorized(config, query, self.headers):
                     self._send_json({"error": "unauthorized"}, status=401)
                     return
             if path == "/dashboard":
                 self._send_html(_dashboard_html(config))
+                return
+            if path == "/research-dashboard":
+                self._send_html(_research_dashboard_html())
+                return
+            if path.startswith(_ATI_PAPER_API_PREFIX):
+                from .labs.ati_paper.api import api_payload
+
+                payload, status = api_payload(path, query)
+                self._send_json(payload, status=status)
                 return
             # V10.4 — read-only Trader Terminal (GET only; no mutable routes).
             if path == "/trader-terminal":
@@ -834,7 +852,7 @@ def start_health_server(
 
     def run() -> None:
         try:
-            httpd = HTTPServer(("0.0.0.0", port), Handler)
+            httpd = HTTPServer((host, port), Handler)
             server_box["server"] = httpd
             server_ready.set()
             httpd.serve_forever()
@@ -846,7 +864,7 @@ def start_health_server(
     thread.start()
     setattr(thread, "server_ready", server_ready)
     setattr(thread, "server_box", server_box)
-    logger.info("Health server listo en /health puerto %s", port)
+    logger.info("Health server listo en http://%s:%s/health", host, port)
     return thread
 
 
@@ -870,6 +888,20 @@ def _dashboard_html(config: Any | None) -> str:
         html = "<!doctype html><title>Training Dashboard</title><h1>Training Dashboard</h1>"
     refresh = max(2, int(getattr(config, "dashboard_refresh_seconds", 10) or 10))
     return html.replace("__DASHBOARD_REFRESH_SECONDS__", str(refresh))
+
+
+def _research_dashboard_html() -> str:
+    try:
+        if _RESEARCH_DASHBOARD_V1043C_HTML.is_symlink():
+            raise OSError("dashboard symlink blocked")
+        return _RESEARCH_DASHBOARD_V1043C_HTML.read_text(encoding="utf-8")
+    except OSError:
+        return (
+            "<!doctype html><meta charset='utf-8'><title>Research Dashboard</title>"
+            "<body style='background:#101318;color:#e8edf5;font-family:sans-serif;padding:24px'>"
+            "<h1>Research dashboard no generado</h1>"
+            "<p>Ejecuta research-dashboard-build-v1043a. SIMULATION ONLY. NO LIVE.</p></body>"
+        )
 
 
 def _training_status(config: Any | None, db: Any | None, training_pulse: Any | None, telegram_notifier: Any | None) -> dict[str, Any]:
@@ -1104,6 +1136,16 @@ def _research_components_status_payload(state: HealthState) -> dict[str, Any]:
             return {}
         return value if isinstance(value, dict) else {}
 
+    def read_heavy_scheduler() -> dict[str, Any]:
+        path = _HEAVY_SCHEDULER_STATUS
+        if not path.is_file() or path.is_symlink():
+            return {}
+        try:
+            value = json.loads(path.read_text(encoding="utf-8-sig"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+        return value if isinstance(value, dict) else {}
+
     def age(value: Any) -> float | None:
         if not value:
             return None
@@ -1130,11 +1172,22 @@ def _research_components_status_payload(state: HealthState) -> dict[str, Any]:
         if isinstance(dashboard.get("dashboard_watch"), dict) else {}
     )
     slow = dashboard.get("slow_metrics") if isinstance(dashboard.get("slow_metrics"), dict) else {}
+    scheduler = read_heavy_scheduler()
     watcher_age = age(watcher.get("last_refresh_at"))
     watcher_stale = watcher_age is None or watcher_age > max(
         120.0, 3.0 * float(watcher.get("interval_seconds") or 30.0),
     )
     ati = _ati_shadow_status_payload()
+    try:
+        from .labs.ati_paper.api import health_payload as ati_paper_health
+
+        ati_paper = ati_paper_health()
+    except Exception as exc:
+        ati_paper = {
+            "status": "ERROR", "last_error": f"{type(exc).__name__}:{str(exc)[:200]}",
+            "simulation_only": True, "can_send_real_orders": False,
+            "final_recommendation": "NO LIVE",
+        }
     collector_status = str(collector.get("status") or "NO_DATA")
     persistent_status = str(persistent.get("status") or "NO_DATA")
     dataset_ready = bool(sources.get("ready_for_shadow_forward"))
@@ -1185,7 +1238,16 @@ def _research_components_status_payload(state: HealthState) -> dict[str, Any]:
             "last_error": watcher.get("last_error"),
         },
         "heavy_research": {
-            "status": "DEGRADED" if heavy_stale else "HEALTHY",
+            "status": (
+                "ERROR" if scheduler.get("status") == "ERROR"
+                else "HEALTHY" if scheduler.get("status") in {"RUNNING", "COMPLETED"} and not heavy_stale
+                else "DEGRADED"
+            ),
+            "scheduler_status": scheduler.get("status") or "NOT_RUNNING",
+            "scheduler_started_at": scheduler.get("started_at"),
+            "scheduler_finished_at": scheduler.get("finished_at"),
+            "scheduler_next_run_at": scheduler.get("next_run_at"),
+            "scheduler_exit_code": scheduler.get("exit_code"),
             "strategy_age_seconds": slow.get("strategy_age_seconds"),
             "exit_age_seconds": slow.get("exit_age_seconds"),
             "strategy_stale": bool(slow.get("strategy_stale", True)),
@@ -1193,11 +1255,12 @@ def _research_components_status_payload(state: HealthState) -> dict[str, Any]:
             "cache_status": slow.get("source_metrics_cache") or "STALE_UNKNOWN",
         },
         "ati_shadow": ati,
+        "ati_paper_executor": ati_paper,
     }
     statuses = [str(item.get("status") or "NO_DATA") for item in components.values()]
     if any(item == "ERROR" for item in statuses):
         overall = "ERROR"
-    elif any(item not in {"HEALTHY", "PAPER_RESEARCH"} for item in statuses):
+    elif any(item not in {"HEALTHY", "PAPER_RESEARCH", "WAITING_FOR_SIGNAL"} for item in statuses):
         overall = "DEGRADED"
     else:
         overall = "HEALTHY"

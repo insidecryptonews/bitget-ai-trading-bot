@@ -11,6 +11,10 @@ logs/
 .env.local
 .env.production
 .manual_test_tmp/
+data/runtime/
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
 exports/
 training_exports/
 railway_logs_export/
