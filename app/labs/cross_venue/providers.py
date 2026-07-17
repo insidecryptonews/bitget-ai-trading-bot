@@ -60,6 +60,7 @@ def load_config(path: Path | str | None = None) -> dict[str, Any]:
     numeric_nonnegative = (
         "round_trip_taker_fee_bps", "adverse_slippage_bps_each_side", "latency_cost_bps",
         "market_impact_bps", "funding_cost_reserve_bps", "basis_risk_reserve_bps",
+        "causal_reorder_buffer_ms",
         "paper_notional_usdt", "paper_min_notional_usdt",
         "paper_quantity_step", "minimum_free_disk_bytes", "maximum_stream_bytes_per_venue",
     )

@@ -89,7 +89,9 @@ Raw frames and normalized JSONL are append-only and partitioned by venue,
 symbol, event type and UTC date. Each venue has an atomic manifest, chained
 hash, bounded restart dedup, health artifact, and atomic exclusive writer
 lease. Partial JSONL lines are not silently consumed. The root must resolve to
-the exact allowlisted staging directory and cannot be a symlink.
+the exact allowlisted staging directory and cannot be a symlink. Atomic health
+replacement uses a bounded Windows retry for transient reader locks and never
+falls back to an in-place partial write.
 
 On the first productive engine start, byte offsets are frozen at the current
 end of every venue stream. Existing rows remain research history and are never
@@ -100,10 +102,13 @@ offsets remain authoritative.
 
 ### Causal lead-lag engine
 
-The engine merges all venue batches by `local_receive_monotonic_ns`. Events
-older than the persisted causal frontier are dropped and counted; they cannot
-rewrite a past decision. Exchange clocks are retained for diagnostics but are
-never used alone to claim leadership.
+The engine performs a durable k-way merge of the next unread row from every
+venue by `local_receive_monotonic_ns`. Its global cycle budget cannot advance a
+quiet venue beyond an unread busy-venue backlog. Events genuinely older than
+the persisted causal frontier are dropped and counted; they cannot rewrite a
+past decision. Exchange clocks are retained for diagnostics but are never used
+alone to claim leadership. A configured 250 ms causal reorder buffer absorbs
+normal cross-process flush jitter before the frontier advances.
 
 Decision and outcome price history uses only observable L1 bid/ask midpoints.
 Trades feed order-flow diagnostics, while mark price, index price, funding and
@@ -120,7 +125,8 @@ The initial research policy requires:
   slippage, latency cost, market impact, funding reserve, basis-risk reserve,
   and the safety margin.
 
-Rejected observations are retained with reasons. Activity is never forced.
+Rejected observations are retained with reasons and counted separately from
+candidate signals. Activity is never forced.
 Observed feed resolution controls which horizons are measurable; the engine
 does not interpolate 10 ms results from a slower feed.
 

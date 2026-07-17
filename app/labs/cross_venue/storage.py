@@ -11,7 +11,7 @@ import ctypes
 from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, BinaryIO, Iterable
 
 from . import STAGING_ROOT, safety_envelope
 from .providers import load_config
@@ -23,9 +23,25 @@ def utc_now() -> str:
 
 def atomic_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
-    tmp.write_text(json.dumps(payload, indent=2, sort_keys=True, default=str), encoding="utf-8")
-    os.replace(tmp, path)
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.{time.monotonic_ns()}.tmp")
+    try:
+        with tmp.open("w", encoding="utf-8", newline="") as handle:
+            handle.write(json.dumps(payload, indent=2, sort_keys=True, default=str))
+            handle.flush()
+            os.fsync(handle.fileno())
+        for attempt in range(8):
+            try:
+                os.replace(tmp, path)
+                return
+            except PermissionError:
+                if attempt == 7:
+                    raise
+                time.sleep(0.025 * (attempt + 1))
+    finally:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 def safe_staging_root(root: Path | str | None = None) -> Path:
@@ -323,3 +339,28 @@ def read_new_jsonl(path: Path, offset: int, *, max_rows: int = 50_000) -> tuple[
             rows.append(value)
         new_offset = handle.tell()
     return rows, new_offset, error
+
+
+def read_next_jsonl_record(
+    handle: BinaryIO, *, snapshot_size: int,
+) -> tuple[dict[str, Any] | None, int, str | None]:
+    """Read one complete object without crossing the cycle's file-size snapshot."""
+    start = handle.tell()
+    if start >= snapshot_size:
+        return None, start, None
+    line = handle.readline()
+    end = handle.tell()
+    if not line:
+        return None, start, None
+    if end > snapshot_size or not line.endswith(b"\n"):
+        handle.seek(start)
+        return None, start, "PARTIAL_LINE_WAITING"
+    try:
+        value = json.loads(line)
+    except json.JSONDecodeError:
+        handle.seek(start)
+        return None, start, "CORRUPT_JSONL_LINE"
+    if not isinstance(value, dict):
+        handle.seek(start)
+        return None, start, "NON_OBJECT_JSONL_LINE"
+    return value, end, None

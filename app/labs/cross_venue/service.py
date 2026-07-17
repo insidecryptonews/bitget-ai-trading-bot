@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import heapq
 import os
 import time
+from contextlib import ExitStack
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -15,7 +17,7 @@ from .ledger import CrossVenueLedger
 from .leverage import LeverageLab
 from .paper import PaperSimulator
 from .providers import load_config
-from .storage import atomic_json, read_json, read_new_jsonl, safe_staging_root
+from .storage import atomic_json, read_json, read_next_jsonl_record, safe_staging_root
 
 OFFSETS_PATH = RUNTIME_ROOT / "stream_offsets.json"
 
@@ -104,60 +106,108 @@ class CrossVenueService:
         }
         RUNTIME_ROOT.mkdir(parents=True, exist_ok=True)
         atomic_json(self.forward_boundary_path, self.forward_boundary)
-        self.events_processed = 0; self.signals_recorded = 0; self.outcomes_recorded = 0
+        self.events_processed = 0; self.observations_recorded = 0; self.signals_recorded = 0; self.outcomes_recorded = 0
         self.late_events_dropped = 0
+        self.max_late_event_lag_ms = 0.0
         self.last_event_at: str | None = None; self.errors: list[str] = []
         self.started_at = utc_now()
 
     def cycle(self, *, max_rows_per_venue: int = 20_000) -> dict[str, Any]:
-        cycle_events = 0; opened: list[dict[str, Any]] = []; closed: list[dict[str, Any]] = []
+        cycle_events = 0; rows_consumed = 0; opened: list[dict[str, Any]] = []; closed: list[dict[str, Any]] = []
         signals_path = self.root / "analysis" / "signals.jsonl"
         outcomes_path = self.root / "analysis" / "outcomes.jsonl"
-        batch: list[dict[str, Any]] = []
-        for venue in self.config.get("active_venues", []):
-            stream = self.root / venue / "normalized" / "current.jsonl"
-            old_offset = int(self.offsets.get(venue) or 0)
-            if not stream.is_file():
-                if old_offset > 0:
-                    self.refreeze_venues.add(venue)
-                    self.errors.append(f"{venue}:STREAM_MISSING_REFREEZE_REQUIRED")
-                self.offsets[venue] = 0
-                continue
-            if venue in self.refreeze_venues:
-                self.offsets[venue] = stream.stat().st_size
-                self.refreeze_venues.discard(venue)
-                self.errors.append(f"{venue}:STREAM_RECREATED_FORWARD_BOUNDARY_REFROZEN")
-                continue
-            rows, new_offset, error = read_new_jsonl(stream, old_offset, max_rows=max_rows_per_venue)
-            if error and error not in {"PARTIAL_LINE_WAITING"}:
-                self.errors.append(f"{venue}:{error}")
-            if error == "OFFSET_RESET_FILE_CHANGED":
-                rows, new_offset = [], stream.stat().st_size
-                self.errors.append(f"{venue}:STREAM_CHANGED_FORWARD_BOUNDARY_REFROZEN")
-            batch.extend(rows)
-            self.offsets[venue] = new_offset
-        batch.sort(key=lambda event: (
-            int(event.get("local_receive_monotonic_ns") or 0),
-            int(event.get("local_receive_wall_ms") or 0), str(event.get("venue") or ""),
-        ))
+        # This legacy parameter is now a global cycle budget. A k-way merge of
+        # the next durable row from each venue prevents a busy venue's unread
+        # backlog from being overtaken by newer rows from a quieter venue.
+        event_budget = max(1, int(max_rows_per_venue))
         cycle_floor_monotonic_ns = self.last_processed_monotonic_ns
-        for event in batch:
-            event_mono = int(event.get("local_receive_monotonic_ns") or 0)
-            if event_mono <= 0 or event_mono <= cycle_floor_monotonic_ns:
-                self.late_events_dropped += 1
-                continue
-            result = self.engine.process(event); cycle_events += 1
-            self.last_processed_monotonic_ns = max(self.last_processed_monotonic_ns, event_mono)
-            self.last_event_at = event.get("local_receive_wall_ts") or self.last_event_at
-            signal = result.get("signal")
-            if isinstance(signal, dict):
-                if self.paper.on_signal(signal): self.signals_recorded += 1
-                _append_jsonl(signals_path, signal)
-            for outcome in result.get("outcomes") or []:
-                _append_jsonl(outcomes_path, outcome); self.outcomes_recorded += 1
-            if event.get("venue") == "bitget" and event.get("event_type") in {"book_l1", "ticker"}:
-                paper_result = self.paper.on_bitget_quote(event)
-                opened.extend(paper_result.get("opened") or []); closed.extend(paper_result.get("closed") or [])
+        reorder_buffer_ms = float(self.config.get("causal_reorder_buffer_ms", 250.0))
+        cycle_cutoff_monotonic_ns = time.monotonic_ns() - int(reorder_buffer_ms * 1_000_000)
+        paper_active = bool(self.ledger.open_positions()) or bool(self.ledger.pending_signals())
+        heap: list[tuple[int, int, str, int, dict[str, Any], int]] = []
+        cursors: dict[str, tuple[Any, int]] = {}
+        serial = 0
+
+        with ExitStack() as stack:
+            for venue in self.config.get("active_venues", []):
+                stream = self.root / venue / "normalized" / "current.jsonl"
+                old_offset = int(self.offsets.get(venue) or 0)
+                if stream.is_symlink():
+                    self.errors.append(f"{venue}:STREAM_SYMLINK_BLOCKED")
+                    continue
+                if not stream.is_file():
+                    if old_offset > 0:
+                        self.refreeze_venues.add(venue)
+                        self.errors.append(f"{venue}:STREAM_MISSING_REFREEZE_REQUIRED")
+                    self.offsets[venue] = 0
+                    continue
+                snapshot_size = stream.stat().st_size
+                if venue in self.refreeze_venues:
+                    self.offsets[venue] = snapshot_size
+                    self.refreeze_venues.discard(venue)
+                    self.errors.append(f"{venue}:STREAM_RECREATED_FORWARD_BOUNDARY_REFROZEN")
+                    continue
+                if old_offset < 0 or old_offset > snapshot_size:
+                    self.offsets[venue] = snapshot_size
+                    self.errors.append(f"{venue}:STREAM_CHANGED_FORWARD_BOUNDARY_REFROZEN")
+                    continue
+                handle = stack.enter_context(stream.open("rb"))
+                handle.seek(old_offset)
+                cursors[venue] = (handle, snapshot_size)
+                event, end_offset, error = read_next_jsonl_record(handle, snapshot_size=snapshot_size)
+                if error and error != "PARTIAL_LINE_WAITING":
+                    self.errors.append(f"{venue}:{error}")
+                if event is not None:
+                    serial += 1
+                    heapq.heappush(heap, (
+                        int(event.get("local_receive_monotonic_ns") or 0),
+                        int(event.get("local_receive_wall_ms") or 0), venue, serial, event, end_offset,
+                    ))
+
+            while heap and rows_consumed < event_budget:
+                if heap[0][0] > 0 and heap[0][0] > cycle_cutoff_monotonic_ns:
+                    break
+                event_mono, _, venue, _, event, end_offset = heapq.heappop(heap)
+                rows_consumed += 1
+                self.offsets[venue] = end_offset
+                if event_mono <= 0 or event_mono < cycle_floor_monotonic_ns:
+                    self.late_events_dropped += 1
+                    if event_mono > 0:
+                        self.max_late_event_lag_ms = max(
+                            self.max_late_event_lag_ms,
+                            (cycle_floor_monotonic_ns - event_mono) / 1_000_000.0,
+                        )
+                else:
+                    result = self.engine.process(event); cycle_events += 1
+                    self.last_processed_monotonic_ns = max(self.last_processed_monotonic_ns, event_mono)
+                    self.last_event_at = event.get("local_receive_wall_ts") or self.last_event_at
+                    signal = result.get("signal")
+                    if isinstance(signal, dict):
+                        recorded = self.paper.on_signal(signal)
+                        if recorded:
+                            self.observations_recorded += 1
+                            if signal.get("status") == "CANDIDATE_RESEARCH_ONLY":
+                                self.signals_recorded += 1
+                                paper_active = True
+                        _append_jsonl(signals_path, signal)
+                    for outcome in result.get("outcomes") or []:
+                        _append_jsonl(outcomes_path, outcome); self.outcomes_recorded += 1
+                    if paper_active and event.get("venue") == "bitget" and event.get("event_type") in {"book_l1", "ticker"}:
+                        paper_result = self.paper.on_bitget_quote(event)
+                        opened.extend(paper_result.get("opened") or []); closed.extend(paper_result.get("closed") or [])
+                        paper_active = bool(self.ledger.open_positions()) or bool(self.ledger.pending_signals())
+
+                handle, snapshot_size = cursors[venue]
+                next_event, next_offset, error = read_next_jsonl_record(handle, snapshot_size=snapshot_size)
+                if error and error != "PARTIAL_LINE_WAITING":
+                    self.errors.append(f"{venue}:{error}")
+                if next_event is not None:
+                    serial += 1
+                    heapq.heappush(heap, (
+                        int(next_event.get("local_receive_monotonic_ns") or 0),
+                        int(next_event.get("local_receive_wall_ms") or 0), venue, serial,
+                        next_event, next_offset,
+                    ))
         self.events_processed += cycle_events
         RUNTIME_ROOT.mkdir(parents=True, exist_ok=True)
         atomic_json(OFFSETS_PATH, {"_schema": "cross_venue_stream_offsets.v2", **self.offsets,
@@ -231,11 +281,15 @@ class CrossVenueService:
                 "target_feed_healthy": target_healthy, "healthy_eligible_leaders": healthy_leaders,
                 "required_eligible_leaders": required_leaders,
                 "late_events_dropped_causal_guard": self.late_events_dropped,
+                "max_late_event_lag_ms": self.max_late_event_lag_ms,
+                "causal_reorder_buffer_ms": float(self.config.get("causal_reorder_buffer_ms", 250.0)),
                 **safety_envelope(),
             },
             "CROSS_VENUE_LEADLAG": {
-                "status": "WAITING_FOR_SIGNAL" if not leadlag["recent_signals"] else "HEALTHY",
-                "signals_recorded": self.signals_recorded, "pending_outcomes": leadlag["pending_outcomes"],
+                "status": "WAITING_FOR_SIGNAL" if self.signals_recorded == 0 else "HEALTHY",
+                "observations_recorded": self.observations_recorded,
+                "candidate_signals_recorded": self.signals_recorded,
+                "pending_outcomes": leadlag["pending_outcomes"],
                 "no_lookahead": True, **safety_envelope(),
             },
             "CROSS_VENUE_PAPER": {
@@ -263,6 +317,8 @@ class CrossVenueService:
             "clock_epoch_reset_detected": self.clock_epoch_reset,
             "forward_boundary": self.forward_boundary,
             "late_events_dropped_causal_guard": self.late_events_dropped,
+            "max_late_event_lag_ms": self.max_late_event_lag_ms,
+            "causal_reorder_buffer_ms": float(self.config.get("causal_reorder_buffer_ms", 250.0)),
             "last_event_at": self.last_event_at, "errors": self.errors[-20:],
             "collectors": venues, "components": logical, **safety_envelope(),
         }

@@ -8,6 +8,7 @@
   "signal_eligible_venues": ["binance", "bybit", "okx"],
   "observation_only_venues": ["hyperliquid"],
   "horizons_ms": [10, 25, 50, 100, 250, 500, 1000, 2000, 5000],
+  "causal_reorder_buffer_ms": 250,
   "stale_after_ms": 5000,
   "consensus_window_ms": 750,
   "leader_return_window_ms": 500,

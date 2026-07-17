@@ -270,6 +270,24 @@ def test_stream_reader_waits_on_partial_line(tmp_path):
     assert offset == len(b'{"ok":true}\n')
 
 
+def test_atomic_json_retries_transient_windows_replace_denial(tmp_path, monkeypatch):
+    path = tmp_path / "health.json"
+    real_replace = S.os.replace
+    attempts = []
+
+    def flaky_replace(source, target):
+        attempts.append((source, target))
+        if len(attempts) < 3:
+            raise PermissionError("transient reader lock")
+        return real_replace(source, target)
+
+    monkeypatch.setattr(S.os, "replace", flaky_replace)
+    S.atomic_json(path, {"status": "HEALTHY"})
+    assert json.loads(path.read_text(encoding="utf-8")) == {"status": "HEALTHY"}
+    assert len(attempts) == 3
+    assert not list(tmp_path.glob("*.tmp"))
+
+
 def test_staging_path_is_exact_not_marker_substring(tmp_path, monkeypatch):
     expected = tmp_path / "external_data" / "staging" / "cross_venue_v1"
     monkeypatch.setattr(S, "STAGING_ROOT", expected)
@@ -338,6 +356,89 @@ def test_service_globally_sorts_receive_clock_and_drops_late_batches(tmp_path, m
         handle.write(json.dumps(late)+"\n"+json.dumps(fresh)+"\n")
     service.cycle(); assert seen[-1]==400 and 250 not in seen
     assert service.late_events_dropped==1
+
+
+def test_service_does_not_overtake_unread_busy_venue_backlog(tmp_path, monkeypatch):
+    root=tmp_path/"external_data"/"staging"/"cross_venue_v1"; monkeypatch.setattr(S,"STAGING_ROOT",root)
+    runtime=tmp_path/"runtime"; monkeypatch.setattr(SV,"RUNTIME_ROOT",runtime)
+    monkeypatch.setattr(SV,"OFFSETS_PATH",runtime/"offsets.json")
+    monkeypatch.setattr(SV,"ENGINE_STATUS_PATH",runtime/"status.json")
+    monkeypatch.setattr(SV,"ENGINE_SNAPSHOT_PATH",runtime/"snapshot.json")
+    config=dict(load_config()); config["active_venues"]=["bitget","binance"]
+    rows={
+        "binance": [_event("binance",mono,100+mono/1000,bid=99.99,ask=100.01) for mono in (100,200,300,400)],
+        "bitget": [_event("bitget",350,100,bid=99.99,ask=100.01)],
+    }
+    for venue, events in rows.items():
+        path=root/venue/"normalized"/"current.jsonl"; path.parent.mkdir(parents=True,exist_ok=True)
+        path.write_text("".join(json.dumps(row)+"\n" for row in events),encoding="utf-8")
+    service=SV.CrossVenueService(
+        config=config,root=root,ledger=CrossVenueLedger(runtime/"paper.sqlite"),bootstrap_existing=True,
+    )
+    seen=[]; original=service.engine.process
+    service.engine.process=lambda row:(seen.append(row["local_receive_monotonic_ns"]) or original(row))
+    service.cycle(max_rows_per_venue=2)
+    assert seen == [100,200]
+    service.cycle(max_rows_per_venue=2)
+    service.cycle(max_rows_per_venue=2)
+    assert seen == [100,200,300,350,400]
+    assert service.late_events_dropped == 0
+
+
+def test_service_reorder_buffer_holds_recent_rows_without_advancing_offset(tmp_path, monkeypatch):
+    root=tmp_path/"external_data"/"staging"/"cross_venue_v1"; monkeypatch.setattr(S,"STAGING_ROOT",root)
+    runtime=tmp_path/"runtime"; monkeypatch.setattr(SV,"RUNTIME_ROOT",runtime)
+    monkeypatch.setattr(SV,"OFFSETS_PATH",runtime/"offsets.json")
+    monkeypatch.setattr(SV,"ENGINE_STATUS_PATH",runtime/"status.json")
+    monkeypatch.setattr(SV,"ENGINE_SNAPSHOT_PATH",runtime/"snapshot.json")
+    clock={"now":1_000_000_000}; monkeypatch.setattr(SV.time,"monotonic_ns",lambda:clock["now"])
+    config=dict(load_config()); config["active_venues"]=["bitget"]; config["causal_reorder_buffer_ms"]=250
+    path=root/"bitget"/"normalized"/"current.jsonl"; path.parent.mkdir(parents=True,exist_ok=True)
+    path.write_text(json.dumps(_event("bitget",900_000_000,100,bid=99.99,ask=100.01))+"\n",encoding="utf-8")
+    service=SV.CrossVenueService(
+        config=config,root=root,ledger=CrossVenueLedger(runtime/"paper.sqlite"),bootstrap_existing=True,
+    )
+    assert service.cycle()["cycle_events"] == 0
+    assert service.offsets["bitget"] == 0
+    clock["now"] = 1_200_000_000
+    assert service.cycle()["cycle_events"] == 1
+    assert service.offsets["bitget"] == path.stat().st_size
+
+
+def test_rejected_observations_do_not_make_leadlag_signal_healthy(tmp_path, monkeypatch):
+    root=tmp_path/"external_data"/"staging"/"cross_venue_v1"; monkeypatch.setattr(S,"STAGING_ROOT",root)
+    runtime=tmp_path/"runtime"; monkeypatch.setattr(SV,"RUNTIME_ROOT",runtime)
+    monkeypatch.setattr(SV,"OFFSETS_PATH",runtime/"offsets.json")
+    monkeypatch.setattr(SV,"ENGINE_STATUS_PATH",runtime/"status.json")
+    monkeypatch.setattr(SV,"ENGINE_SNAPSHOT_PATH",runtime/"snapshot.json")
+    service=SV.CrossVenueService(root=root,ledger=CrossVenueLedger(runtime/"paper.sqlite"))
+    service.observations_recorded=100; service.signals_recorded=0
+    component=service._health(service.engine.snapshot())["components"]["CROSS_VENUE_LEADLAG"]
+    assert component["status"] == "WAITING_FOR_SIGNAL"
+    assert component["observations_recorded"] == 100
+    assert component["candidate_signals_recorded"] == 0
+
+
+def test_service_skips_paper_ledger_hot_path_without_pending_work(tmp_path, monkeypatch):
+    root=tmp_path/"external_data"/"staging"/"cross_venue_v1"; monkeypatch.setattr(S,"STAGING_ROOT",root)
+    runtime=tmp_path/"runtime"; monkeypatch.setattr(SV,"RUNTIME_ROOT",runtime)
+    monkeypatch.setattr(SV,"OFFSETS_PATH",runtime/"offsets.json")
+    monkeypatch.setattr(SV,"ENGINE_STATUS_PATH",runtime/"status.json")
+    monkeypatch.setattr(SV,"ENGINE_SNAPSHOT_PATH",runtime/"snapshot.json")
+    config=dict(load_config()); config["active_venues"]=["bitget"]
+    path=root/"bitget"/"normalized"/"current.jsonl"; path.parent.mkdir(parents=True,exist_ok=True)
+    path.write_text("".join(
+        json.dumps(_event("bitget",mono,100,bid=99.99,ask=100.01))+"\n"
+        for mono in range(1,101)
+    ),encoding="utf-8")
+    service=SV.CrossVenueService(
+        config=config,root=root,ledger=CrossVenueLedger(runtime/"paper.sqlite"),bootstrap_existing=True,
+    )
+    quote_calls=[]
+    monkeypatch.setattr(service.paper,"on_bitget_quote",lambda event: quote_calls.append(event) or {"opened":[],"closed":[]})
+    result=service.cycle()
+    assert result["cycle_events"] == 100
+    assert quote_calls == []
 
 
 def test_productive_service_freezes_existing_stream_as_forward_boundary(tmp_path, monkeypatch):
