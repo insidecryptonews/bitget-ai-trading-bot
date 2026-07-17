@@ -17,7 +17,10 @@ from .ledger import CrossVenueLedger
 from .leverage import LeverageLab
 from .paper import PaperSimulator
 from .providers import load_config
-from .storage import atomic_json, read_json, read_next_jsonl_record, safe_staging_root, storage_status
+from .storage import (
+    atomic_json, read_json, read_next_jsonl_record, safe_staging_root,
+    storage_status, stream_rollover_lock,
+)
 
 OFFSETS_PATH = RUNTIME_ROOT / "stream_offsets.json"
 HEALTHY_COLLECTOR_STATUSES = {"HEALTHY", "HEALTHY_WITH_RECONNECTS"}
@@ -114,6 +117,13 @@ class CrossVenueService:
         self.started_at = utc_now()
 
     def cycle(self, *, max_rows_per_venue: int = 20_000) -> dict[str, Any]:
+        # A collector may roll a fully consumed derived hot stream at its size
+        # cap. Holding the same cross-process mutex through cursor persistence
+        # makes rename + offset reset atomic from the engine's perspective.
+        with stream_rollover_lock(self.root):
+            return self._cycle_locked(max_rows_per_venue=max_rows_per_venue)
+
+    def _cycle_locked(self, *, max_rows_per_venue: int = 20_000) -> dict[str, Any]:
         cycle_events = 0; rows_consumed = 0; opened: list[dict[str, Any]] = []; closed: list[dict[str, Any]] = []
         signals_path = self.root / "analysis" / "signals.jsonl"
         outcomes_path = self.root / "analysis" / "outcomes.jsonl"

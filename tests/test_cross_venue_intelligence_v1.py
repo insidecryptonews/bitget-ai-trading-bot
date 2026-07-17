@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import gzip
+import hashlib
 import json
 import math
 import os
@@ -246,6 +248,101 @@ def test_capacity_guard_fails_before_write_without_poisoning_dedup(tmp_path, mon
         store.append_events([row])
     store.maximum_stream_bytes=1_000_000
     assert store.append_events([row]) == 1
+    store.close()
+
+
+def test_raw_audit_append_is_not_blocked_by_derived_hot_stream_cap(tmp_path, monkeypatch):
+    store = _isolated_store(tmp_path, monkeypatch)
+    store.stream_path.parent.mkdir(parents=True, exist_ok=True)
+    store.stream_path.write_bytes(b"already-at-derived-cap\n")
+    store.maximum_stream_bytes = 1
+    path = store.append_raw({"public": "frame"}, CLOCK[1], "public-connection")
+    assert path.is_file() and b'"public":"frame"' in path.read_bytes()
+    store.close()
+
+
+def test_consumed_hot_stream_rolls_atomically_and_preserves_partitioned_audit(
+    tmp_path, monkeypatch,
+):
+    root = tmp_path / "external_data" / "staging" / "cross_venue_v1"
+    offsets_path = tmp_path / "runtime" / "stream_offsets.json"
+    monkeypatch.setattr(S, "STAGING_ROOT", root)
+    store = S.StreamStore("bybit", root, consumer_offsets_path=offsets_path)
+    store.open()
+    first = A.BybitAdapter(["BTCUSDT"]).normalize({
+        "topic": "publicTrade.BTCUSDT", "ts": 2,
+        "data": [{"T": 1, "s": "BTCUSDT", "S": "Buy", "v": "1", "p": "100", "i": "roll-1"}],
+    }, clock=CLOCK)[0]
+    second = {**first, "event_id": "roll-2", "raw_event_id": "roll-2"}
+    assert store.append_events([first]) == 1
+    old_bytes = store.stream_path.read_bytes()
+    S.atomic_json(offsets_path, {
+        "_schema": "cross_venue_stream_offsets.v2", "bybit": len(old_bytes),
+    })
+    store.maximum_stream_bytes = len(old_bytes) + 1
+    monkeypatch.setattr(store, "_schedule_segment_compression", lambda _path: None)
+    assert store.append_events([second]) == 1
+    segments = list(store.segments_dir.glob("*.jsonl"))
+    assert len(segments) == 1 and segments[0].read_bytes() == old_bytes
+    assert json.loads(store.stream_path.read_text(encoding="utf-8"))["event_id"] == "roll-2"
+    assert json.loads(offsets_path.read_text(encoding="utf-8"))["bybit"] == 0
+    partitions = list(
+        (root / "bybit" / "normalized" / "BTCUSDT" / "trade").glob("*/events.jsonl")
+    )
+    assert len(partitions) == 1
+    assert partitions[0].read_text(encoding="utf-8").count("\n") == 2
+    manifest = json.loads(store.rollover_manifest_path.read_text(encoding="utf-8"))
+    assert manifest["raw_audit_sources_untouched"] is True
+    store.close()
+
+
+def test_hot_stream_rollover_blocks_when_consumer_lags(tmp_path, monkeypatch):
+    root = tmp_path / "external_data" / "staging" / "cross_venue_v1"
+    offsets_path = tmp_path / "runtime" / "stream_offsets.json"
+    monkeypatch.setattr(S, "STAGING_ROOT", root)
+    store = S.StreamStore("bybit", root, consumer_offsets_path=offsets_path)
+    store.open()
+    row = A.BybitAdapter(["BTCUSDT"]).normalize({
+        "topic": "publicTrade.BTCUSDT", "ts": 2,
+        "data": [{"T": 1, "s": "BTCUSDT", "S": "Buy", "v": "1", "p": "100", "i": "lag-1"}],
+    }, clock=CLOCK)[0]
+    assert store.append_events([row]) == 1
+    before = store.stream_path.read_bytes()
+    S.atomic_json(offsets_path, {
+        "_schema": "cross_venue_stream_offsets.v2", "bybit": len(before) - 1,
+    })
+    store.maximum_stream_bytes = len(before)
+    with pytest.raises(RuntimeError, match="STREAM_SIZE_GUARD_CONSUMER_LAG"):
+        store.append_events([{**row, "event_id": "lag-2", "raw_event_id": "lag-2"}])
+    assert store.stream_path.read_bytes() == before
+    assert not store.segments_dir.exists()
+    store.close()
+
+
+def test_consumed_derived_segment_gzip_is_hashed_and_raw_sources_untouched(
+    tmp_path, monkeypatch,
+):
+    root = tmp_path / "external_data" / "staging" / "cross_venue_v1"
+    offsets_path = tmp_path / "runtime" / "stream_offsets.json"
+    monkeypatch.setattr(S, "STAGING_ROOT", root)
+    store = S.StreamStore("bybit", root, consumer_offsets_path=offsets_path)
+    store.open()
+    store.segments_dir.mkdir(parents=True)
+    segment = store.segments_dir / "stream_test.jsonl"
+    payload = b'{"event_id":"one"}\n'
+    segment.write_bytes(payload)
+    store._register_rollover(segment, len(payload))
+    store._compressing_segments.add(segment)
+    store._compress_segment(segment)
+    compressed = segment.with_suffix(".jsonl.gz")
+    assert not segment.exists() and compressed.is_file()
+    with gzip.open(compressed, "rb") as handle:
+        assert handle.read() == payload
+    manifest = json.loads(store.rollover_manifest_path.read_text(encoding="utf-8"))
+    record = manifest["segments"][0]
+    assert record["raw_sha256"] == hashlib.sha256(payload).hexdigest()
+    assert record["state"] == "GZIP_VERIFIED_DERIVED_SEGMENT"
+    assert manifest["raw_audit_sources_untouched"] is True
     store.close()
 
 

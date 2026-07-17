@@ -3,17 +3,20 @@
 from __future__ import annotations
 
 import hashlib
+import gzip
 import json
 import os
 import shutil
+import threading
 import time
 import ctypes
+import uuid
 from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, BinaryIO, Iterable
 
-from . import STAGING_ROOT, safety_envelope
+from . import RUNTIME_ROOT, STAGING_ROOT, safety_envelope
 from .providers import load_config
 
 
@@ -64,6 +67,56 @@ def safe_staging_root(root: Path | str | None = None) -> Path:
             break
         cursor = cursor.parent
     return target
+
+
+class StreamRolloverLock:
+    """Cross-process mutex for stream cursors and derived spool rollover."""
+
+    def __init__(self, root: Path):
+        self.path = root / "locks" / "stream_rollover.guard"
+        self._handle: Any | None = None
+
+    def __enter__(self) -> "StreamRolloverLock":
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        if self.path.is_symlink():
+            raise ValueError("CROSS_VENUE_ROLLOVER_LOCK_SYMLINK_BLOCKED")
+        self._handle = self.path.open("a+b")
+        self._handle.seek(0, os.SEEK_END)
+        if self._handle.tell() == 0:
+            self._handle.write(b"0")
+            self._handle.flush()
+        self._handle.seek(0)
+        if os.name == "nt":
+            import msvcrt
+
+            msvcrt.locking(self._handle.fileno(), msvcrt.LK_LOCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(self._handle.fileno(), fcntl.LOCK_EX)
+        return self
+
+    def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
+        del exc_type, exc, traceback
+        if self._handle is None:
+            return
+        try:
+            self._handle.seek(0)
+            if os.name == "nt":
+                import msvcrt
+
+                msvcrt.locking(self._handle.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(self._handle.fileno(), fcntl.LOCK_UN)
+        finally:
+            self._handle.close()
+            self._handle = None
+
+
+def stream_rollover_lock(root: Path) -> StreamRolloverLock:
+    return StreamRolloverLock(root)
 
 
 def _json_line(payload: dict[str, Any]) -> bytes:
@@ -153,15 +206,22 @@ class WriterLease:
 
 
 class StreamStore:
-    def __init__(self, venue: str, root: Path | str | None = None, *, dedup_capacity: int = 200_000):
+    def __init__(self, venue: str, root: Path | str | None = None, *, dedup_capacity: int = 200_000,
+                 consumer_offsets_path: Path | str | None = None):
         self.root = safe_staging_root(root)
         self.venue = str(venue).lower()
         if not self.venue.replace("_", "").isalnum():
             raise ValueError("CROSS_VENUE_INVALID_VENUE")
         self.venue_root = self.root / self.venue
         self.stream_path = self.venue_root / "normalized" / "current.jsonl"
+        self.segments_dir = self.venue_root / "normalized" / "consumed_hot_segments"
+        self.rollover_manifest_path = self.venue_root / "normalized" / "rollover_manifest.json"
+        self.rollover_journal_path = self.venue_root / "normalized" / "rollover_journal.json"
         self.health_path = self.venue_root / "health.json"
         self.manifest_path = self.venue_root / "manifest.json"
+        self.consumer_offsets_path = Path(
+            consumer_offsets_path or (RUNTIME_ROOT / "stream_offsets.json")
+        )
         previous_manifest = read_json(self.manifest_path, {}) or {}
         self.reconnect_base = int(previous_manifest.get("reconnect_count_total") or 0)
         self.gap_base = int(previous_manifest.get("gaps_total") or 0)
@@ -179,18 +239,192 @@ class StreamStore:
         self.minimum_free_disk_bytes = int(storage_config["minimum_free_disk_bytes"])
         self.maximum_stream_bytes = int(storage_config["maximum_stream_bytes_per_venue"])
         self.retention_days = int(storage_config.get("retention_days", 14))
+        self._compression_threads: list[threading.Thread] = []
+        self._compressing_segments: set[Path] = set()
+        self._compression_errors: list[str] = []
 
-    def _guard_capacity(self, incoming_bytes: int) -> None:
+    def _guard_disk(self, incoming_bytes: int) -> None:
         free = shutil.disk_usage(self.root.parent if self.root.parent.exists() else self.root.parent.parent).free
-        current = self.stream_path.stat().st_size if self.stream_path.is_file() else 0
         if free - max(0, incoming_bytes) < self.minimum_free_disk_bytes:
             raise RuntimeError("CROSS_VENUE_MINIMUM_FREE_DISK_GUARD")
-        if current + max(0, incoming_bytes) > self.maximum_stream_bytes:
-            raise RuntimeError("CROSS_VENUE_STREAM_SIZE_GUARD")
+
+    def _rollover_manifest(self) -> dict[str, Any]:
+        value = read_json(self.rollover_manifest_path, {}) or {}
+        rows = value.get("segments") if isinstance(value, dict) else None
+        return {
+            "schema": "cross_venue_hot_stream_rollover.v1",
+            "venue": self.venue,
+            "segments": list(rows) if isinstance(rows, list) else [],
+            "raw_audit_sources_untouched": True,
+            "partitioned_normalized_sources_untouched": True,
+            "updated_at": utc_now(),
+            **safety_envelope(),
+        }
+
+    def _register_rollover(self, segment: Path, stream_bytes: int) -> None:
+        manifest = self._rollover_manifest()
+        relative = segment.relative_to(self.venue_root).as_posix()
+        if not any(str(row.get("segment_path")) == relative for row in manifest["segments"]):
+            manifest["segments"].append({
+                "segment_path": relative,
+                "stream_bytes": stream_bytes,
+                "rotated_at": utc_now(),
+                "state": "CONSUMED_DERIVED_SEGMENT_PENDING_GZIP",
+                "derived_hot_stream": True,
+                "raw_audit_sources_untouched": True,
+            })
+        manifest["updated_at"] = utc_now()
+        atomic_json(self.rollover_manifest_path, manifest)
+
+    def _compress_segment(self, segment: Path) -> None:
+        compressed = segment.with_suffix(segment.suffix + ".gz")
+        tmp = compressed.with_name(f"{compressed.name}.{os.getpid()}.{time.monotonic_ns()}.tmp")
+        raw_digest = hashlib.sha256()
+        try:
+            with segment.open("rb") as source, tmp.open("wb") as raw_target:
+                with gzip.GzipFile(filename=segment.name, mode="wb", fileobj=raw_target, mtime=0) as target:
+                    while True:
+                        chunk = source.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        raw_digest.update(chunk)
+                        target.write(chunk)
+                raw_target.flush()
+                os.fsync(raw_target.fileno())
+            os.replace(tmp, compressed)
+            compressed_digest = hashlib.sha256()
+            with compressed.open("rb") as handle:
+                for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                    compressed_digest.update(chunk)
+            with stream_rollover_lock(self.root):
+                manifest = self._rollover_manifest()
+                relative = segment.relative_to(self.venue_root).as_posix()
+                for row in manifest["segments"]:
+                    if str(row.get("segment_path")) == relative:
+                        row.update({
+                            "state": "GZIP_VERIFIED_DERIVED_SEGMENT",
+                            "compressed_path": compressed.relative_to(self.venue_root).as_posix(),
+                            "raw_sha256": raw_digest.hexdigest(),
+                            "compressed_sha256": compressed_digest.hexdigest(),
+                            "compressed_bytes": compressed.stat().st_size,
+                            "compressed_at": utc_now(),
+                        })
+                        break
+                segment.unlink(missing_ok=True)
+                manifest["updated_at"] = utc_now()
+                atomic_json(self.rollover_manifest_path, manifest)
+        except Exception as exc:
+            error = f"{type(exc).__name__}:{str(exc)[:200]}"
+            self._compression_errors.append(error)
+            try:
+                with stream_rollover_lock(self.root):
+                    manifest = self._rollover_manifest()
+                    relative = segment.relative_to(self.venue_root).as_posix()
+                    for row in manifest["segments"]:
+                        if str(row.get("segment_path")) == relative:
+                            row.update({
+                                "state": "GZIP_ERROR_DERIVED_SEGMENT_RETAINED",
+                                "compression_error": error,
+                                "compression_failed_at": utc_now(),
+                            })
+                            break
+                    manifest["updated_at"] = utc_now()
+                    atomic_json(self.rollover_manifest_path, manifest)
+            except Exception:
+                pass
+        finally:
+            tmp.unlink(missing_ok=True)
+            self._compressing_segments.discard(segment)
+
+    def _schedule_segment_compression(self, segment: Path) -> None:
+        if segment in self._compressing_segments or not segment.is_file():
+            return
+        self._compressing_segments.add(segment)
+        thread = threading.Thread(
+            target=self._compress_segment, args=(segment,),
+            name=f"cross-venue-gzip-{self.venue}", daemon=True,
+        )
+        self._compression_threads.append(thread)
+        thread.start()
+
+    def _recover_rollover(self) -> None:
+        journal = read_json(self.rollover_journal_path, {}) or {}
+        if isinstance(journal, dict) and journal.get("segment_path"):
+            segment = self.venue_root / str(journal["segment_path"])
+            if segment.resolve(strict=False).parent != self.segments_dir.resolve(strict=False):
+                raise ValueError("CROSS_VENUE_ROLLOVER_JOURNAL_PATH_INVALID")
+            with stream_rollover_lock(self.root):
+                if segment.is_file():
+                    self.stream_path.parent.mkdir(parents=True, exist_ok=True)
+                    self.stream_path.touch(exist_ok=True)
+                    offsets = read_json(self.consumer_offsets_path, {}) or {}
+                    if not isinstance(offsets, dict) or not str(
+                        offsets.get("_schema") or ""
+                    ).startswith("cross_venue_stream_offsets.v"):
+                        raise RuntimeError(
+                            "CROSS_VENUE_ROLLOVER_RECOVERY_CONSUMER_STATE_UNAVAILABLE"
+                        )
+                    offsets[self.venue] = 0
+                    offsets["updated_at"] = utc_now()
+                    atomic_json(self.consumer_offsets_path, offsets)
+                    self._register_rollover(segment, segment.stat().st_size)
+                self.rollover_journal_path.unlink(missing_ok=True)
+        if self.segments_dir.is_dir() and not self.segments_dir.is_symlink():
+            for segment in self.segments_dir.glob("*.jsonl"):
+                if segment.is_file() and not segment.is_symlink():
+                    self._schedule_segment_compression(segment)
+
+    def _guard_capacity(self, incoming_bytes: int) -> None:
+        self._guard_disk(incoming_bytes)
+        incoming_bytes = max(0, incoming_bytes)
+        current = self.stream_path.stat().st_size if self.stream_path.is_file() else 0
+        if current + incoming_bytes <= self.maximum_stream_bytes:
+            return
+        if incoming_bytes > self.maximum_stream_bytes:
+            raise RuntimeError("CROSS_VENUE_STREAM_SIZE_GUARD_BATCH_TOO_LARGE")
+        with stream_rollover_lock(self.root):
+            current = self.stream_path.stat().st_size if self.stream_path.is_file() else 0
+            if current + incoming_bytes <= self.maximum_stream_bytes:
+                return
+            offsets = read_json(self.consumer_offsets_path, {}) or {}
+            if not isinstance(offsets, dict) or not str(offsets.get("_schema") or "").startswith(
+                "cross_venue_stream_offsets.v"
+            ):
+                raise RuntimeError("CROSS_VENUE_STREAM_SIZE_GUARD_CONSUMER_STATE_UNAVAILABLE")
+            try:
+                consumed_offset = int(offsets.get(self.venue))
+            except (TypeError, ValueError):
+                raise RuntimeError("CROSS_VENUE_STREAM_SIZE_GUARD_CONSUMER_STATE_UNAVAILABLE") from None
+            if consumed_offset != current:
+                raise RuntimeError("CROSS_VENUE_STREAM_SIZE_GUARD_CONSUMER_LAG")
+            if self.stream_path.is_symlink() or self.segments_dir.is_symlink():
+                raise ValueError("CROSS_VENUE_ROLLOVER_SYMLINK_BLOCKED")
+            self.segments_dir.mkdir(parents=True, exist_ok=True)
+            stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+            segment = self.segments_dir / f"stream_{stamp}_{uuid.uuid4().hex[:8]}.jsonl"
+            atomic_json(self.rollover_journal_path, {
+                "schema": "cross_venue_hot_stream_rollover_journal.v1",
+                "venue": self.venue,
+                "segment_path": segment.relative_to(self.venue_root).as_posix(),
+                "stream_bytes": current,
+                "consumer_offset": consumed_offset,
+                "prepared_at": utc_now(),
+                **safety_envelope(),
+            })
+            os.replace(self.stream_path, segment)
+            self.stream_path.touch(exist_ok=False)
+            offsets[self.venue] = 0
+            offsets["updated_at"] = utc_now()
+            atomic_json(self.consumer_offsets_path, offsets)
+            self._register_rollover(segment, current)
+            self.rollover_journal_path.unlink(missing_ok=True)
+            self._initial_stream_bytes = 0
+        self._schedule_segment_compression(segment)
 
     def open(self) -> None:
         self.venue_root.mkdir(parents=True, exist_ok=True)
         self.lease.acquire()
+        self._recover_rollover()
         self._seed_seen()
 
     def close(self) -> None:
@@ -232,7 +466,7 @@ class StreamStore:
             "research_only": True,
         }
         encoded = _json_line(payload)
-        self._guard_capacity(len(encoded))
+        self._guard_disk(len(encoded))
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("ab") as handle:
             handle.write(encoded); handle.flush()
@@ -291,6 +525,8 @@ class StreamStore:
         elapsed_hours = max((time.monotonic() - self._opened_monotonic) / 3600.0, 1.0 / 3600.0)
         growth_per_hour = max(0, stream_bytes - self._initial_stream_bytes) / elapsed_hours
         disk = shutil.disk_usage(self.root.parent if self.root.parent.exists() else self.root.parent.parent)
+        rollover = self._rollover_manifest()
+        rollover_rows = list(rollover.get("segments") or [])
         payload = {
             **payload, "storage_rows_this_process": self.rows_written,
             "raw_frames_this_process": self.raw_frames_written,
@@ -300,7 +536,13 @@ class StreamStore:
             "stream_size_bytes": stream_bytes,
             "stream_growth_bytes_per_hour_this_process": growth_per_hour,
             "disk_free_bytes": disk.free,
-            "rotation_state": "UTC_DATE_PARTITIONS_ACTIVE",
+            "rotation_state": "UTC_DATE_PARTITIONS_AND_BOUNDED_HOT_STREAM_ACTIVE",
+            "hot_stream_rollovers": len(rollover_rows),
+            "hot_stream_compression_pending": sum(
+                str(row.get("state")) == "CONSUMED_DERIVED_SEGMENT_PENDING_GZIP"
+                for row in rollover_rows
+            ),
+            "hot_stream_compression_errors": list(self._compression_errors[-10:]),
             "raw_compression": "NONE_APPEND_ONLY_AUDIT_SOURCE",
             "derived_compaction_status": "SEPARATE_JOB_NOT_IN_HOT_PATH",
             "retention_days_configured": self.retention_days,
@@ -316,7 +558,13 @@ class StreamStore:
             "stream_size_bytes": stream_bytes,
             "stream_growth_bytes_per_hour_this_process": growth_per_hour,
             "disk_free_bytes": disk.free,
-            "rotation_state": "UTC_DATE_PARTITIONS_ACTIVE",
+            "rotation_state": "UTC_DATE_PARTITIONS_AND_BOUNDED_HOT_STREAM_ACTIVE",
+            "hot_stream_rollovers": len(rollover_rows),
+            "hot_stream_compression_pending": sum(
+                str(row.get("state")) == "CONSUMED_DERIVED_SEGMENT_PENDING_GZIP"
+                for row in rollover_rows
+            ),
+            "hot_stream_compression_errors": list(self._compression_errors[-10:]),
             "raw_compression": "NONE_APPEND_ONLY_AUDIT_SOURCE",
             "derived_compaction_status": "SEPARATE_JOB_NOT_IN_HOT_PATH",
             "retention_days_configured": self.retention_days,
@@ -345,8 +593,14 @@ def storage_status(root: Path | str | None = None) -> dict[str, Any]:
         venue_name = str(venue).lower()
         manifest = read_json(safe_root / venue_name / "manifest.json", {}) or {}
         health = read_json(safe_root / venue_name / "health.json", {}) or {}
+        rollover = read_json(
+            safe_root / venue_name / "normalized" / "rollover_manifest.json", {}
+        ) or {}
+        rollover_rows = list(rollover.get("segments") or []) if isinstance(rollover, dict) else []
         stream = safe_root / venue_name / "normalized" / "current.jsonl"
         stream_bytes = stream.stat().st_size if stream.is_file() and not stream.is_symlink() else 0
+        compressed_bytes = sum(int(row.get("compressed_bytes") or 0) for row in rollover_rows)
+        archived_source_bytes = sum(int(row.get("stream_bytes") or 0) for row in rollover_rows)
         total_stream_bytes += stream_bytes
         venues.append({
             "venue": venue_name,
@@ -358,7 +612,20 @@ def storage_status(root: Path | str | None = None) -> dict[str, Any]:
             "rows_this_process": manifest.get("rows_this_process"),
             "raw_frames_this_process": manifest.get("raw_frames_this_process"),
             "last_hash": manifest.get("last_hash"),
-            "rotation_state": manifest.get("rotation_state", "UTC_DATE_PARTITIONS_ACTIVE"),
+            "rotation_state": manifest.get(
+                "rotation_state", "UTC_DATE_PARTITIONS_AND_BOUNDED_HOT_STREAM_ACTIVE"
+            ),
+            "hot_stream_rollovers": len(rollover_rows),
+            "hot_stream_archived_source_bytes": archived_source_bytes,
+            "hot_stream_compressed_bytes": compressed_bytes,
+            "hot_stream_compression_pending": sum(
+                str(row.get("state")) == "CONSUMED_DERIVED_SEGMENT_PENDING_GZIP"
+                for row in rollover_rows
+            ),
+            "hot_stream_compression_errors": [
+                row.get("compression_error") for row in rollover_rows
+                if row.get("compression_error")
+            ],
             "raw_compression": manifest.get("raw_compression", "NONE_APPEND_ONLY_AUDIT_SOURCE"),
             "derived_compaction_status": manifest.get(
                 "derived_compaction_status", "SEPARATE_JOB_NOT_IN_HOT_PATH"
@@ -380,7 +647,7 @@ def storage_status(root: Path | str | None = None) -> dict[str, Any]:
         "total_stream_size_bytes": total_stream_bytes,
         "disk_free_bytes": disk.free,
         "minimum_free_disk_bytes": int(config.get("minimum_free_disk_bytes", 0)),
-        "rotation_state": "UTC_DATE_PARTITIONS_ACTIVE",
+        "rotation_state": "UTC_DATE_PARTITIONS_AND_BOUNDED_HOT_STREAM_ACTIVE",
         "raw_storage_contract": "APPEND_ONLY_JSONL_NO_DELETION",
         "derived_compaction": compaction or {
             "status": "NOT_RUN",
