@@ -27,6 +27,7 @@ from .report import (
 _VOLATILE_REPLAY_FIELDS = frozenset({
     "dataset_source", "signal_idx", "entry_idx", "exit_idx",
 })
+_LATE_MATURING_DIAGNOSTIC_PREFIXES = ("gross_return_", "net_return_")
 _PAPER_FEED_MAX_DECISION_AGE_SECONDS = 30 * 60
 _CANONICAL_FORWARD_OUTCOME_POLICY = "baseline_structural_1_5R"
 
@@ -49,6 +50,21 @@ def _semantic_equal(left: Any, right: Any) -> bool:
             _semantic_equal(a, b) for a, b in zip(left, right)
         )
     return type(left) is type(right) and left == right
+
+
+def _identity_projection(row: dict[str, Any]) -> dict[str, Any]:
+    """Remove provenance and post-close diagnostics from durable identity.
+
+    Horizon-suffixed returns can mature after an early TP/SL has already made
+    the canonical outcome final. They are deliberately not copied back into
+    the append-only ledger; entry, exit, canonical return, costs, and every
+    other field remain strict identity inputs.
+    """
+    return {
+        name: value for name, value in row.items()
+        if name not in _VOLATILE_REPLAY_FIELDS
+        and not any(name.startswith(prefix) for prefix in _LATE_MATURING_DIAGNOSTIC_PREFIXES)
+    }
 
 
 def _read_json(path: Path, default: Any) -> Any:
@@ -79,14 +95,8 @@ def _merge_unique(existing: list[dict[str, Any]], incoming: list[dict[str, Any]]
             continue
         current = merged.get(identifier)
         if current is not None:
-            current_semantic = {
-                name: value for name, value in current.items()
-                if name not in _VOLATILE_REPLAY_FIELDS
-            }
-            incoming_semantic = {
-                name: value for name, value in row.items()
-                if name not in _VOLATILE_REPLAY_FIELDS
-            }
+            current_semantic = _identity_projection(current)
+            incoming_semantic = _identity_projection(row)
             if not _semantic_equal(current_semantic, incoming_semantic):
                 raise ValueError(f"ATI_FORWARD_ID_COLLISION:{identifier}")
             # Preserve the first durable row and its original provenance. A

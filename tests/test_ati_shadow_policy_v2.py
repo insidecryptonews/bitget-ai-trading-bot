@@ -433,6 +433,27 @@ def test_forward_merge_rejects_material_float_change() -> None:
         _merge_unique([original], [changed], "signal_id")
 
 
+def test_forward_merge_preserves_first_row_when_horizon_diagnostics_mature() -> None:
+    original = {
+        "signal_id": "closed", "exit_reason": "SL", "net_return": -0.009,
+        "gross_return_2h": None, "net_return_2h": None,
+    }
+    matured = {
+        **original, "gross_return_2h": -0.0165, "net_return_2h": -0.0185,
+    }
+    assert _merge_unique([original], [matured], "signal_id") == [original]
+
+
+def test_forward_merge_rejects_changed_canonical_outcome_return() -> None:
+    original = {
+        "signal_id": "closed", "exit_reason": "SL", "net_return": -0.009,
+        "net_return_2h": None,
+    }
+    changed = {**original, "net_return": -0.008, "net_return_2h": -0.0185}
+    with pytest.raises(ValueError, match="ATI_FORWARD_ID_COLLISION"):
+        _merge_unique([original], [changed], "signal_id")
+
+
 def test_paper_feed_metadata_blocks_preknown_and_stale_outcomes() -> None:
     now = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
     fresh = _paper_feed_metadata(
