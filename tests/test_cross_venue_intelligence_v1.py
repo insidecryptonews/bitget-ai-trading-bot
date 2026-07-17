@@ -197,6 +197,24 @@ def test_remote_frame_size_and_non_finite_json_are_blocked():
         adapter.receive()
 
 
+def test_bitget_public_application_heartbeat_is_sent_without_auth():
+    class Socket:
+        def __init__(self): self.sent=[]
+        def send(self, value): self.sent.append(value)
+        def recv(self): return "pong"
+
+    adapter=A.BitgetAdapter(["BTCUSDT"]); socket=Socket()
+    adapter._socket=socket; adapter.connected=True
+    adapter._last_application_heartbeat_ns=1
+    frame=adapter.receive()
+    assert frame == {"control": "pong"}
+    assert socket.sent == ["ping"]
+    health=adapter.health()
+    assert health["application_heartbeat_interval_seconds"] == 25.0
+    assert health["application_heartbeats_sent"] == 1
+    assert A.BinanceAdapter(["BTCUSDT"]).application_heartbeat_payload is None
+
+
 def test_collector_rejects_symbols_outside_versioned_allowlist_before_network():
     with pytest.raises(ValueError,match="SYMBOL_OUTSIDE_ALLOWLIST"):
         run_collector("bybit",symbols=["UNKNOWNUSDT"],max_sessions=1,max_messages=1)

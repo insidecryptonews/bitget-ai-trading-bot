@@ -72,6 +72,8 @@ class PublicVenueAdapter(ABC):
     venue: str
     timeout_seconds = 8
     max_message_bytes = 2_000_000
+    application_heartbeat_interval_seconds: float | None = None
+    application_heartbeat_payload: str | None = None
 
     def __init__(self, symbols: list[str]):
         self.symbols = [canonical_symbol(item) for item in symbols]
@@ -85,6 +87,8 @@ class PublicVenueAdapter(ABC):
         self.gaps = 0
         self.duplicates = 0
         self.sequence_regressions = 0
+        self.application_heartbeats_sent = 0
+        self._last_application_heartbeat_ns: int | None = None
         self._last_sequence: dict[tuple[str, str], int] = {}
         self._socket: Any = None
 
@@ -101,6 +105,7 @@ class PublicVenueAdapter(ABC):
         self._socket = connector(url, timeout=self.timeout_seconds, header=[])
         self.connected = True
         self.last_error = None
+        self._last_application_heartbeat_ns = time.monotonic_ns()
         return self._socket
 
     def connection_url(self) -> str:
@@ -117,6 +122,7 @@ class PublicVenueAdapter(ABC):
     def receive(self) -> Any:
         if self._socket is None:
             raise RuntimeError("CROSS_VENUE_NOT_CONNECTED")
+        self._send_application_heartbeat_if_due()
         raw = self._socket.recv()
         self.messages += 1
         if isinstance(raw, bytes):
@@ -135,6 +141,23 @@ class PublicVenueAdapter(ABC):
                 ValueError(f"CROSS_VENUE_REMOTE_NON_FINITE_BLOCKED:{value}")
             ),
         )
+
+    def _send_application_heartbeat_if_due(self, *, now_monotonic_ns: int | None = None) -> bool:
+        interval = self.application_heartbeat_interval_seconds
+        payload = self.application_heartbeat_payload
+        if self._socket is None or interval is None or payload is None:
+            return False
+        now = now_monotonic_ns if now_monotonic_ns is not None else time.monotonic_ns()
+        last = self._last_application_heartbeat_ns
+        if last is None:
+            self._last_application_heartbeat_ns = now
+            return False
+        if now - last < int(interval * 1_000_000_000):
+            return False
+        self._socket.send(payload)
+        self._last_application_heartbeat_ns = now
+        self.application_heartbeats_sent += 1
+        return True
 
     def reconnect(self) -> None:
         self.close()
@@ -170,6 +193,8 @@ class PublicVenueAdapter(ABC):
             "normalized_events": self.normalized_events, "last_event_age_ms": age_ms,
             "reconnect_count": self.reconnect_count, "gaps": self.gaps,
             "duplicates": self.duplicates, "last_error": self.last_error,
+            "application_heartbeat_interval_seconds": self.application_heartbeat_interval_seconds,
+            "application_heartbeats_sent": self.application_heartbeats_sent,
             "sequence_regressions": self.sequence_regressions,
             "sequence_check_status": "MONOTONIC_REGRESSION_ONLY_CHANNEL_CONTRACT_VARIES",
             "connection_id": self.connection_id, **safety_envelope(),
@@ -223,6 +248,8 @@ class PublicVenueAdapter(ABC):
 
 class BitgetAdapter(PublicVenueAdapter):
     venue = "bitget"
+    application_heartbeat_interval_seconds = 25.0
+    application_heartbeat_payload = "ping"
 
     def subscription_messages(self) -> list[dict[str, Any]]:
         args = [
