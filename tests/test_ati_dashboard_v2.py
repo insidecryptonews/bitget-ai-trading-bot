@@ -120,3 +120,39 @@ def test_health_server_handles_local_favicon_without_external_fetch() -> None:
     source = (ROOT / "app" / "health_server.py").read_text(encoding="utf-8")
     assert 'if path == "/favicon.ico":' in source
     assert "self.send_response(204)" in source
+
+
+def test_health_heavy_status_uses_current_v1044_artifacts_not_legacy_cache(
+    monkeypatch, tmp_path: Path,
+) -> None:
+    dashboard_dir = tmp_path / "reports" / "research" / "dashboard_v10_43c"
+    dashboard_dir.mkdir(parents=True)
+    dashboard = dashboard_dir / "dashboard_data_v10_43c.json"
+    dashboard.write_text(json.dumps({
+        "health": {"status": "HEALTHY"},
+        "persistent_health": {"status": "HEALTHY", "age_seconds": 1},
+        "source_compare_3way": {"ready_for_shadow_forward": True},
+        "dashboard_watch": {"watcher_status": "RUNNING", "last_refresh_at": "2099-01-01T00:00:00+00:00"},
+        "slow_metrics": {"strategy_stale": True, "exit_stale": True},
+    }), encoding="utf-8")
+    heavy_dir = tmp_path / "reports" / "research" / "v10_44_alpha_sprint"
+    heavy_dir.mkdir(parents=True)
+    (heavy_dir / "alpha_factory_v10_44.json").write_text("{}", encoding="utf-8")
+    (heavy_dir / "exit_factory_v10_44.json").write_text("{}", encoding="utf-8")
+    scheduler = tmp_path / "scheduler_status.json"
+    scheduler.write_text(json.dumps({"status": "COMPLETED", "exit_code": 0}), encoding="utf-8")
+    monkeypatch.setattr(health_server, "_RESEARCH_DASHBOARD_V1043C", dashboard)
+    monkeypatch.setattr(health_server, "_HEAVY_SCHEDULER_STATUS", scheduler)
+    monkeypatch.setattr(health_server, "_ati_shadow_status_payload", lambda: {
+        "status": "HEALTHY", "can_send_real_orders": False,
+    })
+    monkeypatch.setattr("app.labs.ati_paper.api.health_payload", lambda: {
+        "status": "WAITING_FOR_SIGNAL", "can_send_real_orders": False,
+    })
+    component = health_server._research_components_status_payload(
+        HealthState(mode="paper")
+    )["components"]["heavy_research"]
+    assert component["status"] == "HEALTHY"
+    assert component["artifacts_v1044_stale"] is False
+    assert component["legacy_strategy_stale"] is True
+    assert component["legacy_exit_stale"] is True

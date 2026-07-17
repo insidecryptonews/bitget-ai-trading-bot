@@ -1162,6 +1162,15 @@ def _research_components_status_payload(state: HealthState) -> dict[str, Any]:
             parsed = parsed.replace(tzinfo=timezone.utc)
         return max(0.0, (now - parsed.astimezone(timezone.utc)).total_seconds())
 
+    def file_age(path: Path) -> float | None:
+        try:
+            if not path.is_file() or path.is_symlink():
+                return None
+            modified = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
+        except OSError:
+            return None
+        return max(0.0, (now - modified).total_seconds())
+
     dashboard = read_dashboard()
     collector = dashboard.get("health") if isinstance(dashboard.get("health"), dict) else {}
     persistent = (
@@ -1178,6 +1187,13 @@ def _research_components_status_payload(state: HealthState) -> dict[str, Any]:
     )
     slow = dashboard.get("slow_metrics") if isinstance(dashboard.get("slow_metrics"), dict) else {}
     scheduler = read_heavy_scheduler()
+    research_root = _RESEARCH_DASHBOARD_V1043C.parent.parent
+    heavy_alpha_age = file_age(
+        research_root / "v10_44_alpha_sprint" / "alpha_factory_v10_44.json"
+    )
+    heavy_exit_age = file_age(
+        research_root / "v10_44_alpha_sprint" / "exit_factory_v10_44.json"
+    )
     watcher_age = age(watcher.get("last_refresh_at"))
     watcher_stale = watcher_age is None or watcher_age > max(
         120.0, 3.0 * float(watcher.get("interval_seconds") or 30.0),
@@ -1196,7 +1212,10 @@ def _research_components_status_payload(state: HealthState) -> dict[str, Any]:
     collector_status = str(collector.get("status") or "NO_DATA")
     persistent_status = str(persistent.get("status") or "NO_DATA")
     dataset_ready = bool(sources.get("ready_for_shadow_forward"))
-    heavy_stale = bool(slow.get("strategy_stale", True) or slow.get("exit_stale", True))
+    heavy_artifacts_stale = bool(
+        heavy_alpha_age is None or heavy_exit_age is None
+        or heavy_alpha_age > 8 * 3600 or heavy_exit_age > 8 * 3600
+    )
     components = {
         "mode": {
             "status": "PAPER_RESEARCH" if str(state.mode).lower() != "live" else "ERROR",
@@ -1245,7 +1264,7 @@ def _research_components_status_payload(state: HealthState) -> dict[str, Any]:
         "heavy_research": {
             "status": (
                 "ERROR" if scheduler.get("status") == "ERROR"
-                else "HEALTHY" if scheduler.get("status") in {"RUNNING", "COMPLETED"} and not heavy_stale
+                else "HEALTHY" if scheduler.get("status") in {"RUNNING", "COMPLETED"} and not heavy_artifacts_stale
                 else "DEGRADED"
             ),
             "scheduler_status": scheduler.get("status") or "NOT_RUNNING",
@@ -1253,10 +1272,13 @@ def _research_components_status_payload(state: HealthState) -> dict[str, Any]:
             "scheduler_finished_at": scheduler.get("finished_at"),
             "scheduler_next_run_at": scheduler.get("next_run_at"),
             "scheduler_exit_code": scheduler.get("exit_code"),
-            "strategy_age_seconds": slow.get("strategy_age_seconds"),
-            "exit_age_seconds": slow.get("exit_age_seconds"),
-            "strategy_stale": bool(slow.get("strategy_stale", True)),
-            "exit_stale": bool(slow.get("exit_stale", True)),
+            "alpha_v1044_age_seconds": heavy_alpha_age,
+            "exit_v1044_age_seconds": heavy_exit_age,
+            "artifacts_v1044_stale": heavy_artifacts_stale,
+            "legacy_strategy_age_seconds": slow.get("strategy_age_seconds"),
+            "legacy_exit_age_seconds": slow.get("exit_age_seconds"),
+            "legacy_strategy_stale": bool(slow.get("strategy_stale", True)),
+            "legacy_exit_stale": bool(slow.get("exit_stale", True)),
             "cache_status": slow.get("source_metrics_cache") or "STALE_UNKNOWN",
         },
         "ati_shadow": ati,
