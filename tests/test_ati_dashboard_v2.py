@@ -162,11 +162,20 @@ def test_local_research_dashboard_renders_ati_without_claiming_edge(tmp_path: Pa
         "git_head": "abc", "health": {}, "view": {}, "data_quality": {},
         "shadow": None, "scoreboard": [], "bankroll": None, "ws_dataset": {},
         "readiness": {"primary": "DATA_NOT_READY", "states": ["DATA_NOT_READY"]},
-        "ati": {"health": {"status": "NO_DATA"}, "summary": {}, "forward": {}},
+        "ati": {
+            "health": {"status": "HEALTHY", "signals_total": 5},
+            "summary": {
+                "status": "INSUFFICIENT_DATA_OR_REJECTED", "signals_total": 18815,
+                "overall_baseline": {}, "policy": {},
+            },
+            "forward": {"signals_total": 5, "closed_outcomes": 5, "open_positions": 0},
+        },
     }
     result = build_dashboard(state=state, out_dir=tmp_path, write=False)
     page = result["html_str"]
     assert "Adrian Trading Intelligence" in page
+    assert '<span class="k">Historical signals</span><span class="v">18815</span>' in page
+    assert '<span class="k">Forward signals</span><span class="v">5</span>' in page
     assert "can_send_real_orders" in page
     assert "NO LIVE" in page
     assert "edge validated" not in page.lower()

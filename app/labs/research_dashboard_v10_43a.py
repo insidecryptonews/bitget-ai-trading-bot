@@ -246,7 +246,7 @@ def render_html(d: dict) -> str:
         _kv("Engine", ati_health.get("status") or "NO_DATA",
             _state_kind(ati_health.get("status") or "NO_DATA")) +
         _kv("Evidence", ati_summary.get("status") or "INSUFFICIENT_DATA") +
-        _kv("Historical signals", ati_health.get("signals_total") if ati_has_summary else "N/A") +
+        _kv("Historical signals", ati_summary.get("signals_total") if ati_has_summary else "N/A") +
         _kv("Forward signals", ati_forward.get("signals_total") if ati_forward else "N/A") +
         _kv("Closed forward outcomes", ati_forward.get("closed_outcomes") if ati_forward else "N/A") +
         _kv("Open simulated positions", ati_forward.get("open_positions") if ati_forward else "N/A") +
