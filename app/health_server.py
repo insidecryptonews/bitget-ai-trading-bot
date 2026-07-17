@@ -41,6 +41,10 @@ _DASHBOARD_LAB_CACHE: dict[str, dict[str, Any]] = {}
 _DASHBOARD_FULL_REPORT_CACHE: dict[str, dict[str, Any]] = {}
 _DASHBOARD_SHORT_REPORT_CACHE: dict[str, dict[str, Any]] = {}
 _ATI_REPORT_DIR = Path(__file__).resolve().parents[1] / "reports" / "research" / "ati"
+_RESEARCH_DASHBOARD_V1043C = (
+    Path(__file__).resolve().parents[1]
+    / "reports" / "research" / "dashboard_v10_43c" / "dashboard_data_v10_43c.json"
+)
 
 
 def start_health_server(
@@ -60,7 +64,11 @@ def start_health_server(
             query = parse_qs(parsed.query)
             if path == "/health":
                 payload = state.payload()
-                payload["ati_shadow"] = _ati_shadow_status_payload()
+                components = _research_components_status_payload(state)
+                payload["status_scope"] = "http_liveness_only"
+                payload["overall_status"] = components["overall_status"]
+                payload["research_components"] = components["components"]
+                payload["ati_shadow"] = components["components"]["ati_shadow"]
                 self._send_json(payload)
                 return
             if not _dashboard_enabled(config):
@@ -966,13 +974,51 @@ def _ati_shadow_status_payload(report_dir: Path | None = None) -> dict[str, Any]
         "setup_id", "setup_variant", "trades", "net_ev", "gross_ev",
         "profit_factor", "win_rate", "max_drawdown", "average_mfe",
         "average_mae", "result_status", "ci95_lower", "ci95_upper",
+        "gross_pnl", "net_pnl", "total_cost", "median_holding_bars",
+        "top_3_profit_concentration",
     }
     by_setup = [
         {key: row.get(key) for key in allowed_setup_fields}
         for row in (summary.get("by_setup") or [])
         if isinstance(row, dict)
     ]
+    allowed_group_fields = allowed_setup_fields | {"symbol", "regime", "policy"}
+
+    def safe_group(name: str) -> list[dict[str, Any]]:
+        return [
+            {key: row.get(key) for key in allowed_group_fields}
+            for row in (summary.get(name) or [])
+            if isinstance(row, dict)
+        ]
+
+    source_receipts = []
+    for row in summary.get("dataset_receipts") or []:
+        if not isinstance(row, dict):
+            continue
+        source_receipts.append({
+            "symbol": row.get("symbol"),
+            "venue": row.get("venue"),
+            "generation_id": row.get("generation_id"),
+            "verification_status": row.get("verification_status"),
+            "n_bars": row.get("n_bars") or row.get("actual_bars"),
+            "coverage_ratio": row.get("coverage_ratio"),
+            "source_file_mtime": row.get("source_file_mtime"),
+            "source_file_age_seconds": row.get("source_file_age_seconds"),
+        })
     overall = summary.get("overall_baseline") if isinstance(summary.get("overall_baseline"), dict) else {}
+    metric_ran_at = summary.get("generated_at")
+    metric_age_seconds = None
+    if metric_ran_at:
+        try:
+            parsed_metric = datetime.fromisoformat(str(metric_ran_at).replace("Z", "+00:00"))
+            if parsed_metric.tzinfo is None:
+                parsed_metric = parsed_metric.replace(tzinfo=timezone.utc)
+            metric_age_seconds = max(
+                0.0,
+                (datetime.now(timezone.utc) - parsed_metric.astimezone(timezone.utc)).total_seconds(),
+            )
+        except ValueError:
+            metric_age_seconds = None
     return {
         "status": status,
         "result_status": summary.get("status") or forward.get("status") or "NO_DATA",
@@ -985,10 +1031,15 @@ def _ati_shadow_status_payload(report_dir: Path | None = None) -> dict[str, Any]
         "dataset_last_bar_at": health.get("dataset_last_bar_at"),
         "dataset_available_at": dataset_available_at,
         "dataset_snapshot_sha256": health.get("dataset_snapshot_sha256") or summary.get("dataset_snapshot_sha256"),
+        "dataset_source_mode": summary.get("dataset_source_mode") or health.get("source_mode"),
+        "dataset_source_paths": summary.get("dataset_source_paths") or health.get("source_paths") or {},
+        "dataset_sources": source_receipts,
         "history_days": summary.get("history_days"),
         "policy_version": (summary.get("policy") or {}).get("policy_version"),
         "feature_version": (summary.get("policy") or {}).get("feature_version"),
-        "signals_total": int(health.get("signals_total") or summary.get("signals_total") or 0),
+        "signals_total": int(summary.get("signals_total") or 0),
+        "historical_signals": int(summary.get("signals_total") or 0),
+        "forward_signals": int(forward.get("signals_total") or health.get("signals_total") or 0),
         "shadow_candidates": int(summary.get("shadow_candidates") or 0),
         "open_positions": int(forward.get("open_positions") or health.get("open_positions") or 0),
         "historical_trades": int(summary.get("baseline_trades") or 0),
@@ -997,7 +1048,28 @@ def _ati_shadow_status_payload(report_dir: Path | None = None) -> dict[str, Any]
         "profit_factor": overall.get("profit_factor"),
         "win_rate": overall.get("win_rate"),
         "max_drawdown": overall.get("max_drawdown"),
+        "average_mfe": overall.get("average_mfe"),
+        "average_mae": overall.get("average_mae"),
+        "median_holding_bars": overall.get("median_holding_bars"),
+        "gross_pnl": overall.get("gross_pnl"),
+        "net_pnl": overall.get("net_pnl"),
+        "total_cost": overall.get("total_cost"),
+        "fees": overall.get("fees"),
+        "slippage": overall.get("slippage"),
+        "funding": overall.get("funding"),
+        "metric_ran_at": metric_ran_at,
+        "metric_age_seconds": metric_age_seconds,
+        "observer_last_cycle_at": health.get("observer_last_cycle_at") or forward.get("observer_last_cycle_at"),
+        "observer_cycle_duration_seconds": health.get("observer_cycle_duration_seconds") or forward.get("observer_cycle_duration_seconds"),
+        "observer_status": health.get("observer_status") or forward.get("observer_status"),
+        "boundary_status": health.get("boundary_status") or forward.get("boundary_status"),
+        "shadow_phase": health.get("shadow_phase") or forward.get("shadow_phase"),
+        "reconciliation_status": health.get("reconciliation_status") or forward.get("reconciliation_status"),
+        "cache_status": health.get("cache_status") or forward.get("cache_status") or "STALE_UNKNOWN",
         "by_setup": by_setup,
+        "by_symbol": safe_group("by_symbol"),
+        "by_regime": safe_group("by_regime"),
+        "trailing_grid": safe_group("trailing_grid"),
         "blockers": [str(item) for item in (summary.get("blockers") or [])],
         "last_error": health.get("last_error"),
         "cli_replay": "python -m app.research_lab ati-shadow-replay-v2 --symbols BTCUSDT,ETHUSDT",
@@ -1014,6 +1086,126 @@ def _ati_shadow_status_payload(report_dir: Path | None = None) -> dict[str, Any]
         "paper_ready": False,
         "live_ready": False,
         "final_recommendation": "NO LIVE",
+    }
+
+
+def _research_components_status_payload(state: HealthState) -> dict[str, Any]:
+    """Build a cheap, artifact-only component view for `/health`."""
+    now = datetime.now(timezone.utc)
+
+    def read_dashboard() -> dict[str, Any]:
+        path = _RESEARCH_DASHBOARD_V1043C
+        root = path.parent.resolve()
+        if path.parent.resolve() != root or not path.is_file() or path.is_symlink():
+            return {}
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+        return value if isinstance(value, dict) else {}
+
+    def age(value: Any) -> float | None:
+        if not value:
+            return None
+        try:
+            parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return max(0.0, (now - parsed.astimezone(timezone.utc)).total_seconds())
+
+    dashboard = read_dashboard()
+    collector = dashboard.get("health") if isinstance(dashboard.get("health"), dict) else {}
+    persistent = (
+        dashboard.get("persistent_health")
+        if isinstance(dashboard.get("persistent_health"), dict) else {}
+    )
+    sources = (
+        dashboard.get("source_compare_3way")
+        if isinstance(dashboard.get("source_compare_3way"), dict) else {}
+    )
+    watcher = (
+        dashboard.get("dashboard_watch")
+        if isinstance(dashboard.get("dashboard_watch"), dict) else {}
+    )
+    slow = dashboard.get("slow_metrics") if isinstance(dashboard.get("slow_metrics"), dict) else {}
+    watcher_age = age(watcher.get("last_refresh_at"))
+    watcher_stale = watcher_age is None or watcher_age > max(
+        120.0, 3.0 * float(watcher.get("interval_seconds") or 30.0),
+    )
+    ati = _ati_shadow_status_payload()
+    collector_status = str(collector.get("status") or "NO_DATA")
+    persistent_status = str(persistent.get("status") or "NO_DATA")
+    dataset_ready = bool(sources.get("ready_for_shadow_forward"))
+    heavy_stale = bool(slow.get("strategy_stale", True) or slow.get("exit_stale", True))
+    components = {
+        "mode": {
+            "status": "PAPER_RESEARCH" if str(state.mode).lower() != "live" else "ERROR",
+            "mode": state.mode,
+        },
+        "safety": {
+            "status": "HEALTHY" if str(state.mode).lower() != "live" else "ERROR",
+            "paper_trading": True,
+            "live_trading": False,
+            "dry_run": True,
+            "paper_filter_enabled": False,
+            "can_send_real_orders": False,
+            "final_recommendation": "NO LIVE",
+        },
+        "bot": {
+            "status": "ERROR" if state.circuit_breaker else "HEALTHY",
+            "http_liveness": "ok",
+            "circuit_breaker": bool(state.circuit_breaker),
+            "open_positions": int(state.open_positions),
+        },
+        "collectors": {
+            "status": "HEALTHY" if collector_status == "HEALTHY" and persistent_status == "HEALTHY" else "DEGRADED",
+            "rest_collector_status": collector_status,
+            "persistent_ws_status": persistent_status,
+            "persistent_ws_age_seconds": persistent.get("age_seconds"),
+            "uses_api_keys": False,
+            "can_send_real_orders": False,
+        },
+        "datasets": {
+            "status": "HEALTHY" if dataset_ready else "DEGRADED",
+            "recommended_source": sources.get("recommended_source"),
+            "ready_for_shadow_forward": dataset_ready,
+            "rest": sources.get("rest") or {},
+            "ws": sources.get("ws") or {},
+            "ws_persistent": sources.get("ws_persistent") or {},
+            "metric_ran_at": sources.get("ran_at"),
+            "metric_age_seconds": age(sources.get("ran_at")),
+        },
+        "dashboard_watcher": {
+            "status": "DEGRADED" if watcher_stale else "HEALTHY",
+            "watcher_status": watcher.get("watcher_status") or "NO_DATA",
+            "last_cycle_at": watcher.get("last_refresh_at"),
+            "age_seconds": watcher_age,
+            "last_error": watcher.get("last_error"),
+        },
+        "heavy_research": {
+            "status": "DEGRADED" if heavy_stale else "HEALTHY",
+            "strategy_age_seconds": slow.get("strategy_age_seconds"),
+            "exit_age_seconds": slow.get("exit_age_seconds"),
+            "strategy_stale": bool(slow.get("strategy_stale", True)),
+            "exit_stale": bool(slow.get("exit_stale", True)),
+            "cache_status": slow.get("source_metrics_cache") or "STALE_UNKNOWN",
+        },
+        "ati_shadow": ati,
+    }
+    statuses = [str(item.get("status") or "NO_DATA") for item in components.values()]
+    if any(item == "ERROR" for item in statuses):
+        overall = "ERROR"
+    elif any(item not in {"HEALTHY", "PAPER_RESEARCH"} for item in statuses):
+        overall = "DEGRADED"
+    else:
+        overall = "HEALTHY"
+    return {
+        "overall_status": overall,
+        "components": components,
+        "status_scope": "ARTIFACT_AND_RUNTIME_COMPONENTS",
+        "generated_at": now.isoformat(),
     }
 
 

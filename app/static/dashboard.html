@@ -1052,13 +1052,18 @@
             </article>
             <article class="decision-card info">
               <span class="panel-label">Shadow ledger</span>
-              <strong id="atiShadowCounts">0 signals · 0 trades</strong>
-              <p id="atiShadowPositions">0 simulated open positions.</p>
+              <strong id="atiShadowCounts">N/A signals | N/A trades</strong>
+              <p id="atiShadowPositions">Observer status not loaded.</p>
             </article>
             <article class="decision-card warning">
               <span class="panel-label">Net evidence</span>
               <strong id="atiNetEvidence">N/A</strong>
               <p id="atiNetEvidenceText">No gross-only promotion; costs and uncertainty are mandatory.</p>
+            </article>
+            <article class="decision-card info">
+              <span class="panel-label">Costs and contract</span>
+              <strong id="atiCostEvidence">N/A</strong>
+              <p id="atiContractText">Policy, feature and source versions unavailable.</p>
             </article>
             <article class="decision-card danger">
               <span class="panel-label">Activation</span>
@@ -1077,6 +1082,27 @@
               <tbody id="atiSetupRows"><tr><td colspan="8">No ATI report loaded.</td></tr></tbody>
             </table>
           </div>
+          <details class="report-details">
+            <summary>ATI breakdown by symbol, regime and trailing policy</summary>
+            <div class="table-shell">
+              <table class="compact">
+                <thead><tr><th>symbol</th><th>trades</th><th>net EV</th><th>PF</th><th>win rate</th><th>MFE</th><th>MAE</th><th>status</th></tr></thead>
+                <tbody id="atiSymbolRows"><tr><td colspan="8">No ATI symbol data loaded.</td></tr></tbody>
+              </table>
+            </div>
+            <div class="table-shell">
+              <table class="compact">
+                <thead><tr><th>regime</th><th>trades</th><th>net EV</th><th>PF</th><th>win rate</th><th>MFE</th><th>MAE</th><th>status</th></tr></thead>
+                <tbody id="atiRegimeRows"><tr><td colspan="8">No ATI regime data loaded.</td></tr></tbody>
+              </table>
+            </div>
+            <div class="table-shell">
+              <table class="compact">
+                <thead><tr><th>policy</th><th>trades</th><th>net EV</th><th>PF</th><th>win rate</th><th>MFE</th><th>MAE</th><th>status</th></tr></thead>
+                <tbody id="atiTrailingRows"><tr><td colspan="8">No ATI trailing data loaded.</td></tr></tbody>
+              </table>
+            </div>
+          </details>
           <details class="report-details">
             <summary>Technical ATI contract</summary>
             <pre id="atiShadowOutput">research_only=true

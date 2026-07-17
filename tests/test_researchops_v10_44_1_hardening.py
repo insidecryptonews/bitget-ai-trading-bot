@@ -142,27 +142,25 @@ def test_simulate_candidate_threads_n_tests(monkeypatch):
 
 
 # --------------------------------------------------------------------------
-# Watcher perf: base-state TTL cache present and TTL-bounded (dead collector
-# still detected); counters relabelled unambiguously in the panel
+# Watcher perf: base state is artifact-only; counters relabelled unambiguously
+# in the panel. Growing datasets are never re-read by the periodic watcher.
 # --------------------------------------------------------------------------
 
-def test_base_state_cache_expires(monkeypatch, tmp_path: Path):
+def test_base_state_watcher_never_recomputes_heavy_state(monkeypatch, tmp_path: Path):
     calls = {"n": 0}
 
     def fake_gather(symbol):
         calls["n"] += 1
-        return {"symbol": symbol, "n": calls["n"]}
+        raise AssertionError("artifact-only watcher called heavy gather_state")
+
+    monkeypatch.setattr(DASH.CE, "_repo_root", lambda: tmp_path)
     monkeypatch.setattr(DASH.A, "gather_state", fake_gather)
-    DASH._BASE_STATE_CACHE.clear()
     s1 = DASH._cached_base_state("BTCUSDT", tmp_path)
     s2 = DASH._cached_base_state("BTCUSDT", tmp_path)
-    assert calls["n"] == 1 and s1["n"] == s2["n"]        # cached
-    # expire the TTL -> recompute (a dead collector cannot hide forever)
-    key = "BTCUSDT"
-    ts, payload = DASH._BASE_STATE_CACHE[key]
-    DASH._BASE_STATE_CACHE[key] = (ts - DASH.BASE_STATE_TTL_SECONDS - 1, payload)
-    DASH._cached_base_state("BTCUSDT", tmp_path)
-    assert calls["n"] == 2
+    assert calls["n"] == 0
+    assert s1["health"]["status"] == "UNKNOWN_ARTIFACT_ONLY"
+    assert s2["base_metrics"]["refresh_mode"] == "EXPLICIT_ONLY"
+    assert s2["base_metrics"]["stale"] is True
 
 
 def test_persistent_panel_labels_disambiguate_counters():

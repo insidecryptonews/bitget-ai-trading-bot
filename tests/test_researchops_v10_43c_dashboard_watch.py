@@ -125,6 +125,71 @@ def test_missing_reports_fast_state_does_not_crash(tmp_path: Path, monkeypatch):
     assert state["exit_optimization"]["stale_or_missing"] is True
 
 
+def test_fast_watcher_is_artifact_only_when_source_cache_is_stale(
+        tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(DASH.CE, "_repo_root", lambda: tmp_path)
+    out = DASH._output_dir()
+    out.mkdir(parents=True)
+    previous = _state()
+    previous["base_metrics"] = {
+        "source": "EXPLICIT_HEAVY_BUILD",
+        "refreshed_at": "2020-01-01T00:00:00+00:00",
+    }
+    (out / "dashboard_data_v10_43c.json").write_text(
+        json.dumps(previous), encoding="utf-8")
+    (out / DASH.CACHE_FILE).write_text(json.dumps({
+        "symbol": "BTCUSDT",
+        "updated_ts": 1,
+        "source_signature": {"symbol": "BTCUSDT", "size": 1, "mtime": 1},
+        "continuity": previous["persistent_continuity"],
+        "compare": previous["source_compare_3way"],
+    }), encoding="utf-8")
+    monkeypatch.setattr(DASH, "_source_signature",
+                        lambda symbol: {"symbol": symbol, "size": 2, "mtime": 2})
+    monkeypatch.setattr(DASH.PWS, "ws_persistent_health",
+                        lambda symbol: {"status": "HEALTHY"})
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("fast watcher attempted heavy dataset analysis")
+
+    monkeypatch.setattr(DASH.A, "gather_state", forbidden)
+    monkeypatch.setattr(DASH.PWS, "load_persistent_bars", forbidden)
+    monkeypatch.setattr(DASH.PWS, "ws_continuity_audit", forbidden)
+    monkeypatch.setattr(DASH.PWS, "dataset_source_compare_3way", forbidden)
+
+    state = DASH.gather_state_fast("BTCUSDT")
+
+    assert state["fast_metrics"]["heavy_analysis_executed"] is False
+    assert state["slow_metrics"]["source_metrics_cache"] == "STALE_HIT"
+    assert state["slow_metrics"]["source_metrics_stale"] is True
+    assert "SOURCE_METRICS_STALE_EXPLICIT_REFRESH_REQUIRED" in (
+        state["readiness_v1043c"]["blockers"])
+    assert state["can_send_real_orders"] is False
+
+
+def test_fast_watcher_missing_artifacts_fails_closed_without_heavy_fallback(
+        tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(DASH.CE, "_repo_root", lambda: tmp_path)
+    monkeypatch.setattr(DASH.PWS, "ws_persistent_health",
+                        lambda symbol: {"status": "NO_DATA"})
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("fast watcher attempted heavy fallback")
+
+    monkeypatch.setattr(DASH.A, "gather_state", forbidden)
+    monkeypatch.setattr(DASH.PWS, "load_persistent_bars", forbidden)
+    monkeypatch.setattr(DASH.PWS, "ws_continuity_audit", forbidden)
+    monkeypatch.setattr(DASH.PWS, "dataset_source_compare_3way", forbidden)
+
+    state = DASH.gather_state_fast("BTCUSDT")
+
+    assert state["persistent_continuity"]["verdict"] == "NO_CACHED_SOURCE_METRICS"
+    assert state["source_compare_3way"]["ready_for_shadow_forward"] is False
+    assert state["slow_metrics"]["source_metrics_cache"] == "MISS_NO_ARTIFACT"
+    assert state["readiness_v1043c"]["paper_ready"] is False
+    assert state["readiness_v1043c"]["live_ready"] is False
+
+
 def test_lock_blocks_duplicate_watcher(tmp_path: Path):
     lock = tmp_path / DASH.LOCK_FILE
     lock.write_text(

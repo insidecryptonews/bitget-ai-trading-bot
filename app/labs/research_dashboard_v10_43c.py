@@ -66,6 +66,7 @@ def gather_state(symbol: str = "BTCUSDT") -> dict[str, Any]:
     except Exception:
         compare = {"recommended_source": "rest", "blockers": ["COMPARE_FAILED"],
                    "rest": {}, "ws": {}, "ws_persistent": {}}
+    _publish_source_metrics_cache(symbol, continuity, compare, _output_dir())
     try:
         strategy = HARD.run_hardened_lab(symbol, data_source="ws_persistent", write_reports=True)
     except Exception as e:
@@ -83,6 +84,9 @@ def gather_state(symbol: str = "BTCUSDT") -> dict[str, Any]:
             "persistent_continuity": continuity, "source_compare_3way": compare,
             "strategy_hardening": strategy, "ws_persistent_tournament": tournament,
             "exit_optimization": exits, "readiness_v1043c": readiness,
+            "base_metrics": {"source": "EXPLICIT_HEAVY_BUILD",
+                             "refreshed_at": _utc_now(),
+                             "refresh_mode": "MANUAL_OR_EXPLICIT_CLI"},
             "p11_short_forward_observer": _load_p11_observer_status(), **_safety()}
 
 
@@ -108,12 +112,16 @@ def gather_state_fast(symbol: str = "BTCUSDT") -> dict[str, Any]:
     exits = previous.get("exit_optimization") or _missing_slow("EXIT_METRICS_MISSING")
     slow_meta = _slow_metrics_meta(previous, out_dir)
     readiness = _readiness(continuity, compare, strategy, exits)
+    readiness = _apply_artifact_readiness_gates(
+        readiness, base.get("base_metrics") or {}, source_meta)
     return {**base, "tool_version": TOOL_VERSION, "persistent_health": health,
             "persistent_continuity": continuity, "source_compare_3way": compare,
             "strategy_hardening": strategy, "ws_persistent_tournament": tournament,
             "exit_optimization": exits, "readiness_v1043c": readiness,
             "p11_short_forward_observer": _load_p11_observer_status(),
-            "fast_metrics": {"last_updated_at": _utc_now(), "source": "fast_watcher"},
+            "fast_metrics": {"last_updated_at": _utc_now(),
+                             "source": "ARTIFACT_ONLY_FAST_WATCHER",
+                             "heavy_analysis_executed": False},
             "slow_metrics": {**slow_meta, **source_meta}, **_safety()}
 
 
@@ -160,33 +168,74 @@ def _slow_metrics_meta(previous: dict[str, Any], out_dir: Path) -> dict[str, Any
                      "CLIs (or research-heavy-run-v1044) to refresh them")}
 
 
-BASE_STATE_TTL_SECONDS = 120
-_BASE_STATE_CACHE: dict[str, tuple[float, dict]] = {}
-
-
 def _cached_base_state(symbol: str, out_dir: Path) -> dict[str, Any]:
-    """In-process TTL cache for the V10.43A base state (REST health/view).
+    """Load the V10.43A base exclusively from small published artifacts.
 
-    A.gather_state re-reads and re-bars the whole REST dataset (~seconds) and the
-    watcher does not need that every 30s. The TTL (not just an mtime signature)
-    guarantees a dead collector is still detected within ~2 minutes — an
-    mtime-only key would freeze the last healthy snapshot forever."""
-    now = time.time()
-    hit = _BASE_STATE_CACHE.get(symbol)
-    if hit is not None and (now - hit[0]) < BASE_STATE_TTL_SECONDS:
-        return dict(hit[1])
-    base = A.gather_state(symbol)
-    _BASE_STATE_CACHE[symbol] = (now, base)
-    return dict(base)
+    A 30-second watcher must never reload or re-bar a growing dataset. Missing
+    or stale artifacts remain explicit and fail closed until an explicit build.
+    """
+    previous = _read_json(out_dir / "dashboard_data_v10_43c.json") or {}
+    same_symbol = str(previous.get("symbol") or "").upper() == symbol.upper()
+    rd = CE._repo_root().joinpath("reports", "research")
+    keys = ("health", "view", "data_quality", "shadow", "scoreboard", "bankroll",
+            "readiness")
+    if same_symbol:
+        base = {key: previous.get(key) for key in keys}
+        source = "DASHBOARD_ARTIFACT"
+    else:
+        view = {"status": "NO_DATA", "forward_n_bars": 0,
+                "fit_for_fine_backtest": False, "fit_for_shadow_forward": False}
+        dq = {"states": ["INSUFFICIENT_FORWARD_DATA"],
+              "tournament_result_reliability": "NOT_RELIABLE_SAMPLE"}
+        shadow = _read_json(rd / "shadow_simulation" / "shadow_summary_v1040.json")
+        base = {
+            "health": {"status": "UNKNOWN_ARTIFACT_ONLY",
+                       "sub_states": ["EXPLICIT_REFRESH_REQUIRED"]},
+            "view": view,
+            "data_quality": dq,
+            "shadow": shadow,
+            "scoreboard": A._read_csv(
+                rd / "shadow_simulation" / "shadow_scoreboard_v1040.csv"),
+            "bankroll": _read_json(
+                rd / "shadow_simulation" / "shadow_bankroll_20eur_v1040.json"),
+            "readiness": A._readiness(view, dq, shadow),
+        }
+        source = "NO_DASHBOARD_ARTIFACT"
+
+    # These are bounded report reads/file stats and stay cheap as data grows.
+    base["ati"] = {
+        "health": _read_json(rd / "ati" / "ati_health.json"),
+        "summary": _read_json(rd / "ati" / "ati_summary.json"),
+        "forward": _read_json(rd / "ati" / "ati_forward_state.json"),
+    }
+    base["ws_dataset"] = A._ws_dataset_meta()
+    previous_meta = previous.get("base_metrics") if same_symbol else None
+    refreshed_at = previous_meta.get("refreshed_at") if isinstance(previous_meta, dict) else None
+    age = _iso_age_seconds(refreshed_at)
+    base.update({
+        "tool_version": A.TOOL_VERSION,
+        "symbol": symbol,
+        "generated_at": _utc_now(),
+        "git_head": previous.get("git_head") if same_symbol else A._git_head(),
+        "base_metrics": {
+            "source": source,
+            "refreshed_at": refreshed_at or "STALE_UNKNOWN",
+            "age_seconds": age,
+            "stale": age is None or age > SLOW_STALE_SECONDS,
+            "refresh_mode": "EXPLICIT_ONLY",
+            "note": ("fast watcher reads artifacts only; explicit dashboard build "
+                     "refreshes base metrics"),
+        },
+        **_safety(),
+    })
+    return base
 
 
 def _cached_source_metrics(symbol: str, out_dir: Path) -> tuple[dict, dict, dict]:
-    """Cache the expensive continuity/source comparison used by the watcher.
+    """Read source metrics artifacts without scanning the growing datasets.
 
-    Persistent health remains fresh every refresh. Continuity and 3-way source
-    comparison can scan large CSVs, so the watcher recomputes them at a slower
-    cadence and labels the cache age explicitly. A changed file before the slow
-    cadence is not ignored; it is shown as `source_dataset_changed_since_cache`.
+    Only an explicit dashboard build may refresh this cache. The watcher marks
+    stale or missing metrics and blocks readiness instead of doing heavy work.
     """
     cache_path = out_dir / CACHE_FILE
     cache = _read_json(cache_path) or {}
@@ -201,64 +250,88 @@ def _cached_source_metrics(symbol: str, out_dir: Path) -> tuple[dict, dict, dict
         cache.get("symbol") == symbol
         and isinstance(cache.get("continuity"), dict)
         and isinstance(cache.get("compare"), dict)
-        and age is not None
-        and age < SLOW_SOURCE_REFRESH_SECONDS
     )
     if usable:
         dataset_changed = cache.get("source_signature") != sig
+        stale = age is None or age >= SLOW_SOURCE_REFRESH_SECONDS or dataset_changed
         meta = {
-            "source_metrics_cache": "HIT",
-            "source_metrics_age_seconds": round(age, 1),
-            "source_metrics_stale": False,
+            "source_metrics_cache": "STALE_HIT" if stale else "HIT",
+            "source_metrics_age_seconds": round(age, 1) if age is not None else None,
+            "source_metrics_stale": stale,
             "source_metrics_refresh_seconds": SLOW_SOURCE_REFRESH_SECONDS,
             "source_dataset_changed_since_cache": bool(dataset_changed),
+            "source_metrics_refresh_mode": "EXPLICIT_ONLY",
             "source_metrics_note": (
-                "continuity/source compare cached for fast watcher; health is fresh")
+                "artifact-only watcher; run explicit dashboard build to refresh "
+                "continuity/source compare")
         }
         return cache["continuity"], cache["compare"], meta
-    # single-load: read each large CSV once and share it between the continuity
-    # audit and the 3-way compare (they used to re-read persistent + v10.42 twice)
-    try:
-        pers_loaded = PWS.load_persistent_bars(symbol)
-    except Exception:
-        pers_loaded = {"bars": [], "meta": {"exists": False, "n_trades_raw": 0,
-                                            "n_trades_used": 0, "dropped_rows": 0,
-                                            "ws_file_age_min": None}}
-    try:
-        from . import ws_dataset_integration_v10_43b as _WSB
-        ws_bars = _WSB.load_ws_bars(symbol)["bars"]
-    except Exception:
-        ws_bars = []
-    try:
-        continuity = PWS.ws_continuity_audit(symbol, preloaded=pers_loaded,
-                                             ref_bars=ws_bars)
-    except Exception:
-        continuity = {"verdict": "NO_WS_DATA", "max_contiguous_run": 0,
-                      "cache_error": "continuity_failed"}
-    try:
-        compare = PWS.dataset_source_compare_3way(symbol,
-                                                  pers_bars=pers_loaded["bars"],
-                                                  ws_bars=ws_bars)
-    except Exception:
-        compare = {"recommended_source": "rest", "blockers": ["COMPARE_FAILED"],
+    previous = _read_json(out_dir / "dashboard_data_v10_43c.json") or {}
+    continuity = previous.get("persistent_continuity")
+    compare = previous.get("source_compare_3way")
+    if not isinstance(continuity, dict) or not isinstance(compare, dict):
+        continuity = {"verdict": "NO_CACHED_SOURCE_METRICS",
+                      "max_contiguous_run": 0,
+                      "fit_for_shadow_forward": False}
+        compare = {"recommended_source": None,
+                   "ready_for_shadow_forward": False,
+                   "blockers": ["SOURCE_METRICS_EXPLICIT_REFRESH_REQUIRED"],
                    "rest": {}, "ws": {}, "ws_persistent": {}}
-    payload = {"symbol": symbol, "updated_at": _utc_now(), "updated_ts": now_ts,
-               "source_signature": sig, "continuity": continuity, "compare": compare,
-               "mode": "RESEARCH_ONLY", "final_recommendation": FINAL_RECOMMENDATION_NO_LIVE}
+        cache_status = "MISS_NO_ARTIFACT"
+    else:
+        cache_status = "DASHBOARD_ARTIFACT_FALLBACK"
+    meta = {"source_metrics_cache": cache_status,
+            "source_metrics_age_seconds": None,
+            "source_metrics_stale": True,
+            "source_metrics_refresh_seconds": SLOW_SOURCE_REFRESH_SECONDS,
+            "source_dataset_changed_since_cache": True,
+            "source_metrics_refresh_mode": "EXPLICIT_ONLY",
+            "source_metrics_note": "no valid cache; explicit dashboard build required"}
+    return continuity, compare, meta
+
+
+def _publish_source_metrics_cache(symbol: str, continuity: dict, compare: dict,
+                                  out_dir: Path) -> bool:
+    """Publish an explicit heavy-run result for artifact-only watcher reads."""
+    cache_path = out_dir / CACHE_FILE
+    payload = {"symbol": symbol, "updated_at": _utc_now(),
+               "updated_ts": datetime.now(timezone.utc).timestamp(),
+               "source_signature": _source_signature(symbol),
+               "continuity": continuity, "compare": compare,
+               "mode": "RESEARCH_ONLY",
+               "final_recommendation": FINAL_RECOMMENDATION_NO_LIVE}
     try:
         out_dir.mkdir(parents=True, exist_ok=True)
         tmp = cache_path.with_suffix(cache_path.suffix + ".tmp")
         tmp.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
         os.replace(tmp, cache_path)
+        return True
     except OSError:
-        pass
-    meta = {"source_metrics_cache": "MISS_REFRESHED",
-            "source_metrics_age_seconds": 0.0,
-            "source_metrics_stale": False,
-            "source_metrics_refresh_seconds": SLOW_SOURCE_REFRESH_SECONDS,
-            "source_dataset_changed_since_cache": False,
-            "source_metrics_note": "continuity/source compare recomputed this refresh"}
-    return continuity, compare, meta
+        return False
+
+
+def _apply_artifact_readiness_gates(readiness: dict[str, Any], base_meta: dict,
+                                    source_meta: dict) -> dict[str, Any]:
+    """Stale watcher artifacts are never allowed to look research-ready."""
+    result = dict(readiness)
+    states = list(result.get("states") or [])
+    blockers = list(result.get("blockers") or [])
+    if base_meta.get("stale"):
+        states.append("BASE_METRICS_STALE_EXPLICIT_REFRESH_REQUIRED")
+        blockers.append("BASE_METRICS_STALE_EXPLICIT_REFRESH_REQUIRED")
+    if source_meta.get("source_metrics_stale"):
+        states.append("SOURCE_METRICS_STALE_EXPLICIT_REFRESH_REQUIRED")
+        blockers.append("SOURCE_METRICS_STALE_EXPLICIT_REFRESH_REQUIRED")
+    if source_meta.get("source_dataset_changed_since_cache"):
+        states.append("SOURCE_DATASET_CHANGED_SINCE_EXPLICIT_REFRESH")
+        blockers.append("SOURCE_DATASET_CHANGED_SINCE_EXPLICIT_REFRESH")
+    result["states"] = list(dict.fromkeys(states))
+    result["blockers"] = list(dict.fromkeys(blockers))
+    if "BLOCKED_BY_DATA_GAP" not in result["states"] and blockers:
+        result["primary"] = "RESEARCH_METRICS_STALE_EXPLICIT_REFRESH_REQUIRED"
+    result.update({"micro_live_ready": False, "paper_ready": False,
+                   "live_ready": False, **_safety()})
+    return result
 
 
 def _source_signature(symbol: str) -> dict[str, Any]:
@@ -419,6 +492,7 @@ def _panel_watch(d: dict) -> str:
     w = d.get("dashboard_watch") or {}
     slow = d.get("slow_metrics") or {}
     fast = d.get("fast_metrics") or {}
+    base = d.get("base_metrics") or {}
     return (
         A._kv("Auto refresh", w.get("auto_refresh"), "ok" if w.get("auto_refresh") else "warn") +
         A._kv("Watcher status", w.get("watcher_status"), A._state_kind(w.get("watcher_status"))) +
@@ -426,6 +500,10 @@ def _panel_watch(d: dict) -> str:
         A._kv("Last refresh", w.get("last_refresh_at")) +
         A._kv("Dashboard age (s)", w.get("dashboard_age_seconds")) +
         A._kv("Fast metrics updated", fast.get("last_updated_at")) +
+        A._kv("Heavy analysis in watcher", fast.get("heavy_analysis_executed"), "ok") +
+        A._kv("Base artifact refreshed", base.get("refreshed_at")) +
+        A._kv("Base artifact stale", base.get("stale"),
+              "warn" if base.get("stale") else "ok") +
         A._kv("Strategy metrics updated", slow.get("strategy_last_updated_at")) +
         A._kv("Strategy metrics stale", slow.get("strategy_stale"),
               "warn" if slow.get("strategy_stale") else "ok") +
@@ -434,9 +512,11 @@ def _panel_watch(d: dict) -> str:
               "warn" if slow.get("exit_stale") else "ok") +
         A._kv("Continuity cache", slow.get("source_metrics_cache")) +
         A._kv("Continuity cache age (s)", slow.get("source_metrics_age_seconds")) +
+        A._kv("Continuity cache stale", slow.get("source_metrics_stale"),
+              "warn" if slow.get("source_metrics_stale") else "ok") +
         A._kv("Dataset changed since cache", slow.get("source_dataset_changed_since_cache"),
               "warn" if slow.get("source_dataset_changed_since_cache") else "ok") +
-        '<div class="sub">Fast watcher does not run full strategy lab / tournament / exit optimization every refresh.</div>')
+        '<div class="sub">Fast watcher is artifact-only: it never scans growing datasets or runs strategy lab / tournament / exit optimization. Stale artifacts require an explicit dashboard build.</div>')
 
 
 def _p11_pick(snapshot: dict[str, Any], *paths: str) -> Any:

@@ -3,6 +3,8 @@ from __future__ import annotations
 import ast
 import hashlib
 import json
+import shutil
+from datetime import datetime, timezone
 from pathlib import Path
 
 import numpy as np
@@ -14,6 +16,8 @@ from app.labs.ati.features import AtiDataError, build_feature_frame, canonicaliz
 from app.labs.ati.levels import CausalLevelEngine, LevelSnapshot, PriceLevel, level_snapshot
 from app.labs.ati.metrics import chronological_validation, summarize_trades
 from app.labs.ati.replay import AtiCostModel, replay_candidates, simulate_trade
+from app.labs.ati import report as ati_report
+from app.labs.ati import shadow_engine as ati_shadow
 from app.labs.ati.report import _atomic_write, _safe_output_dir, run_historical_replay
 from app.labs.ati.rules import evaluate_rules_at
 from app.labs.ati.shadow_engine import _closed_forward_trades, _latest_available_at, _merge_unique
@@ -378,6 +382,182 @@ def test_forward_merge_is_idempotent_and_detects_conflicting_outcome() -> None:
         _merge_unique([row], [{**row, "value": 2}], "signal_id")
 
 
+def test_v10455_generation_adapter_requires_full_verified_current(monkeypatch, tmp_path: Path) -> None:
+    generation = tmp_path / "bitget_BTCUSDT_1m" / "gen_abc"
+    generation.mkdir(parents=True)
+    csv_path = generation / "data.csv"
+    manifest_path = generation / "manifest.json"
+    csv_path.write_text("ts,open,high,low,close,volume,turnover\n", encoding="utf-8")
+    manifest_path.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(ati_report, "DEFAULT_GENERATION_ROOT", tmp_path)
+    from app.labs import public_data_backfill_v10_45_1 as backfill
+    monkeypatch.setattr(backfill, "current_generation", lambda venue, symbol: {
+        "generation_id": "abc", "csv_path": csv_path,
+        "manifest_path": manifest_path,
+    })
+    monkeypatch.setattr(backfill, "verify_dataset", lambda venue, symbol, expected_timeframe="1m": {
+        "status": "DATASET_VERIFIED", "sha256": "a" * 64,
+        "generation_id": "abc",
+        "manifest": {"venue": "bitget", "symbol": symbol, "timeframe": "1m"},
+    })
+    bundle = ati_report._generation_inputs(["BTCUSDT"])
+    assert bundle is not None
+    assert bundle["mode"] == "v10_45_5_verified_current_generations"
+    assert bundle["entries"]["BTCUSDT"]["receipt"]["verification_status"] == "DATASET_VERIFIED"
+    monkeypatch.setattr(backfill, "verify_dataset", lambda *args, **kwargs: {"status": "INVALID_SHA"})
+    assert ati_report._generation_inputs(["BTCUSDT"]) is None
+
+
+def test_source_snapshot_labels_source_separately_from_shadow_mode(monkeypatch, tmp_path: Path) -> None:
+    dataset = tmp_path / "bitget_BTCUSDT_1m"
+    generation = dataset / "gen_abc123"
+    generation.mkdir(parents=True)
+    (generation / "data.csv").write_text("fixture", encoding="utf-8")
+    (generation / "manifest.json").write_text("{}", encoding="utf-8")
+    marker = {"generation_id": "abc123", "csv_sha256": "x", "manifest_sha256": "y"}
+    (dataset / "CURRENT.json").write_text(json.dumps(marker), encoding="utf-8")
+    monkeypatch.setattr(ati_report, "DEFAULT_GENERATION_ROOT", tmp_path)
+    from app.labs import public_data_backfill_v10_45_1 as backfill
+    monkeypatch.setattr(backfill, "_dataset_dir", lambda venue, symbol: dataset)
+    snapshot = ati_report.source_snapshot_status(symbols=["BTCUSDT"])
+    assert snapshot["source_mode"] == "v10_45_5_current_markers"
+    assert snapshot["mode"] == "SHADOW_RESEARCH_ONLY"
+
+
+def test_observer_reuses_unchanged_snapshot_without_heavy_replay(monkeypatch) -> None:
+    target = Path(__file__).resolve().parents[1] / "reports" / "research" / "ati" / "heartbeat_test"
+    target.mkdir(parents=True, exist_ok=True)
+    now = datetime.now(timezone.utc).isoformat()
+    (target / "ati_summary.json").write_text("{}", encoding="utf-8")
+    (target / "ati_forward_state.json").write_text(json.dumps({
+        "status": "SHADOW_OBSERVATION_ONLY",
+        "source_watch_token": "same-token",
+        "forward_boundary": now,
+        "dataset_available_at": now,
+        "signals_total": 0,
+        "open_positions": 0,
+        "closed_outcomes": 0,
+        "reconciliation_status": "PASS",
+        "heavy_replay_last_run_at": now,
+    }), encoding="utf-8")
+    monkeypatch.setattr(ati_shadow, "source_snapshot_status", lambda **kwargs: {
+        "status": "SNAPSHOT_AVAILABLE", "snapshot_watch_token": "same-token",
+    })
+    monkeypatch.setattr(
+        ati_shadow, "run_shadow_once",
+        lambda **kwargs: pytest.fail("unchanged snapshot must not run heavy replay"),
+    )
+    try:
+        result = ati_shadow.run_shadow_loop(output_dir=target, max_cycles=1)
+        state = result["last_state"]
+        assert state["cache_status"] == "REUSED_UNCHANGED_SOURCE"
+        assert state["heavy_replay_executed"] is False
+        assert state["observer_status"] == "OBSERVER_CONNECTED"
+        assert json.loads((target / "ati_health.json").read_text())["last_error"] is None
+    finally:
+        shutil.rmtree(target, ignore_errors=True)
+
+
+def test_observer_refreshes_when_snapshot_token_changes(monkeypatch) -> None:
+    target = Path(__file__).resolve().parents[1] / "reports" / "research" / "ati" / "refresh_test"
+    target.mkdir(parents=True, exist_ok=True)
+    (target / "ati_summary.json").write_text("{}", encoding="utf-8")
+    (target / "ati_forward_state.json").write_text(json.dumps({
+        "source_watch_token": "old-token",
+    }), encoding="utf-8")
+    calls = []
+    monkeypatch.setattr(ati_shadow, "source_snapshot_status", lambda **kwargs: {
+        "status": "SNAPSHOT_AVAILABLE", "snapshot_watch_token": "new-token",
+    })
+    monkeypatch.setattr(ati_shadow, "run_shadow_once", lambda **kwargs: calls.append(kwargs) or {
+        "status": "SHADOW_OBSERVATION_ONLY", "source_watch_token": "new-token",
+    })
+    try:
+        ati_shadow.run_shadow_loop(output_dir=target, max_cycles=1)
+        assert len(calls) == 1
+    finally:
+        shutil.rmtree(target, ignore_errors=True)
+
+
+def test_metrics_expose_gross_net_and_cost_totals() -> None:
+    rows = [{
+        "net_return": 0.01, "gross_return": 0.012,
+        "mfe": 0.02, "mae": 0.005, "held_bars": 2,
+        "fee_fraction": 0.001, "slippage_fraction": 0.0005,
+        "funding_fraction": 0.0005,
+    }]
+    result = summarize_trades(rows)
+    assert result["gross_pnl"] == pytest.approx(0.012)
+    assert result["net_pnl"] == pytest.approx(0.01)
+    assert result["total_cost"] == pytest.approx(0.002)
+
+
+def test_incremental_public_refresh_deduplicates_exact_overlap_and_rejects_conflict() -> None:
+    from scripts.refresh_ati_public_data import merge_verified_rows
+    minute = 60_000
+    start = 1_800_000_000_000
+    existing = [
+        [start, 100, 101, 99, 100, 1, 100],
+        [start + minute, 100, 102, 99, 101, 2, 201],
+    ]
+    incoming = [
+        [start + minute, 100, 102, 99, 101, 2, 201],
+        [start + 2 * minute, 101, 103, 100, 102, 3, 306],
+    ]
+    merged = merge_verified_rows(
+        existing, incoming, start_ms=start, end_ms=start + 3 * minute,
+    )
+    assert [row[0] for row in merged] == [start, start + minute, start + 2 * minute]
+    with pytest.raises(ValueError, match="BAR_PAYLOAD_CONFLICT"):
+        merge_verified_rows(
+            existing, [[start + minute, 100, 999, 99, 101, 2, 201]],
+            start_ms=start, end_ms=start + 2 * minute,
+        )
+    revisions = []
+    replaced = merge_verified_rows(
+        existing, [[start + minute, 100, 103, 99, 101, 2, 201]],
+        start_ms=start, end_ms=start + 2 * minute,
+        replace_conflicts_after_ms=start + minute,
+        revised_tail_timestamps=revisions,
+    )
+    assert replaced[-1][2] == 103
+    assert revisions == [start + minute]
+
+
+def test_incremental_public_refresh_is_public_verified_and_atomic(monkeypatch) -> None:
+    from scripts import refresh_ati_public_data as refresh
+    end_ms = 200 * 86_400_000
+    start_ms = end_ms - 86_400_000
+    rows = [
+        [start_ms + idx * 60_000, 100, 101, 99, 100, 1, 100]
+        for idx in range(1440)
+    ]
+    bars = [{
+        "ts": row[0], "open": row[1], "high": row[2], "low": row[3],
+        "close": row[4], "volume": row[5], "turnover": row[6],
+    } for row in rows]
+    saved = []
+    monkeypatch.setattr(
+        refresh.backfill, "_now_ms",
+        lambda: end_ms + 2 * refresh.backfill.BAR_MS,
+    )
+    monkeypatch.setattr(refresh.backfill, "verify_dataset", lambda *args, **kwargs: {
+        "status": "DATASET_VERIFIED", "manifest": {"requested_end_ms": end_ms},
+    })
+    monkeypatch.setattr(refresh.backfill, "load_klines", lambda *args: bars)
+    monkeypatch.setattr(refresh.backfill, "fetch_bitget_1m", lambda *args, **kwargs: rows[-10:])
+    monkeypatch.setattr(refresh.backfill, "save_dataset", lambda *args, **kwargs: saved.append((args, kwargs)) or {
+        "generation_id": "fixture", "sha256": "a" * 64,
+        "n_bars": 1440, "actual_end": "fixture",
+    })
+    result = refresh.refresh_symbols(["BTCUSDT"], days=1, log=lambda *_: None)
+    assert result["status"] == "REFRESHED_VERIFIED"
+    assert result["public_endpoints_only"] is True
+    assert result["uses_api_keys"] is False
+    assert result["can_send_real_orders"] is False
+    assert saved and len(saved[0][0][2]) == 1440
+
+
 def test_output_is_contained_and_fixed_temp_name_cannot_redirect_write(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="ATI_OUTPUT_OUTSIDE_RESEARCH_ROOT"):
         _safe_output_dir(tmp_path)
@@ -403,6 +583,14 @@ def test_cli_commands_are_early_dispatched_research_only() -> None:
     assert commands <= PUBLIC_RESEARCH_ONLY_COMMANDS
     for command in commands:
         assert parser.parse_args([command]).command == command
+    scripts = Path(__file__).resolve().parents[1] / "scripts"
+    runner = (
+        (scripts / "run_ati_shadow.bat").read_text(encoding="utf-8")
+        + (scripts / "run_ati_shadow_forever.ps1").read_text(encoding="utf-8")
+    )
+    assert "ati-shadow-run-v2" in runner
+    assert "--max-scans 1" in runner
+    assert "NO LIVE" in runner and "NO ORDERS" in runner.upper()
 
 
 def test_ati_package_has_no_execution_or_private_exchange_surface() -> None:

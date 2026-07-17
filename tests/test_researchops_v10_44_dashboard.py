@@ -90,5 +90,6 @@ def test_fast_source_metrics_cache_reuses_recent_heavy_result(monkeypatch, tmp_p
     assert calls["continuity"] == 0
     assert c["verdict"] == "WS_TOO_GAPPY"
     assert cmp_["recommended_source"] == "ws_persistent"
-    assert meta["source_metrics_cache"] == "HIT"
+    assert meta["source_metrics_cache"] == "STALE_HIT"
+    assert meta["source_metrics_stale"] is True
     assert meta["source_dataset_changed_since_cache"] is True

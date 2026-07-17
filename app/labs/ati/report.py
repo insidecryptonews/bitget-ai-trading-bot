@@ -23,6 +23,7 @@ from .rules import generate_candidates
 
 DEFAULT_OUTPUT_DIR = REPO_ROOT / "reports" / "research" / "ati"
 DEFAULT_SAMPLE_ROOT = REPO_ROOT / "external_data" / "staging"
+DEFAULT_GENERATION_ROOT = DEFAULT_SAMPLE_ROOT / "klines_v10_45_5"
 
 
 def _safe_number(value: Any) -> Any:
@@ -80,6 +81,32 @@ def _manifest_for(csv_path: Path) -> Path:
     return csv_path.with_name(csv_path.stem + "_manifest.json")
 
 
+def _is_link_like(path: Path) -> bool:
+    """Reject symlinks and Windows junctions before consuming research data."""
+    if path.is_symlink():
+        return True
+    is_junction = getattr(path, "is_junction", None)
+    try:
+        return bool(is_junction and is_junction())
+    except OSError:
+        return True
+
+
+def _assert_contained_input(path: Path, root: Path) -> Path:
+    declared_root = root.absolute()
+    declared_path = path.absolute()
+    for item in (declared_path, *declared_path.parents):
+        if item.exists() and _is_link_like(item):
+            raise AtiDataError("ATI_INPUT_LINK_OR_JUNCTION_BLOCKED")
+        if item == declared_root:
+            break
+    resolved_root = declared_root.resolve()
+    resolved_path = declared_path.resolve()
+    if resolved_path != resolved_root and resolved_root not in resolved_path.parents:
+        raise AtiDataError("ATI_INPUT_OUTSIDE_VALIDATED_ROOT")
+    return resolved_path
+
+
 def _validate_manifest(csv_path: Path, symbol: str) -> dict[str, Any]:
     manifest_path = _manifest_for(csv_path)
     try:
@@ -118,6 +145,186 @@ def discover_sample_dir(symbols: list[str]) -> Path | None:
             mtimes = [(directory / f"bitget_{symbol}_1m.csv").stat().st_mtime for symbol in symbols]
             candidates.append((min(mtimes), directory))
     return max(candidates, default=(0.0, None), key=lambda item: item[0])[1]
+
+
+def _generation_inputs(symbols: list[str]) -> dict[str, Any] | None:
+    """Resolve V10.45.5 CURRENT generations and fully verify their CSV truth."""
+    from .. import public_data_backfill_v10_45_1 as backfill
+
+    entries: dict[str, dict[str, Any]] = {}
+    for symbol in symbols:
+        current = backfill.current_generation("bitget", symbol)
+        verified = backfill.verify_dataset("bitget", symbol, expected_timeframe="1m")
+        if current is None or verified.get("status") != "DATASET_VERIFIED":
+            return None
+        csv_path = _assert_contained_input(Path(current["csv_path"]), DEFAULT_GENERATION_ROOT)
+        manifest_path = _assert_contained_input(
+            Path(current["manifest_path"]), DEFAULT_GENERATION_ROOT,
+        )
+        if csv_path.name != "data.csv" or manifest_path.name != "manifest.json":
+            raise AtiDataError("ATI_GENERATION_FILENAME_CONTRACT_FAIL")
+        manifest = verified.get("manifest")
+        if not isinstance(manifest, dict):
+            raise AtiDataError("ATI_GENERATION_MANIFEST_NOT_OBJECT")
+        stat = csv_path.stat()
+        receipt = {
+            **manifest,
+            "manifest_path": str(manifest_path),
+            "verified_sha256": str(verified["sha256"]),
+            "generation_id": str(verified["generation_id"]),
+            "verification_status": "DATASET_VERIFIED",
+            "source_file_mtime": datetime.fromtimestamp(
+                stat.st_mtime, tz=timezone.utc,
+            ).isoformat(),
+            "source_file_age_seconds": max(
+                0.0, datetime.now(timezone.utc).timestamp() - stat.st_mtime,
+            ),
+        }
+        entries[symbol] = {"csv_path": csv_path, "receipt": receipt}
+    return {
+        "mode": "v10_45_5_verified_current_generations",
+        "series_id": "v10_45_5:bitget:1m:" + ",".join(sorted(symbols)),
+        "source_dir": DEFAULT_GENERATION_ROOT.resolve(),
+        "entries": entries,
+    }
+
+
+def _legacy_inputs(source_dir: Path, symbols: list[str], *, mode: str) -> dict[str, Any]:
+    source_dir = _assert_contained_input(source_dir, source_dir)
+    entries: dict[str, dict[str, Any]] = {}
+    for symbol in symbols:
+        csv_path = _assert_contained_input(
+            source_dir / f"bitget_{symbol}_1m.csv", source_dir,
+        )
+        receipt = _validate_manifest(csv_path, symbol)
+        stat = csv_path.stat()
+        receipt.update({
+            "verification_status": "LEGACY_MANIFEST_AND_SHA_VERIFIED",
+            "source_file_mtime": datetime.fromtimestamp(
+                stat.st_mtime, tz=timezone.utc,
+            ).isoformat(),
+            "source_file_age_seconds": max(
+                0.0, datetime.now(timezone.utc).timestamp() - stat.st_mtime,
+            ),
+        })
+        entries[symbol] = {"csv_path": csv_path, "receipt": receipt}
+    return {
+        "mode": mode,
+        "series_id": f"legacy_flat:{source_dir.as_posix()}:{','.join(sorted(symbols))}",
+        "source_dir": source_dir,
+        "entries": entries,
+    }
+
+
+def _resolve_inputs(sample_dir: Path | str | None, symbols: list[str]) -> dict[str, Any] | None:
+    if sample_dir is not None:
+        return _legacy_inputs(Path(sample_dir), symbols, mode="explicit_legacy_flat_snapshot")
+    generated = _generation_inputs(symbols)
+    if generated is not None:
+        return generated
+    legacy = discover_sample_dir(symbols)
+    if legacy is None:
+        return None
+    return _legacy_inputs(legacy, symbols, mode="auto_legacy_flat_fallback")
+
+
+def source_snapshot_status(*, sample_dir: Path | str | None = None,
+                           symbols: list[str] | None = None) -> dict[str, Any]:
+    """Return a cheap change token; replay still performs full verification.
+
+    The token includes CURRENT bytes plus file metadata. It is only a watcher
+    optimization and is never accepted as evidence that a dataset is valid.
+    """
+    symbols = [str(symbol).upper() for symbol in (symbols or ["BTCUSDT", "ETHUSDT"])]
+    parts: list[dict[str, Any]] = []
+    blockers: list[str] = []
+    mode = "explicit_legacy_flat_snapshot" if sample_dir is not None else "v10_45_5_current_markers"
+    try:
+        if sample_dir is not None:
+            root = _assert_contained_input(Path(sample_dir), Path(sample_dir))
+            for symbol in symbols:
+                csv_path = _assert_contained_input(root / f"bitget_{symbol}_1m.csv", root)
+                manifest_path = _assert_contained_input(_manifest_for(csv_path), root)
+                if not csv_path.is_file() or not manifest_path.is_file():
+                    blockers.append(f"missing_legacy_source:{symbol}")
+                    continue
+                csv_stat = csv_path.stat()
+                man_stat = manifest_path.stat()
+                parts.append({
+                    "symbol": symbol,
+                    "csv_path": str(csv_path),
+                    "csv_size": csv_stat.st_size,
+                    "csv_mtime_ns": csv_stat.st_mtime_ns,
+                    "manifest_size": man_stat.st_size,
+                    "manifest_mtime_ns": man_stat.st_mtime_ns,
+                })
+        else:
+            from .. import public_data_backfill_v10_45_1 as backfill
+            for symbol in symbols:
+                dataset_dir = backfill._dataset_dir("bitget", symbol)
+                marker = _assert_contained_input(
+                    dataset_dir / backfill.CURRENT_MARKER, DEFAULT_GENERATION_ROOT,
+                )
+                if not marker.is_file():
+                    blockers.append(f"current_marker_missing:{symbol}")
+                    continue
+                marker_bytes = marker.read_bytes()
+                try:
+                    current = json.loads(marker_bytes.decode("utf-8"))
+                except (UnicodeDecodeError, json.JSONDecodeError):
+                    blockers.append(f"current_marker_invalid:{symbol}")
+                    continue
+                generation_id = str(current.get("generation_id") or "")
+                if not generation_id or not generation_id.isalnum():
+                    blockers.append(f"generation_id_invalid:{symbol}")
+                    continue
+                generation_dir = _assert_contained_input(
+                    dataset_dir / f"gen_{generation_id}", DEFAULT_GENERATION_ROOT,
+                )
+                csv_path = _assert_contained_input(
+                    generation_dir / "data.csv", DEFAULT_GENERATION_ROOT,
+                )
+                manifest_path = _assert_contained_input(
+                    generation_dir / "manifest.json", DEFAULT_GENERATION_ROOT,
+                )
+                if not csv_path.is_file() or not manifest_path.is_file():
+                    blockers.append(f"generation_files_missing:{symbol}")
+                    continue
+                csv_stat = csv_path.stat()
+                man_stat = manifest_path.stat()
+                parts.append({
+                    "symbol": symbol,
+                    "generation_id": generation_id,
+                    "marker_sha256": hashlib.sha256(marker_bytes).hexdigest(),
+                    "csv_path": str(csv_path),
+                    "csv_size": csv_stat.st_size,
+                    "csv_mtime_ns": csv_stat.st_mtime_ns,
+                    "manifest_size": man_stat.st_size,
+                    "manifest_mtime_ns": man_stat.st_mtime_ns,
+                })
+    except (AtiDataError, OSError, ValueError) as exc:
+        blockers.append(str(exc))
+    policy = contract_receipt()
+    token_payload = {
+        "mode": mode,
+        "symbols": symbols,
+        "parts": parts,
+        "policy_sha256": policy.get("policy_sha256"),
+        "feature_version": policy.get("feature_version"),
+    }
+    token = hashlib.sha256(
+        json.dumps(token_payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    return {
+        "status": "SNAPSHOT_AVAILABLE" if len(parts) == len(symbols) and not blockers else "NEED_DATA",
+        "snapshot_watch_token": token,
+        "source_mode": mode,
+        "symbols": symbols,
+        "sources": parts,
+        "blockers": blockers,
+        "verification_scope": "CHANGE_DETECTION_ONLY_FULL_VERIFY_BEFORE_REPLAY",
+        **safety_envelope(),
+    }
 
 
 def _csv_text(rows: list[dict[str, Any]]) -> str:
@@ -182,7 +389,6 @@ def run_historical_replay(
     write: bool = True,
 ) -> dict[str, Any]:
     symbols = [str(symbol).upper() for symbol in (symbols or ["BTCUSDT", "ETHUSDT"])]
-    source_dir = Path(sample_dir).resolve() if sample_dir else discover_sample_dir(symbols)
     base = {
         "schema": "ati_shadow_replay.v2",
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -190,18 +396,22 @@ def run_historical_replay(
         "policy": contract_receipt(),
         **safety_envelope(),
     }
-    if source_dir is None or not source_dir.is_dir() or source_dir.is_symlink():
+    try:
+        inputs = _resolve_inputs(sample_dir, symbols)
+    except (AtiDataError, OSError, ValueError) as exc:
+        return {**base, "status": "NEED_DATA", "blockers": [str(exc)]}
+    if inputs is None:
         return {**base, "status": "NEED_DATA", "blockers": ["validated_sample_dir_missing"]}
+    source_dir = Path(inputs["source_dir"])
     receipts: list[dict[str, Any]] = []
     audits: list[dict[str, Any]] = []
     all_candidates: list[dict[str, Any]] = []
     all_trades: list[dict[str, Any]] = []
     for symbol in symbols:
-        csv_path = source_dir / f"bitget_{symbol}_1m.csv"
-        if csv_path.parent.resolve() != source_dir.resolve() or csv_path.is_symlink():
-            return {**base, "status": "NEED_DATA", "blockers": [f"unsafe_input:{symbol}"]}
+        entry = inputs["entries"][symbol]
+        csv_path = Path(entry["csv_path"])
         try:
-            receipt = _validate_manifest(csv_path, symbol)
+            receipt = dict(entry["receipt"])
             raw, audit = read_ohlcv_csv(csv_path, symbol=symbol, timeframe="1m")
             feature_frame = build_feature_frame(raw)
         except (AtiDataError, OSError, ValueError) as exc:
@@ -254,6 +464,11 @@ def run_historical_replay(
         **base,
         "status": "PROMISING_SHADOW_ONLY" if any_promising and history_days >= 180 else "INSUFFICIENT_DATA_OR_REJECTED",
         "dataset_source_dir": str(source_dir),
+        "dataset_source_mode": inputs["mode"],
+        "dataset_source_series_id": inputs["series_id"],
+        "dataset_source_paths": {
+            symbol: str(inputs["entries"][symbol]["csv_path"]) for symbol in symbols
+        },
         "dataset_snapshot_sha256": _composite_hash(receipts),
         "dataset_receipts": receipts,
         "data_audits": audits,
@@ -327,6 +542,8 @@ def render_replay_text(report: dict[str, Any]) -> str:
         "ATI SHADOW REPLAY V2 START",
         f"status: {report.get('status', 'NEED_DATA')}",
         f"symbols: {','.join(report.get('symbols_requested') or [])}",
+        f"dataset_source_mode: {report.get('dataset_source_mode', 'N/A')}",
+        f"history_days: {report.get('history_days')}",
         f"dataset_snapshot_sha256: {report.get('dataset_snapshot_sha256', 'N/A')}",
         f"signals_total: {report.get('signals_total', 0)}",
         f"shadow_candidates: {report.get('shadow_candidates', 0)}",
@@ -335,6 +552,11 @@ def render_replay_text(report: dict[str, Any]) -> str:
         f"profit_factor: {overall.get('profit_factor')}",
         f"win_rate: {overall.get('win_rate')}",
         f"max_drawdown: {overall.get('max_drawdown')}",
+        f"average_mfe: {overall.get('average_mfe')}",
+        f"average_mae: {overall.get('average_mae')}",
+        f"fees: {overall.get('fees')}",
+        f"slippage: {overall.get('slippage')}",
+        f"funding: {overall.get('funding')}",
         f"blockers: {','.join(report.get('blockers') or []) or 'none'}",
         "research_only: true",
         "shadow_only: true",

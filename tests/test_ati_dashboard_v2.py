@@ -3,7 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from app.health_server import _ati_shadow_status_payload
+from app import health_server
+from app.health_server import HealthState, _ati_shadow_status_payload
 from app.labs.research_dashboard_v10_43a import build_dashboard
 
 
@@ -21,10 +22,14 @@ def test_ati_dashboard_endpoint_is_whitelisted_and_sanitized(tmp_path: Path) -> 
         "status": "INSUFFICIENT_DATA_OR_REJECTED",
         "policy": {"policy_version": "ATI_SHADOW_POLICY_V2", "secret": "no"},
         "overall_baseline": {"net_ev": -0.1, "profit_factor": 0.8, "win_rate": 0.4},
+        "dataset_source_mode": "verified_fixture",
         "baseline_trades": 4, "history_days": 90,
         "by_setup": [{"setup_id": "SHORT_R1", "trades": 4, "net_ev": -0.1,
                       "secret": "must-not-leak"}],
         "blockers": ["history_below_180_days"],
+        "by_symbol": [{"symbol": "BTCUSDT", "trades": 4, "net_ev": -0.1}],
+        "by_regime": [{"regime": "TREND_DOWN", "trades": 4, "net_ev": -0.1}],
+        "trailing_grid": [{"policy": "baseline", "trades": 4, "net_ev": -0.1}],
     }), encoding="utf-8")
     (tmp_path / "ati_forward_state.json").write_text(json.dumps({
         "closed_outcomes": 0, "open_positions": 0,
@@ -38,6 +43,10 @@ def test_ati_dashboard_endpoint_is_whitelisted_and_sanitized(tmp_path: Path) -> 
     assert payload["stale"] is True
     assert payload["historical_trades"] == 4
     assert payload["closed_shadow_trades"] == 0
+    assert payload["dataset_source_mode"] == "verified_fixture"
+    assert payload["by_symbol"][0]["symbol"] == "BTCUSDT"
+    assert payload["by_regime"][0]["regime"] == "TREND_DOWN"
+    assert payload["trailing_grid"][0]["policy"] == "baseline"
     assert "must-not-leak" not in encoded
     assert "api_key" not in encoded
 
@@ -47,11 +56,44 @@ def test_dashboard_ui_has_one_ati_panel_and_clean_js_binding() -> None:
     js = (ROOT / "app" / "static" / "dashboard.js").read_text(encoding="utf-8")
     assert html.count('id="ati-shadow"') == 1
     assert html.count('id="atiShadowRefreshBtn"') == 1
+    assert html.count('id="atiSymbolRows"') == 1
+    assert html.count('id="atiRegimeRows"') == 1
+    assert html.count('id="atiTrailingRows"') == 1
     assert js.count("async function loadAtiShadow") == 1
     assert js.count('$("atiShadowRefreshBtn")?.addEventListener') == 1
     assert "/api/research/ati-shadow" in js
     assert "can_send_real_orders=false" in html
     assert "NO LIVE" in html
+
+
+def test_health_components_are_separate_and_fail_closed_on_stale_heavy_metrics(
+    monkeypatch, tmp_path: Path,
+) -> None:
+    dashboard = tmp_path / "dashboard_data_v10_43c.json"
+    dashboard.write_text(json.dumps({
+        "health": {"status": "HEALTHY"},
+        "persistent_health": {"status": "HEALTHY", "age_seconds": 1},
+        "source_compare_3way": {
+            "ready_for_shadow_forward": True, "recommended_source": "ws_persistent",
+        },
+        "dashboard_watch": {
+            "watcher_status": "RUNNING", "last_refresh_at": "2099-01-01T00:00:00+00:00",
+            "interval_seconds": 30,
+        },
+        "slow_metrics": {"strategy_stale": True, "exit_stale": True},
+    }), encoding="utf-8")
+    monkeypatch.setattr(health_server, "_RESEARCH_DASHBOARD_V1043C", dashboard)
+    monkeypatch.setattr(health_server, "_ati_shadow_status_payload", lambda: {
+        "status": "HEALTHY", "can_send_real_orders": False,
+    })
+    payload = health_server._research_components_status_payload(HealthState(mode="paper"))
+    assert set(payload["components"]) == {
+        "mode", "safety", "bot", "collectors", "datasets",
+        "dashboard_watcher", "heavy_research", "ati_shadow",
+    }
+    assert payload["components"]["heavy_research"]["status"] == "DEGRADED"
+    assert payload["overall_status"] == "DEGRADED"
+    assert payload["components"]["safety"]["can_send_real_orders"] is False
 
 
 def test_local_research_dashboard_renders_ati_without_claiming_edge(tmp_path: Path) -> None:

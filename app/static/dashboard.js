@@ -1668,23 +1668,45 @@
     ].join("\n"));
   }
 
+  function renderAtiGroupRows(targetId, rows, labelKey, emptyText) {
+    const target = $(targetId);
+    if (!target) return;
+    target.innerHTML = rows.length ? rows.map((row) => `<tr>
+      <td>${escapeHtml(row[labelKey] || "-")}</td>
+      <td>${escapeHtml(String(row.trades ?? "N/A"))}</td>
+      <td>${escapeHtml(atiMetric(row.net_ev))}</td>
+      <td>${escapeHtml(atiMetric(row.profit_factor, 4))}</td>
+      <td>${escapeHtml(atiMetric(row.win_rate, 4))}</td>
+      <td>${escapeHtml(atiMetric(row.average_mfe))}</td>
+      <td>${escapeHtml(atiMetric(row.average_mae))}</td>
+      <td>${escapeHtml(row.result_status || "INSUFFICIENT_DATA")}</td>
+    </tr>`).join("") : `<tr><td colspan="8">${escapeHtml(emptyText)}</td></tr>`;
+  }
+
   async function loadAtiShadow() {
     const button = $("atiShadowRefreshBtn");
     setButtonLoading(button, true);
     try {
       const payload = await fetchJson("/api/research/ati-shadow");
+      const hasEvidence = !["NO_DATA", "NEED_DATA", "ERROR"].includes(payload.status);
       setText("atiEngineStatus", payload.status || "NO_DATA");
       setText("atiEngineFreshness", payload.last_run_at
-        ? `last run ${payload.last_run_at} | report age ${atiMetric(payload.report_age_seconds, 0)}s | data age ${atiMetric(payload.dataset_age_seconds, 0)}s | stale=${String(payload.stale)}`
+        ? `observer ${payload.observer_status || "UNKNOWN"} at ${payload.observer_last_cycle_at || payload.last_run_at} | metric age ${atiMetric(payload.metric_age_seconds, 0)}s | data age ${atiMetric(payload.dataset_age_seconds, 0)}s | cache=${payload.cache_status || "STALE_UNKNOWN"} | stale=${String(payload.stale)}`
         : "No ATI run loaded.");
       setText("atiEvidenceStatus", payload.result_status || "INSUFFICIENT_DATA");
       setText("atiEvidenceText", (payload.blockers || []).length
         ? `blocked: ${(payload.blockers || []).join(", ")}`
         : "No blocker list available; manual research review remains mandatory.");
-      setText("atiShadowCounts", `${payload.signals_total || 0} signals | ${payload.historical_trades || 0} historical trades`);
-      setText("atiShadowPositions", `${payload.closed_shadow_trades || 0} forward outcomes | ${payload.open_positions || 0} simulated open positions | actionable=false`);
+      setText("atiShadowCounts", hasEvidence
+        ? `${payload.historical_signals} historical signals | ${payload.historical_trades} historical trades`
+        : "N/A historical signals | N/A historical trades");
+      setText("atiShadowPositions", payload.observer_status
+        ? `${payload.forward_signals} forward signals | ${payload.closed_shadow_trades} forward outcomes | ${payload.open_positions} simulated open positions | ${payload.shadow_phase || "WAITING"} | actionable=false`
+        : "N/A forward outcomes | N/A simulated positions | observer not connected");
       setText("atiNetEvidence", `EV ${atiMetric(payload.net_ev)} | PF ${atiMetric(payload.profit_factor, 4)}`);
-      setText("atiNetEvidenceText", `win ${atiMetric(payload.win_rate, 4)} | max DD ${atiMetric(payload.max_drawdown, 6)}`);
+      setText("atiNetEvidenceText", `win ${atiMetric(payload.win_rate, 4)} | MFE ${atiMetric(payload.average_mfe)} | MAE ${atiMetric(payload.average_mae)} | max DD ${atiMetric(payload.max_drawdown, 6)}`);
+      setText("atiCostEvidence", `fees ${atiMetric(payload.fees)} | slip ${atiMetric(payload.slippage)} | funding ${atiMetric(payload.funding)}`);
+      setText("atiContractText", `${payload.policy_version || "N/A"} | ${payload.feature_version || "N/A"} | ${payload.dataset_source_mode || "N/A"} | historical and forward ledgers remain separate`);
       const rows = Array.isArray(payload.by_setup) ? payload.by_setup : [];
       const target = $("atiSetupRows");
       if (target) {
@@ -1699,6 +1721,9 @@
           <td>${escapeHtml(row.result_status || "INSUFFICIENT_DATA")}</td>
         </tr>`).join("") : "<tr><td colspan=\"8\">No ATI report loaded.</td></tr>";
       }
+      renderAtiGroupRows("atiSymbolRows", Array.isArray(payload.by_symbol) ? payload.by_symbol : [], "symbol", "No ATI symbol data loaded.");
+      renderAtiGroupRows("atiRegimeRows", Array.isArray(payload.by_regime) ? payload.by_regime : [], "regime", "No ATI regime data loaded.");
+      renderAtiGroupRows("atiTrailingRows", Array.isArray(payload.trailing_grid) ? payload.trailing_grid : [], "policy", "No ATI trailing data loaded.");
       setText("atiShadowOutput", JSON.stringify({
         status: payload.status,
         result_status: payload.result_status,
@@ -1706,6 +1731,11 @@
         feature_version: payload.feature_version,
         dataset_last_bar_at: payload.dataset_last_bar_at,
         dataset_snapshot_sha256: payload.dataset_snapshot_sha256,
+        dataset_source_mode: payload.dataset_source_mode,
+        observer_status: payload.observer_status,
+        boundary_status: payload.boundary_status,
+        reconciliation_status: payload.reconciliation_status,
+        cache_status: payload.cache_status,
         research_only: payload.research_only,
         shadow_only: payload.shadow_only,
         paper_filter_enabled: payload.paper_filter_enabled,

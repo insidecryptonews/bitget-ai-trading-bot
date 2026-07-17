@@ -181,7 +181,7 @@ def render_html(d: dict) -> str:
     dq_rows = (
         _kv("Forward bars", v.get("forward_n_bars")) +
         _kv("Total bars", v.get("total_n_bars")) +
-        _kv("Forward coverage", _pct(v.get("forward_coverage_ratio"))) +
+        _kv("REST forward coverage", _pct(v.get("forward_coverage_ratio"))) +
         _kv("Max contiguous run", v.get("forward_max_contiguous_run_bars")) +
         _kv("Forward verdict", v.get("forward_verdict"), dqk) +
         _kv("Reliability", dq.get("tournament_result_reliability"),
@@ -241,16 +241,30 @@ def render_html(d: dict) -> str:
     ati_summary = ati.get("summary") or {}
     ati_forward = ati.get("forward") or {}
     ati_overall = ati_summary.get("overall_baseline") or {}
+    ati_has_summary = bool(ati_summary)
     ati_card = (
         _kv("Engine", ati_health.get("status") or "NO_DATA",
             _state_kind(ati_health.get("status") or "NO_DATA")) +
         _kv("Evidence", ati_summary.get("status") or "INSUFFICIENT_DATA") +
-        _kv("Signals", ati_health.get("signals_total") or 0) +
-        _kv("Closed shadow trades", ati_forward.get("closed_outcomes") or 0) +
-        _kv("Open simulated positions", ati_forward.get("open_positions") or 0) +
+        _kv("Historical signals", ati_health.get("signals_total") if ati_has_summary else "N/A") +
+        _kv("Forward signals", ati_forward.get("signals_total") if ati_forward else "N/A") +
+        _kv("Closed forward outcomes", ati_forward.get("closed_outcomes") if ati_forward else "N/A") +
+        _kv("Open simulated positions", ati_forward.get("open_positions") if ati_forward else "N/A") +
         _kv("Net EV after costs", ati_overall.get("net_ev")) +
         _kv("Profit factor", ati_overall.get("profit_factor")) +
+        _kv("Win rate", ati_overall.get("win_rate")) +
+        _kv("Average MFE", ati_overall.get("average_mfe")) +
+        _kv("Average MAE", ati_overall.get("average_mae")) +
+        _kv("Max drawdown", ati_overall.get("max_drawdown")) +
+        _kv("Fees / slippage / funding",
+            f"{ati_overall.get('fees')} / {ati_overall.get('slippage')} / {ati_overall.get('funding')}") +
+        _kv("Policy / feature",
+            f"{(ati_summary.get('policy') or {}).get('policy_version')} / {(ati_summary.get('policy') or {}).get('feature_version')}") +
+        _kv("Dataset source", ati_summary.get("dataset_source_mode") or "N/A") +
         _kv("Dataset last bar", ati_health.get("dataset_last_bar_at")) +
+        _kv("Observer", ati_forward.get("observer_status") or "NOT_RUNNING") +
+        _kv("Cache", ati_forward.get("cache_status") or "STALE_UNKNOWN") +
+        _kv("Existing strategy comparison", "SEPARATE BASELINES; NO PROMOTION") +
         _kv("can_send_real_orders", "false", "ok") +
         _kv("Final recommendation", "NO LIVE", "bad")
     )

@@ -43,7 +43,8 @@ def summarize_trades(rows: list[dict[str, Any]], *, seed: int = 7) -> dict[str, 
             "average_mae": None, "median_holding_bars": None,
             "top_3_profit_concentration": None, "ci95_lower": None,
             "ci95_upper": None, "fees": 0.0, "slippage": 0.0,
-            "funding": 0.0, "result_status": "INSUFFICIENT_DATA",
+            "funding": 0.0, "gross_pnl": 0.0, "net_pnl": 0.0,
+            "total_cost": 0.0, "result_status": "INSUFFICIENT_DATA",
         }
     gains = sum(value for value in returns if value > 0)
     losses = -sum(value for value in returns if value <= 0)
@@ -69,6 +70,8 @@ def summarize_trades(rows: list[dict[str, Any]], *, seed: int = 7) -> dict[str, 
         "trades": len(returns),
         "net_ev": sum(returns) / len(returns),
         "gross_ev": (sum(gross_returns) / len(gross_returns) if gross_returns else None),
+        "gross_pnl": sum(gross_returns),
+        "net_pnl": sum(returns),
         "profit_factor": profit_factor,
         "win_rate": sum(value > 0 for value in returns) / len(returns),
         "max_drawdown": drawdown,
@@ -81,6 +84,11 @@ def summarize_trades(rows: list[dict[str, Any]], *, seed: int = 7) -> dict[str, 
         "fees": sum(_finite_values(row.get("fee_fraction") for row in rows)),
         "slippage": sum(_finite_values(row.get("slippage_fraction") for row in rows)),
         "funding": sum(_finite_values(row.get("funding_fraction") for row in rows)),
+        "total_cost": (
+            sum(_finite_values(row.get("fee_fraction") for row in rows))
+            + sum(_finite_values(row.get("slippage_fraction") for row in rows))
+            + sum(_finite_values(row.get("funding_fraction") for row in rows))
+        ),
         "result_status": result_status,
     }
 
