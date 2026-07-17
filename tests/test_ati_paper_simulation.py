@@ -352,3 +352,15 @@ def test_local_stack_scripts_are_closed_scope_and_research_only():
     assert "collect_bybit_trades_ws_forever.ps1" not in (
         root / "scripts" / "start_local_stack.ps1"
     ).read_text(encoding="utf-8")
+    status_script = (root / "scripts" / "status_local_stack.ps1").read_text(encoding="utf-8")
+    for field in ("command_line", "uptime_seconds", "memory_mb", "cpu_seconds",
+                  "listening_ports", "last_log_line", "artifact_age_seconds"):
+        assert field in status_script
+    for wrapper in ("run_ati_paper_forever.ps1", "run_dashboard_watcher_forever.ps1",
+                    "run_research_server.ps1", "run_heavy_research_scheduler.ps1"):
+        text = (root / "scripts" / wrapper).read_text(encoding="utf-8")
+        assert "Tee-Object" in text
+        assert "data\\runtime\\local_stack\\logs" in text
+    scheduler = (root / "scripts" / "run_heavy_research_scheduler.ps1").read_text(encoding="utf-8")
+    assert "next_run_at" in scheduler
+    assert "Previous heavy refresh is current" in scheduler

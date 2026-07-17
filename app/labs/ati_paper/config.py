@@ -143,4 +143,3 @@ def load_config(path: Path | str | None = None) -> AtiPaperConfig:
         funding_mode=str(execution.get("funding_mode") or "UNKNOWN_UNLESS_VERIFIED"),
         instrument_rules=rules,
     )
-

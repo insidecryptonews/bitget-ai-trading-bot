@@ -36,4 +36,3 @@ def safety_envelope() -> dict[str, Any]:
         "live_ready": False,
         "final_recommendation": FINAL_RECOMMENDATION,
     }
-

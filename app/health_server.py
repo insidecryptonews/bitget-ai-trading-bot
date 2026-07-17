@@ -79,6 +79,11 @@ def start_health_server(
                 payload["ati_paper_executor"] = components["components"]["ati_paper_executor"]
                 self._send_json(payload)
                 return
+            if path == "/favicon.ico":
+                self.send_response(204)
+                self.send_header("Cache-Control", "public, max-age=86400")
+                self.end_headers()
+                return
             if not _dashboard_enabled(config):
                 self._send_status(404, "not found")
                 return

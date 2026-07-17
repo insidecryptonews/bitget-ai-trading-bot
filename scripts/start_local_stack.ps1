@@ -9,15 +9,24 @@ if ($LASTEXITCODE -ne 0 -or $audit -notmatch "SAFE_PAPER_ONLY") {
 }
 
 $rows = New-Object System.Collections.ArrayList
+New-Item -ItemType Directory -Force -Path $script:LogsRoot | Out-Null
 foreach ($definition in Get-LocalStackDefinitions) {
     if (Test-DefinitionRunning $definition) {
         Write-Host "ALREADY RUNNING: $($definition.Name)" -ForegroundColor DarkYellow
-        [void]$rows.Add([ordered]@{ name=$definition.Name; script=$definition.Script; launcher_pid=$null; state="ALREADY_RUNNING" })
+        [void]$rows.Add([ordered]@{
+            name=$definition.Name; script=$definition.Script; launcher_pid=$null
+            command=(Join-Path $script:RepoRoot ("scripts\" + $definition.Script))
+            started_at=$null; state="ALREADY_RUNNING"
+        })
         continue
     }
     $process = Start-StackDefinition $definition
     Write-Host "STARTED: $($definition.Name) pid=$($process.Id)" -ForegroundColor Green
-    [void]$rows.Add([ordered]@{ name=$definition.Name; script=$definition.Script; launcher_pid=$process.Id; state="STARTED" })
+    [void]$rows.Add([ordered]@{
+        name=$definition.Name; script=$definition.Script; launcher_pid=$process.Id
+        command=(Join-Path $script:RepoRoot ("scripts\" + $definition.Script))
+        started_at=[DateTime]::UtcNow.ToString("o"); state="STARTED"
+    })
     Start-Sleep -Milliseconds 350
 }
 Write-StackRegistry $rows

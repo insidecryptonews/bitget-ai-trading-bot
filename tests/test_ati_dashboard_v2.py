@@ -114,3 +114,9 @@ def test_local_research_dashboard_renders_ati_without_claiming_edge(tmp_path: Pa
     assert "can_send_real_orders" in page
     assert "NO LIVE" in page
     assert "edge validated" not in page.lower()
+
+
+def test_health_server_handles_local_favicon_without_external_fetch() -> None:
+    source = (ROOT / "app" / "health_server.py").read_text(encoding="utf-8")
+    assert 'if path == "/favicon.ico":' in source
+    assert "self.send_response(204)" in source

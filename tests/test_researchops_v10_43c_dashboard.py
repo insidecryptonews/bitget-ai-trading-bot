@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 
 from app.labs import research_dashboard_v10_43c as DASH
 
@@ -77,11 +78,14 @@ def test_dashboard_contains_v1043c_panels_and_blockers(tmp_path):
 def test_dashboard_no_external_fetch_or_fake_metrics(tmp_path):
     DASH.build_dashboard("BTCUSDT", state=STATE, out_dir=tmp_path)
     h = (tmp_path / "index.html").read_text(encoding="utf-8")
-    for forbidden in ("fetch(", "http://", "https://", "92%", "76.6%",
+    for forbidden in ("http://", "https://", "92%", "76.6%",
                       "$41,291", "LIVE READY", "guaranteed profit",
                       "outcome distribution of the best shadow policy",
                       '<div class="cell-v">0%</div>'):
         assert forbidden not in h
+    local_paths = re.findall(r"get\(['`]([^'`]+)['`]\)", h)
+    assert local_paths
+    assert all(path.startswith("/api/ati-paper/") for path in local_paths)
 
 
 def test_cli_registered():

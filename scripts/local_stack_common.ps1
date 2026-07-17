@@ -3,6 +3,7 @@ $ErrorActionPreference = "Stop"
 $script:RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $script:RuntimeRoot = Join-Path $script:RepoRoot "data\runtime\local_stack"
 $script:RegistryPath = Join-Path $script:RuntimeRoot "process_registry.json"
+$script:LogsRoot = Join-Path $script:RuntimeRoot "logs"
 $script:Python = Join-Path $script:RepoRoot ".venv\Scripts\python.exe"
 if (-not (Test-Path -LiteralPath $script:Python)) { $script:Python = "python" }
 
@@ -101,6 +102,7 @@ function Start-StackDefinition($Definition) {
 
 function Write-StackRegistry($Rows) {
     New-Item -ItemType Directory -Force -Path $script:RuntimeRoot | Out-Null
+    New-Item -ItemType Directory -Force -Path $script:LogsRoot | Out-Null
     $payload = [ordered]@{
         schema = "local_research_stack.v1"
         repo = $script:RepoRoot

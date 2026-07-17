@@ -66,7 +66,9 @@ def test_dashboard_includes_v1044_alpha_factory_panel(monkeypatch, tmp_path: Pat
     assert "alpha1" in html
     assert "Candidate labels are NOT executable signals" in html
     assert "NO LIVE" in html
-    assert "fetch(" not in html
+    assert "http://" not in html
+    assert "https://" not in html
+    assert "get('/api/ati-paper/account')" in html
 
 
 def test_fast_source_metrics_cache_reuses_recent_heavy_result(monkeypatch, tmp_path: Path):
