@@ -34,7 +34,10 @@ class LeadLagEngine:
         self.recent_leads: dict[tuple[str, str], tuple[int, float, str | None]] = {}
         self.last_signal_at: dict[str, int] = {}
         self.pending_outcomes: dict[str, dict[str, Any]] = {}
-        self.observations: list[dict[str, Any]] = []
+        self.observations: deque[dict[str, Any]] = deque(maxlen=1000)
+        self.episodes: deque[dict[str, Any]] = deque(maxlen=500)
+        self._active_episodes: dict[tuple[Any, ...], dict[str, Any]] = {}
+        self.counters: dict[str, int] = defaultdict(int)
         self.horizon_stats: dict[tuple[str, str, int], dict[str, float]] = defaultdict(
             lambda: {"count": 0.0, "continuations": 0.0, "reversals": 0.0, "sum_target_bps": 0.0}
         )
@@ -107,6 +110,8 @@ class LeadLagEngine:
         signal = self._candidate(symbol, mono_ns, event)
         result["signal"] = signal
         if signal is not None:
+            signal = self._attach_episode(signal)
+            result["signal"] = signal
             self.observations.append(signal)
             if signal["status"] == "CANDIDATE_RESEARCH_ONLY":
                 self.pending_outcomes[signal["signal_id"]] = signal
@@ -116,6 +121,7 @@ class LeadLagEngine:
         cooldown_ns = 2_000_000_000
         last_signal = self.last_signal_at.get(symbol)
         if last_signal is not None and decision_ns - last_signal < cooldown_ns:
+            self.counters["cooldown_suppressions"] += 1
             return None
         consensus_window_ns = int(self.config.get("consensus_window_ms", 750)) * 1_000_000
         leads = [
@@ -149,14 +155,13 @@ class LeadLagEngine:
         expected_remaining = max(0.0, remaining_signed if direction == "LONG" else -remaining_signed)
         bid = finite((target_quote or {}).get("best_bid")); ask = finite((target_quote or {}).get("best_ask"))
         spread_bps = ((ask - bid) / ((ask + bid) / 2.0) * 10_000.0) if bid and ask and ask >= bid else math.inf
-        fixed_cost = (
-            float(self.config.get("round_trip_taker_fee_bps", 12.0))
-            + 2.0 * float(self.config.get("adverse_slippage_bps_each_side", 1.5))
-            + float(self.config.get("latency_cost_bps", 1.0))
-            + float(self.config.get("market_impact_bps", 0.5))
-            + float(self.config.get("funding_cost_reserve_bps", 0.5))
-            + float(self.config.get("basis_risk_reserve_bps", 1.0))
-        )
+        round_trip_fee = float(self.config.get("round_trip_taker_fee_bps", 12.0))
+        slippage_each = float(self.config.get("adverse_slippage_bps_each_side", 1.5))
+        latency = float(self.config.get("latency_cost_bps", 1.0))
+        impact = float(self.config.get("market_impact_bps", 0.5))
+        funding = float(self.config.get("funding_cost_reserve_bps", 0.5))
+        basis = float(self.config.get("basis_risk_reserve_bps", 1.0))
+        fixed_cost = round_trip_fee + 2.0 * slippage_each + latency + impact + funding + basis
         total_cost = fixed_cost + spread_bps
         net_edge = expected_remaining - total_cost
         if not math.isfinite(net_edge):
@@ -175,6 +180,18 @@ class LeadLagEngine:
         first_lead = min(aligned, key=lambda item: item[1], default=None)
         first_lead_ns = first_lead[1] if first_lead is not None else decision_ns
         first_lead_ts = first_lead[3] if first_lead is not None else None
+        cost_breakdown = {
+            "entry_fee_bps": round_trip_fee / 2.0,
+            "exit_fee_bps": round_trip_fee / 2.0,
+            "spread_bps": spread_bps if math.isfinite(spread_bps) else None,
+            "entry_slippage_bps": slippage_each,
+            "exit_slippage_bps": slippage_each,
+            "latency_reserve_bps": latency,
+            "basis_reserve_bps": basis,
+            "funding_reserve_bps": funding,
+            "impact_reserve_bps": impact,
+            "total_bps": total_cost if math.isfinite(total_cost) else None,
+        }
         return {
             "signal_id": signal_id, "strategy_id": "CONSENSUS_LEAD_V1", "symbol": symbol,
             "leader_venues": sorted(item[0] for item in aligned), "target_venue": self.target,
@@ -184,6 +201,7 @@ class LeadLagEngine:
             "bitget_state_at_decision": {"price": target_price, "bid": bid, "ask": ask, "move_bps": target_move},
             "expected_remaining_move_bps": expected_remaining, "measured_latency_ms": (decision_ns - first_lead_ns) / 1_000_000,
             "estimated_total_cost_bps": total_cost, "unlevered_net_edge_bps": net_edge,
+            "estimated_cost_breakdown_bps": cost_breakdown,
             "confidence": min(0.95, len(aligned) / max(1, len(set(self.config.get("signal_eligible_venues") or [])))),
             "features": {"average_leader_move_bps": average_lead, "target_move_bps": target_move,
                          "spread_bps": spread_bps, "target_age_ms": target_age_ms,
@@ -194,6 +212,75 @@ class LeadLagEngine:
             "policy_version": POLICY_VERSION, "feature_version": "CROSS_VENUE_CAUSAL_FEATURES_V1",
             "code_commit": self.code_commit, "research_only": True, "edge_validated": False,
             "not_actionable": True, "final_recommendation": "NO LIVE",
+        }
+
+    def _attach_episode(self, signal: dict[str, Any]) -> dict[str, Any]:
+        leaders = tuple(sorted(str(item) for item in signal.get("leader_venues") or []))
+        core = (
+            str(signal.get("symbol") or ""), str(signal.get("direction") or ""),
+            leaders, str(signal.get("regime") or "UNCLASSIFIED_FORWARD"), self.target,
+        )
+        decision_ns = int(signal.get("decision_monotonic_ns") or 0)
+        episode = self._active_episodes.get(core)
+        max_gap_ns = max(
+            5_000_000_000,
+            int(self.config.get("consensus_window_ms", 750)) * 4_000_000,
+        )
+        if episode is None or decision_ns - int(episode["last_observed_monotonic_ns"]) > max_gap_ns:
+            identity = {
+                "symbol": core[0], "direction": core[1], "leaders": leaders,
+                "regime": core[3], "target": self.target,
+                "first_lead_event_monotonic_ns": signal.get("first_lead_event_monotonic_ns"),
+                "first_observed_monotonic_ns": decision_ns,
+                "policy": POLICY_VERSION,
+            }
+            episode = {
+                "episode_id": "cve_" + hashlib.sha256(
+                    json.dumps(identity, sort_keys=True, separators=(",", ":")).encode("utf-8")
+                ).hexdigest()[:28],
+                "symbol": core[0], "direction": core[1], "leader_venues": list(leaders),
+                "regime": core[3], "target_venue": self.target,
+                "first_observed_at": signal.get("decision_ts"),
+                "last_observed_at": signal.get("decision_ts"),
+                "first_observed_monotonic_ns": decision_ns,
+                "last_observed_monotonic_ns": decision_ns,
+                "evaluations": 0, "candidate_evaluations": 0,
+                "last_status": None, "last_rejection_reason": None,
+            }
+            self._active_episodes[core] = episode
+            self.episodes.append(episode)
+            self.counters["unique_market_episodes"] += 1
+        else:
+            self.counters["duplicate_evaluations"] += 1
+        episode["evaluations"] += 1
+        episode["last_observed_at"] = signal.get("decision_ts")
+        episode["last_observed_monotonic_ns"] = decision_ns
+        episode["last_status"] = signal.get("status")
+        episode["last_rejection_reason"] = signal.get("rejection_reason")
+        episode["last_expected_remaining_move_bps"] = signal.get("expected_remaining_move_bps")
+        episode["last_estimated_total_cost_bps"] = signal.get("estimated_total_cost_bps")
+        episode["last_unlevered_net_edge_bps"] = signal.get("unlevered_net_edge_bps")
+        self.counters["raw_evaluations"] += 1
+        status = str(signal.get("status") or "")
+        if status == "CANDIDATE_RESEARCH_ONLY":
+            episode["candidate_evaluations"] += 1
+            self.counters["candidate_signals"] += 1
+        elif status == "REJECTED_COSTS":
+            self.counters["rejected_costs"] += 1
+        elif status == "REJECTED_FEED_STALE":
+            self.counters["rejected_stale"] += 1
+        elif status == "REJECTED_INSUFFICIENT_CONSENSUS":
+            self.counters["rejected_no_consensus"] += 1
+        elif status == "REJECTED_TARGET_NEED_DATA":
+            self.counters["rejected_need_data"] += 1
+        else:
+            self.counters["rejected_contract_mismatch"] += 1
+        return {
+            **signal,
+            "episode_id": episode["episode_id"],
+            "episode_evaluation": episode["evaluations"],
+            "episode_first_observed_at": episode["first_observed_at"],
+            "raw_evaluation_preserved": True,
         }
 
     def _resolve_outcomes(self, symbol: str, now_ns: int, target_price: float) -> list[dict[str, Any]]:
@@ -278,7 +365,16 @@ class LeadLagEngine:
         return {
             "schema": "cross_venue_leadlag_snapshot.v1", "venues": venues,
             "orderflow": orderflow,
-            "leaderboard": leaderboard, "recent_signals": self.observations[-100:],
+            "leaderboard": leaderboard, "recent_signals": list(self.observations)[-100:],
+            "recent_episodes": [dict(row) for row in list(self.episodes)[-100:]],
+            "evaluation_counts": {
+                name: int(self.counters.get(name, 0)) for name in (
+                    "raw_evaluations", "unique_market_episodes", "candidate_signals",
+                    "rejected_costs", "rejected_stale", "rejected_contract_mismatch",
+                    "rejected_no_consensus", "rejected_need_data",
+                    "duplicate_evaluations", "cooldown_suppressions",
+                )
+            },
             "normalized_price_series": dict(series),
             "pending_outcomes": len(self.pending_outcomes),
             "strategy_research_status": [

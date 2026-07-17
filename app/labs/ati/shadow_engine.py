@@ -19,6 +19,16 @@ from .report import (
 )
 
 
+# Replay indexes and source receipts may legitimately move when the same
+# canonical dataset is regenerated. They are provenance, not signal identity.
+# Keep this allowlist deliberately small: every other field remains collision
+# protected.
+_VOLATILE_REPLAY_FIELDS = frozenset({
+    "dataset_source", "signal_idx", "entry_idx", "exit_idx",
+})
+_PAPER_FEED_MAX_DECISION_AGE_SECONDS = 30 * 60
+
+
 def _read_json(path: Path, default: Any) -> Any:
     try:
         return json.loads(path.read_text(encoding="utf-8"))
@@ -46,10 +56,54 @@ def _merge_unique(existing: list[dict[str, Any]], incoming: list[dict[str, Any]]
         if not identifier:
             continue
         current = merged.get(identifier)
-        if current is not None and json.dumps(current, sort_keys=True, default=str) != json.dumps(row, sort_keys=True, default=str):
-            raise ValueError(f"ATI_FORWARD_ID_COLLISION:{identifier}")
+        if current is not None:
+            current_semantic = {
+                name: value for name, value in current.items()
+                if name not in _VOLATILE_REPLAY_FIELDS
+            }
+            incoming_semantic = {
+                name: value for name, value in row.items()
+                if name not in _VOLATILE_REPLAY_FIELDS
+            }
+            if json.dumps(current_semantic, sort_keys=True, default=str) != json.dumps(
+                incoming_semantic, sort_keys=True, default=str,
+            ):
+                raise ValueError(f"ATI_FORWARD_ID_COLLISION:{identifier}")
+            # Preserve the first durable row and its original provenance. A
+            # regenerated replay must not silently rewrite forward history.
+            continue
         merged[identifier] = row
     return sorted(merged.values(), key=lambda row: (str(row.get("decision_ts")), str(row.get(key))))
+
+
+def _paper_feed_metadata(
+    row: dict[str, Any], *, now: datetime, outcome_already_known: bool,
+) -> dict[str, Any]:
+    decision = _parse_utc(row.get("decision_ts"))
+    age_seconds = None if decision is None else (now - decision).total_seconds()
+    if outcome_already_known:
+        eligible = False
+        reason = "PREKNOWN_OUTCOME_AT_FIRST_FORWARD_OBSERVATION"
+    elif age_seconds is None:
+        eligible = False
+        reason = "DECISION_TIMESTAMP_INVALID"
+    elif age_seconds < -5:
+        eligible = False
+        reason = "DECISION_TIMESTAMP_IN_FUTURE"
+    elif age_seconds > _PAPER_FEED_MAX_DECISION_AGE_SECONDS:
+        eligible = False
+        reason = "DECISION_STALE_AT_FIRST_FORWARD_OBSERVATION"
+    else:
+        eligible = True
+        reason = None
+    return {
+        **row,
+        "first_forward_observed_at": now.isoformat(),
+        "paper_feed_eligible": eligible,
+        "paper_feed_status": "ELIGIBLE_FORWARD_ONLY" if eligible else "BLOCKED_RESEARCH_LEDGER_ONLY",
+        "paper_feed_block_reason": reason,
+        "decision_age_at_first_forward_observation_seconds": age_seconds,
+    }
 
 
 def _latest_available_at(audits: list[dict[str, Any]]) -> str:
@@ -237,18 +291,46 @@ def run_shadow_once(*, sample_dir: Path | str | None = None,
         }
         _atomic_write(boundary_path, _json_text(boundary))
     boundary_ts = str(boundary.get("forward_boundary") or "")
-    forward_candidates = [
+    raw_forward_candidates = [
         row for row in signal_rows
         if row.get("decision") == "SHADOW_CANDIDATE" and str(row.get("decision_ts") or "") > boundary_ts
     ]
-    forward_ids = {row["signal_id"] for row in forward_candidates}
+    forward_ids = {row["signal_id"] for row in raw_forward_candidates}
     closed = _closed_forward_trades(trade_rows, forward_ids)
     closed_ids = {row["signal_id"] for row in closed}
-    open_rows = [row for row in forward_candidates if row["signal_id"] not in closed_ids]
     signal_ledger_path = target / "ati_forward_signals.jsonl"
     outcome_ledger_path = target / "ati_forward_outcomes.jsonl"
     existing_signals = [] if boundary_rebased else _read_jsonl(signal_ledger_path)
     existing_outcomes = [] if boundary_rebased else _read_jsonl(outcome_ledger_path)
+    existing_by_id = {
+        str(row.get("signal_id") or ""): row for row in existing_signals
+        if row.get("signal_id")
+    }
+    forward_candidates: list[dict[str, Any]] = []
+    for row in raw_forward_candidates:
+        identifier = str(row.get("signal_id") or "")
+        previous = existing_by_id.get(identifier)
+        if previous is not None:
+            # Reuse the first-observation decision verbatim. Eligibility may
+            # never improve retrospectively after an outcome becomes known.
+            candidate = {
+                **row,
+                **{
+                    field: previous.get(field)
+                    for field in (
+                        "first_forward_observed_at", "paper_feed_eligible",
+                        "paper_feed_status", "paper_feed_block_reason",
+                        "decision_age_at_first_forward_observation_seconds",
+                    )
+                    if field in previous
+                },
+            }
+        else:
+            candidate = _paper_feed_metadata(
+                row, now=now, outcome_already_known=identifier in closed_ids,
+            )
+        forward_candidates.append(candidate)
+    open_rows = [row for row in forward_candidates if row["signal_id"] not in closed_ids]
     existing_ids = {str(row.get("signal_id")) for row in existing_signals}
     signals_ledger = _merge_unique(existing_signals, forward_candidates, "signal_id")
     outcomes_ledger = _merge_unique(existing_outcomes, closed, "signal_id")
@@ -282,6 +364,12 @@ def run_shadow_once(*, sample_dir: Path | str | None = None,
         "stale": stale,
         "stale_reason": "dataset_last_bar_older_than_30m" if stale else None,
         "signals_total": len(signals_ledger),
+        "paper_feed_eligible_signals": sum(
+            row.get("paper_feed_eligible") is True for row in signals_ledger
+        ),
+        "paper_feed_blocked_signals": sum(
+            row.get("paper_feed_eligible") is not True for row in signals_ledger
+        ),
         "new_forward_candidates_seen": sum(
             str(row.get("signal_id")) not in existing_ids for row in forward_candidates
         ),

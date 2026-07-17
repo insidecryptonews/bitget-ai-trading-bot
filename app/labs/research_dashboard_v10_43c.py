@@ -10,6 +10,7 @@ from __future__ import annotations
 import html
 import json
 import os
+import subprocess
 import time
 import webbrowser
 from datetime import datetime, timezone
@@ -565,6 +566,18 @@ def _ati_metric(label: str, value: Any, element_id: str) -> str:
     )
 
 
+def _table_rows(rows: list[dict[str, Any]], columns: tuple[str, ...], *, empty: str) -> str:
+    if not rows:
+        return f'<tr><td colspan="{len(columns)}">{html.escape(empty)}</td></tr>'
+    return "".join(
+        "<tr>" + "".join(
+            f"<td>{html.escape(str(row.get(column) if row.get(column) is not None else 'N/A'))}</td>"
+            for column in columns
+        ) + "</tr>"
+        for row in rows
+    )
+
+
 def _panel_ati_paper(d: dict) -> str:
     snapshot = d.get("ati_paper") or {}
     account_wrap = snapshot.get("account") if isinstance(snapshot.get("account"), dict) else {}
@@ -572,6 +585,23 @@ def _panel_ati_paper(d: dict) -> str:
     health = snapshot.get("health") if isinstance(snapshot.get("health"), dict) else {}
     perf = snapshot.get("performance") if isinstance(snapshot.get("performance"), dict) else {}
     sizing = account_wrap.get("sizing") if isinstance(account_wrap.get("sizing"), dict) else {}
+    positions = ((snapshot.get("positions") or {}).get("positions") or [])
+    trades = ((snapshot.get("trades") or {}).get("trades") or [])
+    events = ((snapshot.get("events") or {}).get("events") or [])
+    position_rows = _table_rows(positions, (
+        "symbol", "direction", "entry_reference_price", "last_price", "stop_price",
+        "take_profit_price", "quantity", "notional", "estimated_net_pnl", "status",
+    ), empty="No open simulated positions in this snapshot")
+    trade_rows = _table_rows(trades, (
+        "trade_id", "exit_ts", "symbol", "direction", "entry_reference_price",
+        "exit_reference_price", "notional", "fees", "slippage", "net_pnl", "exit_reason",
+    ), empty="No closed simulated trades in this snapshot")
+    event_rows = "".join(
+        f'<div>{html.escape(str(row.get("timestamp") or "N/A"))} | '
+        f'{html.escape(str(row.get("event_type") or "N/A"))} | '
+        f'{html.escape(str(row.get("reason") or "N/A"))}</div>'
+        for row in events[:80]
+    ) or "No paper events in this snapshot"
     metrics = "".join((
         _ati_metric("Executor", health.get("status") or "DEGRADED", "atiPaperExecutor"),
         _ati_metric("Account", account.get("account_id") or "ATI_PAPER_50", "atiPaperAccount"),
@@ -596,7 +626,7 @@ def _panel_ati_paper(d: dict) -> str:
         _ati_metric("Last heartbeat", health.get("last_heartbeat"), "atiPaperHeartbeat"),
         _ati_metric("Market age", health.get("market_data_age_seconds"), "atiPaperMarketAge"),
         _ati_metric("Policy", health.get("policy_version") or "ATI_PAPER_SIMULATION_V1", "atiPaperPolicy"),
-        _ati_metric("Commit", health.get("commit_hash") or "N/A", "atiPaperCommit"),
+        _ati_metric("Process start commit", health.get("commit_hash") or "N/A", "atiPaperCommit"),
     ))
     return f'''
 <div class="ati-paper-shell" id="atiPaperPanel">
@@ -612,11 +642,11 @@ def _panel_ati_paper(d: dict) -> str:
     <div><h4>Equity / drawdown</h4><canvas id="atiPaperEquityChart" width="900" height="220"></canvas></div>
   </div>
   <div class="ati-paper-columns">
-    <section><h4>Open positions</h4><div class="ati-paper-table-wrap"><table class="tbl"><thead><tr><th>Symbol</th><th>Side</th><th>Entry</th><th>Last</th><th>Stop</th><th>TP</th><th>Qty</th><th>Notional</th><th>Net mark</th><th>MFE / MAE</th></tr></thead><tbody id="atiPaperPositions"><tr><td colspan="10">No open simulated positions</td></tr></tbody></table></div></section>
-    <section><h4>Closed simulated trades</h4><div class="ati-paper-table-wrap"><table class="tbl"><thead><tr><th>Trade</th><th>UTC</th><th>Symbol</th><th>Side</th><th>Entry / exit</th><th>Notional</th><th>Fees</th><th>Slip</th><th>Net</th><th>Reason</th></tr></thead><tbody id="atiPaperTrades"><tr><td colspan="10">No forward trades</td></tr></tbody></table></div></section>
+    <section><h4>Open positions</h4><div class="ati-paper-table-wrap"><table class="tbl"><thead><tr><th>Symbol</th><th>Side</th><th>Entry</th><th>Last</th><th>Stop</th><th>TP</th><th>Qty</th><th>Notional</th><th>Net mark</th><th>Status</th></tr></thead><tbody id="atiPaperPositions">{position_rows}</tbody></table></div></section>
+    <section><h4>Closed simulated trades</h4><div class="ati-paper-table-wrap"><table class="tbl"><thead><tr><th>Trade</th><th>UTC</th><th>Symbol</th><th>Side</th><th>Entry</th><th>Exit</th><th>Notional</th><th>Fees</th><th>Slip</th><th>Net</th><th>Reason</th></tr></thead><tbody id="atiPaperTrades">{trade_rows}</tbody></table></div></section>
   </div>
   <div class="ati-paper-columns">
-    <section><h4>Audit feed</h4><div class="ati-paper-feed" id="atiPaperEvents">No paper events yet</div></section>
+    <section><h4>Audit feed</h4><div class="ati-paper-feed" id="atiPaperEvents">{event_rows}</div></section>
     <section><h4>Selected trade / policy contract</h4><pre class="ati-paper-detail" id="atiPaperTradeDetail">SIMULATION ONLY\nSizing: realized equity fraction\nUnrealized PnL is never compounded\nSTOP_BEFORE_TP\nFunding: UNKNOWN unless verified\nFINAL_RECOMMENDATION: NO LIVE</pre></section>
   </div>
 </div>'''
@@ -630,6 +660,11 @@ def _panel_cross_venue(d: dict) -> str:
     signals = snapshot.get("signals") if isinstance(snapshot.get("signals"), list) else []
     positions = snapshot.get("positions") if isinstance(snapshot.get("positions"), list) else []
     trades = snapshot.get("trades") if isinstance(snapshot.get("trades"), list) else []
+    providers = snapshot.get("providers") if isinstance(snapshot.get("providers"), dict) else {}
+    leadlag = snapshot.get("leadlag") if isinstance(snapshot.get("leadlag"), dict) else {}
+    counts = leadlag.get("evaluation_counts") if isinstance(leadlag.get("evaluation_counts"), dict) else {}
+    episodes = leadlag.get("recent_episodes") if isinstance(leadlag.get("recent_episodes"), list) else []
+    storage = snapshot.get("storage") if isinstance(snapshot.get("storage"), dict) else {}
     venue_rows = "".join(
         "<tr>" + "".join(f"<td>{html.escape(str(value if value is not None else 'N/A'))}</td>" for value in (
             row.get("venue"), row.get("symbol"), row.get("price"), row.get("best_bid"), row.get("best_ask"),
@@ -642,9 +677,19 @@ def _panel_cross_venue(d: dict) -> str:
         "<tr>" + "".join(f"<td>{html.escape(str(value if value is not None else 'N/A'))}</td>" for value in (
             row.get("symbol"), row.get("direction"), ",".join(row.get("leader_venues") or []),
             row.get("expected_remaining_move_bps"), row.get("estimated_total_cost_bps"),
-            row.get("unlevered_net_edge_bps"), row.get("status"), row.get("rejection_reason"),
+            row.get("unlevered_net_edge_bps"),
+            json.dumps(row.get("estimated_cost_breakdown_bps") or {}, sort_keys=True),
+            row.get("status"), row.get("rejection_reason"),
         )) + "</tr>" for row in signals[-20:]
-    ) or '<tr><td colspan="8">WAITING FOR SIGNAL; NO ACTIVITY IS FORCED</td></tr>'
+    ) or '<tr><td colspan="9">WAITING FOR SIGNAL; NO ACTIVITY IS FORCED</td></tr>'
+    episode_rows = _table_rows(episodes[-30:], (
+        "episode_id", "symbol", "direction", "first_observed_at", "last_observed_at",
+        "evaluations", "candidate_evaluations", "last_status", "last_rejection_reason",
+    ), empty="WAITING FOR UNIQUE MARKET EPISODES")
+    storage_rows = _table_rows(storage.get("venues") or [], (
+        "venue", "stream_size_bytes", "stream_growth_bytes_per_hour_this_process",
+        "rotation_state", "raw_compression", "derived_compaction_status", "collector_status",
+    ), empty="STORAGE TELEMETRY NOT AVAILABLE")
     return f'''
 <div class="cv-shell" id="crossVenuePanel">
   <div class="cv-head"><div><h3>CROSS-VENUE INTELLIGENCE - PAPER RESEARCH</h3>
@@ -653,8 +698,11 @@ def _panel_cross_venue(d: dict) -> str:
   <div class="cv-status" id="cvPollStatus">Static snapshot; connecting to local read-only API...</div>
   <div class="cv-metrics">
     {_ati_metric("System", health.get("status") or "CONNECTING", "cvSystemStatus")}
-    {_ati_metric("Venues", len(venues), "cvVenueCount")}
-    {_ati_metric("Signals observed", len(signals), "cvSignalCount")}
+    {_ati_metric("Active venues", providers.get("active_venue_count", 0), "cvVenueCount")}
+    {_ati_metric("Active streams", providers.get("active_stream_count", len(venues)), "cvStreamCount")}
+    {_ati_metric("Raw evaluations", counts.get("raw_evaluations", 0), "cvSignalCount")}
+    {_ati_metric("Unique episodes", counts.get("unique_market_episodes", 0), "cvEpisodeCount")}
+    {_ati_metric("Candidate signals", counts.get("candidate_signals", 0), "cvCandidateCount")}
     {_ati_metric("Open simulated", len(positions), "cvPositionCount")}
     {_ati_metric("Closed simulated", len(trades), "cvTradeCount")}
     {_ati_metric("Account", account.get("account_id") or "CROSS_VENUE_PAPER_50", "cvAccountId")}
@@ -672,15 +720,55 @@ def _panel_cross_venue(d: dict) -> str:
     <section><h4>Order-flow / book pressure</h4><div class="cv-scroll"><table class="tbl"><thead><tr><th>Venue</th><th>Symbol</th><th>Trades 1s</th><th>Buy volume</th><th>Sell volume</th><th>Net aggressor</th><th>Book imbalance</th><th>Microprice</th></tr></thead><tbody id="cvOrderflow"><tr><td colspan="8">NEED_DATA</td></tr></tbody></table></div></section>
     <section><h4>Leader Board / validation</h4><div class="cv-scroll"><table class="tbl"><thead><tr><th>Venue</th><th>Symbol</th><th>Horizon</th><th>N</th><th>Continuation</th><th>Reversal</th><th>Status</th></tr></thead><tbody id="cvLeaders"><tr><td colspan="7">NEED_MORE_DATA</td></tr></tbody></table></div></section>
     <section><h4>Lead-lag horizon heatmap</h4><div class="cv-heatmap" id="cvHeatmap">NEED_MORE_DATA - no historical reliability is inferred</div></section>
-    <section><h4>Signal candidates and rejections</h4><div class="cv-scroll"><table class="tbl"><thead><tr><th>Symbol</th><th>Side</th><th>Leaders</th><th>Remaining bps</th><th>Cost bps</th><th>Net edge bps</th><th>Status</th><th>Reason</th></tr></thead><tbody id="cvSignals">{signal_rows}</tbody></table></div></section>
+    <section><h4>Raw evaluations: candidates and rejections</h4><div class="cv-scroll"><table class="tbl"><thead><tr><th>Symbol</th><th>Side</th><th>Leaders</th><th>Remaining bps</th><th>Cost bps</th><th>Net edge bps</th><th>Cost breakdown</th><th>Status</th><th>Reason</th></tr></thead><tbody id="cvSignals">{signal_rows}</tbody></table></div></section>
+    <section><h4>Unique market episodes</h4><div class="cv-scroll"><table class="tbl"><thead><tr><th>Episode</th><th>Symbol</th><th>Side</th><th>First</th><th>Last</th><th>Evaluations</th><th>Candidates</th><th>Status</th><th>Reason</th></tr></thead><tbody id="cvEpisodes">{episode_rows}</tbody></table></div></section>
     <section><h4>CROSS_VENUE_PAPER_50</h4><div class="cv-scroll"><table class="tbl"><thead><tr><th>UTC</th><th>Symbol</th><th>Side</th><th>Net</th><th>Fees</th><th>Slippage</th><th>Exit</th></tr></thead><tbody id="cvTrades"><tr><td colspan="7">No simulated forward trades</td></tr></tbody></table></div></section>
     <section><h4>Paper equity curve</h4><canvas id="cvEquityChart" width="900" height="240"></canvas><div class="sub">Isolated simulated account. No ATI/P11 balance is read or modified.</div></section>
     <section><h4>Leverage Lab - same fill and path</h4><div class="cv-scroll"><table class="tbl"><thead><tr><th>x</th><th>N</th><th>PnL</th><th>Equity</th><th>Net EV</th><th>PF</th><th>DD</th><th>Liquidations</th><th>Status</th></tr></thead><tbody id="cvLeverage"><tr><td colspan="9">NEED_MORE_DATA</td></tr></tbody></table></div></section>
-    <section><h4>Component health</h4><div class="cv-scroll"><table class="tbl"><thead><tr><th>Component</th><th>Status</th><th>Last age ms</th><th>Reconnects</th><th>Gaps</th><th>Error</th></tr></thead><tbody id="cvHealth"><tr><td colspan="6">CONNECTING</td></tr></tbody></table></div></section>
+    <section><h4>Component health</h4><div class="cv-scroll"><table class="tbl"><thead><tr><th>Component</th><th>Status</th><th>Last age ms</th><th>Reconnects total/hour</th><th>Gaps</th><th>Recovery</th><th>Error</th></tr></thead><tbody id="cvHealth"><tr><td colspan="7">CONNECTING</td></tr></tbody></table></div></section>
+    <section><h4>Append-only storage / derived compaction</h4><div class="cv-scroll"><table class="tbl"><thead><tr><th>Venue</th><th>Bytes</th><th>Growth/hour</th><th>Rotation</th><th>Raw compression</th><th>Derived compaction</th><th>Collector</th></tr></thead><tbody id="cvStorage">{storage_rows}</tbody></table></div><div class="sub">Raw JSONL is append-only. Parquet compaction is a separate optional job and never deletes raw evidence.</div></section>
     <section><h4>Activity feed</h4><div class="cv-activity" id="cvActivity">No simulated account events yet</div></section>
   </div>
   <div class="cv-foot"><span id="cvReconciliation">RECONCILIATION: waiting</span><span>Public feeds only</span><span>can_send_real_orders=false</span><span>FINAL_RECOMMENDATION: NO LIVE</span></div>
 </div>'''
+
+
+def _git_runtime_provenance(d: dict[str, Any]) -> str:
+    root = CE._repo_root()
+    def git(*args: str) -> str:
+        try:
+            return subprocess.run(
+                ["git", *args], cwd=root, check=True, capture_output=True,
+                text=True, timeout=2,
+            ).stdout.strip()
+        except Exception:
+            return "UNKNOWN"
+    return (
+        A._kv("Repository HEAD", d.get("git_head") or git("rev-parse", "HEAD")) +
+        A._kv("Git tree", git("rev-parse", "HEAD^{tree}")) +
+        A._kv("Branch", git("branch", "--show-current")) +
+        A._kv("Artifact generated", d.get("generated_at")) +
+        A._kv("Fast watcher mode", "ARTIFACT_ONLY + LOCAL READ-ONLY API POLLING") +
+        '<div class="sub">Static HTML contains the generation snapshot. ATI Paper and Cross-Venue tables poll local read-only APIs; historical research remains explicitly cached/stale.</div>'
+    )
+
+
+def _relationship_graph(d: dict[str, Any]) -> str:
+    rest = (d.get("view") or {}).get("status") or "UNKNOWN"
+    ws = (d.get("source_compare_3way") or {}).get("ws", {}).get("status") or "UNKNOWN"
+    persistent = (d.get("persistent_continuity") or {}).get("verdict") or "UNKNOWN"
+    ati = ((d.get("ati") or {}).get("health") or {}).get("status") or "UNKNOWN"
+    paper = ((d.get("ati_paper") or {}).get("health") or {}).get("status") or "UNKNOWN"
+    cross = ((d.get("cross_venue") or {}).get("health") or {}).get("status") or "UNKNOWN"
+    nodes = (
+        ("REST historical fragments", rest), ("Persistent public WS", persistent),
+        ("Legacy WS artifact", ws), ("ATI Shadow", ati),
+        ("ATI Paper simulation", paper), ("Cross-Venue public research", cross),
+    )
+    return '<div class="runtime-graph">' + ''.join(
+        f'<div><strong>{html.escape(label)}</strong><span>{html.escape(str(status))}</span></div>'
+        for label, status in nodes
+    ) + '</div>'
 
 
 def _p11_pick(snapshot: dict[str, Any], *paths: str) -> Any:
@@ -1015,6 +1103,7 @@ def render_html(d: dict, auto_refresh_seconds: int | None = None) -> str:
     base = _remove_legacy_probability_lattice(base)
     base = base.replace("</style>", _P11_CSS + _ATI_PAPER_CSS + _CROSS_VENUE_CSS + "</style>", 1)
     extra = _EXTRA.format(
+        provenance=_git_runtime_provenance(d),
         watch=_panel_watch(d), ati_paper=_panel_ati_paper(d), cross_venue=_panel_cross_venue(d),
         pws=_panel_persistent_ws(d), compare=_panel_compare(d),
         p11=_panel_p11_forward_observer(d),
@@ -1024,7 +1113,7 @@ def render_html(d: dict, auto_refresh_seconds: int | None = None) -> str:
         ai=_panel_ai_copilot(d),
         edge=_panel_edge_discovery(d),
         lattice=_panel_lattice(d),
-        graph=A._relationship_graph((d.get("persistent_continuity") or {}).get("verdict")),
+        graph=_relationship_graph(d),
         gen=html.escape(datetime.now(timezone.utc).isoformat()))
     marker = '<div class="foot">'
     base = base.replace(marker, extra + marker, 1) if marker in base else base.replace("</body>", extra + "</body>", 1)
@@ -1059,13 +1148,17 @@ def _remove_legacy_probability_lattice(rendered: str) -> str:
 
 _EXTRA = """
 <div class="grid" style="margin-top:14px">
+  <div class="section-band">A. LIVE LOCAL RUNTIME TELEMETRY <span>read-only, public/local, no execution</span></div>
+  <div class="card wide"><h3>Runtime Provenance</h3>{provenance}</div>
   <div class="card wide"><h3>Dashboard Auto Refresh</h3>{watch}</div>
+  <div class="section-band">B. FORWARD SHADOW / PAPER SIMULATION <span>not actionable, no orders</span></div>
   <div class="card full ati-paper-card">{ati_paper}</div>
   <div class="card full cv-card">{cross_venue}</div>
   <div class="card full p11-panel"><h3>P11_SHORT FORWARD OBSERVER</h3>{p11}</div>
   <div class="card full p11-panel"><h3>Reports &amp; Exports — P11_SHORT</h3>{p11_exports}</div>
+  <div class="section-band">C. CACHED / HISTORICAL RESEARCH ARTIFACTS <span>timestamps and staleness shown explicitly</span></div>
   <div class="card wide"><h3>Persistent WS Panel</h3>{pws}</div>
-  <div class="card wide"><h3>REST vs WS vs WS Persistent</h3>{compare}</div>
+  <div class="card wide"><h3>REST fragments vs WS snapshots vs Persistent WS</h3>{compare}<div class="sub">REST and WS sources have different collection contracts; coverage percentages are not interchangeable.</div></div>
   <div class="card wide"><h3>Alpha Factory V10.44</h3>{alpha}</div>
   <div class="card wide"><h3>AI Research Co-Pilot V10.45</h3>{ai}</div>
   <div class="card wide"><h3>Multi-AI Edge Discovery V10.45.1</h3>{edge}</div>
@@ -1079,6 +1172,9 @@ _EXTRA = """
 
 
 _P11_CSS = """
+.section-band{grid-column:1/-1;border:1px solid #355060;background:#101a21;color:#d7e6f4;padding:10px 12px;font:700 12px ui-monospace,monospace;letter-spacing:.05em}
+.section-band span{color:var(--muted);font-weight:400;letter-spacing:0;margin-left:8px}
+.runtime-graph{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:7px}.runtime-graph div{border:1px solid var(--line);background:var(--panel2);padding:8px;border-radius:5px;min-width:0}.runtime-graph strong,.runtime-graph span{display:block;overflow-wrap:anywhere}.runtime-graph strong{font-size:10px;color:var(--muted);text-transform:uppercase}.runtime-graph span{margin-top:5px;font:600 11px ui-monospace,monospace;color:var(--txt)}
 .p11-panel .kv .v{max-width:68%;overflow-wrap:anywhere;word-break:break-word;text-align:right}
 .p11-metrics-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
 .p11-subhead{margin:0 0 7px;color:var(--txt);font-size:11px;letter-spacing:.08em;text-transform:uppercase}
@@ -1087,7 +1183,7 @@ _P11_CSS = """
 .p11-export-link:hover{border-color:var(--accent)}
 .p11-export-link span{color:var(--muted);font-size:11px}
 .p11-export-link.missing{cursor:not-allowed;opacity:.72}
-@media(max-width:900px){.p11-metrics-grid{grid-template-columns:1fr}.p11-export-grid{grid-template-columns:1fr}.p11-panel .kv .v{max-width:60%}}
+@media(max-width:900px){.p11-metrics-grid{grid-template-columns:1fr}.p11-export-grid{grid-template-columns:1fr}.p11-panel .kv .v{max-width:60%}.runtime-graph{grid-template-columns:1fr}.section-band span{display:block;margin:4px 0 0}}
 """
 
 
@@ -1162,10 +1258,10 @@ _ATI_PAPER_JS = r"""
   }
   function renderTrades(rows) {
     const body=$('atiPaperTrades'); body.textContent='';
-    if(!rows.length){const tr=document.createElement('tr');const td=escapeCell('No forward trades');td.colSpan=10;tr.append(td);body.append(tr);return;}
+    if(!rows.length){const tr=document.createElement('tr');const td=escapeCell('No closed simulated trades in current ledger');td.colSpan=11;tr.append(td);body.append(tr);return;}
     rows.forEach(t=>{const tr=document.createElement('tr');tr.tabIndex=0;[
       String(t.trade_id||'').slice(0,12),t.exit_ts,t.symbol,t.direction,
-      `${num(t.entry_reference_price)} / ${num(t.exit_reference_price)}`,num(t.notional),
+      num(t.entry_reference_price),num(t.exit_reference_price),num(t.notional),
       num(t.fees),num(t.slippage),num(t.net_pnl),t.exit_reason].forEach(v=>tr.append(escapeCell(v)));
       const show=()=>{$('atiPaperTradeDetail').textContent=JSON.stringify(t,null,2)};
       tr.addEventListener('click',show);tr.addEventListener('keydown',e=>{if(e.key==='Enter')show()});body.append(tr);});
@@ -1213,19 +1309,21 @@ _CROSS_VENUE_JS = r"""
   function drawEquity(data){const c=$('cvEquityChart'),ratio=window.devicePixelRatio||1,rect=c.getBoundingClientRect(),w=Math.max(320,rect.width),h=Math.max(180,rect.height);c.width=Math.round(w*ratio);c.height=Math.round(h*ratio);const x=c.getContext('2d');x.setTransform(ratio,0,0,ratio,0,0);x.clearRect(0,0,w,h);const points=(data||[]).slice().reverse().map(r=>Number(r.total_equity)).filter(Number.isFinite);if(!points.length){x.fillStyle='#8291a2';x.fillText('WAITING FOR ISOLATED EQUITY LEDGER',16,26);return;}let lo=Math.min(...points),hi=Math.max(...points);const pad=Math.max((hi-lo)*.1,.01);lo-=pad;hi+=pad;const px=i=>12+i*(w-24)/Math.max(1,points.length-1),py=v=>h-18-(v-lo)/Math.max(.000001,hi-lo)*(h-36);x.strokeStyle='#58a6ff';x.lineWidth=2;x.beginPath();points.forEach((v,i)=>i?x.lineTo(px(i),py(v)):x.moveTo(px(i),py(v)));x.stroke();x.fillStyle='#8291a2';x.fillText(`${lo.toFixed(2)} - ${hi.toFixed(2)} simulated USDT`,14,14);}
   function renderHeatmap(data){const box=$('cvHeatmap');box.textContent='';if(!data.length){box.textContent='NEED_MORE_DATA - no historical reliability is inferred';return;}data.forEach(r=>{const cell=document.createElement('div');cell.className='cv-heat-cell';const mature=Number(r.sample_size)>=200;const probability=Number(r.continuation_probability);cell.dataset.state=mature&&Number.isFinite(probability)?(probability>.5?'positive':'negative'):'neutral';cell.textContent=`${text(r.symbol)} | ${text(r.venue)} | ${text(r.horizon_ms)}ms | N=${text(r.sample_size)} | cont=${num(r.continuation_probability)} | ${text(r.status)}`;box.append(cell);});}
   function renderActivity(data){const box=$('cvActivity');box.textContent='';if(!data.length){box.textContent='No simulated account events yet';return;}data.slice(0,80).forEach(r=>{const line=document.createElement('div');line.textContent=`${text(r.timestamp)} | ${text(r.event_type)} | ${text(r.correlation_id)}`;box.append(line);});}
-  function renderHealth(payload){const combined=[];Object.values(payload.collectors||{}).forEach(r=>combined.push(r));Object.entries(payload.components||{}).forEach(([name,r])=>combined.push({component:name,...r}));rows('cvHealth',combined,[r=>r.component||r.venue,r=>r.status,r=>num(r.last_event_age_ms,1),r=>r.reconnect_count,r=>r.gaps,r=>r.last_error],'CONNECTING');}
+  function renderHealth(payload){const combined=[];Object.values(payload.collectors||{}).forEach(r=>combined.push(r));Object.entries(payload.components||{}).forEach(([name,r])=>combined.push({component:name,...r}));rows('cvHealth',combined,[r=>r.component||r.venue,r=>r.status,r=>num(r.last_event_age_ms,1),r=>`${text(r.reconnect_count_total??r.reconnect_count)}/${text(r.reconnects_last_hour??r.reconnections_last_hour)}`,r=>r.gaps_total??r.gaps,r=>r.recovery_result,r=>r.last_error],'CONNECTING');}
   async function refresh(){try{
-    const paths=['/status','/venues','/prices','/orderflow','/leadlag','/signals','/account','/trades','/equity','/events','/leverage','/health'];
-    const [status,venues,prices,flow,lead,signals,account,trades,equity,events,lev,health]=await Promise.all(paths.map(p=>get('/api/cross-venue'+p)));
-    const vr=venues.venues||[],of=flow.orderflow||[],sg=signals.signals||[],tr=trades.trades||[],eq=equity.equity||[],ev=events.events||[],ac=account.account||{},leaders=(lead.leadlag||{}).leaderboard||[],sc=(lev.leverage||{}).scenarios||[];
-    set('cvSystemStatus',health.status);set('cvVenueCount',vr.length);set('cvSignalCount',sg.length);set('cvPositionCount',(status.counts||{}).positions||0);set('cvTradeCount',tr.length);set('cvAccountId',ac.account_id||'CROSS_VENUE_PAPER_50');set('cvCash',num(ac.cash));set('cvEquity',num(ac.total_equity));set('cvRealized',num(ac.realized_pnl));set('cvFees',num(ac.fees));set('cvSlippage',num(ac.slippage));set('cvMaxDrawdown',num(ac.max_drawdown_pct));set('cvEdgeValidated','false');
+    const paths=['/status','/venues','/prices','/orderflow','/leadlag','/signals','/episodes','/account','/trades','/equity','/events','/leverage','/health','/storage'];
+    const [status,venues,prices,flow,lead,signals,episodes,account,trades,equity,events,lev,health,storage]=await Promise.all(paths.map(p=>get('/api/cross-venue'+p)));
+    const vr=venues.venues||[],of=flow.orderflow||[],sg=signals.signals||[],ep=episodes.episodes||[],tr=trades.trades||[],eq=equity.equity||[],ev=events.events||[],ac=account.account||{},leaders=(lead.leadlag||{}).leaderboard||[],sc=(lev.leverage||{}).scenarios||[],ct=status.counts||{};
+    set('cvSystemStatus',health.status);set('cvVenueCount',ct.active_venues||0);set('cvStreamCount',ct.active_streams||vr.length);set('cvSignalCount',ct.raw_evaluations||0);set('cvEpisodeCount',ct.unique_market_episodes||0);set('cvCandidateCount',ct.candidate_signals||0);set('cvPositionCount',ct.positions||0);set('cvTradeCount',tr.length);set('cvAccountId',ac.account_id||'CROSS_VENUE_PAPER_50');set('cvCash',num(ac.cash));set('cvEquity',num(ac.total_equity));set('cvRealized',num(ac.realized_pnl));set('cvFees',num(ac.fees));set('cvSlippage',num(ac.slippage));set('cvMaxDrawdown',num(ac.max_drawdown_pct));set('cvEdgeValidated','false');
     rows('cvVenues',vr,[r=>r.venue,r=>r.symbol,r=>num(r.price),r=>num(r.best_bid),r=>num(r.best_ask),r=>num(r.spread_bps),r=>num(r.microprice),r=>num(r.book_imbalance_l1),r=>r.trade_events_1s,r=>num(r.funding_rate,6),r=>num(r.open_interest),r=>num(r.last_event_age_ms??r.receive_age_ms,1),r=>r.collector_status,r=>r.signal_eligible],'WAITING FOR REAL PUBLIC EVENTS');
     rows('cvOrderflow',of,[r=>r.venue,r=>r.symbol,r=>r.trade_events_1s,r=>num(r.buy_volume_1s),r=>num(r.sell_volume_1s),r=>num(r.net_aggressor_volume_1s),r=>num(r.book_imbalance_l1),r=>num(r.microprice)],'NEED_DATA');
     rows('cvLeaders',leaders,[r=>r.venue,r=>r.symbol,r=>`${r.horizon_ms}ms`,r=>r.sample_size,r=>num(r.continuation_probability),r=>num(r.reversal_probability),r=>r.status],'NEED_MORE_DATA');
-    rows('cvSignals',sg.slice(-30),[r=>r.symbol,r=>r.direction,r=>(r.leader_venues||[]).join(','),r=>num(r.expected_remaining_move_bps),r=>num(r.estimated_total_cost_bps),r=>num(r.unlevered_net_edge_bps),r=>r.status,r=>r.rejection_reason],'WAITING FOR SIGNAL; NO ACTIVITY IS FORCED');
+    rows('cvSignals',sg.slice(-30),[r=>r.symbol,r=>r.direction,r=>(r.leader_venues||[]).join(','),r=>num(r.expected_remaining_move_bps),r=>num(r.estimated_total_cost_bps),r=>num(r.unlevered_net_edge_bps),r=>JSON.stringify(r.estimated_cost_breakdown_bps||{}),r=>r.status,r=>r.rejection_reason],'WAITING FOR SIGNAL; NO ACTIVITY IS FORCED');
+    rows('cvEpisodes',ep,[r=>String(r.episode_id||'').slice(0,16),r=>r.symbol,r=>r.direction,r=>r.first_observed_at,r=>r.last_observed_at,r=>r.evaluations,r=>r.candidate_evaluations,r=>r.last_status,r=>r.last_rejection_reason],'WAITING FOR UNIQUE MARKET EPISODES');
     rows('cvTrades',tr,[r=>r.exit_ts,r=>r.symbol,r=>r.direction,r=>num(r.net_pnl),r=>num(r.fees),r=>num(r.slippage),r=>r.exit_reason],'No simulated forward trades');
     rows('cvLeverage',sc,[r=>`${r.leverage}x`,r=>r.trades,r=>num(r.pnl),r=>num(r.equity),r=>num(r.net_ev),r=>num(r.profit_factor),r=>num(r.max_drawdown_pct),r=>r.liquidations,r=>r.status],'NEED_MORE_DATA');
-    draw(prices.normalized_price_series||{});drawEquity(eq);renderHeatmap(leaders);renderActivity(ev);renderHealth(health);set('cvReconciliation',`RECONCILIATION: ${text((status.reconciliation||{}).status)}`);$('cvPollStatus').textContent=`LOCAL READ-ONLY API | ${new Date().toISOString()} | ${health.status} | SIMULATION ONLY | NOT ACTIONABLE | NO LIVE`;
+    rows('cvStorage',storage.venues||[],[r=>r.venue,r=>r.stream_size_bytes,r=>num(r.stream_growth_bytes_per_hour_this_process,1),r=>r.rotation_state,r=>r.raw_compression,r=>r.derived_compaction_status,r=>r.collector_status],'STORAGE TELEMETRY NOT AVAILABLE');
+    draw(prices.normalized_price_series||{});drawEquity(eq);renderHeatmap(leaders);renderActivity(ev);renderHealth(health);set('cvReconciliation',`RECONCILIATION: ${text((status.reconciliation||{}).status)}`);$('cvPollStatus').textContent=`LOCAL READ-ONLY API | ${new Date().toISOString()} | ${health.status} | ${ct.active_venues||0} venues / ${ct.active_streams||0} streams | SIMULATION ONLY | NOT ACTIONABLE | NO LIVE`;
   }catch(err){$('cvPollStatus').textContent=`LOCAL API UNAVAILABLE: ${err.message} | static snapshot retained | NO LIVE`;}}
   refresh();setInterval(refresh,3000);window.addEventListener('resize',()=>refresh());
 })();

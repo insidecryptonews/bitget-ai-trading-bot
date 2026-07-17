@@ -13,6 +13,7 @@ from typing import Any
 
 from . import (
     ACCOUNT_ID,
+    DEFAULT_OUTCOME_PATH,
     DEFAULT_RUNTIME_DIR,
     DEFAULT_SIGNAL_PATH,
     DEFAULT_STATUS_PATH,
@@ -120,12 +121,14 @@ class AtiPaperExecutor:
         self, *, config: AtiPaperConfig | None = None,
         ledger: AtiPaperLedger | None = None, market: Any | None = None,
         signal_path: Path | str | None = None, status_path: Path | str | None = None,
+        outcome_path: Path | str | None = None,
         commit_hash: str | None = None,
     ):
         self.config = config or load_config()
         self.ledger = ledger or AtiPaperLedger()
         self.market = market or BitgetPublicMarket()
         self.signal_path = Path(signal_path) if signal_path is not None else DEFAULT_SIGNAL_PATH
+        self.outcome_path = Path(outcome_path) if outcome_path is not None else DEFAULT_OUTCOME_PATH
         self.status_path = Path(status_path) if status_path is not None else DEFAULT_STATUS_PATH
         self.commit_hash = commit_hash or _commit_hash()
         self.broker = AtiPaperBroker(self.ledger, self.config, commit_hash=self.commit_hash)
@@ -182,12 +185,48 @@ class AtiPaperExecutor:
 
     def _ingest_new_signals(self) -> int:
         seen = 0
+        outcome_ids = {
+            str(row.get("signal_id") or "") for row in _read_jsonl(self.outcome_path)
+            if row.get("signal_id")
+        }
         for row in _read_jsonl(self.signal_path):
             signal_id = str(row.get("signal_id") or "")
             if not signal_id or self.ledger.signal(signal_id) is not None:
                 continue
-            self.ledger.observe_signal(row, observed_at=utc_now(), commit_hash=self.commit_hash)
+            observed_at = utc_now()
+            self.ledger.observe_signal(row, observed_at=observed_at, commit_hash=self.commit_hash)
             self.last_signal_id = signal_id
+            rejection: str | None = None
+            if signal_id in outcome_ids:
+                rejection = "PREKNOWN_OUTCOME_NOT_FORWARD_ELIGIBLE"
+            elif row.get("paper_feed_eligible") is not True:
+                rejection = str(
+                    row.get("paper_feed_block_reason")
+                    or "PAPER_FEED_ELIGIBILITY_NOT_CONFIRMED"
+                )
+            else:
+                try:
+                    decision = datetime.fromisoformat(
+                        str(row.get("decision_ts") or "").replace("Z", "+00:00")
+                    )
+                    if decision.tzinfo is None:
+                        decision = decision.replace(tzinfo=timezone.utc)
+                    age = (
+                        datetime.fromisoformat(observed_at).astimezone(timezone.utc)
+                        - decision.astimezone(timezone.utc)
+                    ).total_seconds()
+                    if age < -5:
+                        rejection = "SIGNAL_DECISION_TIMESTAMP_IN_FUTURE"
+                    elif age > self.config.signal_max_age_seconds:
+                        rejection = "SIGNAL_DECISION_STALE_AT_OBSERVATION"
+                except ValueError:
+                    rejection = "SIGNAL_DECISION_TIMESTAMP_INVALID"
+            if rejection:
+                self.ledger.reject_signal(
+                    signal_id, rejection,
+                    source_ts=str(row.get("decision_ts") or ""),
+                    commit_hash=self.commit_hash,
+                )
             seen += 1
         return seen
 

@@ -30,6 +30,7 @@
     "trailing_distance_r": 0.5,
     "poll_interval_seconds": 15,
     "market_data_stale_after_seconds": 120,
+    "signal_max_age_seconds": 1800,
     "funding_mode": "UNKNOWN_UNLESS_VERIFIED"
   },
   "instrument_rule_fallbacks": {

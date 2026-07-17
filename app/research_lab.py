@@ -5,6 +5,7 @@ import csv
 import json
 import math
 import statistics
+import time
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -7286,16 +7287,21 @@ class ResearchLab:
         from .labs import exit_factory_v10_44 as EF
         from .labs import research_dashboard_v10_43c as DASH
         syms = symbols or "BTCUSDT"
+        started = time.perf_counter()
         alpha = AF.run_alpha_factory(
             symbols=syms, data_source=data_source,
             max_runtime_minutes=float(max_runtime_minutes or 90.0),
             write_reports=True)
+        alpha_finished = time.perf_counter()
         exits = EF.run_exit_factory(symbols=syms, data_source=data_source,
                                     write_reports=True)
+        exits_finished = time.perf_counter()
         inc = INC.run_incubator(symbols=syms, data_source=data_source,
                                 write_reports=True)
+        incubator_finished = time.perf_counter()
         dash = DASH.build_dashboard((self._v107_csv_arg(syms) or ["BTCUSDT"])[0],
                                     auto_refresh_seconds=30, fast=True)
+        dashboard_finished = time.perf_counter()
         lines = ["RESEARCH HEAVY RUN V10.44 START",
                  f"symbols: {syms}",
                  f"data_source: {data_source}",
@@ -7303,6 +7309,11 @@ class ResearchLab:
                  f"alpha_strategies_tested: {alpha.get('strategies_tested')}",
                  f"exit_verdict: {exits.get('overall_verdict')}",
                  f"incubator_verdict: {inc.get('overall_verdict')}",
+                 f"alpha_seconds: {alpha_finished - started:.3f}",
+                 f"exit_seconds: {exits_finished - alpha_finished:.3f}",
+                 f"incubator_seconds: {incubator_finished - exits_finished:.3f}",
+                 f"dashboard_seconds: {dashboard_finished - incubator_finished:.3f}",
+                 f"total_seconds: {dashboard_finished - started:.3f}",
                  f"dashboard_html: {dash.get('html')}",
                  f"reports_dir: {alpha.get('reports_dir')}",
                  "research_only: true",

@@ -43,6 +43,10 @@ daily-loss, drawdown, losing-streak, cooldown or invented trade-count stops.
 ## Execution Truth
 
 - Only an exact ATI V2 forward `SHADOW_CANDIDATE` is eligible.
+- ATI Shadow must explicitly mark the row `paper_feed_eligible=true`. A signal
+  is blocked when its outcome was already known at first observation, when its
+  decision timestamp is invalid, or when the decision is more than 30 minutes
+  old. Decision age is checked again immediately before a simulated entry.
 - Signals already present when the executor starts are rejected as not observed
   live; they are never filled retrospectively.
 - Entry uses the first fresh public ticker obtained after live observation.

@@ -1194,6 +1194,10 @@ def _research_components_status_payload(state: HealthState) -> dict[str, Any]:
         if isinstance(dashboard.get("dashboard_watch"), dict) else {}
     )
     slow = dashboard.get("slow_metrics") if isinstance(dashboard.get("slow_metrics"), dict) else {}
+    p11 = (
+        dashboard.get("p11_short_forward_observer")
+        if isinstance(dashboard.get("p11_short_forward_observer"), dict) else {}
+    )
     scheduler = read_heavy_scheduler()
     research_root = _RESEARCH_DASHBOARD_V1043C.parent.parent
     heavy_alpha_age = file_age(
@@ -1207,6 +1211,12 @@ def _research_components_status_payload(state: HealthState) -> dict[str, Any]:
         120.0, 3.0 * float(watcher.get("interval_seconds") or 30.0),
     )
     ati = _ati_shadow_status_payload()
+    if (
+        str(ati.get("status") or "") in {"NO_DATA", "UNKNOWN"}
+        and str(ati.get("reconciliation_status") or "") == "PASS"
+        and str(ati.get("boundary_status") or "") in {"FROZEN", "FORWARD_BOUNDARY_FROZEN"}
+    ):
+        ati["status"] = "WAITING_FOR_SIGNAL"
     try:
         from .labs.ati_paper.api import health_payload as ati_paper_health
 
@@ -1225,6 +1235,9 @@ def _research_components_status_payload(state: HealthState) -> dict[str, Any]:
 
         cross_venue_components = cross_venue_health_components()
         cross_venue_health = cross_venue_health_payload()
+        from .labs.cross_venue.storage import storage_status as cross_venue_storage_status
+
+        cross_venue_storage = cross_venue_storage_status()
     except Exception as exc:
         cross_venue_components = {
             "CROSS_VENUE_SYSTEM": {
@@ -1234,6 +1247,7 @@ def _research_components_status_payload(state: HealthState) -> dict[str, Any]:
             }
         }
         cross_venue_health = {"status": "ERROR"}
+        cross_venue_storage = {"status": "ERROR", "error": str(exc)[:200]}
     cross_venue_status = str(cross_venue_health.get("status") or "CONNECTING")
     if cross_venue_status not in {"PAPER_RESEARCH", "CONNECTING", "STALE", "DEGRADED", "ERROR"}:
         cross_venue_status = "DEGRADED"
@@ -1272,6 +1286,20 @@ def _research_components_status_payload(state: HealthState) -> dict[str, Any]:
             "uses_api_keys": False,
             "can_send_real_orders": False,
         },
+        "public_rest_data": {
+            "status": "HEALTHY" if collector_status == "HEALTHY" else "DEGRADED",
+            "collector_status": collector_status,
+            "coverage_contract": "HISTORICAL_FRAGMENT_SOURCE",
+            "reason_code": None if collector_status == "HEALTHY" else "REST_SOURCE_NOT_HEALTHY",
+            "can_send_real_orders": False,
+        },
+        "public_ws_data": {
+            "status": "HEALTHY" if persistent_status == "HEALTHY" else "DEGRADED",
+            "persistent_ws_status": persistent_status,
+            "coverage_contract": "FORWARD_PERSISTENT_PUBLIC_STREAM",
+            "reason_code": None if persistent_status == "HEALTHY" else "PERSISTENT_WS_NOT_HEALTHY",
+            "can_send_real_orders": False,
+        },
         "datasets": {
             "status": "HEALTHY" if dataset_ready else "DEGRADED",
             "recommended_source": sources.get("recommended_source"),
@@ -1288,6 +1316,16 @@ def _research_components_status_payload(state: HealthState) -> dict[str, Any]:
             "last_cycle_at": watcher.get("last_refresh_at"),
             "age_seconds": watcher_age,
             "last_error": watcher.get("last_error"),
+        },
+        "p11_forward_observer": {
+            "status": str(
+                p11.get("observer_status") or p11.get("status") or "WAITING_FOR_SIGNAL"
+            ),
+            "last_cycle_at": p11.get("observer_last_cycle_at") or p11.get("last_cycle_at"),
+            "reconciliation_status": p11.get("reconciliation_status"),
+            "forward_boundary": p11.get("boundary_status") or p11.get("forward_boundary"),
+            "can_send_real_orders": False,
+            "final_recommendation": "NO LIVE",
         },
         "heavy_research": {
             "status": (
@@ -1319,18 +1357,46 @@ def _research_components_status_payload(state: HealthState) -> dict[str, Any]:
             "can_send_real_orders": False,
             "final_recommendation": "NO LIVE",
         },
+        "storage": {
+            **cross_venue_storage,
+            "status": "HEALTHY" if cross_venue_storage.get("status") == "OK" else "DEGRADED",
+            "can_send_real_orders": False,
+            "final_recommendation": "NO LIVE",
+        },
+        "disk": {
+            "status": (
+                "HEALTHY"
+                if int(cross_venue_storage.get("disk_free_bytes") or 0)
+                >= int(cross_venue_storage.get("minimum_free_disk_bytes") or 1)
+                else "DEGRADED"
+            ),
+            "free_bytes": cross_venue_storage.get("disk_free_bytes"),
+            "minimum_free_bytes": cross_venue_storage.get("minimum_free_disk_bytes"),
+        },
         **cross_venue_components,
     }
     statuses = [str(item.get("status") or "NO_DATA") for item in components.values()]
     if any(item == "ERROR" for item in statuses):
         overall = "ERROR"
-    elif any(item not in {"HEALTHY", "PAPER_RESEARCH", "WAITING_FOR_SIGNAL"} for item in statuses):
+    elif any(item not in {
+        "HEALTHY", "HEALTHY_WITH_RECONNECTS", "PAPER_RESEARCH",
+        "WAITING_FOR_SIGNAL", "WAITING_FOR_FIRST_CLOSED_BAR", "WAITING",
+    } for item in statuses):
         overall = "DEGRADED"
     else:
         overall = "HEALTHY"
+    reason_codes = sorted({
+        str(row.get("reason_code") or f"{name}:{row.get('status')}")
+        for name, row in components.items()
+        if str(row.get("status") or "") not in {
+            "HEALTHY", "HEALTHY_WITH_RECONNECTS", "PAPER_RESEARCH",
+            "WAITING_FOR_SIGNAL", "WAITING_FOR_FIRST_CLOSED_BAR", "WAITING",
+        }
+    })
     return {
         "overall_status": overall,
         "components": components,
+        "reason_codes": reason_codes,
         "status_scope": "ARTIFACT_AND_RUNTIME_COMPONENTS",
         "generated_at": now.isoformat(),
     }

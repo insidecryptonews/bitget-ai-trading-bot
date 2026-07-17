@@ -160,6 +160,12 @@ class AtiPaperBroker:
             tick_observed = _parse_utc(tick.observed_at)
             if tick_observed <= observed_at:
                 raise ValueError("ATI_PAPER_ENTRY_NOT_AFTER_OBSERVATION")
+            decision_at = _parse_utc(signal["decision_ts"])
+            decision_age = (tick_observed - decision_at).total_seconds()
+            if decision_age < -5:
+                raise ValueError("ATI_PAPER_SIGNAL_DECISION_TIMESTAMP_IN_FUTURE")
+            if decision_age > self.config.signal_max_age_seconds:
+                raise ValueError("ATI_PAPER_SIGNAL_DECISION_STALE_AT_ENTRY")
             source_age = (datetime.now(timezone.utc) - datetime.fromtimestamp(tick.source_ts_ms / 1000.0, tz=timezone.utc)).total_seconds()
             if source_age < -5 or source_age > self.config.market_data_stale_after_seconds:
                 raise ValueError("ATI_PAPER_MARKET_DATA_STALE")

@@ -17,6 +17,7 @@ DEFAULT_RUNTIME_DIR = REPO_ROOT / "data" / "runtime" / "ati_paper"
 DEFAULT_DB_PATH = DEFAULT_RUNTIME_DIR / "ati_paper.sqlite"
 DEFAULT_STATUS_PATH = DEFAULT_RUNTIME_DIR / "executor_status.json"
 DEFAULT_SIGNAL_PATH = REPO_ROOT / "reports" / "research" / "ati" / "ati_forward_signals.jsonl"
+DEFAULT_OUTCOME_PATH = REPO_ROOT / "reports" / "research" / "ati" / "ati_forward_outcomes.jsonl"
 DEFAULT_SHADOW_STATE_PATH = REPO_ROOT / "reports" / "research" / "ati" / "ati_forward_state.json"
 
 

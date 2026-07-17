@@ -398,6 +398,43 @@ def _simulate_candidate(rule: dict[str, Any], exit_cfg: dict[str, Any],
     return {"outcomes": outs, "rows": rows, "metrics_all": all_m, "metrics_by_split": by}
 
 
+def _reprice_simulation(simulation: dict[str, Any], *, costs: dict | None,
+                        n_features: int, n_tests: int) -> dict[str, Any]:
+    """Reprice an identical path; cost stress must not resimulate bars."""
+    round_trip = SH._round_trip(costs)
+    outcomes: list[dict[str, Any]] = []
+    rows: list[dict[str, Any]] = []
+    for original in simulation.get("outcomes") or []:
+        outcome = dict(original)
+        outcome["fees"] = round_trip
+        outcome["net_return"] = (
+            float(outcome.get("gross_return") or 0.0) - round_trip
+            if outcome.get("valid") else 0.0
+        )
+        outcomes.append(outcome)
+        rows.append({
+            "i": outcome.get("signal_i"), "ts": outcome.get("signal_ts"),
+            "side": outcome.get("side"), "exit": outcome.get("exit_reason"),
+            "net_return": outcome.get("net_return"), "valid": outcome.get("valid"),
+        })
+    ranges = _split_ranges(n_features)
+    by = {
+        name: _metrics_from_outcomes(
+            [o for o in outcomes if lo <= int(o.get("signal_i", -1)) < hi],
+            n_tests=n_tests,
+        )
+        for name, (lo, hi) in ranges.items()
+    }
+    return {
+        "outcomes": outcomes,
+        "rows": rows,
+        "metrics_all": _metrics_from_outcomes(outcomes, n_tests=n_tests),
+        "metrics_by_split": by,
+        "path_reused": True,
+        "cost_only_repricing": True,
+    }
+
+
 def _baseline_metrics(feats: list[dict], bars: list[dict], q: dict[str, float]) -> dict[str, Any]:
     baselines = {}
     for name, (kind, fn) in SH._policies().items():
@@ -461,7 +498,9 @@ def run_alpha_factory(symbols: str = "BTCUSDT", data_source: str = "ws_persisten
     all_candidates: list[dict[str, Any]] = []
     datasets: list[dict[str, Any]] = []
     errors: list[str] = []
+    stage_timings: list[dict[str, Any]] = []
     for symbol in syms:
+        symbol_started = time.perf_counter()
         try:
             bars, eff_source, meta = LAB._load_bars(symbol, data_source)
         except Exception as exc:
@@ -472,10 +511,12 @@ def run_alpha_factory(symbols: str = "BTCUSDT", data_source: str = "ws_persisten
         if len(bars) < MIN_BARS:
             errors.append(f"{symbol}: insufficient bars {len(bars)}<{MIN_BARS}")
             continue
+        feature_started = time.perf_counter()
         feats = build_alpha_features(bars)
         split = int(len(feats) * 0.60)
         q = _quantiles(feats, split)
         baseline = _baseline_metrics(feats, bars, q)
+        search_started = time.perf_counter()
         rules = _rule_defs()
         exits = _exit_grid()
         total_tests = len(rules) * len(exits)
@@ -494,8 +535,9 @@ def run_alpha_factory(symbols: str = "BTCUSDT", data_source: str = "ws_persisten
                                           n_tests=total_tests)
                 stress_metrics: dict[str, dict] = {}
                 for sname, costs in COST_STRESS.items():
-                    ss = _simulate_candidate(rule, exit_cfg, feats, bars, q,
-                                             costs=costs or None, n_tests=total_tests)
+                    ss = sim if sname == "base" else _reprice_simulation(
+                        sim, costs=costs or None, n_features=len(feats), n_tests=total_tests,
+                    )
                     stress_metrics[sname] = ss["metrics_by_split"]["test"]
                 all_m = sim["metrics_all"]
                 val_m = sim["metrics_by_split"]["validation"]
@@ -531,6 +573,13 @@ def run_alpha_factory(symbols: str = "BTCUSDT", data_source: str = "ws_persisten
                 })
         if "runtime_budget_exhausted" in errors:
             break
+        stage_timings.append({
+            "symbol": symbol,
+            "feature_and_baseline_seconds": round(search_started - feature_started, 3),
+            "candidate_search_seconds": round(time.perf_counter() - search_started, 3),
+            "total_symbol_seconds": round(time.perf_counter() - symbol_started, 3),
+            "cost_stress_mode": "REPRICE_IDENTICAL_PATH",
+        })
     all_candidates.sort(key=lambda c: (float(c["metrics_test"].get("net_EV_lower_bound") or -9),
                                        float(c["metrics_test"].get("net_EV") or -9),
                                        c["score"]), reverse=True)
@@ -543,6 +592,7 @@ def run_alpha_factory(symbols: str = "BTCUSDT", data_source: str = "ws_persisten
         "symbols": syms,
         "data_source": data_source,
         "runtime_seconds": round(time.time() - started, 3),
+        "stage_timings": stage_timings,
         "datasets": datasets,
         "strategies_tested": len(all_candidates),
         "candidate_status_counts": counts,

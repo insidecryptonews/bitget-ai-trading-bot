@@ -17,9 +17,10 @@ from .ledger import CrossVenueLedger
 from .leverage import LeverageLab
 from .paper import PaperSimulator
 from .providers import load_config
-from .storage import atomic_json, read_json, read_next_jsonl_record, safe_staging_root
+from .storage import atomic_json, read_json, read_next_jsonl_record, safe_staging_root, storage_status
 
 OFFSETS_PATH = RUNTIME_ROOT / "stream_offsets.json"
+HEALTHY_COLLECTOR_STATUSES = {"HEALTHY", "HEALTHY_WITH_RECONNECTS"}
 
 
 def utc_now() -> str:
@@ -239,36 +240,65 @@ class CrossVenueService:
                 "collector_status": collector.get("status"),
                 "connected": collector.get("connected"),
                 "reconnect_count": collector.get("reconnect_count_total", collector.get("reconnect_count")),
+                "reconnects_last_hour": collector.get("reconnects_last_hour"),
+                "last_reconnect_at": collector.get("last_reconnect_at"),
+                "last_close_code": collector.get("last_close_code"),
+                "last_close_reason": collector.get("last_close_reason"),
+                "reconnect_recovery_status": collector.get("reconnect_recovery_status"),
+                "protocol_ping_count": collector.get("protocol_ping_count"),
+                "protocol_pong_count": collector.get("protocol_pong_count"),
+                "application_pong_count": collector.get("application_pong_count"),
                 "gaps": collector.get("gaps_total", collector.get("gaps")),
                 "last_event_age_ms": collector.get("last_event_age_ms"),
             })
+        active_venues = list(self.config.get("active_venues", []))
+        symbols = list(self.config.get("symbols", []))
+        eligible = list(self.config.get("signal_eligible_venues", []))
+        observation_only = list(self.config.get("observation_only_venues", []))
+        evaluation_counts = dict(leadlag.get("evaluation_counts") or {})
+        ledger_signals = self.ledger.rows("signals", 5000)
+        evaluation_counts["accepted_simulated_signals"] = sum(
+            1 for row in ledger_signals if str(row.get("status")) in {"OPEN", "CLOSED"}
+        )
         return {
             "schema": "cross_venue_dashboard_snapshot.v1", "generated_at": utc_now(),
             "code_commit": self.code_commit, "forward_boundary": self.forward_boundary,
-            "providers": {"active": self.config.get("active_venues", []),
-                          "signal_eligible": self.config.get("signal_eligible_venues", []),
-                          "observation_only": self.config.get("observation_only_venues", [])},
+            "providers": {
+                "active": active_venues,
+                "active_venue_count": len(active_venues),
+                "active_stream_count": len(active_venues) * len(symbols),
+                "target": [self.config.get("target_venue", "bitget")],
+                "target_venue_count": 1,
+                "signal_eligible": eligible,
+                "signal_eligible_venue_count": len(eligible),
+                "observation_only": observation_only,
+                "observation_only_venue_count": len(observation_only),
+                "tier2_enabled": False,
+            },
             "venues": venues, "prices": venues,
             "normalized_price_series": leadlag["normalized_price_series"],
             "orderflow": leadlag["orderflow"], "leadlag": {"leaderboard": leadlag["leaderboard"],
                                            "ordering_clock": leadlag["ordering_clock"],
                                            "pending_outcomes": leadlag["pending_outcomes"],
-                                           "strategy_research_status": leadlag["strategy_research_status"]},
+                                           "strategy_research_status": leadlag["strategy_research_status"],
+                                           "recent_episodes": leadlag.get("recent_episodes", []),
+                                           "evaluation_counts": evaluation_counts},
             "signals": leadlag["recent_signals"], "account": self.ledger.account(),
             "positions": self.ledger.open_positions(), "trades": self.ledger.rows("trades", 500),
             "equity": list(reversed(self.ledger.rows("equity", 2000))),
             "events": self.ledger.rows("events", 300), "leverage": leverage,
             "reconciliation": self.ledger.reconcile(), "health": health,
+            "storage": storage_status(self.root),
             **safety_envelope(),
         }
 
     def _health(self, leadlag: dict[str, Any]) -> dict[str, Any]:
         venues = {venue: collector_health(venue, root=self.root) for venue in self.config.get("active_venues", [])}
-        healthy_feeds = sum(1 for row in venues.values() if row["status"] == "HEALTHY")
-        target_healthy = venues.get(self.config.get("target_venue", "bitget"), {}).get("status") == "HEALTHY"
+        healthy_feeds = sum(1 for row in venues.values() if row["status"] in HEALTHY_COLLECTOR_STATUSES)
+        target_healthy = venues.get(self.config.get("target_venue", "bitget"), {}).get("status") in HEALTHY_COLLECTOR_STATUSES
         healthy_leaders = sum(
             1 for venue in self.config.get("signal_eligible_venues", [])
-            if venues.get(venue, {}).get("status") == "HEALTHY"
+            if venues.get(venue, {}).get("status") in HEALTHY_COLLECTOR_STATUSES
         )
         required_leaders = int(self.config.get("minimum_consensus_venues", 2))
         feed_set_ready = target_healthy and healthy_leaders >= required_leaders
@@ -289,6 +319,7 @@ class CrossVenueService:
                 "status": "WAITING_FOR_SIGNAL" if self.signals_recorded == 0 else "HEALTHY",
                 "observations_recorded": self.observations_recorded,
                 "candidate_signals_recorded": self.signals_recorded,
+                "evaluation_counts": leadlag.get("evaluation_counts", {}),
                 "pending_outcomes": leadlag["pending_outcomes"],
                 "no_lookahead": True, **safety_envelope(),
             },

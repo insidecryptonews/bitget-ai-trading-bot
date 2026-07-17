@@ -20,7 +20,10 @@ from app.labs.ati import report as ati_report
 from app.labs.ati import shadow_engine as ati_shadow
 from app.labs.ati.report import _atomic_write, _safe_output_dir, run_historical_replay
 from app.labs.ati.rules import evaluate_rules_at
-from app.labs.ati.shadow_engine import _closed_forward_trades, _latest_available_at, _merge_unique
+from app.labs.ati.shadow_engine import (
+    _closed_forward_trades, _latest_available_at, _merge_unique,
+    _paper_feed_metadata,
+)
 from app.research_lab import PUBLIC_RESEARCH_ONLY_COMMANDS, build_argument_parser
 
 
@@ -380,6 +383,38 @@ def test_forward_merge_is_idempotent_and_detects_conflicting_outcome() -> None:
     assert _merge_unique([row], [row], "signal_id") == [row]
     with pytest.raises(ValueError, match="ATI_FORWARD_ID_COLLISION"):
         _merge_unique([row], [{**row, "value": 2}], "signal_id")
+
+
+def test_forward_merge_ignores_only_explicit_replay_provenance_fields() -> None:
+    original = {
+        "signal_id": "stable", "decision_ts": "2026-01-01", "value": 1,
+        "signal_idx": 9, "dataset_source": "sha-old",
+    }
+    regenerated = {
+        **original, "signal_idx": 7, "dataset_source": "sha-new",
+    }
+    assert _merge_unique([original], [regenerated], "signal_id") == [original]
+    with pytest.raises(ValueError, match="ATI_FORWARD_ID_COLLISION"):
+        _merge_unique([original], [{**regenerated, "value": 2}], "signal_id")
+
+
+def test_paper_feed_metadata_blocks_preknown_and_stale_outcomes() -> None:
+    now = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
+    fresh = _paper_feed_metadata(
+        {"signal_id": "fresh", "decision_ts": "2026-01-01T11:55:00+00:00"},
+        now=now, outcome_already_known=False,
+    )
+    stale = _paper_feed_metadata(
+        {"signal_id": "stale", "decision_ts": "2026-01-01T10:00:00+00:00"},
+        now=now, outcome_already_known=False,
+    )
+    known = _paper_feed_metadata(
+        {"signal_id": "known", "decision_ts": "2026-01-01T11:59:00+00:00"},
+        now=now, outcome_already_known=True,
+    )
+    assert fresh["paper_feed_eligible"] is True
+    assert stale["paper_feed_block_reason"] == "DECISION_STALE_AT_FIRST_FORWARD_OBSERVATION"
+    assert known["paper_feed_block_reason"] == "PREKNOWN_OUTCOME_AT_FIRST_FORWARD_OBSERVATION"
 
 
 def test_v10455_generation_adapter_requires_full_verified_current(monkeypatch, tmp_path: Path) -> None:

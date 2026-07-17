@@ -94,6 +94,7 @@ def test_health_components_are_separate_and_fail_closed_on_stale_heavy_metrics(
     assert {
         "mode", "safety", "bot", "collectors", "datasets",
         "dashboard_watcher", "heavy_research", "ati_shadow", "ati_paper_executor",
+        "public_rest_data", "public_ws_data", "p11_forward_observer", "storage", "disk",
     } <= set(payload["components"])
     assert {
         "cross_venue", "CROSS_VENUE_BITGET", "CROSS_VENUE_BINANCE",
@@ -104,6 +105,33 @@ def test_health_components_are_separate_and_fail_closed_on_stale_heavy_metrics(
     assert payload["components"]["heavy_research"]["status"] == "DEGRADED"
     assert payload["overall_status"] == "DEGRADED"
     assert payload["components"]["safety"]["can_send_real_orders"] is False
+    assert payload["reason_codes"]
+
+
+def test_static_dashboard_renders_existing_ati_paper_ledger_truthfully(tmp_path: Path) -> None:
+    from app.labs import research_dashboard_v10_43c as dashboard
+    state = {
+        "tool_version": "test", "symbol": "BTCUSDT", "generated_at": "now",
+        "git_head": "abc", "health": {}, "view": {}, "data_quality": {},
+        "shadow": None, "scoreboard": [], "bankroll": None, "ws_dataset": {},
+        "persistent_health": {}, "persistent_continuity": {}, "source_compare_3way": {},
+        "strategy_hardening": {}, "ws_persistent_tournament": {}, "exit_optimization": {},
+        "readiness_v1043c": {"primary": "DATA_NOT_READY", "states": ["DATA_NOT_READY"]},
+        "ati_paper": {
+            "account": {"account": {"account_id": "ATI_PAPER_50"}},
+            "positions": {"positions": []},
+            "trades": {"trades": [{"trade_id": "truthful_trade", "symbol": "BTCUSDT", "direction": "SHORT", "net_pnl": 0.01}]},
+            "events": {"events": [{"timestamp": "now", "event_type": "TRADE_CLOSED", "reason": "TP"}]},
+            "health": {"status": "HEALTHY", "commit_hash": "abc"},
+            "performance": {"total_trades": 1},
+        },
+        "cross_venue": {},
+    }
+    page = dashboard.build_dashboard("BTCUSDT", state=state, out_dir=tmp_path, write=False)["html_str"]
+    assert "truthful_trade" in page
+    assert "TRADE_CLOSED" in page
+    assert "Process start commit" in page
+    assert "No forward trades" not in page
 
 
 def test_local_research_dashboard_renders_ati_without_claiming_edge(tmp_path: Path) -> None:

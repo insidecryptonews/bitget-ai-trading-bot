@@ -172,10 +172,13 @@ class StreamStore:
         self.duplicates = 0
         self.last_hash: str | None = None
         self._last_fsync_monotonic = 0.0
+        self._opened_monotonic = time.monotonic()
+        self._initial_stream_bytes = self.stream_path.stat().st_size if self.stream_path.is_file() else 0
         self.lease = WriterLease(self.root, self.venue)
         storage_config = load_config()
         self.minimum_free_disk_bytes = int(storage_config["minimum_free_disk_bytes"])
         self.maximum_stream_bytes = int(storage_config["maximum_stream_bytes_per_venue"])
+        self.retention_days = int(storage_config.get("retention_days", 14))
 
     def _guard_capacity(self, incoming_bytes: int) -> None:
         free = shutil.disk_usage(self.root.parent if self.root.parent.exists() else self.root.parent.parent).free
@@ -284,12 +287,23 @@ class StreamStore:
     def write_health(self, payload: dict[str, Any]) -> None:
         reconnect_total = self.reconnect_base + int(payload.get("reconnect_count") or 0)
         gaps_total = self.gap_base + int(payload.get("gaps") or 0)
+        stream_bytes = self.stream_path.stat().st_size if self.stream_path.is_file() else 0
+        elapsed_hours = max((time.monotonic() - self._opened_monotonic) / 3600.0, 1.0 / 3600.0)
+        growth_per_hour = max(0, stream_bytes - self._initial_stream_bytes) / elapsed_hours
+        disk = shutil.disk_usage(self.root.parent if self.root.parent.exists() else self.root.parent.parent)
         payload = {
             **payload, "storage_rows_this_process": self.rows_written,
             "raw_frames_this_process": self.raw_frames_written,
             "storage_duplicates_this_process": self.duplicates,
             "last_hash": self.last_hash, "stream_path": str(self.stream_path),
             "reconnect_count_total": reconnect_total, "gaps_total": gaps_total,
+            "stream_size_bytes": stream_bytes,
+            "stream_growth_bytes_per_hour_this_process": growth_per_hour,
+            "disk_free_bytes": disk.free,
+            "rotation_state": "UTC_DATE_PARTITIONS_ACTIVE",
+            "raw_compression": "NONE_APPEND_ONLY_AUDIT_SOURCE",
+            "derived_compaction_status": "SEPARATE_JOB_NOT_IN_HOT_PATH",
+            "retention_days_configured": self.retention_days,
             "heartbeat_at": utc_now(), **safety_envelope(),
         }
         atomic_json(self.health_path, payload)
@@ -299,6 +313,13 @@ class StreamStore:
             "last_hash": self.last_hash, "rows_this_process": self.rows_written,
             "raw_frames_this_process": self.raw_frames_written,
             "reconnect_count_total": reconnect_total, "gaps_total": gaps_total,
+            "stream_size_bytes": stream_bytes,
+            "stream_growth_bytes_per_hour_this_process": growth_per_hour,
+            "disk_free_bytes": disk.free,
+            "rotation_state": "UTC_DATE_PARTITIONS_ACTIVE",
+            "raw_compression": "NONE_APPEND_ONLY_AUDIT_SOURCE",
+            "derived_compaction_status": "SEPARATE_JOB_NOT_IN_HOT_PATH",
+            "retention_days_configured": self.retention_days,
             "append_only": True, "partitioned_by": ["venue", "symbol", "event_type", "utc_date"],
             **safety_envelope(),
         })
@@ -312,6 +333,63 @@ def read_json(path: Path, default: Any = None) -> Any:
         return json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return default
+
+
+def storage_status(root: Path | str | None = None) -> dict[str, Any]:
+    """Return bounded storage telemetry without scanning stream contents."""
+    safe_root = safe_staging_root(root)
+    config = load_config()
+    venues: list[dict[str, Any]] = []
+    total_stream_bytes = 0
+    for venue in config.get("active_venues", []):
+        venue_name = str(venue).lower()
+        manifest = read_json(safe_root / venue_name / "manifest.json", {}) or {}
+        health = read_json(safe_root / venue_name / "health.json", {}) or {}
+        stream = safe_root / venue_name / "normalized" / "current.jsonl"
+        stream_bytes = stream.stat().st_size if stream.is_file() and not stream.is_symlink() else 0
+        total_stream_bytes += stream_bytes
+        venues.append({
+            "venue": venue_name,
+            "stream_size_bytes": stream_bytes,
+            "stream_growth_bytes_per_hour_this_process": manifest.get(
+                "stream_growth_bytes_per_hour_this_process",
+                health.get("stream_growth_bytes_per_hour_this_process"),
+            ),
+            "rows_this_process": manifest.get("rows_this_process"),
+            "raw_frames_this_process": manifest.get("raw_frames_this_process"),
+            "last_hash": manifest.get("last_hash"),
+            "rotation_state": manifest.get("rotation_state", "UTC_DATE_PARTITIONS_ACTIVE"),
+            "raw_compression": manifest.get("raw_compression", "NONE_APPEND_ONLY_AUDIT_SOURCE"),
+            "derived_compaction_status": manifest.get(
+                "derived_compaction_status", "SEPARATE_JOB_NOT_IN_HOT_PATH"
+            ),
+            "retention_days_configured": manifest.get(
+                "retention_days_configured", config.get("retention_days")
+            ),
+            "heartbeat_at": health.get("heartbeat_at"),
+            "collector_status": health.get("status", "NEED_DATA"),
+        })
+    disk_target = safe_root.parent if safe_root.parent.exists() else safe_root.parent.parent
+    disk = shutil.disk_usage(disk_target)
+    compaction = read_json(safe_root / "derived" / "compaction_status.json", {}) or {}
+    return {
+        "schema": "cross_venue_storage_status.v1",
+        "status": "OK" if any(row["stream_size_bytes"] > 0 for row in venues) else "NEED_DATA",
+        "root": str(safe_root),
+        "active_venue_count": len(venues),
+        "total_stream_size_bytes": total_stream_bytes,
+        "disk_free_bytes": disk.free,
+        "minimum_free_disk_bytes": int(config.get("minimum_free_disk_bytes", 0)),
+        "rotation_state": "UTC_DATE_PARTITIONS_ACTIVE",
+        "raw_storage_contract": "APPEND_ONLY_JSONL_NO_DELETION",
+        "derived_compaction": compaction or {
+            "status": "NOT_RUN",
+            "hot_path": False,
+            "raw_deleted": False,
+        },
+        "venues": venues,
+        **safety_envelope(),
+    }
 
 
 def read_new_jsonl(path: Path, offset: int, *, max_rows: int = 50_000) -> tuple[list[dict[str, Any]], int, str | None]:

@@ -11,7 +11,9 @@ import json
 import time
 import uuid
 from abc import ABC, abstractmethod
+from collections import deque
 from collections.abc import Callable
+from datetime import datetime, timezone
 from typing import Any
 
 from . import POLICY_VERSION, safety_envelope
@@ -88,9 +90,28 @@ class PublicVenueAdapter(ABC):
         self.duplicates = 0
         self.sequence_regressions = 0
         self.application_heartbeats_sent = 0
+        self.application_pongs_received = 0
+        self.last_application_pong_monotonic_ns: int | None = None
         self._last_application_heartbeat_ns: int | None = None
         self._last_sequence: dict[tuple[str, str], int] = {}
         self._socket: Any = None
+        self._session_started_monotonic_ns: int | None = None
+        self._session_started_at: str | None = None
+        self._session_start_events = 0
+        self._session_durations_seconds: deque[float] = deque(maxlen=500)
+        self._reconnect_epochs: deque[float] = deque(maxlen=5000)
+        self.last_reconnect_at: str | None = None
+        self.last_close_code: int | None = None
+        self.last_close_reason: str | None = None
+        self.timeout_count = 0
+        self.network_error_count = 0
+        self.dns_error_count = 0
+        self.rate_limit_warning_count = 0
+        self.events_before_last_reconnect = 0
+        self.gaps_during_reconnect = 0
+        self.recovery_result = "NOT_RECONNECTED"
+        self.backoff_seconds: float | None = None
+        self.backoff_status = "INACTIVE"
 
     @property
     def url(self) -> str:
@@ -105,7 +126,14 @@ class PublicVenueAdapter(ABC):
         self._socket = connector(url, timeout=self.timeout_seconds, header=[])
         self.connected = True
         self.last_error = None
+        self._session_started_monotonic_ns = time.monotonic_ns()
+        self._session_started_at = datetime.now(timezone.utc).isoformat()
+        self._session_start_events = self.normalized_events
         self._last_application_heartbeat_ns = time.monotonic_ns()
+        if self.reconnect_count:
+            self.recovery_result = "RECOVERED_PUBLIC_STREAM"
+        self.backoff_status = "INACTIVE"
+        self.backoff_seconds = None
         return self._socket
 
     def connection_url(self) -> str:
@@ -134,6 +162,9 @@ class PublicVenueAdapter(ABC):
         if raw in {"pong", "ping"}:
             if raw == "ping":
                 self._socket.send("pong")
+            else:
+                self.application_pongs_received += 1
+                self.last_application_pong_monotonic_ns = time.monotonic_ns()
             return {"control": raw}
         return json.loads(
             raw,
@@ -162,12 +193,41 @@ class PublicVenueAdapter(ABC):
     def reconnect(self) -> None:
         self.close()
         self.reconnect_count += 1
+        now = time.time()
+        self._reconnect_epochs.append(now)
+        self.last_reconnect_at = datetime.fromtimestamp(now, tz=timezone.utc).isoformat()
+        self.events_before_last_reconnect = max(0, self.normalized_events - self._session_start_events)
         self.connection_id = f"{self.venue}_{uuid.uuid4().hex[:16]}"
         self._last_sequence.clear()
+
+    def record_failure(self, exc: BaseException) -> None:
+        name = type(exc).__name__
+        message = str(exc)[:240]
+        lower = f"{name}:{message}".lower()
+        self.last_error = f"{name}:{message}"
+        self.last_close_code = getattr(exc, "status_code", None)
+        self.last_close_reason = str(getattr(exc, "reason", "") or message)[:240]
+        if "timeout" in lower or "timed out" in lower:
+            self.timeout_count += 1
+        elif "name resolution" in lower or "getaddrinfo" in lower or "dns" in lower:
+            self.dns_error_count += 1
+        else:
+            self.network_error_count += 1
+        if "429" in lower or "rate limit" in lower or "too many request" in lower:
+            self.rate_limit_warning_count += 1
+        self.recovery_result = "RECONNECT_PENDING"
+
+    def record_backoff(self, seconds: float | None) -> None:
+        self.backoff_seconds = None if seconds is None else max(0.0, float(seconds))
+        self.backoff_status = "INACTIVE" if seconds is None else "SCHEDULED"
 
     def close(self) -> None:
         sock, self._socket = self._socket, None
         self.connected = False
+        if self._session_started_monotonic_ns is not None:
+            duration = max(0.0, (time.monotonic_ns() - self._session_started_monotonic_ns) / 1_000_000_000.0)
+            self._session_durations_seconds.append(duration)
+            self._session_started_monotonic_ns = None
         if sock is not None:
             try:
                 sock.close()
@@ -187,6 +247,23 @@ class PublicVenueAdapter(ABC):
             status = "STALE"
         else:
             status = "HEALTHY"
+        reconnects_last_hour = sum(epoch >= time.time() - 3600 for epoch in self._reconnect_epochs)
+        if status == "HEALTHY" and reconnects_last_hour:
+            status = (
+                "DEGRADED_RECONNECT_STORM" if reconnects_last_hour >= 12
+                else "HEALTHY_WITH_RECONNECTS"
+            )
+        current_session = (
+            None if self._session_started_monotonic_ns is None
+            else max(0.0, (now - self._session_started_monotonic_ns) / 1_000_000_000.0)
+        )
+        session_values = list(self._session_durations_seconds)
+        if current_session is not None:
+            session_values.append(current_session)
+        last_pong_age = (
+            None if self.last_application_pong_monotonic_ns is None
+            else max(0.0, (now - self.last_application_pong_monotonic_ns) / 1_000_000_000.0)
+        )
         return {
             "component": f"CROSS_VENUE_{self.venue.upper()}", "venue": self.venue,
             "status": status, "connected": self.connected, "messages": self.messages,
@@ -195,6 +272,38 @@ class PublicVenueAdapter(ABC):
             "duplicates": self.duplicates, "last_error": self.last_error,
             "application_heartbeat_interval_seconds": self.application_heartbeat_interval_seconds,
             "application_heartbeats_sent": self.application_heartbeats_sent,
+            "application_pongs_received": self.application_pongs_received,
+            "last_application_pong_age_seconds": last_pong_age,
+            "transport_ping_pong_telemetry": (
+                "WEBSOCKET_CLIENT_AUTOMATIC_CONTROL_FRAMES_NOT_EXPOSED"
+                if self.venue == "binance" else "NOT_REQUIRED_OR_APPLICATION_LEVEL"
+            ),
+            "protocol_ping_sent": None,
+            "protocol_pong_received": None,
+            "protocol_ping_count": None,
+            "protocol_pong_count": None,
+            "last_protocol_pong_age_seconds": None,
+            "reconnections_last_hour": reconnects_last_hour,
+            "reconnects_last_hour": reconnects_last_hour,
+            "last_reconnect_at": self.last_reconnect_at,
+            "last_close_code": self.last_close_code,
+            "last_close_reason": self.last_close_reason,
+            "timeout_count": self.timeout_count,
+            "network_error_count": self.network_error_count,
+            "dns_error_count": self.dns_error_count,
+            "rate_limit_warning_count": self.rate_limit_warning_count,
+            "session_started_at": self._session_started_at,
+            "current_session_duration_seconds": current_session,
+            "average_session_duration_seconds": (
+                sum(session_values) / len(session_values) if session_values else None
+            ),
+            "max_session_duration_seconds": max(session_values) if session_values else None,
+            "events_before_last_reconnect": self.events_before_last_reconnect,
+            "gaps_during_reconnect": self.gaps_during_reconnect,
+            "application_pong_count": self.application_pongs_received,
+            "recovery_result": self.recovery_result,
+            "backoff_status": self.backoff_status,
+            "backoff_seconds": self.backoff_seconds,
             "sequence_regressions": self.sequence_regressions,
             "sequence_check_status": "MONOTONIC_REGRESSION_ONLY_CHANNEL_CONTRACT_VARIES",
             "connection_id": self.connection_id, **safety_envelope(),

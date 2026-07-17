@@ -39,6 +39,7 @@ class AtiPaperConfig:
     trailing_distance_r: float
     poll_interval_seconds: int
     market_data_stale_after_seconds: int
+    signal_max_age_seconds: int
     funding_mode: str
     instrument_rules: dict[str, InstrumentRule]
     policy_version: str = POLICY_VERSION
@@ -140,6 +141,7 @@ def load_config(path: Path | str | None = None) -> AtiPaperConfig:
         trailing_distance_r=_finite_positive(execution.get("trailing_distance_r"), "trailing_distance_r"),
         poll_interval_seconds=max(5, int(execution.get("poll_interval_seconds"))),
         market_data_stale_after_seconds=max(30, int(execution.get("market_data_stale_after_seconds"))),
+        signal_max_age_seconds=max(60, int(execution.get("signal_max_age_seconds", 1800))),
         funding_mode=str(execution.get("funding_mode") or "UNKNOWN_UNLESS_VERIFIED"),
         instrument_rules=rules,
     )

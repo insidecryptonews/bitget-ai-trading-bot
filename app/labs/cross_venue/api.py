@@ -10,7 +10,7 @@ from . import ENGINE_SNAPSHOT_PATH, ENGINE_STATUS_PATH, safety_envelope
 from .ledger import CrossVenueLedger
 from .providers import providers_payload
 from .service import collector_health
-from .storage import read_json
+from .storage import read_json, storage_status
 
 
 def _base() -> dict[str, Any]:
@@ -30,10 +30,20 @@ def snapshot() -> dict[str, Any]:
 
 def status_payload() -> dict[str, Any]:
     data = snapshot()
+    evaluations = ((data.get("leadlag") or {}).get("evaluation_counts") or {})
+    providers = data.get("providers") or {}
     return {**_base(), "status": (data.get("health") or {}).get("status", "CONNECTING"),
             "generated_at": data.get("generated_at"), "reconciliation": data.get("reconciliation"),
-            "counts": {"venues": len(data.get("venues") or []), "signals": len(data.get("signals") or []),
-                       "positions": len(data.get("positions") or []), "trades": len(data.get("trades") or [])}}
+            "counts": {
+                "active_venues": providers.get("active_venue_count", len(providers.get("active") or [])),
+                "active_streams": providers.get("active_stream_count", len(data.get("venues") or [])),
+                "raw_evaluations": evaluations.get("raw_evaluations", 0),
+                "unique_market_episodes": evaluations.get("unique_market_episodes", 0),
+                "candidate_signals": evaluations.get("candidate_signals", 0),
+                "accepted_simulated_signals": evaluations.get("accepted_simulated_signals", 0),
+                "positions": len(data.get("positions") or []),
+                "trades": len(data.get("trades") or []),
+            }}
 
 
 def health_payload() -> dict[str, Any]:
@@ -90,6 +100,12 @@ READERS: dict[str, Callable[[], dict[str, Any]]] = {
     "/api/cross-venue/orderflow": lambda: _section("orderflow"),
     "/api/cross-venue/leadlag": lambda: _section("leadlag"),
     "/api/cross-venue/signals": lambda: _section("signals"),
+    "/api/cross-venue/episodes": lambda: {
+        **_base(),
+        "status": "OK" if ((snapshot().get("leadlag") or {}).get("recent_episodes") or []) else "NEED_DATA",
+        "episodes": (snapshot().get("leadlag") or {}).get("recent_episodes") or [],
+        "evaluation_counts": (snapshot().get("leadlag") or {}).get("evaluation_counts") or {},
+    },
     "/api/cross-venue/account": account_payload,
     "/api/cross-venue/positions": lambda: {**_base(), "status": "OK", "positions": CrossVenueLedger().open_positions()},
     "/api/cross-venue/trades": lambda: rows_payload("trades", "trades"),
@@ -98,6 +114,7 @@ READERS: dict[str, Callable[[], dict[str, Any]]] = {
     "/api/cross-venue/leverage": lambda: _section("leverage"),
     "/api/cross-venue/health": health_payload,
     "/api/cross-venue/performance": performance_payload,
+    "/api/cross-venue/storage": storage_status,
 }
 
 

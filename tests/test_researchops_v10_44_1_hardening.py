@@ -141,6 +141,30 @@ def test_simulate_candidate_threads_n_tests(monkeypatch):
     assert captured["n_tests"] and all(t == 50 for t in captured["n_tests"])
 
 
+def test_cost_repricing_is_exactly_equivalent_to_full_path_resimulation():
+    bars = _mk_bars(260)
+    for i, bar in enumerate(bars):
+        wave = ((i % 24) - 12) / 10_000
+        bar["open"] = 100 * (1 + wave)
+        bar["close"] = bar["open"] * (1 + (0.0008 if i % 2 else -0.0004))
+        bar["high"] = max(bar["open"], bar["close"]) * 1.002
+        bar["low"] = min(bar["open"], bar["close"]) * 0.998
+    feats = AF.build_alpha_features(bars)
+    q = AF._quantiles(feats, int(len(feats) * 0.6))
+    rule = AF._rule_defs()[0]
+    exit_cfg = AF._exit_grid()[0]
+    base = AF._simulate_candidate(rule, exit_cfg, feats, bars, q, n_tests=50)
+    costs = AF.COST_STRESS["stress_0_25"]
+    full = AF._simulate_candidate(rule, exit_cfg, feats, bars, q, costs=costs, n_tests=50)
+    repriced = AF._reprice_simulation(
+        base, costs=costs, n_features=len(feats), n_tests=50,
+    )
+    assert repriced["path_reused"] is True
+    assert repriced["outcomes"] == full["outcomes"]
+    assert repriced["metrics_all"] == full["metrics_all"]
+    assert repriced["metrics_by_split"] == full["metrics_by_split"]
+
+
 # --------------------------------------------------------------------------
 # Watcher perf: base state is artifact-only; counters relabelled unambiguously
 # in the panel. Growing datasets are never re-read by the periodic watcher.

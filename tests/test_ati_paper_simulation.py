@@ -13,6 +13,9 @@ from app.labs.ati_paper.broker import AtiPaperBroker, decide_bar_exit
 from app.labs.ati_paper.config import InstrumentRule, load_config
 from app.labs.ati_paper.executor import AtiPaperExecutor
 from app.labs.ati_paper.ledger import AtiPaperLedger
+from app.labs.ati_paper.incident_migration import (
+    CONFIRMATION, archive_and_restore_causal_incident,
+)
 from app.labs.ati_paper.public_market import (
     AtiPublicMarketError,
     MarketBar,
@@ -41,6 +44,7 @@ def _signal(signal_id: str, *, direction: str = "LONG", invalidation: float | No
         "score_components": {"fixture": 1},
         "policy_version": "ATI_SHADOW_POLICY_V2",
         "feature_version": "ATI_FEATURES_V2",
+        "paper_feed_eligible": True,
     }
 
 
@@ -275,6 +279,82 @@ def test_executor_rejects_preexisting_signal_but_accepts_new_live_signal(tmp_pat
     status = executor.cycle_once()
     assert status["status"] == "HEALTHY"
     assert ledger.signal("new")["status"] == "ATI_PAPER_POSITION_OPEN"
+
+
+def test_executor_blocks_signal_when_outcome_is_already_known(tmp_path):
+    signal_path = tmp_path / "signals.jsonl"
+    outcome_path = tmp_path / "outcomes.jsonl"
+    signal_path.write_text("", encoding="utf-8")
+    outcome_path.write_text("", encoding="utf-8")
+    cfg = dataclasses.replace(load_config(), position_fraction=0.5)
+    ledger = AtiPaperLedger(tmp_path / "executor.sqlite")
+    executor = AtiPaperExecutor(
+        config=cfg, ledger=ledger, market=_FakeMarket(), signal_path=signal_path,
+        outcome_path=outcome_path, status_path=tmp_path / "status.json",
+        commit_hash="test",
+    )
+    executor.initialize()
+    signal_path.write_text(json.dumps(_signal("known")) + "\n", encoding="utf-8")
+    outcome_path.write_text(json.dumps({"signal_id": "known"}) + "\n", encoding="utf-8")
+    executor.cycle_once()
+    assert ledger.signal("known")["status"] == "ATI_SIGNAL_REJECTED"
+    assert ledger.signal("known")["rejection_reason"] == "PREKNOWN_OUTCOME_NOT_FORWARD_ELIGIBLE"
+    assert ledger.open_positions() == []
+    assert ledger.rows("trades") == []
+
+
+def test_executor_and_broker_both_block_stale_signal_decisions(tmp_path):
+    signal_path = tmp_path / "signals.jsonl"
+    signal_path.write_text("", encoding="utf-8")
+    cfg = dataclasses.replace(load_config(), position_fraction=0.5, signal_max_age_seconds=60)
+    ledger = AtiPaperLedger(tmp_path / "executor.sqlite")
+    executor = AtiPaperExecutor(
+        config=cfg, ledger=ledger, market=_FakeMarket(), signal_path=signal_path,
+        outcome_path=tmp_path / "outcomes.jsonl", status_path=tmp_path / "status.json",
+        commit_hash="test",
+    )
+    executor.initialize()
+    stale = _signal("stale")
+    stale["decision_ts"] = (_now() - timedelta(minutes=5)).isoformat()
+    signal_path.write_text(json.dumps(stale) + "\n", encoding="utf-8")
+    executor.cycle_once()
+    assert ledger.signal("stale")["rejection_reason"] == "SIGNAL_DECISION_STALE_AT_OBSERVATION"
+
+    manual = _signal("broker-stale")
+    manual["decision_ts"] = (_now() - timedelta(minutes=5)).isoformat()
+    ledger.observe_signal(manual, observed_at=(_now() - timedelta(seconds=2)).isoformat())
+    broker = AtiPaperBroker(ledger, cfg, commit_hash="test")
+    with pytest.raises(ValueError, match="SIGNAL_DECISION_STALE_AT_ENTRY"):
+        broker.open_from_signal("broker-stale", _tick(), _rule())
+
+
+def test_causal_incident_is_archived_before_transactional_ledger_restore(tmp_path):
+    _, ledger, broker, opened = _open(tmp_path, fraction=0.5, signal_id="contaminated")
+    broker.close_position(
+        opened["position_id"], event_type="SIM_MANUAL_RESEARCH_CLOSE",
+        exit_reason="TEST", reference_price=101.0,
+        source_ts=(_now() + timedelta(minutes=2)).isoformat(),
+    )
+    before = ledger.rows("trades", limit=1)[0]
+    result = archive_and_restore_causal_incident(
+        "contaminated", confirmation=CONFIRMATION, db_path=ledger.db_path,
+        qa_root=tmp_path / "qa", status_path=tmp_path / "missing-status.json",
+        evidence_paths=[], commit_hash="test",
+    )
+    assert result["status"] == "QA_ARCHIVED_AND_PRODUCTIVE_LEDGER_RESTORED"
+    assert result["reconciliation"]["status"] == "PASS"
+    assert result["account"]["cash_balance"] == pytest.approx(50.0)
+    assert ledger.rows("trades") == []
+    assert ledger.open_positions() == []
+    assert ledger.signal("contaminated")["status"] == "ATI_SIGNAL_REJECTED"
+    assert any(
+        row["event_type"] == "ATI_PAPER_CAUSAL_INCIDENT_MIGRATED_TO_QA"
+        for row in ledger.rows("events")
+    )
+    archive = Path(result["qa_archive_db"])
+    assert archive.is_file()
+    archived = AtiPaperLedger(archive)
+    assert archived.rows("trades", limit=1)[0]["trade_id"] == before["trade_id"]
 
 
 def test_api_is_read_only_and_reports_sample_warning(tmp_path):

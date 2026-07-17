@@ -145,13 +145,16 @@ def run_collector(
                 total_events += int(result["normalized_events"])
                 if max_sessions is not None:
                     break
+                if stop_requested():
+                    break
                 adapter.reconnect()
             except KeyboardInterrupt:
                 break
             except Exception as exc:
                 if adapter.connected:
                     adapter.gaps += 1
-                adapter.last_error = f"{type(exc).__name__}:{str(exc)[:240]}"
+                    adapter.gaps_during_reconnect += 1
+                adapter.record_failure(exc)
                 errors.append(adapter.last_error)
                 store.write_health(adapter.health())
                 adapter.reconnect()
@@ -159,7 +162,11 @@ def run_collector(
                     break
                 if stop_requested():
                     break
-                sleep_fn(BACKOFF_SECONDS[min(len(errors) - 1, len(BACKOFF_SECONDS) - 1)])
+                backoff = BACKOFF_SECONDS[min(len(errors) - 1, len(BACKOFF_SECONDS) - 1)]
+                adapter.record_backoff(backoff)
+                store.write_health(adapter.health())
+                sleep_fn(backoff)
+                adapter.record_backoff(None)
         health = adapter.health()
         store.write_health(health)
         return {"venue": venue, "sessions": sessions, "normalized_events": total_events,

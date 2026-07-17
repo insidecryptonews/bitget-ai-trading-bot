@@ -18,6 +18,7 @@ from app.labs.cross_venue.api import READERS
 from app.labs.cross_venue import api as CVAPI
 from app.labs.cross_venue.cli import build_parser
 from app.labs.cross_venue.collector import collect_session, run_collector
+from app.labs.cross_venue.compaction import compact_partition
 from app.labs.cross_venue.leadlag import LeadLagEngine
 from app.labs.cross_venue.ledger import CrossVenueLedger
 from app.labs.cross_venue.leverage import LeverageLab, simulate_trade
@@ -340,6 +341,58 @@ def test_leadlag_consensus_is_causal_and_cost_aware():
     assert signal["edge_validated"] is False
     assert signal["first_lead_event_ts"]
     assert signal["code_commit"]
+    breakdown = signal["estimated_cost_breakdown_bps"]
+    assert breakdown["total_bps"] == pytest.approx(sum(
+        value for key, value in breakdown.items() if key != "total_bps"
+    ))
+
+
+def test_repeated_raw_evaluations_are_grouped_into_one_market_episode():
+    engine, result, _ = _leadlag_fixture()
+    first = result["signal"]
+    before = engine.snapshot()["evaluation_counts"]
+    repeated = engine._attach_episode({
+        **first,
+        "signal_id": "second_raw_evaluation",
+        "decision_monotonic_ns": first["decision_monotonic_ns"] + 1_000_000,
+    })
+    snapshot = engine.snapshot()
+    assert repeated["episode_id"] == first["episode_id"]
+    assert snapshot["evaluation_counts"]["raw_evaluations"] == before["raw_evaluations"] + 1
+    assert snapshot["evaluation_counts"]["unique_market_episodes"] == before["unique_market_episodes"]
+    assert snapshot["evaluation_counts"]["duplicate_evaluations"] == before["duplicate_evaluations"] + 1
+    episode = next(row for row in snapshot["recent_episodes"] if row["episode_id"] == first["episode_id"])
+    assert episode["evaluations"] == 2
+
+
+def test_reconnect_telemetry_is_truthful_and_aliases_are_consistent(monkeypatch):
+    adapter = A.BinanceAdapter(["BTCUSDT"])
+    adapter.connected = True
+    adapter.normalized_events = 10
+    adapter.last_event_monotonic_ns = 1_000_000_000
+    now = {"epoch": 10_000.0}
+    monkeypatch.setattr(A.time, "time", lambda: now["epoch"])
+    for _ in range(2):
+        adapter.reconnect()
+        adapter.connected = True
+        adapter.last_event_monotonic_ns = 1_000_000_000
+    health = adapter.health(now_monotonic_ns=1_000_000_001)
+    assert health["status"] == "HEALTHY_WITH_RECONNECTS"
+    assert health["reconnects_last_hour"] == health["reconnections_last_hour"] == 2
+    assert health["protocol_ping_count"] is None
+    assert health["transport_ping_pong_telemetry"] == "WEBSOCKET_CLIENT_AUTOMATIC_CONTROL_FRAMES_NOT_EXPOSED"
+
+
+def test_reconnect_storm_is_degraded(monkeypatch):
+    adapter = A.BinanceAdapter(["BTCUSDT"])
+    adapter.connected = True
+    adapter.last_event_monotonic_ns = 1_000_000_000
+    monkeypatch.setattr(A.time, "time", lambda: 10_000.0)
+    for _ in range(12):
+        adapter.reconnect()
+        adapter.connected = True
+        adapter.last_event_monotonic_ns = 1_000_000_000
+    assert adapter.health(now_monotonic_ns=1_000_000_001)["status"] == "DEGRADED_RECONNECT_STORM"
 
 
 def test_leadlag_outcome_requires_future_target_receive_event():
@@ -493,6 +546,47 @@ def test_stale_collectors_cannot_be_aggregated_as_paper_research(tmp_path, monke
     assert health["components"]["CROSS_VENUE_NORMALIZER"]["status"] == "DEGRADED"
 
 
+def test_healthy_with_reconnects_remains_feed_ready(tmp_path, monkeypatch):
+    root=tmp_path/"external_data"/"staging"/"cross_venue_v1"; monkeypatch.setattr(S,"STAGING_ROOT",root)
+    runtime=tmp_path/"runtime"; monkeypatch.setattr(SV,"RUNTIME_ROOT",runtime)
+    monkeypatch.setattr(SV,"OFFSETS_PATH",runtime/"offsets.json")
+    monkeypatch.setattr(SV,"ENGINE_STATUS_PATH",runtime/"status.json")
+    monkeypatch.setattr(SV,"ENGINE_SNAPSHOT_PATH",runtime/"snapshot.json")
+    monkeypatch.setattr(SV,"collector_health",lambda venue,**kwargs:{"venue":venue,"status":"HEALTHY_WITH_RECONNECTS"})
+    service=SV.CrossVenueService(root=root,ledger=CrossVenueLedger(runtime/"paper.sqlite"))
+    health=service._health(service.engine.snapshot())
+    assert health["status"] == "PAPER_RESEARCH"
+    assert health["components"]["CROSS_VENUE_NORMALIZER"]["status"] == "HEALTHY"
+
+
+def test_storage_status_is_bounded_and_reports_stream_bytes(tmp_path, monkeypatch):
+    root=tmp_path/"external_data"/"staging"/"cross_venue_v1"; monkeypatch.setattr(S,"STAGING_ROOT",root)
+    stream=root/"bitget"/"normalized"/"current.jsonl"; stream.parent.mkdir(parents=True)
+    stream.write_text('{"event_id":"one"}\n',encoding="utf-8")
+    status=S.storage_status(root)
+    bitget=next(row for row in status["venues"] if row["venue"]=="bitget")
+    assert status["status"] == "OK"
+    assert bitget["stream_size_bytes"] == stream.stat().st_size
+    assert status["raw_storage_contract"] == "APPEND_ONLY_JSONL_NO_DELETION"
+
+
+def test_compaction_fails_closed_without_optional_dependency_and_preserves_raw(tmp_path, monkeypatch):
+    root=tmp_path/"external_data"/"staging"/"cross_venue_v1"; monkeypatch.setattr(S,"STAGING_ROOT",root)
+    source=root/"bitget"/"normalized"/"BTCUSDT"/"trade"/"2026-07-17"/"events.jsonl"
+    source.parent.mkdir(parents=True); source.write_text('{"event_id":"one"}\n',encoding="utf-8")
+    before=source.read_bytes()
+    result=compact_partition(venue="bitget",symbol="BTCUSDT",event_type="trade",date="2026-07-17",root=root)
+    assert result["status"] in {"NEED_DEPENDENCY","COMPLETED"}
+    assert result["raw_deleted"] is False and result["raw_mutated"] is False
+    assert source.read_bytes() == before
+
+
+def test_compaction_rejects_path_tokens_before_io(tmp_path, monkeypatch):
+    root=tmp_path/"external_data"/"staging"/"cross_venue_v1"; monkeypatch.setattr(S,"STAGING_ROOT",root)
+    with pytest.raises(ValueError,match="INVALID_SYMBOL"):
+        compact_partition(venue="bitget",symbol="../BTCUSDT",event_type="trade",date="2026-07-17",root=root)
+
+
 def test_stale_engine_artifact_is_not_reported_as_current(tmp_path, monkeypatch):
     path=tmp_path/"engine_status.json"
     path.write_text(json.dumps({"status":"PAPER_RESEARCH"}),encoding="utf-8")
@@ -634,7 +728,7 @@ def test_leverage_liquidation_is_conservative():
 
 
 def test_api_surface_is_read_only_only():
-    expected={"status","providers","venues","prices","orderflow","leadlag","signals","account","positions","trades","equity","leverage","health"}
+    expected={"status","providers","venues","prices","orderflow","leadlag","signals","episodes","account","positions","trades","equity","leverage","health","storage"}
     actual={path.rsplit("/",1)[-1] for path in READERS}
     assert expected <= actual
     forbidden=("open","close","reset","configure","leverage-set","live","key","order")
@@ -645,6 +739,8 @@ def test_cli_parser_is_standalone_and_safe():
     args=build_parser().parse_args(["collect","--venue","bybit","--max-sessions","1","--max-messages","2","--stop-file","stop.flag"])
     assert args.venue=="bybit" and args.max_messages==2 and args.stop_file=="stop.flag"
     assert build_parser().parse_args(["engine","--max-cycles","1"]).max_cycles==1
+    compact=build_parser().parse_args(["compact","--venue","bitget","--symbol","BTCUSDT","--event-type","trade","--date","2026-07-17"])
+    assert compact.command == "compact" and compact.batch_rows == 50_000
 
 
 def test_engine_honors_existing_cooperative_stop_file(tmp_path):
@@ -662,6 +758,18 @@ def test_dashboard_has_single_cross_venue_panel_and_no_mutation(tmp_path):
     assert page.count('id="crossVenuePanel"')==1
     assert "CROSS-VENUE INTELLIGENCE" in page and "NOT ACTIONABLE" in page and "NO LIVE" in page
     assert "/api/cross-venue/order" not in page and "/api/cross-venue/reset" not in page
+
+
+def test_dashboard_separates_venues_streams_raw_evaluations_and_episodes(tmp_path):
+    from app.labs import research_dashboard_v10_43c as D
+    state={"tool_version":"v10.43c","symbol":"BTCUSDT","generated_at":"now","git_head":"x","health":{},"view":{},"data_quality":{},"shadow":None,"scoreboard":[],"bankroll":None,"ws_dataset":{},"persistent_health":{},"persistent_continuity":{},"source_compare_3way":{},"strategy_hardening":{},"ws_persistent_tournament":{},"exit_optimization":{},"readiness_v1043c":{"primary":"RESEARCH_ONLY","states":[]},"ati_paper":{},"cross_venue":{"health":{"status":"PAPER_RESEARCH"},"providers":{"active_venue_count":5,"active_stream_count":10},"venues":[{"venue":"bitget","symbol":"BTCUSDT"} for _ in range(10)],"signals":[],"positions":[],"trades":[],"leadlag":{"leaderboard":[],"evaluation_counts":{"raw_evaluations":100,"unique_market_episodes":7,"candidate_signals":0},"recent_episodes":[{"episode_id":"episode_one","symbol":"BTCUSDT","direction":"LONG","evaluations":4,"last_status":"REJECTED_COSTS"}]},"leverage":{"scenarios":[]},"account":None}}
+    page=D.build_dashboard("BTCUSDT",state=state,out_dir=tmp_path,write=False)["html_str"]
+    assert 'id="cvVenueCount">5<' in page
+    assert 'id="cvStreamCount">10<' in page
+    assert 'id="cvSignalCount">100<' in page
+    assert 'id="cvEpisodeCount">7<' in page
+    assert "episode_one" in page
+    assert "Raw evaluations" in page and "Unique market episodes" in page
 
 
 def test_local_stack_contains_six_isolated_cross_venue_components():

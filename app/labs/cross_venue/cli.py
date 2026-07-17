@@ -9,6 +9,7 @@ from typing import Any
 from . import safety_envelope
 from .api import dashboard_snapshot, health_payload
 from .collector import run_collector
+from .compaction import compact_partition
 from .providers import load_config, load_inventory, providers_payload
 from .service import run_service
 
@@ -29,6 +30,12 @@ def build_parser() -> argparse.ArgumentParser:
     engine.add_argument("--stop-file")
     sub.add_parser("status"); sub.add_parser("providers"); sub.add_parser("verify-inventory")
     sub.add_parser("snapshot")
+    compact = sub.add_parser("compact", help="Compact one derived partition; raw JSONL is preserved")
+    compact.add_argument("--venue", required=True)
+    compact.add_argument("--symbol", required=True)
+    compact.add_argument("--event-type", required=True)
+    compact.add_argument("--date", required=True)
+    compact.add_argument("--batch-rows", type=int, default=50_000)
     return parser
 
 
@@ -50,6 +57,11 @@ def main(argv: list[str] | None = None) -> int:
         inventory = load_inventory(); config = load_config()
         payload = {"status": "PASS", "provider_count": len(inventory["providers"]),
                    "active_venues": config["active_venues"], "official_sources_only": True}
+    elif args.command == "compact":
+        payload = compact_partition(
+            venue=args.venue, symbol=args.symbol, event_type=args.event_type,
+            date=args.date, batch_rows=args.batch_rows,
+        )
     else: payload = dashboard_snapshot()
     _print(payload)
     return 0
