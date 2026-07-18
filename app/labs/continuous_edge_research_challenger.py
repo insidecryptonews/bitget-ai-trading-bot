@@ -148,7 +148,48 @@ def load_feature_rows(
         "price_return_bps", "gap_flag", "source_partition_id", "dataset_hash",
         "feature_version",
     }
+    path_rows: list[tuple[Path, int]] = []
     for path in sorted(paths):
+        parquet = pq.ParquetFile(path)
+        try:
+            path_rows.append((path, int(parquet.metadata.num_rows)))
+        finally:
+            parquet.close()
+    total_available_rows = sum(count for _, count in path_rows)
+    budget = max(1, int(max_rows))
+    quotas: dict[Path, int] = {}
+    if total_available_rows <= budget:
+        quotas = {path: count for path, count in path_rows}
+    else:
+        active = [(path, count) for path, count in path_rows if count > 0]
+        reserved = min(len(active), budget)
+        quotas = {path: (1 if index < reserved else 0) for index, (path, _) in enumerate(active)}
+        remaining = budget - sum(quotas.values())
+        if remaining > 0 and total_available_rows > 0:
+            shares = [
+                (remaining * count / total_available_rows, path)
+                for path, count in active
+            ]
+            for raw, path in shares:
+                quotas[path] += int(raw)
+            leftover = budget - sum(quotas.values())
+            for _, path in sorted(
+                ((raw - int(raw), path) for raw, path in shares),
+                key=lambda item: (-item[0], str(item[1])),
+            )[:leftover]:
+                quotas[path] += 1
+        for path, count in active:
+            quotas[path] = min(count, quotas.get(path, 0))
+    for path, file_row_count in path_rows:
+        quota = quotas.get(path, 0)
+        if quota <= 0 or file_row_count <= 0:
+            continue
+        selected_indices = (
+            None if quota >= file_row_count else {
+                min(file_row_count - 1, int((index + 0.5) * file_row_count / quota))
+                for index in range(quota)
+            }
+        )
         parquet = pq.ParquetFile(path)
         horizon_ms = 0
         for part in path.parts:
@@ -163,8 +204,13 @@ def load_feature_rows(
         available = set(parquet.schema_arrow.names)
         if not required.issubset(available):
             continue
+        local_index = 0
         for batch in parquet.iter_batches(batch_size=50_000, columns=sorted(required)):
             for row in batch.to_pylist():
+                take = selected_indices is None or local_index in selected_indices
+                local_index += 1
+                if not take:
+                    continue
                 symbol = str(row.get("canonical_symbol") or "").upper()
                 if wanted and symbol not in wanted:
                     continue
@@ -191,24 +237,27 @@ def load_feature_rows(
                     "horizon_ms": horizon_ms,
                 })
                 rows.append(clean)
-                if len(rows) > max(1, int(max_rows)):
-                    return [], {
-                        "status": "RESOURCE_BUDGET_EXCEEDED",
-                        "reason": "FEATURE_ROW_LIMIT_EXCEEDED",
-                        "maximum_feature_rows": int(max_rows),
-                        "dataset_hash": dataset_hash,
-                        "verified_feature_files": len(paths),
-                        "source_partition_ids": source_ids,
-                    }
     rows.sort(key=lambda row: (
         int(row["bucket_start_ms"]), str(row["canonical_symbol"]), str(row["venue"]),
     ))
     return rows, {
-        "status": "OK" if rows else "NEED_MORE_DATA",
+        "status": (
+            "OK_DOWNSAMPLED_RESOURCE_BUDGET"
+            if total_available_rows > budget and rows else
+            "OK" if rows else "NEED_MORE_DATA"
+        ),
         "dataset_hash": dataset_hash,
         "verified_feature_files": len(paths),
         "source_partition_ids": source_ids,
         "rows": len(rows),
+        "total_available_rows": total_available_rows,
+        "maximum_feature_rows": budget,
+        "downsampled": total_available_rows > budget,
+        "sampling_method": (
+            "DETERMINISTIC_EVEN_WITHIN_VERIFIED_FILE"
+            if total_available_rows > budget else "ALL_VERIFIED_ROWS"
+        ),
+        "sampling_is_not_full_dataset": total_available_rows > budget,
     }
 
 
@@ -534,7 +583,9 @@ def _walk_forward_stability(
     if len(timestamps) < 20:
         return {"status": "NEED_MORE_DATA", "folds": []}
     folds = []
-    for index, (left_fraction, right_fraction) in enumerate(((0.40, 0.60), (0.50, 0.70), (0.60, 0.80))):
+    for index, (left_fraction, right_fraction) in enumerate(
+        ((0.20, 0.40), (0.35, 0.55), (0.50, 0.70), (0.60, 0.80))
+    ):
         left = timestamps[int((len(timestamps) - 1) * left_fraction)]
         right = timestamps[int((len(timestamps) - 1) * right_fraction)]
         evaluation = _evaluate(
@@ -549,7 +600,7 @@ def _walk_forward_stability(
         })
     sufficient = [fold for fold in folds if fold["metrics"]["trades"] >= 15]
     positive = sum(fold["positive"] for fold in sufficient)
-    status = "PASS" if len(sufficient) == 3 and positive >= 2 else "FAIL" if sufficient else "NEED_MORE_DATA"
+    status = "PASS" if len(sufficient) == 4 and positive >= 3 else "FAIL" if sufficient else "NEED_MORE_DATA"
     return {
         "status": status, "method": "FIXED_SPEC_ROLLING_STABILITY_NO_RETUNING",
         "folds": folds,

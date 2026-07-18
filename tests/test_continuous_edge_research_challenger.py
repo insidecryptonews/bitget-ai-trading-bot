@@ -139,9 +139,14 @@ def test_feature_loader_honors_memory_row_budget(tmp_path: Path, monkeypatch) ->
     }), encoding="utf-8")
     monkeypatch.setattr(challenger, "STAGING_ROOT", root)
     rows, status = challenger.load_feature_rows(manifest, max_rows=2)
-    assert rows == []
-    assert status["status"] == "RESOURCE_BUDGET_EXCEEDED"
-    assert status["reason"] == "FEATURE_ROW_LIMIT_EXCEEDED"
+    assert len(rows) <= 2
+    assert status["status"] == "OK_DOWNSAMPLED_RESOURCE_BUDGET"
+    assert status["downsampled"] is True
+    assert status["total_available_rows"] == len(_rows(2))
+    assert status["sampling_method"] == "DETERMINISTIC_EVEN_WITHIN_VERIFIED_FILE"
+    repeat, repeated_status = challenger.load_feature_rows(manifest, max_rows=2)
+    assert repeat == rows
+    assert repeated_status == status
 
 
 def test_challenger_keeps_holdout_sealed_and_cannot_auto_promote(

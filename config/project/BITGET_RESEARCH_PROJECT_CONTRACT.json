@@ -1,0 +1,65 @@
+{
+  "schema": "bitget_research_project_contract.v1",
+  "contract_version": "PROJECT_MEMORY_CONTRACT_V1",
+  "project": "Bitget AI Trading Research Bot",
+  "allowed_branch": "backup/ati-wip-cdb0cee",
+  "contract_source_head": "4710f0959c10bdadfa72734e315a8257d2bc281e",
+  "mode": "PAPER_RESEARCH_SIMULATION_ONLY",
+  "updated_at": "2026-07-18T00:00:00Z",
+  "safety_flags": {
+    "PAPER_TRADING": true,
+    "LIVE_TRADING": false,
+    "DRY_RUN": true,
+    "ENABLE_PAPER_POLICY_FILTER": false,
+    "ENABLE_CANDIDATE_SHADOW_MONITOR": false,
+    "can_send_real_orders": false,
+    "final_recommendation": "NO LIVE"
+  },
+  "locked_rules": {
+    "real_orders": false,
+    "private_exchange_endpoints": false,
+    "env_modification": false,
+    "live_activation": false,
+    "paper_filter_activation": false,
+    "leverage_margin_sizing_slot_changes": false,
+    "account_reset": false,
+    "forward_boundary_reset": false,
+    "automatic_strategy_promotion": false,
+    "hot_policy_modification": false,
+    "raw_delete_without_verified_remote_restore": false
+  },
+  "active_policies": {
+    "ati_shadow": "ATI_SHADOW_POLICY_V2",
+    "ati_paper": "ATI_PAPER_SIMULATION_V1",
+    "p11": "P11_SHORT_FORWARD_OBSERVER_V2",
+    "cross_venue": "CROSS_VENUE_RESEARCH_V1",
+    "storage": "STORAGE_EFFICIENCY_V2",
+    "challenger": "CONTINUOUS_EDGE_RESEARCH_CHALLENGER_V2"
+  },
+  "schemas": {
+    "ati_forward": "ati_forward_shadow.v2",
+    "p11_observer": "p11_short_forward_observer.v2",
+    "cross_venue_boundary": "cross_venue_forward_boundary.v1",
+    "storage_manifest": "storage_efficiency_v2.manifest.v1",
+    "feature_manifest": "storage_efficiency_v2.feature_manifest.v1",
+    "decision_ledger": "research_decision_ledger.v1"
+  },
+  "accounts": {
+    "ati": {"account_id": "ATI_PAPER_50", "initial_balance": 50.0},
+    "cross_venue": {"account_id": "CROSS_VENUE_PAPER_50", "initial_balance": 50.0},
+    "diagnostic_demo": {"account_id": "OPERABILITY_DIAGNOSTIC_DEMO_50", "initial_balance": 50.0},
+    "edge_candidate_demo": {"account_id": "EDGE_CANDIDATE_DEMO_50", "initial_balance": 50.0}
+  },
+  "promotion": {
+    "automatic": false,
+    "maximum_automatic_state": "WATCH_ONLY",
+    "human_approval_required": true,
+    "paper_filter_remains_disabled": true,
+    "live_remains_disabled": true
+  },
+  "storage": {
+    "default_mode": "COMPRESSION_ONLY_NO_DELETE",
+    "delete_allowed": false,
+    "required_remote_state_for_retention": "VERIFIED_REMOTE_RESTORABLE"
+  }
+}
