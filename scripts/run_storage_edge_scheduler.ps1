@@ -31,7 +31,9 @@ function Write-SchedulerStatus($Payload) {
     $Payload["can_send_real_orders"] = $false
     $Payload["final_recommendation"] = "NO LIVE"
     $tmp = $StatusPath + ".tmp"
-    $Payload | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $tmp -Encoding UTF8
+    $json = $Payload | ConvertTo-Json -Depth 8
+    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+    [System.IO.File]::WriteAllText($tmp, $json, $utf8NoBom)
     Move-Item -LiteralPath $tmp -Destination $StatusPath -Force
 }
 

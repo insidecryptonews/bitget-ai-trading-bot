@@ -266,6 +266,41 @@ def test_health_artifact_and_dashboard_panels_are_read_only(
     assert "no automatic promotion" in challenger_html
 
 
+def test_dashboard_reads_powershell_utf8_bom_scheduler_status(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    runtime = tmp_path / "data" / "runtime" / "storage_efficiency_v2"
+    runtime.mkdir(parents=True)
+    (runtime / "storage_status.json").write_text(json.dumps({
+        "storage_mode": "COMPRESSION_ONLY_NO_DELETE",
+        "delete_allowed": False,
+    }), encoding="utf-8")
+    scheduler_payload = {
+        "status": "COMPLETED",
+        "next_cycle_at": "2026-07-18T05:00:00+00:00",
+        "can_send_real_orders": False,
+        "final_recommendation": "NO LIVE",
+    }
+    (runtime / "scheduler_status.json").write_bytes(
+        b"\xef\xbb\xbf" + json.dumps(scheduler_payload).encode("utf-8")
+    )
+    monkeypatch.setattr(dashboard.CE, "_repo_root", lambda: tmp_path)
+
+    snapshot = dashboard._storage_efficiency_snapshot()
+    assert snapshot["scheduler"]["status"] == "COMPLETED"
+    html = dashboard._panel_storage_efficiency({"storage_efficiency_v2": snapshot})
+    assert "COMPLETED" in html
+    assert "NOT_RUNNING" not in html
+
+
+def test_scheduler_writes_utf8_without_bom() -> None:
+    source = (ROOT / "scripts" / "run_storage_edge_scheduler.ps1").read_text(
+        encoding="utf-8",
+    )
+    assert "UTF8Encoding($false)" in source
+    assert "Set-Content -LiteralPath $tmp -Encoding UTF8" not in source
+
+
 def test_http_status_endpoints_read_artifacts_without_running_heavy_work(
     tmp_path: Path, monkeypatch,
 ) -> None:
