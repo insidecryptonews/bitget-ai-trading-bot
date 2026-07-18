@@ -236,8 +236,19 @@ class StreamStore:
         self._initial_stream_bytes = self.stream_path.stat().st_size if self.stream_path.is_file() else 0
         self.lease = WriterLease(self.root, self.venue)
         storage_config = load_config()
+        from ..storage_efficiency_v2 import load_storage_config
+
+        efficiency_config = load_storage_config()
         self.minimum_free_disk_bytes = int(storage_config["minimum_free_disk_bytes"])
-        self.maximum_stream_bytes = int(storage_config["maximum_stream_bytes_per_venue"])
+        self.maximum_stream_bytes = min(
+            int(storage_config["maximum_stream_bytes_per_venue"]),
+            int(efficiency_config["normalized_hot_max_bytes"]),
+        )
+        self.maximum_raw_bytes = int(efficiency_config["raw_hot_max_bytes"])
+        self.write_partitioned_normalized_jsonl = bool(
+            efficiency_config["write_partitioned_normalized_jsonl"]
+        )
+        self.raw_rollover_manifest_path = self.venue_root / "raw" / "rollover_manifest.json"
         self.retention_days = int(storage_config.get("retention_days", 14))
         self._compression_threads: list[threading.Thread] = []
         self._compressing_segments: set[Path] = set()
@@ -337,15 +348,10 @@ class StreamStore:
             self._compressing_segments.discard(segment)
 
     def _schedule_segment_compression(self, segment: Path) -> None:
-        if segment in self._compressing_segments or not segment.is_file():
-            return
-        self._compressing_segments.add(segment)
-        thread = threading.Thread(
-            target=self._compress_segment, args=(segment,),
-            name=f"cross-venue-gzip-{self.venue}", daemon=True,
-        )
-        self._compression_threads.append(thread)
-        thread.start()
+        # Storage Efficiency V2 moves compression out of collector processes.
+        # The dedicated low-priority worker consumes the manifest state; the
+        # collector only performs the bounded atomic rollover.
+        return
 
     def _recover_rollover(self) -> None:
         journal = read_json(self.rollover_journal_path, {}) or {}
@@ -468,10 +474,44 @@ class StreamStore:
         encoded = _json_line(payload)
         self._guard_disk(len(encoded))
         path.parent.mkdir(parents=True, exist_ok=True)
+        self._rotate_raw_if_needed(path, len(encoded), date)
         with path.open("ab") as handle:
             handle.write(encoded); handle.flush()
         self.raw_frames_written += 1
         return path
+
+    def _rotate_raw_if_needed(self, path: Path, incoming_bytes: int, date: str) -> None:
+        current = path.stat().st_size if path.is_file() else 0
+        if current + incoming_bytes <= self.maximum_raw_bytes:
+            return
+        if incoming_bytes > self.maximum_raw_bytes:
+            raise RuntimeError("CROSS_VENUE_RAW_SIZE_GUARD_BATCH_TOO_LARGE")
+        if path.is_symlink() or path.parent.is_symlink():
+            raise ValueError("CROSS_VENUE_RAW_ROLLOVER_SYMLINK_BLOCKED")
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+        segment = path.parent / f"frames_{stamp}_{uuid.uuid4().hex[:8]}.jsonl"
+        os.replace(path, segment)
+        path.touch(exist_ok=False)
+        manifest = read_json(self.raw_rollover_manifest_path, {}) or {}
+        rows = manifest.get("segments") if isinstance(manifest, dict) else None
+        rows = list(rows) if isinstance(rows, list) else []
+        rows.append({
+            "segment_path": segment.relative_to(self.venue_root).as_posix(),
+            "logical_bytes": current,
+            "date": date,
+            "rotated_at": utc_now(),
+            "state": "CLOSED_RAW_PENDING_TRANSPARENT_COMPRESSION",
+            "raw_audit_source": True,
+            "delete_allowed": False,
+        })
+        atomic_json(self.raw_rollover_manifest_path, {
+            "schema": "cross_venue_raw_rollover.v1",
+            "venue": self.venue,
+            "segments": rows,
+            "updated_at": utc_now(),
+            "mode": "COMPRESSION_ONLY_NO_DELETE",
+            **safety_envelope(),
+        })
 
     def append_events(self, rows: Iterable[dict[str, Any]]) -> int:
         accepted: list[dict[str, Any]] = []
@@ -500,11 +540,12 @@ class StreamStore:
                     date = datetime.fromtimestamp(ts / 1000, tz=timezone.utc).strftime("%Y-%m-%d")
                     event_type = str(row.get("event_type") or "unknown").replace("/", "_")
                     symbol = str(row.get("canonical_symbol") or "unknown").replace("/", "_")
-                    part = self.venue_root / "normalized" / symbol / event_type / date / "events.jsonl"
-                    if part not in partition_handles:
-                        part.parent.mkdir(parents=True, exist_ok=True)
-                        partition_handles[part] = part.open("ab")
-                    partition_handles[part].write(encoded)
+                    if self.write_partitioned_normalized_jsonl:
+                        part = self.venue_root / "normalized" / symbol / event_type / date / "events.jsonl"
+                        if part not in partition_handles:
+                            part.parent.mkdir(parents=True, exist_ok=True)
+                            partition_handles[part] = part.open("ab")
+                        partition_handles[part].write(encoded)
                     digest = hashlib.sha256((self.last_hash or "").encode("ascii") + encoded).hexdigest()
                     self.last_hash = digest
                 stream.flush()
@@ -537,12 +578,16 @@ class StreamStore:
             "stream_growth_bytes_per_hour_this_process": growth_per_hour,
             "disk_free_bytes": disk.free,
             "rotation_state": "UTC_DATE_PARTITIONS_AND_BOUNDED_HOT_STREAM_ACTIVE",
+            "normalized_hot_max_bytes": self.maximum_stream_bytes,
+            "raw_hot_max_bytes": self.maximum_raw_bytes,
+            "partitioned_normalized_jsonl_enabled": self.write_partitioned_normalized_jsonl,
             "hot_stream_rollovers": len(rollover_rows),
             "hot_stream_compression_pending": sum(
                 str(row.get("state")) == "CONSUMED_DERIVED_SEGMENT_PENDING_GZIP"
                 for row in rollover_rows
             ),
             "hot_stream_compression_errors": list(self._compression_errors[-10:]),
+            "hot_stream_compression_worker": "SEPARATE_LOW_PRIORITY_PROCESS",
             "raw_compression": "NONE_APPEND_ONLY_AUDIT_SOURCE",
             "derived_compaction_status": "SEPARATE_JOB_NOT_IN_HOT_PATH",
             "retention_days_configured": self.retention_days,
@@ -559,12 +604,16 @@ class StreamStore:
             "stream_growth_bytes_per_hour_this_process": growth_per_hour,
             "disk_free_bytes": disk.free,
             "rotation_state": "UTC_DATE_PARTITIONS_AND_BOUNDED_HOT_STREAM_ACTIVE",
+            "normalized_hot_max_bytes": self.maximum_stream_bytes,
+            "raw_hot_max_bytes": self.maximum_raw_bytes,
+            "partitioned_normalized_jsonl_enabled": self.write_partitioned_normalized_jsonl,
             "hot_stream_rollovers": len(rollover_rows),
             "hot_stream_compression_pending": sum(
                 str(row.get("state")) == "CONSUMED_DERIVED_SEGMENT_PENDING_GZIP"
                 for row in rollover_rows
             ),
             "hot_stream_compression_errors": list(self._compression_errors[-10:]),
+            "hot_stream_compression_worker": "SEPARATE_LOW_PRIORITY_PROCESS",
             "raw_compression": "NONE_APPEND_ONLY_AUDIT_SOURCE",
             "derived_compaction_status": "SEPARATE_JOB_NOT_IN_HOT_PATH",
             "retention_days_configured": self.retention_days,
