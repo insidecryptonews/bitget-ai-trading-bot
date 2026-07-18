@@ -433,6 +433,16 @@ def test_forward_merge_accepts_observed_sub_tick_rolling_indicator_drift() -> No
     assert _merge_unique([original], [regenerated], "signal_id") == [original]
 
 
+def test_forward_merge_keeps_epoch_millisecond_integers_exact() -> None:
+    original = {
+        "signal_id": "timestamp", "decision_ts": "2026-07-17T23:00:00+00:00",
+        "available_at_ms": 1_784_329_200_000,
+    }
+    changed = {**original, "available_at_ms": original["available_at_ms"] + 1_000}
+    with pytest.raises(ValueError, match="ATI_FORWARD_ID_COLLISION"):
+        _merge_unique([original], [changed], "signal_id")
+
+
 def test_forward_merge_rejects_material_float_change() -> None:
     original = {
         "signal_id": "same", "decision_ts": "2026-01-01", "direction": "SHORT",

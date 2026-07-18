@@ -42,7 +42,12 @@ def _semantic_equal(left: Any, right: Any) -> bool:
     """Strict structural equality with machine-noise tolerance for floats."""
     if isinstance(left, bool) or isinstance(right, bool):
         return type(left) is type(right) and left == right
-    if isinstance(left, (int, float)) and isinstance(right, (int, float)):
+    # Integer fields include millisecond timestamps, indexes and counts.  A
+    # relative float tolerance at epoch scale could otherwise hide seconds of
+    # timestamp drift, so integers remain exact identity inputs.
+    if isinstance(left, int) or isinstance(right, int):
+        return type(left) is type(right) and left == right
+    if isinstance(left, float) and isinstance(right, float):
         a, b = float(left), float(right)
         return math.isfinite(a) and math.isfinite(b) and math.isclose(
             a, b, rel_tol=_REPLAY_FLOAT_REL_TOL,
