@@ -745,6 +745,21 @@ def test_tiny_move_cannot_clear_cost_gate():
     assert signal["status"] == "REJECTED_COSTS" and signal["unlevered_net_edge_bps"] < 0
 
 
+def test_cost_gate_does_not_overwrite_insufficient_consensus():
+    config = dict(load_config())
+    config["minimum_leader_move_bps"] = 0.1
+    engine = LeadLagEngine(config)
+    t = 1_000_000_000
+    engine.process(_event("bitget", t, 100, bid=99.99, ask=100.01))
+    engine.process(_event("binance", t, 100, bid=99.99, ask=100.01))
+    signal = engine.process(
+        _event("binance", t + 500_000_000, 100.02, bid=100.01, ask=100.03)
+    )["signal"]
+    assert signal["unlevered_net_edge_bps"] < 0
+    assert signal["status"] == "REJECTED_INSUFFICIENT_CONSENSUS"
+    assert signal["rejection_reason"] == "minimum_consensus_not_met"
+
+
 def test_trade_or_mark_price_cannot_contaminate_l1_lead_history():
     engine=LeadLagEngine(load_config()); t=1_000_000_000
     engine.process(_event("binance",t,100,bid=99.99,ask=100.01))

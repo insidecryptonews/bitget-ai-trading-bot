@@ -996,6 +996,39 @@ def _panel_alpha_factory(d: dict) -> str:
         '<div class="sub">V10.44 Alpha Factory is research-only. Candidate labels are NOT executable signals. NO LIVE.</div>')
 
 
+def _panel_edge_research_review(d: dict) -> str:
+    path = CE._repo_root().joinpath(
+        "reports", "research", "edge_audit_v1044", "edge_research_review_v10_44.json")
+    report = _read_json(path) or {}
+    coverage = report.get("coverage") or {}
+    best = report.get("best_diagnostic") or {}
+    chronological = report.get("chronological_60_20_20_at_1000ms") or {}
+    statuses: dict[str, int] = {}
+    for row in report.get("hypotheses") or []:
+        status = str(row.get("status") or "UNKNOWN")
+        statuses[status] = statuses.get(status, 0) + 1
+    verdict = report.get("verdict") or "NOT_RUN"
+    return (
+        A._kv("Executable outcome audit", verdict, A._state_kind(verdict)) +
+        A._kv("Generated at", report.get("generated_at") or "NOT_RUN") +
+        A._kv("Raw / true-consensus evaluations",
+              f"{coverage.get('raw_evaluations', 0)} / {coverage.get('consensus_evaluations', 0)}") +
+        A._kv("Unique episodes / duplicate evaluations",
+              f"{coverage.get('unique_consensus_episodes', 0)} / "
+              f"{coverage.get('duplicate_consensus_evaluations', 0)}") +
+        A._kv("Executable fills / missing",
+              f"{coverage.get('filled_episodes', 0)} / {coverage.get('missing_fill_episodes', 0)}") +
+        A._kv("Best diagnostic horizon",
+              f"{best.get('horizon_ms')}ms (hindsight diagnostic only)") +
+        A._kv("Best realistic net mean (bps)", best.get("realistic_base_mean_bps")) +
+        A._kv("Chronological 60/20/20", chronological.get("status") or "NOT_RUN",
+              A._state_kind(chronological.get("status") or "NEED_DATA")) +
+        A._kv("Hypothesis states", statuses) +
+        A._kv("Edge validated", False, "bad") +
+        '<div class="sub">Public Bitget L1 delayed fills; spread is embedded once. '
+        'Future quotes are counterfactual outcomes only. No candidate promotion, no paper, NO LIVE.</div>')
+
+
 def _panel_ai_copilot(d: dict) -> str:
     rd = CE._repo_root().joinpath("reports", "research", "v10_45_ai_copilot")
     cop = _read_json(rd / "ai_copilot_last_run_v10_45.json") or {}
@@ -1110,6 +1143,7 @@ def render_html(d: dict, auto_refresh_seconds: int | None = None) -> str:
         p11_exports=_panel_p11_exports(d),
         strategy=_panel_strategy(d), exits=_panel_exit(d),
         alpha=_panel_alpha_factory(d),
+        edge_review=_panel_edge_research_review(d),
         ai=_panel_ai_copilot(d),
         edge=_panel_edge_discovery(d),
         lattice=_panel_lattice(d),
@@ -1160,6 +1194,7 @@ _EXTRA = """
   <div class="card wide"><h3>Persistent WS Panel</h3>{pws}</div>
   <div class="card wide"><h3>REST vs WS vs WS Persistent</h3>{compare}<div class="sub">REST fragments, WS snapshots, and persistent WS have different collection contracts; coverage percentages are not interchangeable.</div></div>
   <div class="card wide"><h3>Alpha Factory V10.44</h3>{alpha}</div>
+  <div class="card wide"><h3>Edge Research Review V10.44</h3>{edge_review}</div>
   <div class="card wide"><h3>AI Research Co-Pilot V10.45</h3>{ai}</div>
   <div class="card wide"><h3>Multi-AI Edge Discovery V10.45.1</h3>{edge}</div>
   <div class="card"><h3>Strategy Lab Hardened</h3>{strategy}</div>

@@ -421,6 +421,18 @@ def test_forward_merge_accepts_only_machine_noise_float_drift() -> None:
     assert _merge_unique([original], [regenerated], "signal_id") == [original]
 
 
+def test_forward_merge_accepts_observed_sub_tick_rolling_indicator_drift() -> None:
+    original = {
+        "signal_id": "observed", "decision_ts": "2026-07-17T23:00:00+00:00",
+        "direction": "SHORT",
+        "timeframe_context": {"h4_ema50": 63736.3485396715},
+    }
+    regenerated = {
+        **original, "timeframe_context": {"h4_ema50": 63736.34853960475},
+    }
+    assert _merge_unique([original], [regenerated], "signal_id") == [original]
+
+
 def test_forward_merge_rejects_material_float_change() -> None:
     original = {
         "signal_id": "same", "decision_ts": "2026-01-01", "direction": "SHORT",

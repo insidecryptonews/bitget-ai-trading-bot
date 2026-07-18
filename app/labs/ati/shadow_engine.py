@@ -30,6 +30,12 @@ _VOLATILE_REPLAY_FIELDS = frozenset({
 _LATE_MATURING_DIAGNOSTIC_PREFIXES = ("gross_return_", "net_return_")
 _PAPER_FEED_MAX_DECISION_AGE_SECONDS = 30 * 60
 _CANONICAL_FORWARD_OUTCOME_POLICY = "baseline_structural_1_5R"
+# Rolling indicators can differ by a few sub-tick decimals when an otherwise
+# identical 90-day source window is regenerated from a different origin.  The
+# tolerance remains well below one BTCUSDT tick at current price levels while
+# material changes to decisions, prices, returns or outcomes still collide.
+_REPLAY_FLOAT_REL_TOL = 2e-9
+_REPLAY_FLOAT_ABS_TOL = 1e-12
 
 
 def _semantic_equal(left: Any, right: Any) -> bool:
@@ -39,7 +45,8 @@ def _semantic_equal(left: Any, right: Any) -> bool:
     if isinstance(left, (int, float)) and isinstance(right, (int, float)):
         a, b = float(left), float(right)
         return math.isfinite(a) and math.isfinite(b) and math.isclose(
-            a, b, rel_tol=1e-12, abs_tol=1e-12,
+            a, b, rel_tol=_REPLAY_FLOAT_REL_TOL,
+            abs_tol=_REPLAY_FLOAT_ABS_TOL,
         )
     if isinstance(left, dict) and isinstance(right, dict):
         return left.keys() == right.keys() and all(

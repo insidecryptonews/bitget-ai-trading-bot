@@ -164,10 +164,14 @@ class LeadLagEngine:
         fixed_cost = round_trip_fee + 2.0 * slippage_each + latency + impact + funding + basis
         total_cost = fixed_cost + spread_bps
         net_edge = expected_remaining - total_cost
-        if not math.isfinite(net_edge):
-            status, rejection = "REJECTED_TARGET_NEED_DATA", "bitget_spread_missing"
-        elif net_edge < float(self.config.get("minimum_net_edge_bps", 3.0)):
-            status, rejection = "REJECTED_COSTS", "estimated_move_does_not_clear_costs"
+        # Cost is the final gate.  It must never overwrite an earlier data,
+        # freshness or consensus rejection because that corrupts the research
+        # funnel and makes the true bottleneck impossible to measure.
+        if status == "CANDIDATE_RESEARCH_ONLY":
+            if not math.isfinite(net_edge):
+                status, rejection = "REJECTED_TARGET_NEED_DATA", "bitget_spread_missing"
+            elif net_edge < float(self.config.get("minimum_net_edge_bps", 3.0)):
+                status, rejection = "REJECTED_COSTS", "estimated_move_does_not_clear_costs"
         if status == "CANDIDATE_RESEARCH_ONLY":
             self.last_signal_at[symbol] = decision_ns
         identity = {

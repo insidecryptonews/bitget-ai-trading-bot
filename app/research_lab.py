@@ -7325,6 +7325,14 @@ class ResearchLab:
                  "RESEARCH HEAVY RUN V10.44 END"]
         return chr(10).join(lines)
 
+    def edge_research_review_v1044_cli(self, *, symbols="") -> str:
+        from .labs import edge_research_review_v10_44 as EDGE
+
+        report = EDGE.run_edge_research_review(
+            symbols=self._v107_csv_arg(symbols), write_reports=True,
+        )
+        return EDGE.render_cli(report)
+
     def ai_provider_audit_v1045_cli(self) -> str:
         from .labs import ai_research_copilot_v10_45 as COP
         d = COP.write_provider_audit_report()
@@ -8928,6 +8936,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
             "exit-factory-v1044",
             "candidate-incubator-v1044",
             "research-heavy-run-v1044",
+            "edge-research-review-v1044",
             "ai-provider-audit-v1045",
             "ai-research-copilot-v1045",
             "ai-simulated-trader-v1045",
@@ -9217,6 +9226,7 @@ PUBLIC_RESEARCH_ONLY_COMMANDS = frozenset({
     "exit-factory-v1044",
     "candidate-incubator-v1044",
     "research-heavy-run-v1044",
+    "edge-research-review-v1044",
     "ai-provider-audit-v1045",
     "ai-research-copilot-v1045",
     "ai-simulated-trader-v1045",
@@ -9430,6 +9440,8 @@ def _dispatch_public_research_only(args) -> None:
         print(lab.research_heavy_run_v1044_cli(
             symbols=args.symbols, data_source=getattr(args, "data_source", "ws_persistent"),
             max_runtime_minutes=getattr(args, "max_runtime_minutes", 90.0)))
+    elif args.command == "edge-research-review-v1044":
+        print(lab.edge_research_review_v1044_cli(symbols=args.symbols))
     elif args.command == "ai-provider-audit-v1045":
         print(lab.ai_provider_audit_v1045_cli())
     elif args.command == "ai-research-copilot-v1045":
