@@ -261,7 +261,7 @@ def test_raw_audit_append_is_not_blocked_by_derived_hot_stream_cap(tmp_path, mon
     store.close()
 
 
-def test_consumed_hot_stream_rolls_atomically_and_preserves_partitioned_audit(
+def test_consumed_hot_stream_rolls_atomically_without_duplicate_partition_copy(
     tmp_path, monkeypatch,
 ):
     root = tmp_path / "external_data" / "staging" / "cross_venue_v1"
@@ -286,13 +286,13 @@ def test_consumed_hot_stream_rolls_atomically_and_preserves_partitioned_audit(
     assert len(segments) == 1 and segments[0].read_bytes() == old_bytes
     assert json.loads(store.stream_path.read_text(encoding="utf-8"))["event_id"] == "roll-2"
     assert json.loads(offsets_path.read_text(encoding="utf-8"))["bybit"] == 0
-    partitions = list(
+    duplicate_partitions = list(
         (root / "bybit" / "normalized" / "BTCUSDT" / "trade").glob("*/events.jsonl")
     )
-    assert len(partitions) == 1
-    assert partitions[0].read_text(encoding="utf-8").count("\n") == 2
+    assert duplicate_partitions == []
     manifest = json.loads(store.rollover_manifest_path.read_text(encoding="utf-8"))
     assert manifest["raw_audit_sources_untouched"] is True
+    assert store.write_partitioned_normalized_jsonl is False
     store.close()
 
 

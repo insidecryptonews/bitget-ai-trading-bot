@@ -52,6 +52,33 @@ _HEAVY_SCHEDULER_STATUS = (
     Path(__file__).resolve().parents[1]
     / "data" / "runtime" / "heavy_research" / "scheduler_status.json"
 )
+_STORAGE_EFFICIENCY_V2_STATUS = (
+    Path(__file__).resolve().parents[1]
+    / "data" / "runtime" / "storage_efficiency_v2" / "storage_status.json"
+)
+_CONTINUOUS_EDGE_CHALLENGER_STATUS = (
+    Path(__file__).resolve().parents[1]
+    / "data" / "runtime" / "storage_efficiency_v2" / "challenger_status.json"
+)
+
+
+def _research_status_artifact(path: Path, *, default_status: str) -> dict[str, Any]:
+    """Read one fixed local status artifact without triggering research work."""
+    value: dict[str, Any] = {}
+    try:
+        if path.is_file() and not path.is_symlink():
+            loaded = json.loads(path.read_text(encoding="utf-8-sig"))
+            if isinstance(loaded, dict):
+                value = loaded
+    except (OSError, json.JSONDecodeError):
+        value = {}
+    return {
+        **({"status": default_status} if not value else value),
+        "research_only": True,
+        "paper_filter_enabled": False,
+        "can_send_real_orders": False,
+        "final_recommendation": "NO LIVE",
+    }
 
 
 def start_health_server(
@@ -260,6 +287,8 @@ def start_health_server(
                 "/api/research/counterfactual-training-export",
                 "/api/research/counterfactual-training-download",
                 "/api/research/counterfactual-training-summary",
+                "/api/research/storage-efficiency-v2",
+                "/api/research/continuous-edge-challenger",
                 "/api/training/full-report",
                 "/api/training/export/full.txt",
                 "/api/training/export/full.json",
@@ -739,6 +768,16 @@ def start_health_server(
             if path == "/api/research/counterfactual-training-summary":
                 self._send_json(_v824_counterfactual_training_summary(config, db, query))
                 return
+            if path == "/api/research/storage-efficiency-v2":
+                self._send_json(_research_status_artifact(
+                    _STORAGE_EFFICIENCY_V2_STATUS, default_status="NEED_MORE_DATA"
+                ))
+                return
+            if path == "/api/research/continuous-edge-challenger":
+                self._send_json(_research_status_artifact(
+                    _CONTINUOUS_EDGE_CHALLENGER_STATUS, default_status="NEED_MORE_DATA"
+                ))
+                return
             if path == "/api/training/full-report":
                 payload = _dashboard_full_report(config, db, query)
                 fmt = (query.get("format") or ["text"])[0].lower()
@@ -1213,6 +1252,12 @@ def _research_components_status_payload(state: HealthState) -> dict[str, Any]:
     ):
         p11_boundary_status = "FORWARD_BOUNDARY_FROZEN"
     scheduler = read_heavy_scheduler()
+    storage_efficiency_v2 = _research_status_artifact(
+        _STORAGE_EFFICIENCY_V2_STATUS, default_status="NEED_MORE_DATA"
+    )
+    continuous_edge_challenger = _research_status_artifact(
+        _CONTINUOUS_EDGE_CHALLENGER_STATUS, default_status="NEED_MORE_DATA"
+    )
     research_root = _RESEARCH_DASHBOARD_V1043C.parent.parent
     heavy_alpha_age = file_age(
         research_root / "v10_44_alpha_sprint" / "alpha_factory_v10_44.json"
@@ -1393,6 +1438,26 @@ def _research_components_status_payload(state: HealthState) -> dict[str, Any]:
             "status": "HEALTHY" if cross_venue_storage.get("status") == "OK" else "DEGRADED",
             "can_send_real_orders": False,
             "final_recommendation": "NO LIVE",
+        },
+        "storage_efficiency_v2": {
+            **storage_efficiency_v2,
+            "status": (
+                "HEALTHY"
+                if str(storage_efficiency_v2.get("status") or "") in {"OK", "HEALTHY"}
+                else "DEGRADED"
+            ),
+            "artifact_status": storage_efficiency_v2.get("status"),
+        },
+        "continuous_edge_challenger": {
+            **continuous_edge_challenger,
+            "status": (
+                "HEALTHY"
+                if str(continuous_edge_challenger.get("status") or "") in {
+                    "OK", "COMPLETED", "WATCH_ONLY", "REJECTED"
+                }
+                else "DEGRADED"
+            ),
+            "artifact_status": continuous_edge_challenger.get("status"),
         },
         "disk": {
             "status": (

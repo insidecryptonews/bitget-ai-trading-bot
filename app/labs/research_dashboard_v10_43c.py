@@ -85,6 +85,26 @@ def _cross_venue_snapshot() -> dict[str, Any]:
         }
 
 
+def _storage_efficiency_snapshot() -> dict[str, Any]:
+    root = CE._repo_root()
+    status = _read_json(root / "data" / "runtime" / "storage_efficiency_v2" / "storage_status.json") or {}
+    scheduler = _read_json(root / "data" / "runtime" / "storage_efficiency_v2" / "scheduler_status.json") or {}
+    if not status:
+        status = {"status": "NEED_MORE_DATA", "mode": "COMPRESSION_ONLY_NO_DELETE"}
+    return {"status": status, "scheduler": scheduler, **_safety()}
+
+
+def _continuous_challenger_snapshot() -> dict[str, Any]:
+    path = CE._repo_root() / "data" / "runtime" / "storage_efficiency_v2" / "challenger_status.json"
+    value = _read_json(path) or {}
+    if not value:
+        value = {
+            "status": "NEED_MORE_DATA", "state": "NEED_MORE_DATA",
+            "reason": "CHALLENGER_NOT_RUN", "holdout_access_count": 0,
+        }
+    return {**value, **_safety()}
+
+
 def gather_state(symbol: str = "BTCUSDT") -> dict[str, Any]:
     base = A.gather_state(symbol)
     try:
@@ -122,7 +142,9 @@ def gather_state(symbol: str = "BTCUSDT") -> dict[str, Any]:
                              "refreshed_at": _utc_now(),
                              "refresh_mode": "MANUAL_OR_EXPLICIT_CLI"},
             "p11_short_forward_observer": _load_p11_observer_status(),
-            "ati_paper": _ati_paper_snapshot(), "cross_venue": _cross_venue_snapshot(), **_safety()}
+            "ati_paper": _ati_paper_snapshot(), "cross_venue": _cross_venue_snapshot(),
+            "storage_efficiency_v2": _storage_efficiency_snapshot(),
+            "continuous_edge_challenger": _continuous_challenger_snapshot(), **_safety()}
 
 
 def gather_state_fast(symbol: str = "BTCUSDT") -> dict[str, Any]:
@@ -156,6 +178,8 @@ def gather_state_fast(symbol: str = "BTCUSDT") -> dict[str, Any]:
             "p11_short_forward_observer": _load_p11_observer_status(),
             "ati_paper": _ati_paper_snapshot(),
             "cross_venue": _cross_venue_snapshot(),
+            "storage_efficiency_v2": _storage_efficiency_snapshot(),
+            "continuous_edge_challenger": _continuous_challenger_snapshot(),
             "fast_metrics": {"last_updated_at": _utc_now(),
                              "source": "ARTIFACT_ONLY_FAST_WATCHER",
                              "heavy_analysis_executed": False},
@@ -973,6 +997,81 @@ def _latest_v1044() -> dict[str, Any]:
     }
 
 
+def _human_bytes(value: Any) -> str:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return "N/A"
+    units = ("B", "KiB", "MiB", "GiB", "TiB")
+    for unit in units:
+        if abs(number) < 1024 or unit == units[-1]:
+            return f"{number:.2f} {unit}"
+        number /= 1024
+    return "N/A"
+
+
+def _panel_storage_efficiency(d: dict) -> str:
+    snapshot = d.get("storage_efficiency_v2") or {}
+    status = snapshot.get("status") or {}
+    scheduler = snapshot.get("scheduler") or {}
+    ratio = status.get("compression_ratio")
+    ratio_text = f"{float(ratio):.4f}" if isinstance(ratio, (int, float)) else "N/A"
+    return (
+        A._kv("Mode", status.get("storage_mode") or "COMPRESSION_ONLY_NO_DELETE", "warn") +
+        A._kv("Raw hot", _human_bytes(status.get("raw_hot_bytes"))) +
+        A._kv("Raw logical / physical",
+              f"{_human_bytes(status.get('raw_logical_bytes'))} / {_human_bytes(status.get('raw_physical_bytes'))}") +
+        A._kv("Warm compressed", _human_bytes(status.get("raw_compressed_bytes"))) +
+        A._kv("Parquet / feature store",
+              f"{_human_bytes(status.get('parquet_bytes'))} / {_human_bytes(status.get('feature_store_bytes'))}") +
+        A._kv("Physical bytes saved", _human_bytes(status.get("bytes_saved")), "ok") +
+        A._kv("Physical/logical ratio", ratio_text) +
+        A._kv("Growth per hour/day",
+              f"{_human_bytes(status.get('growth_bytes_per_hour'))} / {_human_bytes(status.get('growth_bytes_per_day'))}") +
+        A._kv("Free disk", _human_bytes(status.get("free_disk_bytes"))) +
+        A._kv("ETA guard/full (h)",
+              f"{status.get('eta_to_guard_hours')} / {status.get('eta_to_full_hours')}") +
+        A._kv("Compression / rollover / analytics queues",
+              f"{status.get('compression_queue', 0)} / {status.get('rollover_gzip_queue', 0)} / {status.get('analytics_queue', 0)}") +
+        A._kv("Manifest verification queue", status.get("manifest_verification_queue", 0)) +
+        A._kv("Hash / manifest", f"{status.get('hash_verification')} / {status.get('manifest_status')}") +
+        A._kv("Scheduler", scheduler.get("status") or "NOT_RUNNING",
+              A._state_kind(scheduler.get("status") or "NEED_DATA")) +
+        A._kv("R2 verified / delete allowed",
+              f"{status.get('r2_verified', False)} / {status.get('delete_allowed', False)}", "warn") +
+        '<div class="sub">Raw audit evidence is never deleted. Compression and analytics run outside collectors. COMPRESSION_ONLY_NO_DELETE.</div>'
+    )
+
+
+def _panel_continuous_challenger(d: dict) -> str:
+    report = d.get("continuous_edge_challenger") or {}
+    candidates = report.get("candidates") or []
+    best = candidates[0] if candidates else {}
+    validation = ((best.get("validation") or {}).get("cost_scenarios") or {}).get("15.5") or {}
+    snapshot = report.get("snapshot") or {}
+    return (
+        A._kv("Last sprint", report.get("generated_at") or "NOT_RUN") +
+        A._kv("Dataset hash", report.get("dataset_hash") or "NEED_MORE_DATA") +
+        A._kv("Train / validation / sealed holdout",
+              f"{snapshot.get('train_end_ms')} / {snapshot.get('validation_end_ms')} / {snapshot.get('holdout_end_ms')}") +
+        A._kv("Families / trials", f"{report.get('families_tested', 0)} / {report.get('trials', 0)}") +
+        A._kv("Holdout accesses", report.get("holdout_access_count", 0),
+              "ok" if report.get("holdout_access_count", 0) == 0 else "bad") +
+        A._kv("Rejected / need data / watch",
+              f"{report.get('rejected', 0)} / {report.get('need_more_data', 0)} / {report.get('watch_only', 0)}") +
+        A._kv("Best family", best.get("family") or "NONE") +
+        A._kv("Validation net EV / lower bound (bps)",
+              f"{validation.get('net_ev_bps')} / {validation.get('net_ev_lower_bound_bps')}") +
+        A._kv("Validation PF / sample / n_eff",
+              f"{validation.get('profit_factor')} / {validation.get('trades')} / {validation.get('n_eff')}") +
+        A._kv("Walk-forward", (best.get("walk_forward") or {}).get("status") or "NOT_RUN") +
+        A._kv("State", report.get("state") or "NEED_MORE_DATA",
+              A._state_kind(report.get("state") or "NEED_MORE_DATA")) +
+        A._kv("Edge validated", False, "bad") +
+        '<div class="sub">Bounded causal research. Holdout remains sealed; no automatic promotion, no policy changes, no paper, NO LIVE.</div>'
+    )
+
+
 def _panel_alpha_factory(d: dict) -> str:
     v = _latest_v1044()
     alpha = v["alpha"]
@@ -1146,6 +1245,8 @@ def render_html(d: dict, auto_refresh_seconds: int | None = None) -> str:
         edge_review=_panel_edge_research_review(d),
         ai=_panel_ai_copilot(d),
         edge=_panel_edge_discovery(d),
+        storage_efficiency=_panel_storage_efficiency(d),
+        continuous_challenger=_panel_continuous_challenger(d),
         lattice=_panel_lattice(d),
         graph=_relationship_graph(d),
         gen=html.escape(datetime.now(timezone.utc).isoformat()))
@@ -1196,6 +1297,8 @@ _EXTRA = """
   <div class="card wide"><h3>REST vs WS vs WS Persistent</h3>{compare}<div class="sub">REST fragments, WS snapshots, and persistent WS have different collection contracts; coverage percentages are not interchangeable.</div></div>
   <div class="card wide"><h3>Alpha Factory V10.44</h3>{alpha}</div>
   <div class="card wide"><h3>Edge Research Review V10.44</h3>{edge_review}</div>
+  <div class="card wide"><h3>STORAGE EFFICIENCY V2</h3>{storage_efficiency}</div>
+  <div class="card wide"><h3>CONTINUOUS EDGE RESEARCH CHALLENGER</h3>{continuous_challenger}</div>
   <div class="card wide"><h3>AI Research Co-Pilot V10.45</h3>{ai}</div>
   <div class="card wide"><h3>Multi-AI Edge Discovery V10.45.1</h3>{edge}</div>
   <div class="card"><h3>Strategy Lab Hardened</h3>{strategy}</div>

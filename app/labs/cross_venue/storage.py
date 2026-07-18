@@ -232,6 +232,7 @@ class StreamStore:
         self.duplicates = 0
         self.last_hash: str | None = None
         self._last_fsync_monotonic = 0.0
+        self._last_raw_fsync_monotonic = 0.0
         self._opened_monotonic = time.monotonic()
         self._initial_stream_bytes = self.stream_path.stat().st_size if self.stream_path.is_file() else 0
         self.lease = WriterLease(self.root, self.venue)
@@ -249,6 +250,7 @@ class StreamStore:
             efficiency_config["write_partitioned_normalized_jsonl"]
         )
         self.raw_rollover_manifest_path = self.venue_root / "raw" / "rollover_manifest.json"
+        self.raw_rollover_journal_path = self.venue_root / "raw" / "rollover_journal.json"
         self.retention_days = int(storage_config.get("retention_days", 14))
         self._compression_threads: list[threading.Thread] = []
         self._compressing_segments: set[Path] = set()
@@ -380,6 +382,53 @@ class StreamStore:
                 if segment.is_file() and not segment.is_symlink():
                     self._schedule_segment_compression(segment)
 
+    def _register_raw_rollover(
+        self, segment: Path, logical_bytes: int, date: str,
+    ) -> None:
+        manifest = read_json(self.raw_rollover_manifest_path, {}) or {}
+        rows = manifest.get("segments") if isinstance(manifest, dict) else None
+        rows = list(rows) if isinstance(rows, list) else []
+        relative = segment.relative_to(self.venue_root).as_posix()
+        if not any(str(row.get("segment_path")) == relative for row in rows):
+            rows.append({
+                "segment_path": relative,
+                "logical_bytes": int(logical_bytes),
+                "date": date,
+                "rotated_at": utc_now(),
+                "state": "CLOSED_RAW_PENDING_TRANSPARENT_COMPRESSION",
+                "raw_audit_source": True,
+                "delete_allowed": False,
+            })
+        atomic_json(self.raw_rollover_manifest_path, {
+            "schema": "cross_venue_raw_rollover.v1",
+            "venue": self.venue,
+            "segments": rows,
+            "updated_at": utc_now(),
+            "mode": "COMPRESSION_ONLY_NO_DELETE",
+            **safety_envelope(),
+        })
+
+    def _recover_raw_rollover(self) -> None:
+        journal = read_json(self.raw_rollover_journal_path, {}) or {}
+        if not isinstance(journal, dict) or not journal.get("segment_path"):
+            return
+        segment = self.venue_root / str(journal["segment_path"])
+        raw_root = (self.venue_root / "raw").resolve(strict=False)
+        if raw_root not in segment.resolve(strict=False).parents:
+            raise ValueError("CROSS_VENUE_RAW_ROLLOVER_JOURNAL_PATH_INVALID")
+        if segment.is_file() and not segment.is_symlink():
+            source = self.venue_root / str(journal.get("active_path") or "")
+            if raw_root not in source.resolve(strict=False).parents:
+                raise ValueError("CROSS_VENUE_RAW_ROLLOVER_ACTIVE_PATH_INVALID")
+            source.parent.mkdir(parents=True, exist_ok=True)
+            source.touch(exist_ok=True)
+            self._register_raw_rollover(
+                segment,
+                int(journal.get("logical_bytes") or segment.stat().st_size),
+                str(journal.get("date") or segment.parent.name),
+            )
+        self.raw_rollover_journal_path.unlink(missing_ok=True)
+
     def _guard_capacity(self, incoming_bytes: int) -> None:
         self._guard_disk(incoming_bytes)
         incoming_bytes = max(0, incoming_bytes)
@@ -431,6 +480,7 @@ class StreamStore:
         self.venue_root.mkdir(parents=True, exist_ok=True)
         self.lease.acquire()
         self._recover_rollover()
+        self._recover_raw_rollover()
         self._seed_seen()
 
     def close(self) -> None:
@@ -476,7 +526,12 @@ class StreamStore:
         path.parent.mkdir(parents=True, exist_ok=True)
         self._rotate_raw_if_needed(path, len(encoded), date)
         with path.open("ab") as handle:
-            handle.write(encoded); handle.flush()
+            handle.write(encoded)
+            handle.flush()
+            now = time.monotonic()
+            if now - self._last_raw_fsync_monotonic >= 1.0:
+                os.fsync(handle.fileno())
+                self._last_raw_fsync_monotonic = now
         self.raw_frames_written += 1
         return path
 
@@ -490,28 +545,20 @@ class StreamStore:
             raise ValueError("CROSS_VENUE_RAW_ROLLOVER_SYMLINK_BLOCKED")
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
         segment = path.parent / f"frames_{stamp}_{uuid.uuid4().hex[:8]}.jsonl"
-        os.replace(path, segment)
-        path.touch(exist_ok=False)
-        manifest = read_json(self.raw_rollover_manifest_path, {}) or {}
-        rows = manifest.get("segments") if isinstance(manifest, dict) else None
-        rows = list(rows) if isinstance(rows, list) else []
-        rows.append({
+        atomic_json(self.raw_rollover_journal_path, {
+            "schema": "cross_venue_raw_rollover_journal.v1",
+            "venue": self.venue,
+            "active_path": path.relative_to(self.venue_root).as_posix(),
             "segment_path": segment.relative_to(self.venue_root).as_posix(),
             "logical_bytes": current,
             "date": date,
-            "rotated_at": utc_now(),
-            "state": "CLOSED_RAW_PENDING_TRANSPARENT_COMPRESSION",
-            "raw_audit_source": True,
-            "delete_allowed": False,
-        })
-        atomic_json(self.raw_rollover_manifest_path, {
-            "schema": "cross_venue_raw_rollover.v1",
-            "venue": self.venue,
-            "segments": rows,
-            "updated_at": utc_now(),
-            "mode": "COMPRESSION_ONLY_NO_DELETE",
+            "prepared_at": utc_now(),
             **safety_envelope(),
         })
+        os.replace(path, segment)
+        path.touch(exist_ok=False)
+        self._register_raw_rollover(segment, current, date)
+        self.raw_rollover_journal_path.unlink(missing_ok=True)
 
     def append_events(self, rows: Iterable[dict[str, Any]]) -> int:
         accepted: list[dict[str, Any]] = []

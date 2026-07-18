@@ -31,6 +31,9 @@ $script:ManagedMarkers = @(
     "app.labs.ati_paper.cli run",
     "app.labs.ati_paper.server",
     "research-heavy-run-v1044"
+    "run_storage_edge_scheduler.ps1",
+    "storage-efficiency-cycle-v2",
+    "continuous-edge-challenger-v2",
     "run_cross_venue_bitget_forever.ps1",
     "run_cross_venue_binance_forever.ps1",
     "run_cross_venue_bybit_forever.ps1",
@@ -57,6 +60,7 @@ function Get-LocalStackDefinitions {
         [pscustomobject]@{ Name="cross_venue_okx"; Kind="powershell"; Script="run_cross_venue_okx_forever.ps1" }
         [pscustomobject]@{ Name="cross_venue_hyperliquid"; Kind="powershell"; Script="run_cross_venue_hyperliquid_forever.ps1" }
         [pscustomobject]@{ Name="cross_venue_engine"; Kind="powershell"; Script="run_cross_venue_engine_forever.ps1" }
+        [pscustomobject]@{ Name="storage_edge_scheduler"; Kind="powershell"; Script="run_storage_edge_scheduler.ps1" }
     )
 }
 

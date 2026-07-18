@@ -47,6 +47,7 @@ $artifactMap = @{
     cross_venue_okx = "external_data\staging\cross_venue_v1\okx\health.json"
     cross_venue_hyperliquid = "external_data\staging\cross_venue_v1\hyperliquid\health.json"
     cross_venue_engine = "data\runtime\cross_venue\engine_status.json"
+    storage_edge_scheduler = "data\runtime\storage_efficiency_v2\scheduler_status.json"
 }
 
 function Get-DescendantPids([int[]]$RootPids) {

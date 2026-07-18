@@ -11,7 +11,7 @@ import json
 import os
 import re
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -125,7 +125,9 @@ def compact_partition(
             raise ValueError("CROSS_VENUE_COMPACTION_EMPTY_SOURCE")
         writer.close()
         writer = None
-        with tmp.open("rb") as handle:
+        # Windows rejects fsync on a read-only descriptor.  Reopen the fully
+        # written derivative read/write so durability is checked before replace.
+        with tmp.open("r+b") as handle:
             os.fsync(handle.fileno())
         os.replace(tmp, output)
         output_hash = hashlib.sha256(output.read_bytes()).hexdigest()
@@ -136,7 +138,7 @@ def compact_partition(
             "source_sha256": source_hash.hexdigest(),
             "output_sha256": output_hash,
             "compression": "zstd",
-            "completed_at": datetime.utcnow().isoformat() + "Z",
+            "completed_at": datetime.now(timezone.utc).isoformat(),
         }
         atomic_json(status_path, result)
         return result

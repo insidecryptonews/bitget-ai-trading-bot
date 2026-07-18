@@ -11,6 +11,7 @@ from __future__ import annotations
 import ctypes
 import gzip
 import hashlib
+import io
 import json
 import math
 import os
@@ -75,6 +76,7 @@ def load_storage_config(path: Path | str | None = None) -> dict[str, Any]:
     for key in (
         "normalized_hot_max_bytes", "raw_hot_max_bytes",
         "compression_worker_interval_seconds", "minimum_free_disk_bytes",
+        "challenger_max_feature_rows",
     ):
         try:
             number = int(value[key])
@@ -82,6 +84,8 @@ def load_storage_config(path: Path | str | None = None) -> dict[str, Any]:
             raise ValueError(f"STORAGE_EFFICIENCY_CONFIG_INVALID:{key}") from exc
         if number <= 0:
             raise ValueError(f"STORAGE_EFFICIENCY_CONFIG_INVALID:{key}")
+    if str(value.get("warm_compression_codec") or "zstd").lower() not in {"zstd", "gzip"}:
+        raise ValueError("STORAGE_EFFICIENCY_CONFIG_INVALID:warm_compression_codec")
     return value
 
 
@@ -142,6 +146,32 @@ def _file_sha256(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _iter_compressed_lines(path: Path):
+    """Yield exact logical lines from supported verified warm codecs."""
+    if path.suffix == ".gz":
+        with gzip.open(path, "rb") as handle:
+            yield from handle
+        return
+    if path.suffix == ".zst":
+        try:
+            import zstandard as zstd  # type: ignore
+        except ImportError as exc:
+            raise RuntimeError("STORAGE_EFFICIENCY_ZSTD_DEPENDENCY_MISSING") from exc
+        with path.open("rb") as raw:
+            with zstd.ZstdDecompressor().stream_reader(raw) as reader:
+                with io.BufferedReader(reader) as buffered:
+                    yield from buffered
+        return
+    raise ValueError("STORAGE_EFFICIENCY_UNSUPPORTED_WARM_CODEC")
+
+
+def _warm_segment_stem(path: Path) -> str:
+    for suffix in (".jsonl.zst", ".jsonl.gz"):
+        if path.name.endswith(suffix):
+            return path.name[:-len(suffix)]
+    raise ValueError("STORAGE_EFFICIENCY_WARM_NAME_INVALID")
 
 
 def _physical_bytes(path: Path) -> int:
@@ -247,7 +277,20 @@ def compress_closed_partitions(
     manifest = _read_json(MANIFEST_PATH, {"schema": "storage_efficiency_v2.manifest.v1", "partitions": {}})
     if not isinstance(manifest, dict) or not isinstance(manifest.get("partitions"), dict):
         raise ValueError("STORAGE_EFFICIENCY_MANIFEST_INVALID")
-    candidates = _closed_jsonl_candidates(safe_root)
+    candidates = []
+    for path in _closed_jsonl_candidates(safe_root):
+        relative = path.relative_to(safe_root).as_posix()
+        previous = manifest["partitions"].get(relative)
+        already_verified = bool(
+            isinstance(previous, dict)
+            and previous.get("sha256")
+            and previous.get("status") in {
+                "ALREADY_COMPRESSED", "VERIFIED_TRANSPARENT_COMPRESSION",
+            }
+            and _is_ntfs_compressed(path)
+        )
+        if not already_verified:
+            candidates.append(path)
     if max_files is not None:
         candidates = candidates[: max(0, int(max_files))]
     rows: list[dict[str, Any]] = []
@@ -339,6 +382,7 @@ def benchmark_compression(
         import zstandard as zstd  # type: ignore
     except ImportError:
         zstd = None
+    REPORT_ROOT.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="storage-v2-", dir=REPORT_ROOT) as temp_name:
         temp = Path(temp_name)
         for size_mb in sizes:
@@ -409,11 +453,16 @@ def _arrow_schema():
     fields += [
         pa.field("source_partition_id", pa.string()),
         pa.field("source_sha256", pa.string()),
+        pa.field("source_row_index", pa.int64()),
+        pa.field("source_json", pa.string()),
     ]
     return pa.schema(fields)
 
 
-def _canonical_row(row: dict[str, Any], source_id: str, source_sha: str) -> dict[str, Any]:
+def _canonical_row(
+    row: dict[str, Any], source_id: str, source_sha: str,
+    source_row_index: int, source_json: str,
+) -> dict[str, Any]:
     result: dict[str, Any] = {}
     for key in STRING_FIELDS:
         value = row.get(key)
@@ -435,22 +484,31 @@ def _canonical_row(row: dict[str, Any], source_id: str, source_sha: str) -> dict
         result[key] = number
     result["source_partition_id"] = source_id
     result["source_sha256"] = source_sha
+    result["source_row_index"] = int(source_row_index)
+    result["source_json"] = source_json
     return result
 
 
 def _row_fingerprint(row: dict[str, Any]) -> bytes:
-    keys = STRING_FIELDS + INT_FIELDS + FLOAT_FIELDS + ("source_partition_id", "source_sha256")
+    keys = STRING_FIELDS + INT_FIELDS + FLOAT_FIELDS + (
+        "source_partition_id", "source_sha256", "source_row_index", "source_json",
+    )
     payload = {key: row.get(key) for key in keys}
     return json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")
 
 
 def _verified_segments(root: Path = STAGING_ROOT) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
+    if not root.is_dir() or root.is_symlink():
+        return rows
     for venue_dir in sorted(path for path in root.iterdir() if path.is_dir() and path.name != "derived"):
         manifest_path = venue_dir / "normalized" / "rollover_manifest.json"
         manifest = _read_json(manifest_path, {})
         for item in manifest.get("segments", []) if isinstance(manifest, dict) else []:
-            if item.get("state") != "GZIP_VERIFIED_DERIVED_SEGMENT":
+            if item.get("state") not in {
+                "GZIP_VERIFIED_DERIVED_SEGMENT",
+                "VERIFIED_COMPRESSED_DERIVED_SEGMENT",
+            }:
                 continue
             relative = item.get("compressed_path")
             if not relative:
@@ -464,6 +522,7 @@ def _verified_segments(root: Path = STAGING_ROOT) -> list[dict[str, Any]]:
 
 def compress_pending_rollover_segments(
     *, root: Path | str = STAGING_ROOT, apply: bool = False, max_segments: int = 2,
+    retry_backoff_seconds: int = 300,
 ) -> dict[str, Any]:
     """Compress consumed normalized hot segments in a separate process.
 
@@ -472,16 +531,45 @@ def compress_pending_rollover_segments(
     raw audit frames are never touched by this operation.
     """
     safe_root = _contained(STAGING_ROOT, Path(root))
+    config = load_storage_config()
+    codec = str(config.get("warm_compression_codec") or "zstd").lower()
+    if codec not in {"zstd", "gzip"}:
+        raise ValueError("STORAGE_EFFICIENCY_WARM_CODEC_INVALID")
+    extension = ".zst" if codec == "zstd" else ".gz"
+    if not safe_root.is_dir() or safe_root.is_symlink():
+        return {
+            "status": "NEED_MORE_DATA", "pending_segments": 0,
+            "reason": "STAGING_ROOT_UNAVAILABLE", **research_safety(),
+        }
     pending: list[tuple[str, Path, Path, dict[str, Any], Path]] = []
     for venue_dir in sorted(path for path in safe_root.iterdir() if path.is_dir() and path.name != "derived"):
         manifest_path = venue_dir / "normalized" / "rollover_manifest.json"
         manifest = _read_json(manifest_path, {})
         for row in manifest.get("segments", []) if isinstance(manifest, dict) else []:
-            if row.get("state") != "CONSUMED_DERIVED_SEGMENT_PENDING_GZIP":
+            state = str(row.get("state") or "")
+            if state not in {
+                "CONSUMED_DERIVED_SEGMENT_PENDING_GZIP",
+                "GZIP_ERROR_DERIVED_SEGMENT_RETAINED",
+                "COMPRESSION_ERROR_DERIVED_SEGMENT_RETAINED",
+            }:
                 continue
+            if state in {
+                "GZIP_ERROR_DERIVED_SEGMENT_RETAINED",
+                "COMPRESSION_ERROR_DERIVED_SEGMENT_RETAINED",
+            }:
+                failed_at = row.get("compression_failed_at")
+                try:
+                    failed = datetime.fromisoformat(str(failed_at).replace("Z", "+00:00"))
+                    if failed.tzinfo is None:
+                        failed = failed.replace(tzinfo=timezone.utc)
+                    age = (datetime.now(timezone.utc) - failed.astimezone(timezone.utc)).total_seconds()
+                except (TypeError, ValueError):
+                    age = float("inf")
+                if age < max(0, int(retry_backoff_seconds)):
+                    continue
             source = _contained(safe_root, venue_dir / str(row.get("segment_path") or ""))
             if source.is_file() and not source.is_symlink():
-                pending.append((venue_dir.name, source, source.with_suffix(source.suffix + ".gz"), row, manifest_path))
+                pending.append((venue_dir.name, source, source.with_suffix(source.suffix + extension), row, manifest_path))
     pending = pending[: max(0, int(max_segments))]
     if not apply:
         return {"status": "DRY_RUN", "pending_segments": len(pending), "segments": [source.name for _, source, _, _, _ in pending], **research_safety()}
@@ -492,7 +580,21 @@ def compress_pending_rollover_segments(
         temp = target.with_name(f"{target.name}.{os.getpid()}.{time.monotonic_ns()}.tmp")
         try:
             with source.open("rb") as source_handle, temp.open("wb") as raw_target:
-                with gzip.GzipFile(filename=source.name, mode="wb", fileobj=raw_target, compresslevel=3, mtime=0) as compressed:
+                if codec == "zstd":
+                    try:
+                        import zstandard as zstd  # type: ignore
+                    except ImportError as exc:
+                        raise RuntimeError("STORAGE_EFFICIENCY_ZSTD_DEPENDENCY_MISSING") from exc
+                    compressor = zstd.ZstdCompressor(
+                        level=int(config.get("warm_compression_level", 1)),
+                        write_checksum=True,
+                    ).stream_writer(raw_target, closefd=False)
+                else:
+                    compressor = gzip.GzipFile(
+                        filename=source.name, mode="wb", fileobj=raw_target,
+                        compresslevel=int(config.get("warm_compression_level", 3)), mtime=0,
+                    )
+                with compressor as compressed:
                     for raw_line in source_handle:
                         if not raw_line.endswith(b"\n"):
                             raise ValueError("STORAGE_EFFICIENCY_PARTIAL_ROLLOVER_LINE")
@@ -503,20 +605,36 @@ def compress_pending_rollover_segments(
                 os.fsync(raw_target.fileno())
             verify = hashlib.sha256()
             verify_rows = 0
-            with gzip.open(temp, "rb") as handle:
-                for raw_line in handle:
-                    verify.update(raw_line)
-                    verify_rows += 1
+            # The temporary filename ends in .tmp, so verify using the selected
+            # codec explicitly before the atomic replace.
+            if codec == "gzip":
+                verify_iter = gzip.open(temp, "rb")
+                with verify_iter as handle:
+                    for raw_line in handle:
+                        verify.update(raw_line)
+                        verify_rows += 1
+            else:
+                with temp.open("rb") as raw:
+                    with zstd.ZstdDecompressor().stream_reader(raw) as reader:
+                        with io.BufferedReader(reader) as handle:
+                            for raw_line in handle:
+                                verify.update(raw_line)
+                                verify_rows += 1
             if verify.digest() != raw_digest.digest() or verify_rows != rows:
                 raise RuntimeError("STORAGE_EFFICIENCY_GZIP_ROUNDTRIP_FAILED")
-            os.replace(temp, target)
+            if target.exists():
+                if target.is_symlink() or _file_sha256(target) != _file_sha256(temp):
+                    raise RuntimeError("STORAGE_EFFICIENCY_GZIP_TARGET_CONFLICT")
+                temp.unlink(missing_ok=True)
+            else:
+                os.replace(temp, target)
             compressed_sha = _file_sha256(target)
             manifest = _read_json(manifest_path, {})
             matched = False
             for current in manifest.get("segments", []) if isinstance(manifest, dict) else []:
                 if current.get("segment_path") == row.get("segment_path"):
                     current.update({
-                        "state": "GZIP_VERIFIED_DERIVED_SEGMENT",
+                        "state": "VERIFIED_COMPRESSED_DERIVED_SEGMENT",
                         "compressed_path": target.relative_to(manifest_path.parents[1]).as_posix(),
                         "raw_sha256": raw_digest.hexdigest(),
                         "compressed_sha256": compressed_sha,
@@ -524,6 +642,7 @@ def compress_pending_rollover_segments(
                         "row_count": rows,
                         "compressed_at": utc_now(),
                         "compression_worker": "STORAGE_EFFICIENCY_V2",
+                        "compression_codec": codec,
                         "raw_audit_sources_untouched": True,
                     })
                     matched = True
@@ -534,6 +653,20 @@ def compress_pending_rollover_segments(
             _atomic_json(manifest_path, manifest)
             source.unlink()
             completed.append({"venue": venue, "source": source.name, "compressed": target.name, "rows": rows, "raw_sha256": raw_digest.hexdigest(), "compressed_sha256": compressed_sha, "logical_bytes": int(row.get("stream_bytes") or 0), "compressed_bytes": target.stat().st_size})
+        except Exception as exc:
+            manifest = _read_json(manifest_path, {})
+            for current in manifest.get("segments", []) if isinstance(manifest, dict) else []:
+                if current.get("segment_path") == row.get("segment_path"):
+                    current.update({
+                        "state": "COMPRESSION_ERROR_DERIVED_SEGMENT_RETAINED",
+                        "compression_error": f"{type(exc).__name__}:{str(exc)[:240]}",
+                        "compression_failed_at": utc_now(),
+                    })
+                    break
+            if isinstance(manifest, dict):
+                manifest["updated_at"] = utc_now()
+                _atomic_json(manifest_path, manifest)
+            raise
         finally:
             temp.unlink(missing_ok=True)
     return {"status": "COMPLETED" if completed else "NO_NEW_SEGMENTS", "completed_segments": len(completed), "segments": completed, "raw_deleted": False, "derived_source_replaced_after_roundtrip": bool(completed), **research_safety()}
@@ -549,7 +682,7 @@ def compact_verified_segments(
         raise ValueError("STORAGE_EFFICIENCY_ANALYTICS_MANIFEST_INVALID")
     pending = []
     for item in _verified_segments(safe_root):
-        source_id = f"{item['venue']}:{item['source'].name.removesuffix('.jsonl.gz')}"
+        source_id = f"{item['venue']}:{_warm_segment_stem(item['source'])}"
         if manifest["segments"].get(source_id, {}).get("status") == "VERIFIED_PARQUET":
             continue
         pending.append((source_id, item))
@@ -576,25 +709,24 @@ def compact_verified_segments(
         source_sha = str(item.get("raw_sha256") or "")
         run_token = uuid.uuid4().hex[:12]
         temp_root = ANALYTICS_ROOT / ".tmp" / f"{source_id.replace(':', '_')}_{run_token}"
-        writers: dict[tuple[str, str, str], Any] = {}
-        temp_paths: dict[tuple[str, str, str], Path] = {}
-        counts: dict[tuple[str, str, str], int] = defaultdict(int)
-        input_hashes: dict[tuple[str, str, str], Any] = defaultdict(hashlib.sha256)
-        first_ts: dict[tuple[str, str, str], int | None] = {}
-        last_ts: dict[tuple[str, str, str], int | None] = {}
-        batches: dict[tuple[str, str, str], list[dict[str, Any]]] = defaultdict(list)
+        writers: dict[tuple[str, str, str, str], Any] = {}
+        temp_paths: dict[tuple[str, str, str, str], Path] = {}
+        counts: dict[tuple[str, str, str, str], int] = defaultdict(int)
+        input_hashes: dict[tuple[str, str, str, str], Any] = defaultdict(hashlib.sha256)
+        first_ts: dict[tuple[str, str, str, str], int | None] = {}
+        last_ts: dict[tuple[str, str, str, str], int | None] = {}
+        batches: dict[tuple[str, str, str, str], list[dict[str, Any]]] = defaultdict(list)
         logical_hash = hashlib.sha256()
         total = 0
 
-        def flush(key: tuple[str, str, str]) -> None:
+        def flush(key: tuple[str, str, str, str]) -> None:
             batch = batches[key]
             if not batch:
                 return
             table = pa.Table.from_pylist(batch, schema=_arrow_schema())
             writer = writers.get(key)
             if writer is None:
-                venue, symbol, event_type = key
-                date = datetime.fromtimestamp((first_ts[key] or 0) / 1000, timezone.utc).strftime(UTC_DATE)
+                venue, symbol, event_type, date = key
                 target = temp_root / venue / symbol / event_type / date / f"{source_id.split(':', 1)[1]}.parquet"
                 target.parent.mkdir(parents=True, exist_ok=True)
                 writer = pq.ParquetWriter(
@@ -607,8 +739,7 @@ def compact_verified_segments(
             batch.clear()
 
         try:
-            with gzip.open(source, "rb") as handle:
-                for raw_line in handle:
+            for source_row_index, raw_line in enumerate(_iter_compressed_lines(source)):
                     if not raw_line.endswith(b"\n"):
                         raise ValueError("STORAGE_EFFICIENCY_PARTIAL_GZIP_JSONL")
                     logical_hash.update(raw_line)
@@ -618,12 +749,21 @@ def compact_verified_segments(
                         raise ValueError("STORAGE_EFFICIENCY_CORRUPT_GZIP_JSONL") from exc
                     if not isinstance(raw, dict):
                         raise ValueError("STORAGE_EFFICIENCY_NON_OBJECT_GZIP_JSONL")
-                    row = _canonical_row(raw, source_id, source_sha)
+                    try:
+                        source_json = raw_line[:-1].decode("utf-8")
+                    except UnicodeDecodeError as exc:
+                        raise ValueError("STORAGE_EFFICIENCY_NON_UTF8_JSONL") from exc
+                    row = _canonical_row(
+                        raw, source_id, source_sha, source_row_index, source_json,
+                    )
                     venue = str(row.get("venue") or item["venue"]).lower()
                     symbol = str(row.get("canonical_symbol") or "UNKNOWN").upper()
                     event_type = str(row.get("event_type") or "unknown").lower()
-                    key = (venue, symbol, event_type)
                     timestamp = int(row.get("local_receive_wall_ms") or 0)
+                    if timestamp <= 0:
+                        raise ValueError("STORAGE_EFFICIENCY_TIMESTAMP_REQUIRED")
+                    date = datetime.fromtimestamp(timestamp / 1000, timezone.utc).strftime(UTC_DATE)
+                    key = (venue, symbol, event_type, date)
                     first_ts.setdefault(key, timestamp)
                     last_ts[key] = timestamp
                     input_hashes[key].update(_row_fingerprint(row))
@@ -641,15 +781,19 @@ def compact_verified_segments(
                 raise RuntimeError("STORAGE_EFFICIENCY_LOGICAL_SHA_MISMATCH")
             outputs: list[dict[str, Any]] = []
             for key, temp_path in temp_paths.items():
-                table = pq.read_table(temp_path)
-                rows = table.to_pylist()
                 output_hash = hashlib.sha256()
-                for row in rows:
-                    output_hash.update(_row_fingerprint(row))
-                if len(rows) != counts[key] or output_hash.hexdigest() != input_hashes[key].hexdigest():
+                output_count = 0
+                parquet_file = pq.ParquetFile(temp_path)
+                try:
+                    for batch in parquet_file.iter_batches(batch_size=50_000):
+                        for row in batch.to_pylist():
+                            output_hash.update(_row_fingerprint(row))
+                            output_count += 1
+                finally:
+                    parquet_file.close()
+                if output_count != counts[key] or output_hash.hexdigest() != input_hashes[key].hexdigest():
                     raise RuntimeError("STORAGE_EFFICIENCY_PARQUET_EQUIVALENCE_FAILED")
-                venue, symbol, event_type = key
-                date = datetime.fromtimestamp((first_ts[key] or 0) / 1000, timezone.utc).strftime(UTC_DATE)
+                venue, symbol, event_type, date = key
                 final_path = _contained(
                     STAGING_ROOT,
                     ANALYTICS_ROOT / venue / symbol / event_type / date / temp_path.name,
@@ -660,7 +804,7 @@ def compact_verified_segments(
                 os.replace(temp_path, final_path)
                 outputs.append({
                     "path": final_path.relative_to(STAGING_ROOT).as_posix(),
-                    "rows": len(rows),
+                    "rows": output_count,
                     "bytes": final_path.stat().st_size,
                     "sha256": _file_sha256(final_path),
                     "semantic_sha256": output_hash.hexdigest(),
@@ -670,6 +814,8 @@ def compact_verified_segments(
                     "symbol": symbol,
                     "event_type": event_type,
                     "date": date,
+                    "source_row_index_preserved": True,
+                    "source_json_preserved": True,
                 })
             record = {
                 "status": "VERIFIED_PARQUET",
@@ -729,6 +875,8 @@ def build_incremental_features(*, apply: bool = False, max_segments: int = 1) ->
         output_rows = []
         try:
             path_sql = "[" + ",".join("'" + str(path).replace("'", "''") + "'" for path in paths) + "]"
+            source_id_sql = source_id.replace("'", "''")
+            created_at_sql = utc_now().replace("'", "''")
             for horizon in horizons:
                 target = _contained(STAGING_ROOT, FEATURE_ROOT / f"horizon_ms={horizon}" / f"{source_id.replace(':', '_')}.parquet")
                 target.parent.mkdir(parents=True, exist_ok=True)
@@ -757,18 +905,38 @@ def build_incremental_features(*, apply: bool = False, max_segments: int = 1) ->
                       ARG_MAX(mark_price-index_price, local_receive_wall_ms) AS mark_index_basis,
                       MAX(reconnect_count) AS reconnect_count,
                       MAX(CASE WHEN source_status IS NULL OR source_status='OK' THEN 0 ELSE 1 END) AS gap_flag,
-                      '{source_id}' AS source_partition_id,
+                      SUM(CASE WHEN event_type='trade' AND taker_side='BUY' THEN COALESCE(size,0) WHEN event_type='trade' AND taker_side='SELL' THEN -COALESCE(size,0) ELSE 0 END) AS net_aggressor_volume,
+                      COUNT(*) FILTER (WHERE event_type='trade') / GREATEST({horizon} / 1000.0, 0.001) AS trade_intensity_per_second,
+                      CASE WHEN ARG_MIN(COALESCE((best_bid + best_ask) / 2.0, price, mark_price), local_receive_wall_ms) > 0 THEN
+                        (ARG_MAX(COALESCE((best_bid + best_ask) / 2.0, price, mark_price), local_receive_wall_ms) /
+                         ARG_MIN(COALESCE((best_bid + best_ask) / 2.0, price, mark_price), local_receive_wall_ms) - 1.0) * 10000
+                      ELSE NULL END AS price_return_bps,
+                      '{source_id_sql}' AS source_partition_id,
                       '{dataset_hash}' AS dataset_hash,
                       'storage_efficiency_v2.features.v1' AS feature_version,
-                      '{utc_now()}' AS created_at
+                      '{created_at_sql}' AS created_at
                     FROM read_parquet({path_sql}, union_by_name=true)
                     WHERE local_receive_wall_ms IS NOT NULL
                     GROUP BY venue, canonical_symbol, bucket_start_ms
                     ORDER BY canonical_symbol, bucket_start_ms, venue
                 """
-                con.execute(f"COPY ({query}) TO '{str(tmp).replace("'", "''")}' (FORMAT PARQUET, COMPRESSION ZSTD, COMPRESSION_LEVEL 3)")
-                rows = int(con.execute(f"SELECT COUNT(*) FROM read_parquet('{str(tmp).replace("'", "''")}')").fetchone()[0])
-                os.replace(tmp, target)
+                tmp_sql = str(tmp).replace("'", "''")
+                try:
+                    con.execute(
+                        f"COPY ({query}) TO '{tmp_sql}' "
+                        "(FORMAT PARQUET, COMPRESSION ZSTD, COMPRESSION_LEVEL 3)"
+                    )
+                    rows = int(con.execute(
+                        f"SELECT COUNT(*) FROM read_parquet('{tmp_sql}')"
+                    ).fetchone()[0])
+                    if target.exists() and _file_sha256(target) != _file_sha256(tmp):
+                        raise RuntimeError("STORAGE_EFFICIENCY_FEATURE_TARGET_CONFLICT")
+                    if target.exists():
+                        tmp.unlink(missing_ok=True)
+                    else:
+                        os.replace(tmp, target)
+                finally:
+                    tmp.unlink(missing_ok=True)
                 output_rows.append({"horizon_ms": horizon, "path": target.relative_to(STAGING_ROOT).as_posix(), "rows": rows, "bytes": target.stat().st_size, "sha256": _file_sha256(target)})
             item = {"status": "VERIFIED_FEATURES", "source_partition_id": source_id, "dataset_hash": dataset_hash, "outputs": output_rows, "created_at": utc_now(), "causal": True, "interpolation_used": False}
             features.setdefault("segments", {})[source_id] = item
@@ -785,7 +953,8 @@ def storage_status() -> dict[str, Any]:
     disk = shutil.disk_usage(REPO_ROOT)
     logical = physical = 0
     categories = defaultdict(lambda: {"files": 0, "logical_bytes": 0, "physical_bytes": 0})
-    for path in STAGING_ROOT.rglob("*"):
+    paths = STAGING_ROOT.rglob("*") if STAGING_ROOT.is_dir() else ()
+    for path in paths:
         if not path.is_file() or path.is_symlink():
             continue
         relative = path.relative_to(STAGING_ROOT)
@@ -809,10 +978,36 @@ def storage_status() -> dict[str, Any]:
     compression_manifest = _read_json(MANIFEST_PATH, {"partitions": {}})
     analytics_manifest = _read_json(ANALYTICS_MANIFEST_PATH, {"segments": {}})
     feature_manifest = _read_json(FEATURE_MANIFEST_PATH, {"segments": {}})
-    pending_compression = sum(not _is_ntfs_compressed(path) for path in _closed_jsonl_candidates())
+    closed_candidates = _closed_jsonl_candidates(STAGING_ROOT)
+    partition_records = compression_manifest.get("partitions") or {}
+    pending_compression = sum(not _is_ntfs_compressed(path) for path in closed_candidates)
+    pending_manifest_verification = sum(
+        not isinstance(partition_records.get(path.relative_to(STAGING_ROOT).as_posix()), dict)
+        or not partition_records[path.relative_to(STAGING_ROOT).as_posix()].get("sha256")
+        for path in closed_candidates
+    )
+    manifest_errors = sum(
+        isinstance(row, dict) and row.get("status") == "ERROR"
+        for row in partition_records.values()
+    )
+    pending_rollover_gzip = 0
+    if STAGING_ROOT.is_dir():
+        for venue_dir in (
+            path for path in STAGING_ROOT.iterdir()
+            if path.is_dir() and path.name != "derived"
+        ):
+            rollover = _read_json(venue_dir / "normalized" / "rollover_manifest.json", {})
+            pending_rollover_gzip += sum(
+                row.get("state") in {
+                    "CONSUMED_DERIVED_SEGMENT_PENDING_GZIP",
+                    "GZIP_ERROR_DERIVED_SEGMENT_RETAINED",
+                    "COMPRESSION_ERROR_DERIVED_SEGMENT_RETAINED",
+                }
+                for row in rollover.get("segments", []) if isinstance(rollover, dict)
+            )
     pending_analytics = sum(
-        f"{item['venue']}:{item['source'].name.removesuffix('.jsonl.gz')}" not in (analytics_manifest.get("segments") or {})
-        for item in _verified_segments()
+        f"{item['venue']}:{_warm_segment_stem(item['source'])}" not in (analytics_manifest.get("segments") or {})
+        for item in _verified_segments(STAGING_ROOT)
     )
     growth_per_hour = 0.0
     for venue in ("bitget", "binance", "bybit", "okx", "hyperliquid"):
@@ -841,12 +1036,21 @@ def storage_status() -> dict[str, Any]:
         "eta_to_guard_hours": eta_guard,
         "eta_to_full_hours": eta_full,
         "compression_queue": pending_compression,
+        "manifest_verification_queue": pending_manifest_verification,
+        "rollover_gzip_queue": pending_rollover_gzip,
         "analytics_queue": pending_analytics,
-        "failed_partitions": sum(row.get("status") == "ERROR" for row in (compression_manifest.get("partitions") or {}).values()),
-        "hash_verification": "PASS" if all(row.get("sha256") for row in (compression_manifest.get("partitions") or {}).values()) else "NEED_MORE_DATA",
-        "manifest_status": "OK" if isinstance(compression_manifest.get("partitions"), dict) else "ERROR",
+        "failed_partitions": manifest_errors,
+        "hash_verification": (
+            "ERROR" if manifest_errors else "PASS" if closed_candidates and pending_manifest_verification == 0
+            else "NEED_MORE_DATA"
+        ),
+        "manifest_status": (
+            "ERROR" if not isinstance(compression_manifest.get("partitions"), dict) or manifest_errors
+            else "OK" if pending_manifest_verification == 0 else "PARTIAL"
+        ),
         "r2_verified": bool(config.get("r2_verified")),
         "delete_allowed": False,
+        "storage_mode": config["mode"],
         "categories": dict(categories),
         **research_safety(),
     }
@@ -859,11 +1063,19 @@ def run_storage_cycle(*, apply: bool = False) -> dict[str, Any]:
     compression = compress_closed_partitions(
         apply=apply, max_files=int(config["compression_max_files_per_cycle"]),
     )
+    rollover = compress_pending_rollover_segments(
+        apply=apply,
+        max_segments=int(config.get("rollover_compression_max_segments_per_cycle", 1)),
+        retry_backoff_seconds=int(config.get("compression_retry_backoff_seconds", 300)),
+    )
+    disk_guard_ok = shutil.disk_usage(REPO_ROOT).free > int(config["minimum_free_disk_bytes"])
     analytics = compact_verified_segments(
-        apply=apply, max_segments=int(config["analytics_max_segments_per_cycle"]),
+        apply=apply and disk_guard_ok,
+        max_segments=int(config["analytics_max_segments_per_cycle"]),
     )
     features = build_incremental_features(
-        apply=apply, max_segments=int(config["analytics_max_segments_per_cycle"]),
+        apply=apply and disk_guard_ok,
+        max_segments=int(config["analytics_max_segments_per_cycle"]),
     )
     status = storage_status()
     return {
@@ -871,6 +1083,8 @@ def run_storage_cycle(*, apply: bool = False) -> dict[str, Any]:
         "generated_at": utc_now(),
         "apply": bool(apply),
         "compression": compression,
+        "rollover_compression": rollover,
+        "derived_disk_guard_ok": disk_guard_ok,
         "analytics": analytics,
         "features": features,
         "status": status,

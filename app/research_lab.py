@@ -7333,6 +7333,53 @@ class ResearchLab:
         )
         return EDGE.render_cli(report)
 
+    def storage_efficiency_status_v2_cli(self) -> str:
+        from .labs.storage_efficiency_v2 import storage_status
+
+        return json.dumps(storage_status(), indent=2, sort_keys=True, allow_nan=False)
+
+    def storage_efficiency_cycle_v2_cli(self, *, apply=False) -> str:
+        from .labs.storage_efficiency_v2 import run_storage_cycle
+
+        return json.dumps(
+            run_storage_cycle(apply=bool(apply)),
+            indent=2, sort_keys=True, allow_nan=False,
+        )
+
+    def storage_efficiency_benchmark_v2_cli(self, *, source_file="") -> str:
+        from .labs.storage_efficiency_v2 import (
+            _closed_jsonl_candidates,
+            benchmark_compression,
+        )
+
+        source = Path(source_file) if source_file else None
+        if source is None:
+            candidates = _closed_jsonl_candidates()
+            source = max(candidates, key=lambda path: path.stat().st_size) if candidates else None
+        if source is None:
+            return json.dumps({
+                "status": "NEED_MORE_DATA",
+                "reason": "NO_CLOSED_JSONL_FOR_BENCHMARK",
+                "research_only": True,
+                "paper_filter_enabled": False,
+                "can_send_real_orders": False,
+                "final_recommendation": "NO LIVE",
+            }, indent=2, sort_keys=True)
+        return json.dumps(
+            benchmark_compression(source),
+            indent=2, sort_keys=True, allow_nan=False,
+        )
+
+    def continuous_edge_challenger_v2_cli(
+        self, *, symbols="", max_runtime_minutes=30.0,
+    ) -> str:
+        from .labs.continuous_edge_research_challenger import run_challenger
+
+        return json.dumps(run_challenger(
+            symbols=self._v107_csv_arg(symbols),
+            max_runtime_minutes=max(1, min(30, int(max_runtime_minutes or 30))),
+        ), indent=2, sort_keys=True, allow_nan=False)
+
     def ai_provider_audit_v1045_cli(self) -> str:
         from .labs import ai_research_copilot_v10_45 as COP
         d = COP.write_provider_audit_report()
@@ -8937,6 +8984,10 @@ def build_argument_parser() -> argparse.ArgumentParser:
             "candidate-incubator-v1044",
             "research-heavy-run-v1044",
             "edge-research-review-v1044",
+            "storage-efficiency-status-v2",
+            "storage-efficiency-cycle-v2",
+            "storage-efficiency-benchmark-v2",
+            "continuous-edge-challenger-v2",
             "ai-provider-audit-v1045",
             "ai-research-copilot-v1045",
             "ai-simulated-trader-v1045",
@@ -9141,6 +9192,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--request-budget", type=int, default=6, help="V10.28 bounded GET requests per symbol per scan (public klines).")
     parser.add_argument("--date", default="", help="V10.36 backfill day (YYYY-MM-DD).")
     parser.add_argument("--run-label", default="", help="V10.29 fixed assembled-run dir name (e.g. 'latest'), safely overwritten each assemble; empty = unique timestamped run id.")
+    parser.add_argument("--source-file", default="", help="Closed local JSONL source for the Storage Efficiency V2 benchmark.")
     return parser
 
 
@@ -9227,6 +9279,10 @@ PUBLIC_RESEARCH_ONLY_COMMANDS = frozenset({
     "candidate-incubator-v1044",
     "research-heavy-run-v1044",
     "edge-research-review-v1044",
+    "storage-efficiency-status-v2",
+    "storage-efficiency-cycle-v2",
+    "storage-efficiency-benchmark-v2",
+    "continuous-edge-challenger-v2",
     "ai-provider-audit-v1045",
     "ai-research-copilot-v1045",
     "ai-simulated-trader-v1045",
@@ -9442,6 +9498,17 @@ def _dispatch_public_research_only(args) -> None:
             max_runtime_minutes=getattr(args, "max_runtime_minutes", 90.0)))
     elif args.command == "edge-research-review-v1044":
         print(lab.edge_research_review_v1044_cli(symbols=args.symbols))
+    elif args.command == "storage-efficiency-status-v2":
+        print(lab.storage_efficiency_status_v2_cli())
+    elif args.command == "storage-efficiency-cycle-v2":
+        print(lab.storage_efficiency_cycle_v2_cli(apply=args.apply))
+    elif args.command == "storage-efficiency-benchmark-v2":
+        print(lab.storage_efficiency_benchmark_v2_cli(source_file=args.source_file))
+    elif args.command == "continuous-edge-challenger-v2":
+        print(lab.continuous_edge_challenger_v2_cli(
+            symbols=args.symbols,
+            max_runtime_minutes=getattr(args, "max_runtime_minutes", 30.0),
+        ))
     elif args.command == "ai-provider-audit-v1045":
         print(lab.ai_provider_audit_v1045_cli())
     elif args.command == "ai-research-copilot-v1045":
