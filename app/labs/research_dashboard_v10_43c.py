@@ -1153,6 +1153,7 @@ def render_html(d: dict, auto_refresh_seconds: int | None = None) -> str:
     base = base.replace(marker, extra + marker, 1) if marker in base else base.replace("</body>", extra + "</body>", 1)
     base = base.replace("</body>", _ATI_PAPER_JS + _CROSS_VENUE_JS + "</body>", 1)
     base = base.replace("V10.43A DASHBOARD", "V10.43C DASHBOARD")
+    base = base.replace("Command Center V10.43A", "Command Center V10.43C")
     if auto_refresh_seconds:
         base = _inject_auto_refresh(base, auto_refresh_seconds)
     return base

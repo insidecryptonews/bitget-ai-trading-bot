@@ -181,3 +181,14 @@ def test_dashboard_panel_labels_counterfactual_results_not_actionable(tmp_path: 
     assert "Future quotes are counterfactual outcomes only" in rendered
     assert "No candidate promotion" in rendered
     assert "NO LIVE" in rendered
+
+
+def test_dashboard_v1043c_rewrites_legacy_document_title(monkeypatch) -> None:
+    monkeypatch.setattr(DASH.A, "render_html", lambda state: (
+        "<html><head><title>Bitget AI Trading Research Bot - Command Center V10.43A</title>"
+        "<style></style></head><body><div class=\"foot\"></div></body></html>"
+    ))
+    monkeypatch.setattr(DASH, "_panel_edge_research_review", lambda state: "edge")
+    rendered = DASH.render_html({})
+    assert "Command Center V10.43C" in rendered
+    assert "Command Center V10.43A" not in rendered
