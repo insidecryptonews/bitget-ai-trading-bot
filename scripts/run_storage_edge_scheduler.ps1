@@ -10,6 +10,9 @@ $ConfigPath = Join-Path $Repo "config\research\STORAGE_EFFICIENCY_V2.json"
 $Runtime = Join-Path $Repo "data\runtime\storage_efficiency_v2"
 $StatusPath = Join-Path $Runtime "scheduler_status.json"
 $FeatureManifest = Join-Path $Runtime "feature_manifest.json"
+$ContractStatus = Join-Path $Repo "data\runtime\project_memory\contract_state.json"
+$DiskGuardStatus = Join-Path $Runtime "disk_guard_status.json"
+$SprintStatus = Join-Path $Repo "data\runtime\edge_sprint_48h\sprint_status.json"
 $HeavyStatus = Join-Path $Repo "data\runtime\heavy_research\scheduler_status.json"
 $LogDir = Join-Path $Repo "data\runtime\local_stack\logs"
 $LogPath = Join-Path $LogDir "storage_edge_scheduler.log"
@@ -101,9 +104,26 @@ try {
             }
         }
 
+        & $Python -m app.research_lab project-memory-contract-v1 --apply 2>&1 |
+            Tee-Object -FilePath $LogPath -Append | Out-Host
+        $contractExit = $LASTEXITCODE
+        $contractState = Read-JsonSafe $ContractStatus
+        $contractPass = (
+            $contractExit -eq 0 -and $null -ne $contractState -and
+            [string]$contractState.guardrails_status -eq "PASS"
+        )
+
         & $Python -m app.research_lab storage-efficiency-cycle-v2 --apply 2>&1 |
             Tee-Object -FilePath $LogPath -Append | Out-Host
         $storageExit = $LASTEXITCODE
+        & $Python -m app.research_lab storage-disk-guard-v1 --apply 2>&1 |
+            Tee-Object -FilePath $LogPath -Append | Out-Host
+        $diskGuardExit = $LASTEXITCODE
+        $diskGuard = Read-JsonSafe $DiskGuardStatus
+        $allowChallenger = (
+            $diskGuardExit -eq 0 -and $null -ne $diskGuard -and
+            [bool]$diskGuard.allow_challenger
+        )
         $featureCount = Get-VerifiedFeatureCount
         $lastFeatureCount = if ($previous) { [int]$previous.last_challenger_feature_count } else { 0 }
         $lastRun = if ($previous -and $previous.last_challenger_at) {
@@ -114,7 +134,8 @@ try {
         $intervalOk = ([DateTime]::UtcNow - $lastRun).TotalHours -ge $minHours
         $newPartitions = $featureCount - $lastFeatureCount
         $challengerEligible = (
-            $storageExit -eq 0 -and $diskOk -and $collectorsHealthy -and
+            $contractPass -and $storageExit -eq 0 -and $diskOk -and
+            $allowChallenger -and $collectorsHealthy -and
             -not $heavyRunning -and $intervalOk -and $newPartitions -ge $minNew
         )
         $challengerExit = $null
@@ -127,18 +148,32 @@ try {
             $lastChallengerAt = [DateTime]::UtcNow.ToString("o")
             if ($challengerExit -eq 0) { $lastFeatureCount = $featureCount }
         }
+        & $Python -m app.research_lab edge-sprint-cycle-v1 --apply 2>&1 |
+            Tee-Object -FilePath $LogPath -Append | Out-Host
+        $sprintExit = $LASTEXITCODE
+        $sprintState = Read-JsonSafe $SprintStatus
+        $sprintPass = (
+            $sprintExit -eq 0 -and $null -ne $sprintState -and
+            [string]$sprintState.status -in @("ACTIVE", "COMPLETED")
+        )
         $finished = [DateTime]::UtcNow
         $state = [ordered]@{
             schema = "storage_edge_scheduler.v1"
-            status = if ($storageExit -eq 0 -and ($null -eq $challengerExit -or $challengerExit -eq 0)) { "COMPLETED" } else { "ERROR" }
+            status = if ($contractPass -and $storageExit -eq 0 -and $diskGuardExit -eq 0 -and $sprintPass -and ($null -eq $challengerExit -or $challengerExit -eq 0)) { "COMPLETED" } else { "ERROR" }
             cycle = $cycle
             started_at = $started.ToString("o")
             finished_at = $finished.ToString("o")
             duration_seconds = [Math]::Round(($finished - $started).TotalSeconds, 3)
             storage_exit_code = $storageExit
+            contract_exit_code = $contractExit
+            contract_guardrails_pass = $contractPass
+            disk_guard_exit_code = $diskGuardExit
+            disk_guard_level = if ($diskGuard) { [string]$diskGuard.level } else { "UNKNOWN" }
+            sprint_exit_code = $sprintExit
+            sprint_status = if ($sprintState) { [string]$sprintState.status } else { "UNKNOWN" }
             challenger_eligible = $challengerEligible
             challenger_exit_code = $challengerExit
-            challenger_skip_reason = if ($challengerEligible) { $null } elseif ($heavyRunning) { "HEAVY_RESEARCH_RUNNING" } elseif (-not $collectorsHealthy) { "COLLECTORS_NOT_HEALTHY" } elseif (-not $diskOk) { "DISK_GUARD" } elseif (-not $intervalOk) { "MINIMUM_INTERVAL" } else { "NO_NEW_VERIFIED_PARTITIONS" }
+            challenger_skip_reason = if ($challengerEligible) { $null } elseif (-not $contractPass) { "PROJECT_MEMORY_CONTRACT" } elseif ($heavyRunning) { "HEAVY_RESEARCH_RUNNING" } elseif (-not $collectorsHealthy) { "COLLECTORS_NOT_HEALTHY" } elseif (-not $diskOk -or -not $allowChallenger) { "DISK_GUARD" } elseif (-not $intervalOk) { "MINIMUM_INTERVAL" } else { "NO_NEW_VERIFIED_PARTITIONS" }
             verified_feature_count = $featureCount
             new_verified_partitions = $newPartitions
             last_challenger_feature_count = $lastFeatureCount

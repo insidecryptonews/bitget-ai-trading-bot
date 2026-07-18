@@ -105,6 +105,41 @@ def _continuous_challenger_snapshot() -> dict[str, Any]:
     return {**value, **_safety()}
 
 
+def _project_memory_snapshot() -> dict[str, Any]:
+    path = CE._repo_root() / "data" / "runtime" / "project_memory" / "contract_state.json"
+    value = _read_json(path) or {}
+    if not value:
+        value = {
+            "status": "NOT_ACTIVATED", "guardrails_status": "FAIL",
+            "violations": ["CONTRACT_BASELINE_NOT_FROZEN"],
+        }
+    return {**value, **_safety()}
+
+
+def _edge_sprint_snapshot() -> dict[str, Any]:
+    path = CE._repo_root() / "data" / "runtime" / "edge_sprint_48h" / "sprint_status.json"
+    value = _read_json(path) or {}
+    if not value:
+        value = {"status": "NOT_STARTED", "strategy_verdict": "NEED_MORE_FORWARD_DATA"}
+    return {**value, **_safety()}
+
+
+def _isolated_demos_snapshot() -> dict[str, Any]:
+    root = CE._repo_root() / "data" / "runtime" / "edge_sprint_48h"
+    diagnostic = _read_json(root / "operability_diagnostic_demo_status.json") or {
+        "status": "NOT_STARTED", "trades": 0, "reconciliation": "NOT_STARTED",
+    }
+    candidate = _read_json(root / "edge_candidate_demo_status.json") or {
+        "status": "NO DEFENSIBLE CANDIDATE - DEMO NOT STARTED",
+        "trades": 0, "positions": 0, "account_initialized": False,
+    }
+    return {
+        "diagnostic": {**diagnostic, **_safety()},
+        "candidate": {**candidate, **_safety()},
+        **_safety(),
+    }
+
+
 def gather_state(symbol: str = "BTCUSDT") -> dict[str, Any]:
     base = A.gather_state(symbol)
     try:
@@ -144,7 +179,10 @@ def gather_state(symbol: str = "BTCUSDT") -> dict[str, Any]:
             "p11_short_forward_observer": _load_p11_observer_status(),
             "ati_paper": _ati_paper_snapshot(), "cross_venue": _cross_venue_snapshot(),
             "storage_efficiency_v2": _storage_efficiency_snapshot(),
-            "continuous_edge_challenger": _continuous_challenger_snapshot(), **_safety()}
+            "continuous_edge_challenger": _continuous_challenger_snapshot(),
+            "project_memory_contract": _project_memory_snapshot(),
+            "edge_sprint_48h": _edge_sprint_snapshot(),
+            "isolated_research_demos": _isolated_demos_snapshot(), **_safety()}
 
 
 def gather_state_fast(symbol: str = "BTCUSDT") -> dict[str, Any]:
@@ -180,6 +218,9 @@ def gather_state_fast(symbol: str = "BTCUSDT") -> dict[str, Any]:
             "cross_venue": _cross_venue_snapshot(),
             "storage_efficiency_v2": _storage_efficiency_snapshot(),
             "continuous_edge_challenger": _continuous_challenger_snapshot(),
+            "project_memory_contract": _project_memory_snapshot(),
+            "edge_sprint_48h": _edge_sprint_snapshot(),
+            "isolated_research_demos": _isolated_demos_snapshot(),
             "fast_metrics": {"last_updated_at": _utc_now(),
                              "source": "ARTIFACT_ONLY_FAST_WATCHER",
                              "heavy_analysis_executed": False},
@@ -1072,6 +1113,83 @@ def _panel_continuous_challenger(d: dict) -> str:
     )
 
 
+def _panel_project_memory(d: dict) -> str:
+    report = d.get("project_memory_contract") or {}
+    violations = report.get("violations") or []
+    boundaries = report.get("last_seen_boundaries") or {}
+    ledger = report.get("decision_ledger") or {}
+    return (
+        A._kv("Guardrails", report.get("guardrails_status") or "FAIL",
+              "ok" if report.get("guardrails_status") == "PASS" else "bad") +
+        A._kv("Contract hash", report.get("contract_hash") or "NOT_FROZEN") +
+        A._kv("Allowed / actual branch",
+              f"{report.get('allowed_branch')} / {report.get('actual_branch')}") +
+        A._kv("ATI / P11 boundary",
+              f"{boundaries.get('ati_forward')} / {boundaries.get('p11_forward')}") +
+        A._kv("Cross cursors (rollover-relative)", boundaries.get("cross_current_offsets") or {}) +
+        A._kv("Decision ledger", f"{ledger.get('status')} / {ledger.get('records', 0)} records") +
+        A._kv("Violations", violations or "NONE", "ok" if not violations else "bad") +
+        A._kv("Paper filter / real orders", "false / false", "ok") +
+        A._kv("Final recommendation", "NO LIVE", "bad") +
+        '<div class="sub">Machine-readable startup contract. Boundary regression, account reset, policy/env metadata change, or unsafe flags fail closed.</div>'
+    )
+
+
+def _panel_edge_sprint(d: dict) -> str:
+    report = d.get("edge_sprint_48h") or {}
+    disk = report.get("disk_guard") or {}
+    remote = report.get("remote_restore") or {}
+    populations = report.get("populations") or {}
+    return (
+        A._kv("Sprint", report.get("sprint_id") or "NOT_STARTED") +
+        A._kv("Status", report.get("status") or "NOT_STARTED",
+              A._state_kind(report.get("status") or "NEED_DATA")) +
+        A._kv("Start / planned end", f"{report.get('started_at')} / {report.get('planned_end_at')}") +
+        A._kv("Dataset initial / current",
+              f"{report.get('initial_dataset_hash')} / {report.get('current_dataset_hash')}") +
+        A._kv("Snapshots / holdout accesses",
+              f"{report.get('snapshot_count', 0)} / {report.get('holdout_accesses', 0)}") +
+        A._kv("Last / next cycle", f"{report.get('last_cycle_at')} / {report.get('next_cycle_at')}") +
+        A._kv("Disk / R2", f"{disk.get('level', 'UNKNOWN')} / {remote.get('status', 'BLOCKED')}") +
+        A._kv("Honest populations", populations) +
+        A._kv("Strategy verdict", report.get("strategy_verdict") or "NEED_MORE_FORWARD_DATA", "warn") +
+        A._kv("Final recommendation", "NO LIVE", "bad") +
+        '<div class="sub">Six-hour snapshots, dataset-hash deduplication, sealed holdout, no policy mutation and no automatic promotion.</div>'
+    )
+
+
+def _panel_diagnostic_demo(d: dict) -> str:
+    report = ((d.get("isolated_research_demos") or {}).get("diagnostic") or {})
+    account = report.get("account") or {}
+    return (
+        A._kv("Status", report.get("status") or "NOT_STARTED", "warn") +
+        A._kv("Account", account.get("account_id") or "OPERABILITY_DIAGNOSTIC_DEMO_50") +
+        A._kv("Cash / initial", f"{account.get('cash')} / {account.get('initial_balance')}") +
+        A._kv("Signals / trades / positions",
+              f"{report.get('signals', 0)} / {report.get('trades', 0)} / {report.get('open_positions', 0)}") +
+        A._kv("Fees / realized PnL", f"{account.get('fees')} / {account.get('realized_pnl')}") +
+        A._kv("Reconciliation", report.get("reconciliation") or "NOT_STARTED") +
+        A._kv("Evidence label", "DIAGNOSTIC ONLY - NOT EDGE", "bad") +
+        '<div class="sub">Empty by default; never forces signals. Separate account and ledger; excluded from all edge and forward-evidence metrics.</div>'
+    )
+
+
+def _panel_edge_candidate_demo(d: dict) -> str:
+    report = ((d.get("isolated_research_demos") or {}).get("candidate") or {})
+    gate = report.get("gate") or {}
+    return (
+        A._kv("Status", report.get("status") or "NO DEFENSIBLE CANDIDATE - DEMO NOT STARTED", "bad") +
+        A._kv("Account initialized", report.get("account_initialized", False), "bad") +
+        A._kv("Candidate / family", f"{gate.get('candidate')} / {gate.get('family')}") +
+        A._kv("Gate", gate.get("status") or "NO_DEFENSIBLE_CANDIDATE") +
+        A._kv("Blockers", gate.get("blockers") or ["STRICT_GATE_NOT_PASSED"]) +
+        A._kv("Positions / trades", f"{report.get('positions', 0)} / {report.get('trades', 0)}") +
+        A._kv("Human review required", True, "warn") +
+        A._kv("Activation", "disabled", "bad") +
+        '<div class="sub">No automatic start. Even an eligible result remains FORWARD_DEMO_RESEARCH_ONLY pending explicit human review; paper filter stays disabled.</div>'
+    )
+
+
 def _panel_alpha_factory(d: dict) -> str:
     v = _latest_v1044()
     alpha = v["alpha"]
@@ -1247,6 +1365,10 @@ def render_html(d: dict, auto_refresh_seconds: int | None = None) -> str:
         edge=_panel_edge_discovery(d),
         storage_efficiency=_panel_storage_efficiency(d),
         continuous_challenger=_panel_continuous_challenger(d),
+        project_memory=_panel_project_memory(d),
+        edge_sprint=_panel_edge_sprint(d),
+        diagnostic_demo=_panel_diagnostic_demo(d),
+        edge_candidate_demo=_panel_edge_candidate_demo(d),
         lattice=_panel_lattice(d),
         graph=_relationship_graph(d),
         gen=html.escape(datetime.now(timezone.utc).isoformat()))
@@ -1299,6 +1421,11 @@ _EXTRA = """
   <div class="card wide"><h3>Edge Research Review V10.44</h3>{edge_review}</div>
   <div class="card wide"><h3>STORAGE EFFICIENCY V2</h3>{storage_efficiency}</div>
   <div class="card wide"><h3>CONTINUOUS EDGE RESEARCH CHALLENGER</h3>{continuous_challenger}</div>
+  <div class="section-band">D. 48H EDGE SPRINT CONTROL <span>persistent, fail-closed, simulation only</span></div>
+  <div class="card wide"><h3>PROJECT MEMORY CONTRACT</h3>{project_memory}</div>
+  <div class="card wide"><h3>48H RESEARCH SPRINT</h3>{edge_sprint}</div>
+  <div class="card wide"><h3>DIAGNOSTIC DEMO — NOT EDGE</h3>{diagnostic_demo}</div>
+  <div class="card wide"><h3>EDGE CANDIDATE DEMO</h3>{edge_candidate_demo}</div>
   <div class="card wide"><h3>AI Research Co-Pilot V10.45</h3>{ai}</div>
   <div class="card wide"><h3>Multi-AI Edge Discovery V10.45.1</h3>{edge}</div>
   <div class="card"><h3>Strategy Lab Hardened</h3>{strategy}</div>

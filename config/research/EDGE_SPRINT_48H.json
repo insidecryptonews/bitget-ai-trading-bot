@@ -1,0 +1,36 @@
+{
+  "schema": "edge_sprint_48h.config.v1",
+  "duration_hours": 48,
+  "snapshot_interval_hours": 6,
+  "dataset_change_required_for_analysis": true,
+  "holdout_max_accesses": 1,
+  "seed": 480104,
+  "trial_budget": 80,
+  "cost_scenarios_bps": [15.5, 18.0, 25.0],
+  "symbols": ["BTCUSDT", "ETHUSDT"],
+  "families": [
+    {"id": "cross_venue_large_moves", "status": "IMPLEMENTED_CHALLENGER"},
+    {"id": "causal_consensus", "status": "IMPLEMENTED_CHALLENGER"},
+    {"id": "order_flow_precursor", "status": "IMPLEMENTED_CHALLENGER"},
+    {"id": "leader_stability", "status": "IMPLEMENTED_CHALLENGER"},
+    {"id": "longer_horizons", "status": "REGISTERED_RESEARCH_DESIGN"},
+    {"id": "ati_short_research_only", "status": "IMPLEMENTED_CHALLENGER"},
+    {"id": "frozen_entry_exit_research", "status": "REGISTERED_RESEARCH_DESIGN"}
+  ],
+  "diagnostic_demo": {
+    "account_id": "OPERABILITY_DIAGNOSTIC_DEMO_50",
+    "initial_balance": 50.0,
+    "automatic_trade_generation": false,
+    "counts_as_edge": false
+  },
+  "edge_candidate_demo": {
+    "account_id": "EDGE_CANDIDATE_DEMO_50",
+    "initial_balance": 50.0,
+    "automatic_start": false,
+    "human_review_required": true
+  },
+  "paper_filter_enabled": false,
+  "can_send_real_orders": false,
+  "auto_promotion": false,
+  "final_recommendation": "NO LIVE"
+}

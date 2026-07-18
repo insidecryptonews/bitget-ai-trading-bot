@@ -60,6 +60,17 @@ _CONTINUOUS_EDGE_CHALLENGER_STATUS = (
     Path(__file__).resolve().parents[1]
     / "data" / "runtime" / "storage_efficiency_v2" / "challenger_status.json"
 )
+_PROJECT_MEMORY_CONTRACT_STATUS = (
+    Path(__file__).resolve().parents[1]
+    / "data" / "runtime" / "project_memory" / "contract_state.json"
+)
+_EDGE_SPRINT_48H_STATUS = (
+    Path(__file__).resolve().parents[1]
+    / "data" / "runtime" / "edge_sprint_48h" / "sprint_status.json"
+)
+_DIAGNOSTIC_DEMO_STATUS = _EDGE_SPRINT_48H_STATUS.parent / "operability_diagnostic_demo_status.json"
+_EDGE_CANDIDATE_DEMO_STATUS = _EDGE_SPRINT_48H_STATUS.parent / "edge_candidate_demo_status.json"
+_STORAGE_REMOTE_RESTORE_STATUS = _STORAGE_EFFICIENCY_V2_STATUS.parent / "remote_restore_status.json"
 
 
 def _research_status_artifact(path: Path, *, default_status: str) -> dict[str, Any]:
@@ -289,6 +300,11 @@ def start_health_server(
                 "/api/research/counterfactual-training-summary",
                 "/api/research/storage-efficiency-v2",
                 "/api/research/continuous-edge-challenger",
+                "/api/research/project-memory-contract",
+                "/api/research/edge-sprint-48h",
+                "/api/research/operability-diagnostic-demo",
+                "/api/research/edge-candidate-demo",
+                "/api/research/storage-remote-restore",
                 "/api/training/full-report",
                 "/api/training/export/full.txt",
                 "/api/training/export/full.json",
@@ -778,6 +794,33 @@ def start_health_server(
                     _CONTINUOUS_EDGE_CHALLENGER_STATUS, default_status="NEED_MORE_DATA"
                 ))
                 return
+            if path == "/api/research/project-memory-contract":
+                self._send_json(_research_status_artifact(
+                    _PROJECT_MEMORY_CONTRACT_STATUS, default_status="NOT_ACTIVATED"
+                ))
+                return
+            if path == "/api/research/edge-sprint-48h":
+                self._send_json(_research_status_artifact(
+                    _EDGE_SPRINT_48H_STATUS, default_status="NOT_STARTED"
+                ))
+                return
+            if path == "/api/research/operability-diagnostic-demo":
+                self._send_json(_research_status_artifact(
+                    _DIAGNOSTIC_DEMO_STATUS, default_status="NOT_STARTED"
+                ))
+                return
+            if path == "/api/research/edge-candidate-demo":
+                self._send_json(_research_status_artifact(
+                    _EDGE_CANDIDATE_DEMO_STATUS,
+                    default_status="NO DEFENSIBLE CANDIDATE - DEMO NOT STARTED",
+                ))
+                return
+            if path == "/api/research/storage-remote-restore":
+                self._send_json(_research_status_artifact(
+                    _STORAGE_REMOTE_RESTORE_STATUS,
+                    default_status="BLOCKED_R2_CONFIG_UNAVAILABLE",
+                ))
+                return
             if path == "/api/training/full-report":
                 payload = _dashboard_full_report(config, db, query)
                 fmt = (query.get("format") or ["text"])[0].lower()
@@ -1258,6 +1301,23 @@ def _research_components_status_payload(state: HealthState) -> dict[str, Any]:
     continuous_edge_challenger = _research_status_artifact(
         _CONTINUOUS_EDGE_CHALLENGER_STATUS, default_status="NEED_MORE_DATA"
     )
+    project_memory_contract = _research_status_artifact(
+        _PROJECT_MEMORY_CONTRACT_STATUS, default_status="NOT_ACTIVATED"
+    )
+    edge_sprint_48h = _research_status_artifact(
+        _EDGE_SPRINT_48H_STATUS, default_status="NOT_STARTED"
+    )
+    diagnostic_demo = _research_status_artifact(
+        _DIAGNOSTIC_DEMO_STATUS, default_status="NOT_STARTED"
+    )
+    edge_candidate_demo = _research_status_artifact(
+        _EDGE_CANDIDATE_DEMO_STATUS,
+        default_status="NO DEFENSIBLE CANDIDATE - DEMO NOT STARTED",
+    )
+    storage_remote_restore = _research_status_artifact(
+        _STORAGE_REMOTE_RESTORE_STATUS,
+        default_status="BLOCKED_R2_CONFIG_UNAVAILABLE",
+    )
     research_root = _RESEARCH_DASHBOARD_V1043C.parent.parent
     heavy_alpha_age = file_age(
         research_root / "v10_44_alpha_sprint" / "alpha_factory_v10_44.json"
@@ -1458,6 +1518,52 @@ def _research_components_status_payload(state: HealthState) -> dict[str, Any]:
                 else "DEGRADED"
             ),
             "artifact_status": continuous_edge_challenger.get("status"),
+        },
+        "project_memory_contract": {
+            "status": (
+                "HEALTHY" if project_memory_contract.get("guardrails_status") == "PASS"
+                else "DEGRADED"
+            ),
+            "artifact_status": project_memory_contract.get("guardrails_status") or "NOT_ACTIVATED",
+            "updated_at": project_memory_contract.get("updated_at"),
+            "contract_version": project_memory_contract.get("contract_version"),
+            "violations": project_memory_contract.get("violations") or [],
+            "can_continue_research": bool(project_memory_contract.get("can_continue_research")),
+        },
+        "edge_sprint_48h": {
+            "status": "HEALTHY" if edge_sprint_48h.get("status") in {"ACTIVE", "COMPLETED"} else "DEGRADED",
+            "artifact_status": edge_sprint_48h.get("status"),
+            "sprint_id": edge_sprint_48h.get("sprint_id"),
+            "updated_at": edge_sprint_48h.get("updated_at"),
+            "planned_end_at": edge_sprint_48h.get("planned_end_at"),
+            "strategy_verdict": edge_sprint_48h.get("strategy_verdict"),
+            "infrastructure_verdict": edge_sprint_48h.get("infrastructure_verdict"),
+            "snapshot_count": int(edge_sprint_48h.get("snapshot_count") or 0),
+            "holdout_accesses": int(edge_sprint_48h.get("holdout_accesses") or 0),
+        },
+        "operability_diagnostic_demo": {
+            "status": "HEALTHY" if diagnostic_demo.get("reconciliation") in {"PASS", "NOT_STARTED"} else "DEGRADED",
+            "artifact_status": diagnostic_demo.get("status"),
+            "reconciliation": diagnostic_demo.get("reconciliation"),
+            "signals": int(diagnostic_demo.get("signals") or 0),
+            "trades": int(diagnostic_demo.get("trades") or 0),
+            "open_positions": int(diagnostic_demo.get("open_positions") or 0),
+            "not_edge": True,
+        },
+        "edge_candidate_demo": {
+            "status": "HEALTHY",
+            "artifact_status": edge_candidate_demo.get("status"),
+            "account_initialized": bool(edge_candidate_demo.get("account_initialized")),
+            "positions": int(edge_candidate_demo.get("positions") or 0),
+            "trades": int(edge_candidate_demo.get("trades") or 0),
+            "not_actionable": True,
+        },
+        "storage_remote_restore": {
+            "status": "HEALTHY" if storage_remote_restore.get("status") == "VERIFIED_REMOTE_RESTORABLE" else "DEGRADED",
+            "artifact_status": storage_remote_restore.get("status"),
+            "remote_restore_verified": bool(storage_remote_restore.get("remote_restore_verified")),
+            "blockers": storage_remote_restore.get("blockers") or [],
+            "delete_allowed": False,
         },
         "disk": {
             "status": (

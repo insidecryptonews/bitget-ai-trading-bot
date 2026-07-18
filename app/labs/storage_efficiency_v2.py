@@ -1068,7 +1068,11 @@ def run_storage_cycle(*, apply: bool = False) -> dict[str, Any]:
         max_segments=int(config.get("rollover_compression_max_segments_per_cycle", 1)),
         retry_backoff_seconds=int(config.get("compression_retry_backoff_seconds", 300)),
     )
-    disk_guard_ok = shutil.disk_usage(REPO_ROOT).free > int(config["minimum_free_disk_bytes"])
+    derived_minimum = max(
+        int(config["minimum_free_disk_bytes"]),
+        int(config.get("disk_critical_free_bytes", config["minimum_free_disk_bytes"])),
+    )
+    disk_guard_ok = shutil.disk_usage(REPO_ROOT).free > derived_minimum
     analytics = compact_verified_segments(
         apply=apply and disk_guard_ok,
         max_segments=int(config["analytics_max_segments_per_cycle"]),
@@ -1085,6 +1089,7 @@ def run_storage_cycle(*, apply: bool = False) -> dict[str, Any]:
         "compression": compression,
         "rollover_compression": rollover,
         "derived_disk_guard_ok": disk_guard_ok,
+        "derived_minimum_free_bytes": derived_minimum,
         "analytics": analytics,
         "features": features,
         "status": status,

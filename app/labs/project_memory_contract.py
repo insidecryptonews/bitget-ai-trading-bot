@@ -36,7 +36,7 @@ DEFAULT_SOURCES = {
     "cross_boundary": REPO_ROOT / "data" / "runtime" / "cross_venue" / "forward_boundary.json",
     "cross_offsets": REPO_ROOT / "data" / "runtime" / "cross_venue" / "stream_offsets.json",
     "cross_account": REPO_ROOT / "data" / "runtime" / "cross_venue" / "cross_venue_paper.sqlite",
-    "cross_status": REPO_ROOT / "data" / "runtime" / "cross_venue" / "engine_status.json",
+    "cross_status": REPO_ROOT / "data" / "runtime" / "cross_venue" / "dashboard_snapshot.json",
     "storage_manifest": REPO_ROOT / "data" / "runtime" / "storage_efficiency_v2" / "storage_manifest.json",
     "feature_manifest": REPO_ROOT / "data" / "runtime" / "storage_efficiency_v2" / "feature_manifest.json",
     "challenger_status": REPO_ROOT / "data" / "runtime" / "storage_efficiency_v2" / "challenger_status.json",
@@ -304,16 +304,24 @@ def _boundary_violations(previous: dict[str, Any], current: dict[str, Any]) -> l
         old, new = previous.get(key), current.get(key)
         if old is None or new is None:
             violations.append(f"BOUNDARY_UNAVAILABLE:{key}")
-        elif int(new) < int(old):
-            violations.append(f"BOUNDARY_REGRESSION:{key}")
-    for group in ("cross_initial_offsets", "cross_current_offsets"):
-        old_map = previous.get(group) if isinstance(previous.get(group), dict) else {}
-        new_map = current.get(group) if isinstance(current.get(group), dict) else {}
-        for key, old in old_map.items():
-            if key not in new_map:
-                violations.append(f"BOUNDARY_UNAVAILABLE:{group}:{key}")
-            elif int(new_map[key]) < int(old):
-                violations.append(f"BOUNDARY_REGRESSION:{group}:{key}")
+        elif int(new) != int(old):
+            violations.append(f"BOUNDARY_CHANGED:{key}")
+    old_initial = previous.get("cross_initial_offsets") if isinstance(previous.get("cross_initial_offsets"), dict) else {}
+    new_initial = current.get("cross_initial_offsets") if isinstance(current.get("cross_initial_offsets"), dict) else {}
+    current_offsets = current.get("cross_current_offsets") if isinstance(current.get("cross_current_offsets"), dict) else {}
+    for key, old in old_initial.items():
+        if key not in new_initial:
+            violations.append(f"BOUNDARY_UNAVAILABLE:cross_initial_offsets:{key}")
+        elif int(new_initial[key]) != int(old):
+            violations.append(f"BOUNDARY_CHANGED:cross_initial_offsets:{key}")
+        if key not in current_offsets:
+            violations.append(f"BOUNDARY_UNAVAILABLE:cross_current_offsets:{key}")
+        else:
+            try:
+                if int(current_offsets[key]) < 0:
+                    violations.append(f"BOUNDARY_INVALID:cross_current_offsets:{key}")
+            except (TypeError, ValueError):
+                violations.append(f"BOUNDARY_INVALID:cross_current_offsets:{key}")
     return violations
 
 

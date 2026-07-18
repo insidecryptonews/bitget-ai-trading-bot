@@ -360,7 +360,9 @@ def edge_candidate_gate(challenger: dict[str, Any], holdout: dict[str, Any] | No
     }
 
 
-def edge_demo_status(challenger: dict[str, Any] | None = None) -> dict[str, Any]:
+def edge_demo_status(
+    challenger: dict[str, Any] | None = None, *, write_status: bool = False,
+) -> dict[str, Any]:
     if challenger is None:
         try:
             challenger = json.loads(
@@ -377,5 +379,6 @@ def edge_demo_status(challenger: dict[str, Any] | None = None) -> dict[str, Any]
         "gate": gate, "activation": "disabled",
         **safety(),
     }
-    _atomic_json(EDGE_DEMO_STATUS_PATH, result)
+    if write_status:
+        _atomic_json(EDGE_DEMO_STATUS_PATH, result)
     return result

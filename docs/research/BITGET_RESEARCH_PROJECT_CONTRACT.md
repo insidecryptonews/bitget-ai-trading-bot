@@ -30,7 +30,10 @@ hash-chained decision ledger are written only below
 
 The guard reads ATI and Cross-Venue SQLite ledgers with SQLite `mode=ro`. It
 freezes account ID, initial balance and creation time, but not changing equity.
-Boundaries and consumer offsets may move forward; a regression fails closed.
+ATI/P11 boundaries and Cross-Venue initial offsets are immutable. Cross-Venue
+current offsets are byte cursors in rotating `current.jsonl` files, so a
+coordinated rollover may reduce them; the guard requires every cursor to remain
+present and non-negative instead of incorrectly treating it as a global counter.
 The `.env` file is never read by this guard: only existence, size and modification
 timestamp are fingerprinted, and no secret value is logged.
 

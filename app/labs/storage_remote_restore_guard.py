@@ -175,6 +175,11 @@ class _RemoteBackend:
     def configured(self) -> bool:
         return bool(_external_configured(self.config))
 
+    @property
+    def object_prefix(self) -> str:
+        configured = str(self.config.data_vault_external_prefix or "").strip("/")
+        return configured or "bitget-ai-trading-bot/training"
+
     def upload(self, path: Path, object_key: str, metadata: dict[str, str]) -> dict[str, Any]:
         try:
             import boto3  # type: ignore
@@ -339,8 +344,9 @@ def verify_remote_restore(
         if write:
             _atomic_json(REMOTE_RESTORE_PATH, result)
         return result
+    prefix = str(getattr(backend, "object_prefix", "bitget-ai-trading-bot/training")).strip("/")
     object_key = (
-        "bitget-ai-trading-bot/storage-restore-v1/"
+        f"{prefix}/storage-restore-v1/"
         f"{str(candidate['source_partition_id']).replace(':', '_')}/"
         f"{candidate['compressed_sha256']}{candidate['source'].suffix}"
     )
@@ -363,11 +369,16 @@ def verify_remote_restore(
             replay = _restore_replay(restored, candidate, Path(temp_name)) if physical_ok else {"status": "NOT_RUN"}
             verified = bool(
                 physical_ok and replay.get("status") == "PASS"
+                and replay.get("features_replay_ready") is True
                 and int(upload.get("size") or 0) == int(candidate["compressed_bytes"])
             )
             result = {
                 **base, "status": "VERIFIED_REMOTE_RESTORABLE" if verified else "REMOTE_RESTORE_FAILED",
-                "blockers": [] if verified else ["REMOTE_ROUNDTRIP_NOT_EQUIVALENT"],
+                "blockers": [] if verified else [
+                    "REMOTE_FEATURE_REBUILD_AND_REPLAY_NOT_VERIFIED"
+                    if replay.get("status") == "PASS" and not replay.get("features_replay_ready")
+                    else "REMOTE_ROUNDTRIP_NOT_EQUIVALENT"
+                ],
                 "upload": upload, "download": download,
                 "physical_sha256_match": physical_ok, "replay": replay,
                 "remote_restore_verified": verified,

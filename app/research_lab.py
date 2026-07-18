@@ -7380,6 +7380,59 @@ class ResearchLab:
             max_runtime_minutes=max(1, min(30, int(max_runtime_minutes or 30))),
         ), indent=2, sort_keys=True, allow_nan=False)
 
+    def project_memory_contract_v1_cli(self, *, apply=False) -> str:
+        from .labs.project_memory_contract import run_contract_audit
+
+        return json.dumps(
+            run_contract_audit(apply=bool(apply)),
+            indent=2, sort_keys=True, allow_nan=False,
+        )
+
+    def project_memory_status_v1_cli(self) -> str:
+        from .labs.project_memory_contract import contract_status
+
+        return json.dumps(contract_status(), indent=2, sort_keys=True, allow_nan=False)
+
+    def storage_disk_guard_v1_cli(self, *, apply=False) -> str:
+        from .labs.storage_remote_restore_guard import disk_guard_status
+
+        return json.dumps(
+            disk_guard_status(write=bool(apply)),
+            indent=2, sort_keys=True, allow_nan=False,
+        )
+
+    def storage_remote_restore_v1_cli(self, *, apply=False, source_id="") -> str:
+        from .labs.storage_remote_restore_guard import verify_remote_restore
+
+        return json.dumps(
+            verify_remote_restore(apply=bool(apply), source_id=source_id or None),
+            indent=2, sort_keys=True, allow_nan=False,
+        )
+
+    def edge_sprint_cycle_v1_cli(self, *, apply=False) -> str:
+        from .labs.edge_sprint_48h import run_sprint_cycle
+
+        return json.dumps(
+            run_sprint_cycle(apply=bool(apply)),
+            indent=2, sort_keys=True, allow_nan=False,
+        )
+
+    def edge_sprint_status_v1_cli(self) -> str:
+        from .labs.edge_sprint_48h import sprint_status
+
+        return json.dumps(sprint_status(), indent=2, sort_keys=True, allow_nan=False)
+
+    def research_demo_status_v1_cli(self) -> str:
+        from .labs.isolated_research_demos import DiagnosticDemoLedger, edge_demo_status
+
+        return json.dumps({
+            "diagnostic_demo": DiagnosticDemoLedger().status(),
+            "edge_candidate_demo": edge_demo_status(write_status=False),
+            "research_only": True, "simulation_only": True,
+            "paper_filter_enabled": False, "can_send_real_orders": False,
+            "final_recommendation": "NO LIVE",
+        }, indent=2, sort_keys=True, allow_nan=False)
+
     def ai_provider_audit_v1045_cli(self) -> str:
         from .labs import ai_research_copilot_v10_45 as COP
         d = COP.write_provider_audit_report()
@@ -8988,6 +9041,13 @@ def build_argument_parser() -> argparse.ArgumentParser:
             "storage-efficiency-cycle-v2",
             "storage-efficiency-benchmark-v2",
             "continuous-edge-challenger-v2",
+            "project-memory-contract-v1",
+            "project-memory-status-v1",
+            "storage-disk-guard-v1",
+            "storage-remote-restore-v1",
+            "edge-sprint-cycle-v1",
+            "edge-sprint-status-v1",
+            "research-demo-status-v1",
             "ai-provider-audit-v1045",
             "ai-research-copilot-v1045",
             "ai-simulated-trader-v1045",
@@ -9193,6 +9253,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--date", default="", help="V10.36 backfill day (YYYY-MM-DD).")
     parser.add_argument("--run-label", default="", help="V10.29 fixed assembled-run dir name (e.g. 'latest'), safely overwritten each assemble; empty = unique timestamped run id.")
     parser.add_argument("--source-file", default="", help="Closed local JSONL source for the Storage Efficiency V2 benchmark.")
+    parser.add_argument("--source-id", default="", help="Verified storage partition id for the opt-in remote restore audit.")
     return parser
 
 
@@ -9283,6 +9344,13 @@ PUBLIC_RESEARCH_ONLY_COMMANDS = frozenset({
     "storage-efficiency-cycle-v2",
     "storage-efficiency-benchmark-v2",
     "continuous-edge-challenger-v2",
+    "project-memory-contract-v1",
+    "project-memory-status-v1",
+    "storage-disk-guard-v1",
+    "storage-remote-restore-v1",
+    "edge-sprint-cycle-v1",
+    "edge-sprint-status-v1",
+    "research-demo-status-v1",
     "ai-provider-audit-v1045",
     "ai-research-copilot-v1045",
     "ai-simulated-trader-v1045",
@@ -9509,6 +9577,22 @@ def _dispatch_public_research_only(args) -> None:
             symbols=args.symbols,
             max_runtime_minutes=getattr(args, "max_runtime_minutes", 30.0),
         ))
+    elif args.command == "project-memory-contract-v1":
+        print(lab.project_memory_contract_v1_cli(apply=args.apply))
+    elif args.command == "project-memory-status-v1":
+        print(lab.project_memory_status_v1_cli())
+    elif args.command == "storage-disk-guard-v1":
+        print(lab.storage_disk_guard_v1_cli(apply=args.apply))
+    elif args.command == "storage-remote-restore-v1":
+        print(lab.storage_remote_restore_v1_cli(
+            apply=args.apply, source_id=getattr(args, "source_id", ""),
+        ))
+    elif args.command == "edge-sprint-cycle-v1":
+        print(lab.edge_sprint_cycle_v1_cli(apply=args.apply))
+    elif args.command == "edge-sprint-status-v1":
+        print(lab.edge_sprint_status_v1_cli())
+    elif args.command == "research-demo-status-v1":
+        print(lab.research_demo_status_v1_cli())
     elif args.command == "ai-provider-audit-v1045":
         print(lab.ai_provider_audit_v1045_cli())
     elif args.command == "ai-research-copilot-v1045":
