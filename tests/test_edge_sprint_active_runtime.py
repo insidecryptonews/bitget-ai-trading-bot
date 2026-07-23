@@ -316,3 +316,22 @@ def test_session_scripts_and_scheduler_remain_research_only() -> None:
     assert "BLOCKED_SPRINT_CYCLE_IN_PROGRESS" in start_script
     assert "SCHEDULER_DID_NOT_REACH_ATOMIC_CYCLE_BOUNDARY" in stop_script
     assert "safe_to_power_off=true" in stop_script
+
+
+def test_scheduler_heartbeats_during_long_challenger_runs() -> None:
+    scheduler = (ROOT / "scripts" / "run_storage_edge_scheduler.ps1").read_text(encoding="utf-8")
+    config = json.loads((ROOT / "config" / "research" / "EDGE_SPRINT_48H.json").read_text(encoding="utf-8"))
+
+    heartbeat_seconds = 300
+    assert f"$SprintHeartbeatSeconds = {heartbeat_seconds}" in scheduler
+    assert heartbeat_seconds < config["runtime_heartbeat_max_gap_seconds"]
+    assert scheduler.index("function Invoke-SprintCycle") < scheduler.index(
+        "function Invoke-ChallengerWithSprintHeartbeats"
+    )
+    challenger = scheduler.split("function Invoke-ChallengerWithSprintHeartbeats", 1)[1]
+    challenger = challenger.split("$mutex =", 1)[0]
+    assert "WaitForExit($SprintHeartbeatSeconds * 1000)" in challenger
+    assert "Invoke-SprintCycle" in challenger
+    assert scheduler.index("$earlySprintExit = Invoke-SprintCycle") < scheduler.index(
+        "storage-efficiency-cycle-v2 --apply"
+    )

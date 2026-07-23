@@ -18,6 +18,7 @@ $LogDir = Join-Path $Repo "data\runtime\local_stack\logs"
 $LogPath = Join-Path $LogDir "storage_edge_scheduler.log"
 $CollectorRoot = Join-Path $Repo "external_data\staging\cross_venue_v1"
 $CollectorVenues = @("bitget", "binance", "bybit", "okx", "hyperliquid")
+$SprintHeartbeatSeconds = 300
 
 New-Item -ItemType Directory -Force -Path $Runtime | Out-Null
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
@@ -67,6 +68,48 @@ function Get-VerifiedFeatureCount {
     }).Count
 }
 
+function Invoke-SprintCycle {
+    & $Python -m app.research_lab edge-sprint-cycle-v1 --apply 2>&1 |
+        Tee-Object -FilePath $LogPath -Append | Out-Host
+    return $LASTEXITCODE
+}
+
+function Invoke-ChallengerWithSprintHeartbeats {
+    $runId = [Guid]::NewGuid().ToString("N")
+    $stdoutPath = Join-Path $Runtime ("challenger_" + $runId + ".stdout.tmp")
+    $stderrPath = Join-Path $Runtime ("challenger_" + $runId + ".stderr.tmp")
+    $process = $null
+    $heartbeatExit = 0
+    try {
+        $arguments = @(
+            "-m", "app.research_lab", "continuous-edge-challenger-v2",
+            "--symbols", "BTCUSDT,ETHUSDT", "--max-runtime-minutes", "30"
+        )
+        $process = Start-Process -FilePath $Python -ArgumentList $arguments -NoNewWindow `
+            -PassThru -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath
+        try { $process.PriorityClass = "BelowNormal" } catch { }
+        while (-not $process.WaitForExit($SprintHeartbeatSeconds * 1000)) {
+            $cycleExit = Invoke-SprintCycle
+            if ($cycleExit -ne 0) { $heartbeatExit = $cycleExit }
+        }
+        $process.WaitForExit()
+        foreach ($path in @($stdoutPath, $stderrPath)) {
+            if (Test-Path -LiteralPath $path) {
+                Get-Content -LiteralPath $path | Tee-Object -FilePath $LogPath -Append | Out-Host
+            }
+        }
+        return [pscustomobject]@{
+            challenger_exit_code = $process.ExitCode
+            heartbeat_exit_code = $heartbeatExit
+        }
+    } finally {
+        if ($null -ne $process -and -not $process.HasExited) {
+            Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+        }
+        Remove-Item -LiteralPath $stdoutPath, $stderrPath -Force -ErrorAction SilentlyContinue
+    }
+}
+
 $mutex = New-Object System.Threading.Mutex($false, "Local\BitgetBotStorageEdgeSchedulerV2")
 try { $acquired = $mutex.WaitOne(0) } catch [System.Threading.AbandonedMutexException] { $acquired = $true }
 if (-not $acquired) { Write-Host "Storage scheduler already running."; return }
@@ -113,6 +156,9 @@ try {
             [string]$contractState.guardrails_status -eq "PASS"
         )
 
+        # Keep active-runtime accounting independent from storage/challenger duration.
+        $earlySprintExit = Invoke-SprintCycle
+
         & $Python -m app.research_lab storage-efficiency-cycle-v2 --apply 2>&1 |
             Tee-Object -FilePath $LogPath -Append | Out-Host
         $storageExit = $LASTEXITCODE
@@ -138,24 +184,29 @@ try {
             $allowChallenger -and $collectorsHealthy -and
             -not $heavyRunning -and $intervalOk -and $newPartitions -ge $minNew
         )
-        $challengerExit = $null
-        $lastChallengerAt = if ($previous) { $previous.last_challenger_at } else { $null }
-        if ($challengerEligible) {
-            & $Python -m app.research_lab continuous-edge-challenger-v2 `
-                --symbols BTCUSDT,ETHUSDT --max-runtime-minutes 30 2>&1 |
-                Tee-Object -FilePath $LogPath -Append | Out-Host
-            $challengerExit = $LASTEXITCODE
-            $lastChallengerAt = [DateTime]::UtcNow.ToString("o")
-            if ($challengerExit -eq 0) { $lastFeatureCount = $featureCount }
-        }
-        & $Python -m app.research_lab edge-sprint-cycle-v1 --apply 2>&1 |
-            Tee-Object -FilePath $LogPath -Append | Out-Host
-        $sprintExit = $LASTEXITCODE
+        $sprintExit = Invoke-SprintCycle
+        if ($earlySprintExit -ne 0) { $sprintExit = $earlySprintExit }
         $sprintState = Read-JsonSafe $SprintStatus
         $sprintPass = (
             $sprintExit -eq 0 -and $null -ne $sprintState -and
             [string]$sprintState.status -in @("ACTIVE", "PAUSED", "COMPLETED")
         )
+        $challengerExit = $null
+        $lastChallengerAt = if ($previous) { $previous.last_challenger_at } else { $null }
+        if ($challengerEligible) {
+            $challengerResult = Invoke-ChallengerWithSprintHeartbeats
+            $challengerExit = $challengerResult.challenger_exit_code
+            if ($challengerResult.heartbeat_exit_code -ne 0) {
+                $sprintExit = $challengerResult.heartbeat_exit_code
+            }
+            $sprintState = Read-JsonSafe $SprintStatus
+            $sprintPass = (
+                $sprintExit -eq 0 -and $null -ne $sprintState -and
+                [string]$sprintState.status -in @("ACTIVE", "PAUSED", "COMPLETED")
+            )
+            $lastChallengerAt = [DateTime]::UtcNow.ToString("o")
+            if ($challengerExit -eq 0) { $lastFeatureCount = $featureCount }
+        }
         $handoffStatus = "NOT_DUE"
         $handoffExit = $null
         $handoffPath = $null
