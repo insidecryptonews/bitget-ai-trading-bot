@@ -25,7 +25,11 @@ from .isolated_research_demos import (
     edge_demo_status,
     ensure_diagnostic_demo,
 )
-from .project_memory_contract import contract_status
+from .project_memory_contract import (
+    DECISION_LEDGER_PATH,
+    append_research_decision,
+    contract_status,
+)
 from .storage_remote_restore_guard import disk_guard_status, remote_restore_status
 
 
@@ -43,6 +47,10 @@ CROSS_PATH = REPO_ROOT / "data" / "runtime" / "cross_venue" / "dashboard_snapsho
 STORAGE_PATH = REPO_ROOT / "data" / "runtime" / "storage_efficiency_v2" / "storage_status.json"
 CHALLENGER_PATH = REPO_ROOT / "data" / "runtime" / "storage_efficiency_v2" / "challenger_status.json"
 SCHEDULER_PATH = REPO_ROOT / "data" / "runtime" / "storage_efficiency_v2" / "scheduler_status.json"
+ATI_PAPER_PATH = REPO_ROOT / "data" / "runtime" / "ati_paper" / "executor_status.json"
+COLLECTOR_ROOT = REPO_ROOT / "external_data" / "staging" / "cross_venue_v1"
+RUNTIME_HEARTBEAT_LEDGER_PATH = RUNTIME_ROOT / "runtime_heartbeats.jsonl"
+REQUIRED_COLLECTOR_VENUES = ("bitget", "binance", "bybit", "okx", "hyperliquid")
 
 
 def utc_now() -> str:
@@ -120,7 +128,12 @@ def load_config(path: Path = CONFIG_PATH) -> dict[str, Any]:
         raise ValueError("EDGE_SPRINT_CONFIG_INVALID")
     locked = {
         "duration_hours": 48,
+        "target_active_runtime_seconds": 172800,
         "snapshot_interval_hours": 6,
+        "runtime_heartbeat_max_gap_seconds": 900,
+        "collector_heartbeat_max_age_seconds": 180,
+        "runtime_clock_skew_tolerance_seconds": 30,
+        "migration_snapshot_gap_grace_seconds": 900,
         "holdout_max_accesses": 1,
         "paper_filter_enabled": False,
         "can_send_real_orders": False,
@@ -133,6 +146,335 @@ def load_config(path: Path = CONFIG_PATH) -> dict[str, Any]:
     if len(config.get("families") or []) != 7:
         raise ValueError("EDGE_SPRINT_FAMILY_REGISTRY_INCOMPLETE")
     return config
+
+
+def _append_jsonl(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.is_symlink() or path.parent.is_symlink():
+        raise ValueError("EDGE_SPRINT_SYMLINK_BLOCKED")
+    with path.open("a", encoding="utf-8", newline="\n") as handle:
+        handle.write(json.dumps(payload, sort_keys=True, ensure_ascii=True, allow_nan=False) + "\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+
+
+def _safe_int(value: Any) -> int:
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError, OverflowError):
+        return 0
+
+
+def _collector_progress_marker(
+    dataset: dict[str, Any], storage: dict[str, Any], collector_rows: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "dataset_hash": dataset.get("dataset_hash"),
+        "dataset_rows": _safe_int(dataset.get("total_feature_rows")),
+        "verified_feature_files": _safe_int(dataset.get("verified_feature_files")),
+        "raw_logical_bytes": _safe_int(storage.get("raw_logical_bytes")),
+        "raw_physical_bytes": _safe_int(storage.get("raw_physical_bytes") or storage.get("physical_bytes")),
+        "collectors": {
+            venue: {
+                "normalized_events": _safe_int(row.get("normalized_events")),
+                "storage_rows": _safe_int(row.get("storage_rows_this_process")),
+                "stream_size_bytes": _safe_int(row.get("stream_size_bytes")),
+                "last_hash": row.get("last_hash"),
+                "session_started_at": row.get("session_started_at"),
+            }
+            for venue, row in sorted(collector_rows.items())
+        },
+    }
+
+
+def _marker_advanced(previous: dict[str, Any] | None, current: dict[str, Any]) -> bool:
+    if not isinstance(previous, dict) or not previous:
+        return False
+    for key in ("dataset_rows", "verified_feature_files", "raw_logical_bytes"):
+        if _safe_int(current.get(key)) > _safe_int(previous.get(key)):
+            return True
+    if current.get("dataset_hash") and current.get("dataset_hash") != previous.get("dataset_hash"):
+        return True
+    old_collectors = previous.get("collectors") if isinstance(previous.get("collectors"), dict) else {}
+    new_collectors = current.get("collectors") if isinstance(current.get("collectors"), dict) else {}
+    for venue, row in new_collectors.items():
+        old = old_collectors.get(venue) if isinstance(old_collectors.get(venue), dict) else {}
+        for key in ("normalized_events", "storage_rows", "stream_size_bytes"):
+            if _safe_int(row.get(key)) > _safe_int(old.get(key)):
+                return True
+        if row.get("last_hash") and row.get("last_hash") != old.get("last_hash"):
+            return True
+    return False
+
+
+def _runtime_evidence(
+    *, now: datetime, dataset: dict[str, Any], config: dict[str, Any],
+    scheduler_path: Path = SCHEDULER_PATH, storage_path: Path = STORAGE_PATH,
+    collector_root: Path = COLLECTOR_ROOT, previous_marker: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    scheduler = _read_json(scheduler_path, {}) or {}
+    storage = _read_json(storage_path, {}) or {}
+    max_collector_age = float(config["collector_heartbeat_max_age_seconds"])
+    max_scheduler_age = float(config["runtime_heartbeat_max_gap_seconds"])
+    clock_skew_tolerance = float(config["runtime_clock_skew_tolerance_seconds"])
+    scheduler_started = _parse_time(scheduler.get("started_at"))
+    scheduler_age = (now - scheduler_started).total_seconds() if scheduler_started else math.inf
+    scheduler_alive = bool(
+        scheduler.get("status") == "RUNNING"
+        and scheduler.get("collectors_healthy") is True
+        and -clock_skew_tolerance <= scheduler_age <= max_scheduler_age
+    )
+    collectors: dict[str, Any] = {}
+    collector_blockers: list[str] = []
+    for venue in REQUIRED_COLLECTOR_VENUES:
+        path = collector_root / venue / "health.json"
+        row = _read_json(path, {}) or {}
+        heartbeat = _parse_time(row.get("heartbeat_at"))
+        age = (now - heartbeat).total_seconds() if heartbeat else math.inf
+        healthy = bool(
+            row.get("status") not in {None, "ERROR", "FAILED", "HALTED"}
+            and row.get("connected") is True
+            and -clock_skew_tolerance <= age <= max_collector_age
+            and row.get("uses_private_endpoints") is not True
+            and row.get("can_send_real_orders") is not True
+        )
+        collectors[venue] = {**row, "heartbeat_age_seconds": age, "runtime_healthy": healthy}
+        if not healthy:
+            collector_blockers.append(f"COLLECTOR_NOT_RUNTIME_HEALTHY:{venue}")
+    marker = _collector_progress_marker(dataset, storage, collectors)
+    data_growing = _marker_advanced(previous_marker, marker)
+    blockers = list(collector_blockers)
+    if not scheduler_alive:
+        blockers.append("SCHEDULER_HEARTBEAT_NOT_VALID")
+    if not data_growing:
+        blockers.append("DATA_PROGRESS_NOT_CONFIRMED")
+    stack_healthy = scheduler_alive and not collector_blockers
+    return {
+        "schema": "edge_sprint_runtime_evidence.v2",
+        "observed_at": now.isoformat(),
+        "scheduler_alive": scheduler_alive,
+        "scheduler_status": scheduler.get("status"),
+        "scheduler_cycle": scheduler.get("cycle"),
+        "scheduler_heartbeat_age_seconds": scheduler_age,
+        "collectors_healthy": not collector_blockers,
+        "collector_status": {
+            venue: {
+                "status": row.get("status"),
+                "connected": row.get("connected"),
+                "heartbeat_age_seconds": row.get("heartbeat_age_seconds"),
+                "runtime_healthy": row.get("runtime_healthy"),
+            }
+            for venue, row in collectors.items()
+        },
+        "stack_healthy": stack_healthy,
+        "data_growing": data_growing,
+        "runtime_qualified": stack_healthy and data_growing,
+        "progress_marker": marker,
+        "progress_marker_hash": _sha(marker),
+        "blockers": blockers,
+    }
+
+
+def _snapshot_runtime_qualified(snapshot: dict[str, Any]) -> bool:
+    dataset = snapshot.get("dataset") if isinstance(snapshot.get("dataset"), dict) else {}
+    scheduler = snapshot.get("scheduler") if isinstance(snapshot.get("scheduler"), dict) else {}
+    contract = snapshot.get("contract") if isinstance(snapshot.get("contract"), dict) else {}
+    return bool(
+        dataset.get("dataset_hash")
+        and scheduler.get("status") in {"RUNNING", "COMPLETED"}
+        and scheduler.get("collectors_healthy") is True
+        and contract.get("guardrails_status") == "PASS"
+    )
+
+
+def _migrate_active_runtime_state(
+    state: dict[str, Any], *, now: datetime, config: dict[str, Any], report_root: Path,
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    if state.get("runtime_accounting_version") == "ACTIVE_RUNTIME_V2":
+        return state, None
+    before_hash = _sha(state)
+    snapshot_dir = report_root / str(state.get("sprint_id")) / "snapshots"
+    snapshots: list[dict[str, Any]] = []
+    for path in sorted(snapshot_dir.glob("snapshot_*.json")) if snapshot_dir.is_dir() else []:
+        row = _read_json(path, {}) or {}
+        captured = _parse_time(row.get("captured_at"))
+        if captured:
+            snapshots.append({"path": path.name, "captured_at": captured, "payload": row})
+    credited = 0.0
+    intervals: list[dict[str, Any]] = []
+    max_gap = float(config["snapshot_interval_hours"]) * 3600.0 + float(
+        config["migration_snapshot_gap_grace_seconds"]
+    )
+    for left, right in zip(snapshots, snapshots[1:]):
+        gap = (right["captured_at"] - left["captured_at"]).total_seconds()
+        left_data = left["payload"].get("dataset") or {}
+        right_data = right["payload"].get("dataset") or {}
+        grew = bool(
+            right_data.get("dataset_hash") != left_data.get("dataset_hash")
+            or _safe_int(right_data.get("total_feature_rows")) > _safe_int(left_data.get("total_feature_rows"))
+            or _safe_int(right_data.get("verified_feature_files")) > _safe_int(left_data.get("verified_feature_files"))
+        )
+        qualified = bool(
+            0 < gap <= max_gap
+            and _snapshot_runtime_qualified(left["payload"])
+            and _snapshot_runtime_qualified(right["payload"])
+            and grew
+        )
+        if qualified:
+            credited += gap
+        intervals.append({
+            "from": left["captured_at"].isoformat(),
+            "to": right["captured_at"].isoformat(),
+            "seconds": gap,
+            "dataset_grew": grew,
+            "credited": qualified,
+        })
+    target = int(config["target_active_runtime_seconds"])
+    start = _parse_time(state.get("started_at")) or now
+    original_end = state.get("original_planned_wall_clock_end") or state.get("planned_end_at")
+    migration = {
+        "schema": "edge_sprint_active_runtime_migration.v2",
+        "migrated_at": now.isoformat(),
+        "method": "CONSERVATIVE_VALID_SNAPSHOT_INTERVALS_ONLY",
+        "pre_migration_state_sha256": before_hash,
+        "sprint_id_preserved": state.get("sprint_id"),
+        "original_started_at": state.get("started_at"),
+        "original_planned_wall_clock_end": original_end,
+        "original_commit": state.get("commit"),
+        "original_tree": state.get("tree"),
+        "original_config_hash": state.get("config_hash"),
+        "snapshot_count_preserved": _safe_int(state.get("snapshot_count")),
+        "holdout_accesses_preserved": _safe_int(state.get("holdout_access_count")),
+        "snapshots_evaluated": len(snapshots),
+        "credited_active_runtime_seconds": int(credited),
+        "intervals": intervals,
+        "unproven_wall_time_credited": False,
+    }
+    state.update({
+        "schema": "edge_sprint_48h.state.v2",
+        "runtime_accounting_version": "ACTIVE_RUNTIME_V2",
+        "target_active_runtime_seconds": target,
+        "accumulated_active_runtime_seconds": min(target, int(credited)),
+        "active_runtime_remaining_seconds": max(0, target - int(credited)),
+        "current_session_started_at": None,
+        "current_session_runtime_seconds": 0,
+        "last_runtime_observation_at": None,
+        "last_valid_heartbeat_at": None,
+        "runtime_progress_marker": None,
+        "last_runtime_qualified": False,
+        "runtime_state": "WAITING_FOR_VALID_HEARTBEAT",
+        "explicit_pause": False,
+        "paused_at": None,
+        "resume_count": 0,
+        "shutdown_count": 0,
+        "wall_clock_elapsed_seconds": max(0, int((now - start).total_seconds())),
+        "original_planned_wall_clock_end": original_end,
+        "estimated_completion_at_if_continuous": (now + timedelta(seconds=max(0, target - int(credited)))).isoformat(),
+        "actual_completion_at": None,
+        "last_snapshot_active_runtime_seconds": min(target, int(credited)),
+        "migration": migration,
+        "migration_decision_recorded": False,
+    })
+    return state, migration
+
+
+def _persist_active_runtime_migration(
+    state: dict[str, Any], migration: dict[str, Any] | None, *,
+    migration_path: Path, decision_path: Path,
+) -> None:
+    if not migration:
+        return
+    _atomic_json(migration_path, migration)
+    if state.get("migration_decision_recorded"):
+        return
+    append_research_decision({
+        "dataset_hash": state.get("current_dataset_hash"),
+        "commit": _git("rev-parse", "HEAD"),
+        "hypothesis": "SPRINT_ACTIVE_RUNTIME_ACCOUNTING",
+        "proposed_change": "WALL_CLOCK_TO_ACCUMULATED_VALID_RUNTIME",
+        "reason": "PC_OFF_AND_SUSPEND_TIME_MUST_NOT_COUNT",
+        "result": "MIGRATED_CONSERVATIVELY_WITHOUT_HOLDOUT_ACCESS",
+        "tests": ["PENDING_FINAL_VALIDATION"],
+        "final_state": "RESEARCH_ONLY_NO_LIVE",
+    }, path=decision_path)
+    state["migration_decision_recorded"] = True
+
+
+def _update_active_runtime(
+    state: dict[str, Any], *, now: datetime, evidence: dict[str, Any], config: dict[str, Any],
+) -> dict[str, Any]:
+    target = int(config["target_active_runtime_seconds"])
+    accumulated = min(target, _safe_int(state.get("accumulated_active_runtime_seconds")))
+    increment = 0
+    last_observation = _parse_time(state.get("last_runtime_observation_at"))
+    delta = (now - last_observation).total_seconds() if last_observation else None
+    prior_stack_healthy = state.get("last_runtime_stack_healthy") is True
+    explicit_pause = state.get("explicit_pause") is True
+    max_gap = float(config["runtime_heartbeat_max_gap_seconds"])
+    previous_runtime_state = str(state.get("runtime_state") or "")
+    if explicit_pause:
+        runtime_state = "PAUSED_EXPLICIT"
+        state["current_session_started_at"] = None
+    elif evidence.get("stack_healthy") is not True:
+        runtime_state = "PAUSED_RUNTIME_NOT_QUALIFIED"
+        if previous_runtime_state == "RUNNING":
+            state["shutdown_count"] = _safe_int(state.get("shutdown_count")) + 1
+        state["paused_at"] = state.get("paused_at") or now.isoformat()
+        state["current_session_started_at"] = None
+        state["current_session_runtime_seconds"] = 0
+    else:
+        if delta is not None and delta > max_gap:
+            if previous_runtime_state == "RUNNING":
+                state["shutdown_count"] = _safe_int(state.get("shutdown_count")) + 1
+            state["resume_count"] = _safe_int(state.get("resume_count")) + 1
+            state["current_session_started_at"] = now.isoformat()
+            state["current_session_runtime_seconds"] = 0
+            state["paused_at"] = last_observation.isoformat() if last_observation else state.get("paused_at")
+            runtime_state = "RESUMED_AFTER_UNCOUNTED_GAP"
+        else:
+            if not state.get("current_session_started_at"):
+                if state.get("last_runtime_observation_at") or state.get("paused_at"):
+                    state["resume_count"] = _safe_int(state.get("resume_count")) + 1
+                state["current_session_started_at"] = now.isoformat()
+                state["current_session_runtime_seconds"] = 0
+            if (
+                delta is not None and 0 <= delta <= max_gap and prior_stack_healthy
+                and evidence.get("data_growing") is True
+            ):
+                increment = int(delta)
+                accumulated = min(target, accumulated + increment)
+                state["current_session_runtime_seconds"] = (
+                    _safe_int(state.get("current_session_runtime_seconds")) + increment
+                )
+                state["last_valid_heartbeat_at"] = now.isoformat()
+                runtime_state = "RUNNING"
+            else:
+                runtime_state = "WAITING_FOR_DATA_GROWTH"
+    start = _parse_time(state.get("started_at")) or now
+    remaining = max(0, target - accumulated)
+    snapshot_interval = int(float(config["snapshot_interval_hours"]) * 3600)
+    last_snapshot_active = _safe_int(state.get("last_snapshot_active_runtime_seconds"))
+    next_snapshot_active = min(target, last_snapshot_active + snapshot_interval)
+    state.update({
+        "target_active_runtime_seconds": target,
+        "accumulated_active_runtime_seconds": accumulated,
+        "active_runtime_remaining_seconds": remaining,
+        "active_runtime_increment_seconds": increment,
+        "wall_clock_elapsed_seconds": max(0, int((now - start).total_seconds())),
+        "estimated_completion_at_if_continuous": (now + timedelta(seconds=remaining)).isoformat(),
+        "runtime_state": runtime_state,
+        "last_runtime_observation_at": now.isoformat(),
+        "last_runtime_stack_healthy": evidence.get("stack_healthy") is True,
+        "last_runtime_qualified": increment > 0,
+        "runtime_progress_marker": evidence.get("progress_marker"),
+        "runtime_qualification": evidence,
+        "next_runtime_qualified_cycle_active_seconds": next_snapshot_active,
+        "next_runtime_qualified_cycle_at_if_continuous": (
+            now + timedelta(seconds=max(0, next_snapshot_active - accumulated))
+        ).isoformat(),
+        "pc_off_time_counts": False,
+    })
+    return state
 
 
 @contextmanager
@@ -194,6 +536,7 @@ def _dataset_snapshot() -> dict[str, Any]:
 
 def _funnel_snapshot() -> dict[str, Any]:
     ati = _read_json(ATI_PATH, {}) or {}
+    ati_paper = _read_json(ATI_PAPER_PATH, {}) or {}
     p11 = _read_json(P11_PATH, {}) or {}
     cross = _read_json(CROSS_PATH, {}) or {}
     metrics = p11.get("metrics") if isinstance(p11.get("metrics"), dict) else {}
@@ -205,7 +548,7 @@ def _funnel_snapshot() -> dict[str, Any]:
         if isinstance(row, dict) and len(row.get("leader_venues") or []) >= 2
     )
     return {
-        "ati": {
+        "ati_shadow": {
             "observations": int(ati.get("new_forward_candidates_seen") or 0),
             "signals": int(ati.get("signals_total") or 0),
             "blocked_signals": int(ati.get("paper_feed_blocked_signals") or 0),
@@ -214,6 +557,17 @@ def _funnel_snapshot() -> dict[str, Any]:
             "open_positions": int(ati.get("open_positions") or 0),
             "reconciliation": (ati.get("reconciliation") or {}).get("status") or ati.get("reconciliation_status"),
             "timing_metrics_status": "NEED_MORE_DATA" if not ati.get("timing_metrics") else "AVAILABLE",
+        },
+        "ati_paper": {
+            "trades": int(ati_paper.get("closed_trades") or 0),
+            "open_positions": int(ati_paper.get("open_positions") or 0),
+            "realized_equity": ati_paper.get("realized_equity"),
+            "total_equity": ati_paper.get("total_equity"),
+            "reconciliation": (
+                (ati_paper.get("reconciliation") or {}).get("status")
+                if isinstance(ati_paper.get("reconciliation"), dict)
+                else ati_paper.get("reconciliation")
+            ),
         },
         "p11": {
             "opportunities": int(metrics.get("forward_opportunities") or 0),
@@ -243,19 +597,26 @@ def _funnel_snapshot() -> dict[str, Any]:
     }
 
 
-def _population_counters(funnels: dict[str, Any], diagnostic: dict[str, Any]) -> dict[str, int]:
+def _population_counters(
+    funnels: dict[str, Any], diagnostic: dict[str, Any], edge_demo: dict[str, Any],
+) -> dict[str, int]:
     cross = funnels["cross_venue"]
     p11 = funnels["p11"]
-    ati = funnels["ati"]
+    ati_shadow = funnels["ati_shadow"]
+    ati_paper = funnels["ati_paper"]
     return {
         "raw_evaluations": int(cross["raw_evaluations"]),
         "unique_episodes": int(cross["unique_episodes"]),
-        "diagnostic_trades": int(diagnostic.get("trades") or 0),
-        "candidate_validation_fills": 0,
-        "forward_demo_trades": 0,
-        "ati_paper_trades": int(ati["closed_outcomes"]),
+        "ati_shadow_forward_signals": int(ati_shadow["signals"]),
+        "ati_shadow_forward_outcomes": int(ati_shadow["closed_outcomes"]),
+        "ati_paper_trades": int(ati_paper["trades"]),
+        "ati_paper_open_positions": int(ati_paper["open_positions"]),
         "p11_outcomes": int(p11["closed_outcomes"]),
         "cross_venue_paper_trades": int(cross["paper_trades"]),
+        "diagnostic_trades": int(diagnostic.get("trades") or 0),
+        "candidate_demo_trades": int(edge_demo.get("trades") or 0),
+        "candidate_validation_fills": 0,
+        "forward_demo_trades": 0,
     }
 
 
@@ -354,6 +715,11 @@ def _write_final_report(state: dict[str, Any], report_root: Path = REPORT_ROOT) 
         f"- Sprint: {state['sprint_id']}",
         f"- Status: {state.get('status')}",
         f"- Strategy verdict: {state.get('strategy_verdict')}",
+        f"- Active runtime seconds: {state.get('accumulated_active_runtime_seconds')}",
+        f"- Active runtime target seconds: {state.get('target_active_runtime_seconds')}",
+        f"- Wall-clock elapsed seconds: {state.get('wall_clock_elapsed_seconds')}",
+        f"- Original planned wall-clock end: {state.get('original_planned_wall_clock_end')}",
+        f"- Actual completion: {state.get('actual_completion_at')}",
         f"- Dataset hash: {state.get('current_dataset_hash')}",
         f"- Holdout: {(state.get('holdout') or {}).get('status')}",
         f"- Diagnostic demo: {(state.get('diagnostic_demo') or {}).get('status')}",
@@ -378,11 +744,152 @@ def sprint_status(path: Path = STATUS_PATH) -> dict[str, Any]:
     }
 
 
+def _finalization_blockers(
+    state: dict[str, Any], funnels: dict[str, Any], diagnostic: dict[str, Any],
+    contract: dict[str, Any], evidence: dict[str, Any],
+) -> list[str]:
+    blockers: list[str] = []
+    if contract.get("guardrails_status") != "PASS":
+        blockers.append("PROJECT_MEMORY_CONTRACT_NOT_PASS")
+    if evidence.get("runtime_qualified") is not True:
+        blockers.append("FINAL_RUNTIME_INTERVAL_NOT_QUALIFIED")
+    target = _safe_int(state.get("target_active_runtime_seconds"))
+    if _safe_int(state.get("last_snapshot_active_runtime_seconds")) < target:
+        blockers.append("FINAL_RUNTIME_SNAPSHOT_MISSING")
+    reconciliation = {
+        "ati_shadow": (funnels.get("ati_shadow") or {}).get("reconciliation"),
+        "ati_paper": (funnels.get("ati_paper") or {}).get("reconciliation"),
+        "p11": (funnels.get("p11") or {}).get("reconciliation"),
+        "cross_venue": (funnels.get("cross_venue") or {}).get("reconciliation"),
+        "diagnostic": diagnostic.get("reconciliation"),
+    }
+    for component, status in reconciliation.items():
+        if status != "PASS":
+            blockers.append(f"RECONCILIATION_NOT_PASS:{component}:{status or 'UNKNOWN'}")
+    return blockers
+
+
+def pause_sprint_session(
+    *, reason: str = "USER_REQUESTED_SHUTDOWN", now: datetime | None = None,
+    state_path: Path = STATE_PATH, status_path: Path = STATUS_PATH,
+    report_root: Path = REPORT_ROOT,
+    migration_path: Path = RUNTIME_ROOT / "active_runtime_migration_v2.json",
+    decision_path: Path = DECISION_LEDGER_PATH, lock_path: Path = LOCK_PATH,
+) -> dict[str, Any]:
+    with _cycle_lock(lock_path) as acquired:
+        if not acquired:
+            return {"status": "BLOCKED_SPRINT_CYCLE_IN_PROGRESS", **safety()}
+        return _pause_sprint_session_unlocked(
+            reason=reason, now=now, state_path=state_path, status_path=status_path,
+            report_root=report_root, migration_path=migration_path, decision_path=decision_path,
+        )
+
+
+def _pause_sprint_session_unlocked(
+    *, reason: str = "USER_REQUESTED_SHUTDOWN", now: datetime | None = None,
+    state_path: Path = STATE_PATH, status_path: Path = STATUS_PATH,
+    report_root: Path = REPORT_ROOT,
+    migration_path: Path = RUNTIME_ROOT / "active_runtime_migration_v2.json",
+    decision_path: Path = DECISION_LEDGER_PATH,
+) -> dict[str, Any]:
+    current_time = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    state = _read_json(state_path, {}) or {}
+    if not state:
+        return {"status": "NOT_STARTED", **safety()}
+    state, migration = _migrate_active_runtime_state(
+        state, now=current_time, config=load_config(), report_root=report_root,
+    )
+    _persist_active_runtime_migration(
+        state, migration, migration_path=migration_path, decision_path=decision_path,
+    )
+    already_paused = state.get("explicit_pause") is True
+    state.update({
+        "explicit_pause": True,
+        "runtime_state": "PAUSED_EXPLICIT",
+        "status": "PAUSED",
+        "paused_at": current_time.isoformat(),
+        "pause_reason": str(reason or "USER_REQUESTED_SHUTDOWN")[:200],
+        "current_session_started_at": None,
+        "last_runtime_observation_at": None,
+        "last_runtime_stack_healthy": False,
+        "last_runtime_qualified": False,
+        "runtime_progress_marker": None,
+        "shutdown_count": _safe_int(state.get("shutdown_count")) + (0 if already_paused else 1),
+        "updated_at": current_time.isoformat(),
+        **safety(),
+    })
+    _atomic_json(state_path, state)
+    _atomic_json(status_path, state)
+    return state
+
+
+def resume_sprint_session(
+    *, now: datetime | None = None, state_path: Path = STATE_PATH,
+    status_path: Path = STATUS_PATH, report_root: Path = REPORT_ROOT,
+    migration_path: Path = RUNTIME_ROOT / "active_runtime_migration_v2.json",
+    decision_path: Path = DECISION_LEDGER_PATH, lock_path: Path = LOCK_PATH,
+) -> dict[str, Any]:
+    with _cycle_lock(lock_path) as acquired:
+        if not acquired:
+            return {"status": "BLOCKED_SPRINT_CYCLE_IN_PROGRESS", **safety()}
+        return _resume_sprint_session_unlocked(
+            now=now, state_path=state_path, status_path=status_path,
+            report_root=report_root, migration_path=migration_path, decision_path=decision_path,
+        )
+
+
+def _resume_sprint_session_unlocked(
+    *, now: datetime | None = None, state_path: Path = STATE_PATH,
+    status_path: Path = STATUS_PATH,
+    report_root: Path = REPORT_ROOT,
+    migration_path: Path = RUNTIME_ROOT / "active_runtime_migration_v2.json",
+    decision_path: Path = DECISION_LEDGER_PATH,
+) -> dict[str, Any]:
+    current_time = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    state = _read_json(state_path, {}) or {}
+    if not state:
+        return {"status": "NOT_STARTED", **safety()}
+    contract = contract_status()
+    if contract.get("guardrails_status") != "PASS":
+        return {
+            "status": "BLOCKED_PROJECT_MEMORY_CONTRACT",
+            "blockers": contract.get("violations") or ["PROJECT_MEMORY_GUARDRAILS_NOT_PASS"],
+            **safety(),
+        }
+    state, migration = _migrate_active_runtime_state(
+        state, now=current_time, config=load_config(), report_root=report_root,
+    )
+    _persist_active_runtime_migration(
+        state, migration, migration_path=migration_path, decision_path=decision_path,
+    )
+    was_paused = state.get("explicit_pause") is True or not state.get("current_session_started_at")
+    state.update({
+        "explicit_pause": False,
+        "runtime_state": "WAITING_FOR_VALID_HEARTBEAT",
+        "status": "ACTIVE",
+        "last_resumed_at": current_time.isoformat(),
+        "current_session_started_at": current_time.isoformat(),
+        "current_session_runtime_seconds": 0,
+        "last_runtime_observation_at": None,
+        "last_runtime_stack_healthy": False,
+        "last_runtime_qualified": False,
+        "runtime_progress_marker": None,
+        "resume_count": _safe_int(state.get("resume_count")) + (1 if was_paused else 0),
+        "updated_at": current_time.isoformat(),
+        **safety(),
+    })
+    _atomic_json(state_path, state)
+    _atomic_json(status_path, state)
+    return state
+
+
 def run_sprint_cycle(
     *, apply: bool = False, now: datetime | None = None,
     state_path: Path = STATE_PATH, status_path: Path = STATUS_PATH,
     holdout_path: Path = HOLDOUT_SEAL_PATH, report_root: Path = REPORT_ROOT,
-    lock_path: Path = LOCK_PATH,
+    lock_path: Path = LOCK_PATH, heartbeat_path: Path = RUNTIME_HEARTBEAT_LEDGER_PATH,
+    migration_path: Path = RUNTIME_ROOT / "active_runtime_migration_v2.json",
+    decision_path: Path = DECISION_LEDGER_PATH,
 ) -> dict[str, Any]:
     current_time = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
     config = load_config()
@@ -422,15 +929,33 @@ def run_sprint_cycle(
             config_hash = _sha(config)
             seal = _candidate_seal(challenger, dataset.get("dataset_hash"), config_hash)
             previous = {
-                "schema": "edge_sprint_48h.state.v1", "sprint_id": sprint_id,
+                "schema": "edge_sprint_48h.state.v2", "sprint_id": sprint_id,
                 "started_at": start.isoformat(),
                 "planned_end_at": (start + timedelta(hours=48)).isoformat(),
+                "original_planned_wall_clock_end": (start + timedelta(hours=48)).isoformat(),
                 "commit": _git("rev-parse", "HEAD"), "tree": _git("rev-parse", "HEAD^{tree}"),
                 "config_hash": config_hash, "initial_dataset_hash": dataset.get("dataset_hash"),
                 "last_analyzed_dataset_hash": None, "last_snapshot_at": None,
                 "last_cycle_at": None, "snapshot_count": 0,
                 "holdout_access_count": 0, "holdout": {"status": "SEALED_NOT_EVALUATED", "access_count": 0},
                 "finalized": False, "families": config["families"],
+                "runtime_accounting_version": "ACTIVE_RUNTIME_V2",
+                "target_active_runtime_seconds": int(config["target_active_runtime_seconds"]),
+                "accumulated_active_runtime_seconds": 0,
+                "active_runtime_remaining_seconds": int(config["target_active_runtime_seconds"]),
+                "current_session_started_at": None,
+                "current_session_runtime_seconds": 0,
+                "last_runtime_observation_at": None,
+                "last_valid_heartbeat_at": None,
+                "runtime_progress_marker": None,
+                "last_runtime_qualified": False,
+                "runtime_state": "WAITING_FOR_VALID_HEARTBEAT",
+                "explicit_pause": False,
+                "paused_at": None,
+                "resume_count": 0,
+                "shutdown_count": 0,
+                "last_snapshot_active_runtime_seconds": 0,
+                "actual_completion_at": None,
             }
             if apply:
                 _atomic_json(holdout_path, seal)
@@ -452,10 +977,32 @@ def run_sprint_cycle(
                 }
                 _atomic_json(status_path, result)
                 return result
+        previous, migration = _migrate_active_runtime_state(
+            previous, now=current_time, config=config, report_root=report_root,
+        )
+        if migration and apply:
+            _persist_active_runtime_migration(
+                previous, migration, migration_path=migration_path, decision_path=decision_path,
+            )
+        runtime_time = current_time if now is not None else datetime.now(timezone.utc)
+        evidence = _runtime_evidence(
+            now=runtime_time, dataset=dataset, config=config,
+            scheduler_path=SCHEDULER_PATH, storage_path=STORAGE_PATH,
+            collector_root=COLLECTOR_ROOT,
+            previous_marker=previous.get("runtime_progress_marker"),
+        )
+        previous = _update_active_runtime(
+            previous, now=runtime_time, evidence=evidence, config=config,
+        )
         start_at = _parse_time(previous.get("started_at")) or current_time
-        end_at = _parse_time(previous.get("planned_end_at")) or (start_at + timedelta(hours=48))
-        last_snapshot = _parse_time(previous.get("last_snapshot_at"))
-        snapshot_due = last_snapshot is None or (current_time - last_snapshot) >= timedelta(hours=6)
+        target_active = int(config["target_active_runtime_seconds"])
+        active_runtime = _safe_int(previous.get("accumulated_active_runtime_seconds"))
+        snapshot_interval = int(float(config["snapshot_interval_hours"]) * 3600)
+        last_snapshot_active = _safe_int(previous.get("last_snapshot_active_runtime_seconds"))
+        snapshot_due = (
+            int(previous.get("snapshot_count") or 0) == 0
+            or active_runtime >= min(target_active, last_snapshot_active + snapshot_interval)
+        )
         dataset_changed = dataset.get("dataset_hash") != previous.get("last_analyzed_dataset_hash")
         analysis_eligible = bool(
             snapshot_due and dataset_changed and disk.get("allow_challenger")
@@ -469,9 +1016,16 @@ def run_sprint_cycle(
             "status": "NO DEFENSIBLE CANDIDATE - DEMO NOT STARTED",
             "account_initialized": False, **safety(),
         }
-        populations = _population_counters(funnels, diagnostic)
+        populations = _population_counters(funnels, diagnostic, edge_demo)
         snapshot = {
             "schema": "edge_sprint_48h.snapshot.v1", "captured_at": current_time.isoformat(),
+            "active_runtime": {
+                "accumulated_seconds": active_runtime,
+                "target_seconds": target_active,
+                "remaining_seconds": max(0, target_active - active_runtime),
+                "runtime_state": previous.get("runtime_state"),
+                "qualification": evidence,
+            },
             "dataset": dataset, "dataset_changed": dataset_changed,
             "analysis_eligible": analysis_eligible,
             "analysis_executed_by_this_cycle": False,
@@ -488,20 +1042,25 @@ def run_sprint_cycle(
             _atomic_json(snapshot_path, snapshot)
             previous["snapshot_count"] = sequence
             previous["last_snapshot_at"] = current_time.isoformat()
+            previous["last_snapshot_active_runtime_seconds"] = active_runtime
         if analysis_eligible:
             previous["last_analyzed_dataset_hash"] = dataset.get("dataset_hash")
-        final_due = current_time >= end_at
+        final_due = active_runtime >= target_active
+        finalization_blockers = _finalization_blockers(
+            previous, funnels, diagnostic, contract, evidence,
+        ) if final_due else []
         if final_due and not previous.get("finalized"):
             if not apply:
                 previous["holdout_preview"] = {
                     "status": "NOT_ACCESSED_DRY_RUN", "access_count": 0,
                 }
-            else:
+            elif not finalization_blockers:
                 seal = _read_json(holdout_path, {}) or {}
                 holdout = _final_holdout(challenger, dataset.get("dataset_hash"), seal)
                 previous["holdout"] = holdout
                 previous["holdout_access_count"] = int(holdout.get("access_count") or 0)
                 previous["finalized"] = True
+                previous["actual_completion_at"] = current_time.isoformat()
                 seal.update({
                     "status": holdout.get("status"),
                     "access_count": int(holdout.get("access_count") or 0),
@@ -529,15 +1088,23 @@ def run_sprint_cycle(
             ),
             "dataset_changed": dataset_changed, "analysis_eligible": analysis_eligible,
             "analysis_executed_by_this_cycle": False,
-            "next_cycle_at": (current_time + timedelta(hours=6)).isoformat(),
-            "remaining_seconds": max(0, int((end_at - current_time).total_seconds())),
+            "next_cycle_at": previous.get("next_runtime_qualified_cycle_at_if_continuous"),
+            "remaining_seconds": previous.get("active_runtime_remaining_seconds"),
+            "finalization_blockers": finalization_blockers,
             "status": (
                 "COMPLETED" if previous.get("finalized")
                 else "FINALIZATION_DUE_APPLY_REQUIRED" if final_due and not apply
+                else "FINALIZATION_BLOCKED" if final_due and finalization_blockers
+                else "PAUSED" if previous.get("explicit_pause")
                 else "ACTIVE"
             ),
             "infrastructure_verdict": (
-                "48H SPRINT ACTIVO Y STORAGE SEGURO" if remote.get("remote_restore_verified")
+                "48H SPRINT COMPLETED AND STORAGE SAFE"
+                if previous.get("finalized") and remote.get("remote_restore_verified")
+                else "48H SPRINT COMPLETED WITH R2 BLOCKED"
+                if previous.get("finalized")
+                else "48H SPRINT ACTIVO Y STORAGE SEGURO"
+                if remote.get("remote_restore_verified")
                 else "48H SPRINT ACTIVO CON R2 BLOQUEADO"
             ),
             "strategy_verdict": strategy_verdict,
@@ -550,6 +1117,26 @@ def run_sprint_cycle(
         if previous.get("holdout_access_count", 0) > 1:
             raise ValueError("EDGE_SPRINT_HOLDOUT_ACCESS_LIMIT_EXCEEDED")
         if apply:
+            heartbeat_id = _sha({
+                "sprint_id": previous.get("sprint_id"),
+                "observed_at": evidence.get("observed_at"),
+                "progress_marker_hash": evidence.get("progress_marker_hash"),
+            })
+            if heartbeat_id != previous.get("last_runtime_heartbeat_id"):
+                _append_jsonl(heartbeat_path, {
+                    "schema": "edge_sprint_runtime_heartbeat.v2",
+                    "heartbeat_id": heartbeat_id,
+                    "sprint_id": previous.get("sprint_id"),
+                    "observed_at": evidence.get("observed_at"),
+                    "runtime_state": previous.get("runtime_state"),
+                    "runtime_qualified": evidence.get("runtime_qualified"),
+                    "active_runtime_increment_seconds": previous.get("active_runtime_increment_seconds"),
+                    "accumulated_active_runtime_seconds": previous.get("accumulated_active_runtime_seconds"),
+                    "progress_marker_hash": evidence.get("progress_marker_hash"),
+                    "blockers": evidence.get("blockers") or [],
+                    **safety(),
+                })
+                previous["last_runtime_heartbeat_id"] = heartbeat_id
             if previous.get("finalized") and not previous.get("final_report"):
                 previous["final_report"] = _write_final_report(previous, report_root)
             _atomic_json(state_path, previous)

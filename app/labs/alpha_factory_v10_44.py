@@ -47,6 +47,10 @@ FORBIDDEN_FEATURE_PREFIXES = ("ret_", "mfe", "mae", "future", "label",
                               "outcome", "barrier", "pnl")
 
 
+class RuntimeBudgetExceeded(RuntimeError):
+    """Cooperative stop between deterministic replay chunks."""
+
+
 def _safety() -> dict[str, Any]:
     return {
         "research_only": True,
@@ -366,12 +370,16 @@ def _metrics_from_outcomes(outs: list[dict], n_tests: int) -> dict[str, Any]:
 def _simulate_candidate(rule: dict[str, Any], exit_cfg: dict[str, Any],
                         feats: list[dict], bars: list[dict],
                         q: dict[str, float], costs: dict | None = None,
-                        n_tests: int = 1) -> dict[str, Any]:
+                        n_tests: int = 1,
+                        deadline_epoch_seconds: float | None = None) -> dict[str, Any]:
     fn = _rule_fn(rule, q)
     outs: list[dict] = []
     rows: list[dict[str, Any]] = []
     last_i = -999
     for i, f in enumerate(feats[:-1]):
+        if i % 1024 == 0 and deadline_epoch_seconds is not None:
+            if time.time() >= deadline_epoch_seconds:
+                raise RuntimeBudgetExceeded("runtime_budget_exhausted_during_candidate")
         if i - last_i < 3:
             continue
         side = fn(f, feats[i - 1] if i else None, q, None)
@@ -494,6 +502,7 @@ def run_alpha_factory(symbols: str = "BTCUSDT", data_source: str = "ws_persisten
                       write_reports: bool = True,
                       max_candidates: int = MAX_CANDIDATES_DEFAULT) -> dict[str, Any]:
     started = time.time()
+    deadline = started + max(0.01, float(max_runtime_minutes)) * 60
     syms = [s.strip().upper() for s in str(symbols or "BTCUSDT").split(",") if s.strip()] or ["BTCUSDT"]
     all_candidates: list[dict[str, Any]] = []
     datasets: list[dict[str, Any]] = []
@@ -521,18 +530,27 @@ def run_alpha_factory(symbols: str = "BTCUSDT", data_source: str = "ws_persisten
         exits = _exit_grid()
         total_tests = len(rules) * len(exits)
         tested = 0
+        runtime_exhausted = False
         for rule in rules:
             for exit_cfg in exits:
                 if tested >= max_candidates:
                     break
                 if (time.time() - started) > float(max_runtime_minutes) * 60:
                     errors.append("runtime_budget_exhausted")
+                    runtime_exhausted = True
                     break
                 tested += 1
                 # the multiple-testing penalty is applied to EVERY lower bound so
                 # the ranking key is honestly "adjusted for 50 hypotheses tested"
-                sim = _simulate_candidate(rule, exit_cfg, feats, bars, q,
-                                          n_tests=total_tests)
+                try:
+                    sim = _simulate_candidate(
+                        rule, exit_cfg, feats, bars, q,
+                        n_tests=total_tests, deadline_epoch_seconds=deadline,
+                    )
+                except RuntimeBudgetExceeded:
+                    errors.append("runtime_budget_exhausted_during_candidate")
+                    runtime_exhausted = True
+                    break
                 stress_metrics: dict[str, dict] = {}
                 for sname, costs in COST_STRESS.items():
                     ss = sim if sname == "base" else _reprice_simulation(
@@ -571,7 +589,9 @@ def run_alpha_factory(symbols: str = "BTCUSDT", data_source: str = "ws_persisten
                     "score": _candidate_score(test_m, val_m, stress_metrics, blockers),
                     **_safety(),
                 })
-        if "runtime_budget_exhausted" in errors:
+            if runtime_exhausted:
+                break
+        if runtime_exhausted or "runtime_budget_exhausted" in errors:
             break
         stage_timings.append({
             "symbol": symbol,

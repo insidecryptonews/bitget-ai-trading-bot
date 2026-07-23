@@ -89,10 +89,74 @@ class CrossVenueService:
                 self.offsets[venue] = stream.stat().st_size if stream.is_file() else 0
             boundary_mode = "FROZEN_AT_CURRENT_STREAM_END"
         saved_frontier = int(saved_offsets.get("_last_processed_monotonic_ns") or 0) if resume_valid else 0
-        self.clock_epoch_reset = saved_frontier > time.monotonic_ns()
-        self.last_processed_monotonic_ns = 0 if self.clock_epoch_reset else saved_frontier
+        current_monotonic_ns = time.monotonic_ns()
+        future_cursor_venues: list[str] = []
+        if resume_valid and not bootstrap_existing:
+            # A prior process may have persisted zero as its frontier after an OS
+            # reboot while unread rows still carry the previous boot's monotonic
+            # epoch. Detect that state at each durable cursor as well as from the
+            # saved frontier. Replaying incomparable epochs would stall the
+            # causal reorder buffer and eventually fill the bounded hot stream.
+            future_tolerance_ns = 5_000_000_000
+            for venue in active_venues:
+                stream = self.root / venue / "normalized" / "current.jsonl"
+                old_offset = int(self.offsets.get(venue) or 0)
+                if stream.is_symlink() or not stream.is_file():
+                    continue
+                snapshot_size = stream.stat().st_size
+                if old_offset < 0 or old_offset >= snapshot_size:
+                    continue
+                with stream.open("rb") as handle:
+                    handle.seek(old_offset)
+                    event, _, _ = read_next_jsonl_record(handle, snapshot_size=snapshot_size)
+                event_monotonic_ns = int((event or {}).get("local_receive_monotonic_ns") or 0)
+                if event_monotonic_ns > current_monotonic_ns + future_tolerance_ns:
+                    future_cursor_venues.append(venue)
+        self.clock_epoch_future_cursor_venues = sorted(future_cursor_venues)
+        self.clock_epoch_reset = (
+            saved_frontier > current_monotonic_ns
+            or bool(self.clock_epoch_future_cursor_venues)
+        )
+        self.clock_epoch_refreeze_offsets: dict[str, int] = {}
         self.refreeze_venues: set[str] = set()
+        if self.clock_epoch_reset and not bootstrap_existing:
+            # Monotonic timestamps are not comparable across OS boots. Preserve
+            # all files as research history, but freeze a new forward-only
+            # boundary at each current stream end. No pre-reset row is replayed
+            # into the simulated account.
+            for venue in active_venues:
+                stream = self.root / venue / "normalized" / "current.jsonl"
+                if not stream.is_symlink() and stream.is_file():
+                    snapshot_size = stream.stat().st_size
+                    self.offsets[venue] = snapshot_size
+                    self.clock_epoch_refreeze_offsets[venue] = snapshot_size
+                else:
+                    self.offsets[venue] = 0
+                    self.refreeze_venues.add(venue)
+            boundary_mode = "CLOCK_EPOCH_RESET_REFROZEN_AT_CURRENT_STREAM_END"
+        self.last_processed_monotonic_ns = 0 if self.clock_epoch_reset else saved_frontier
         existing_boundary = read_json(self.forward_boundary_path, {}) or {}
+        prior_clock_reset = bool(existing_boundary.get("clock_epoch_reset_detected"))
+        prior_refrozen_at = existing_boundary.get("clock_epoch_refrozen_at")
+        if prior_clock_reset and not prior_refrozen_at:
+            try:
+                prior_refrozen_at = datetime.fromtimestamp(
+                    self.forward_boundary_path.stat().st_mtime, tz=timezone.utc,
+                ).isoformat()
+            except OSError:
+                prior_refrozen_at = None
+        refrozen_at = (
+            utc_now() if self.clock_epoch_reset
+            else prior_refrozen_at
+        )
+        recorded_future_cursor_venues = (
+            self.clock_epoch_future_cursor_venues if self.clock_epoch_reset
+            else list(existing_boundary.get("clock_epoch_future_cursor_venues") or [])
+        )
+        recorded_refreeze_offsets = (
+            dict(self.clock_epoch_refreeze_offsets) if self.clock_epoch_reset
+            else dict(existing_boundary.get("clock_epoch_refreeze_offsets") or {})
+        )
         self.forward_boundary = {
             "schema": "cross_venue_forward_boundary.v1",
             "boundary_mode": boundary_mode,
@@ -103,11 +167,44 @@ class CrossVenueService:
             ),
             "frozen_at": (existing_boundary.get("frozen_at") or utc_now()) if resume_valid else utc_now(),
             "initial_offsets": (existing_boundary.get("initial_offsets") or dict(self.offsets)) if resume_valid else dict(self.offsets),
-            "clock_epoch_reset_detected": self.clock_epoch_reset,
+            "clock_epoch_reset_detected": self.clock_epoch_reset or prior_clock_reset,
+            "clock_epoch_refrozen_at": refrozen_at,
+            "clock_epoch_future_cursor_venues": recorded_future_cursor_venues,
+            "clock_epoch_refreeze_offsets": recorded_refreeze_offsets,
             "historical_rows_eligible_for_paper": False,
             "code_commit": self.code_commit,
             **safety_envelope(),
         }
+        self.clock_epoch_paper_state: dict[str, Any] = {
+            "blocked": False,
+            "open_positions": 0,
+            "pending_signals": 0,
+            "reason": None,
+        }
+        if self.clock_epoch_reset and not bootstrap_existing:
+            try:
+                open_positions = len(self.ledger.open_positions())
+                pending_signals = len(self.ledger.pending_signals())
+                blocked = bool(open_positions or pending_signals)
+                reason = "CLOCK_EPOCH_RESET_WITH_OPEN_PAPER_STATE_REQUIRES_MANUAL_REVIEW" if blocked else None
+                self.clock_epoch_paper_state = {
+                    "blocked": blocked,
+                    "open_positions": open_positions,
+                    "pending_signals": pending_signals,
+                    "reason": reason,
+                }
+            except Exception:
+                # An unreadable ledger is also unsafe for simulated execution;
+                # observation may continue, but no paper state may advance.
+                self.clock_epoch_paper_state = {
+                    "blocked": True,
+                    "open_positions": None,
+                    "pending_signals": None,
+                    "reason": "CLOCK_EPOCH_RESET_PAPER_STATE_UNAVAILABLE",
+                }
+        self.forward_boundary["paper_state_after_clock_epoch_reset"] = dict(
+            self.clock_epoch_paper_state
+        )
         RUNTIME_ROOT.mkdir(parents=True, exist_ok=True)
         atomic_json(self.forward_boundary_path, self.forward_boundary)
         self.events_processed = 0; self.observations_recorded = 0; self.signals_recorded = 0; self.outcomes_recorded = 0
@@ -115,6 +212,8 @@ class CrossVenueService:
         self.max_late_event_lag_ms = 0.0
         self.stream_rollovers_observed = 0
         self.last_event_at: str | None = None; self.errors: list[str] = []
+        if self.clock_epoch_paper_state["blocked"]:
+            self.errors.append(str(self.clock_epoch_paper_state["reason"]))
         self.started_at = utc_now()
 
     def cycle(self, *, max_rows_per_venue: int = 20_000) -> dict[str, Any]:
@@ -135,7 +234,10 @@ class CrossVenueService:
         cycle_floor_monotonic_ns = self.last_processed_monotonic_ns
         reorder_buffer_ms = float(self.config.get("causal_reorder_buffer_ms", 250.0))
         cycle_cutoff_monotonic_ns = time.monotonic_ns() - int(reorder_buffer_ms * 1_000_000)
-        paper_active = bool(self.ledger.open_positions()) or bool(self.ledger.pending_signals())
+        paper_state_blocked = bool(self.clock_epoch_paper_state["blocked"])
+        paper_active = not paper_state_blocked and (
+            bool(self.ledger.open_positions()) or bool(self.ledger.pending_signals())
+        )
         heap: list[tuple[int, int, str, int, dict[str, Any], int]] = []
         cursors: dict[str, tuple[Any, int]] = {}
         serial = 0
@@ -212,7 +314,7 @@ class CrossVenueService:
                     self.last_event_at = event.get("local_receive_wall_ts") or self.last_event_at
                     signal = result.get("signal")
                     if isinstance(signal, dict):
-                        recorded = self.paper.on_signal(signal)
+                        recorded = False if paper_state_blocked else self.paper.on_signal(signal)
                         if recorded:
                             self.observations_recorded += 1
                             if signal.get("status") == "CANDIDATE_RESEARCH_ONLY":
@@ -221,7 +323,7 @@ class CrossVenueService:
                         _append_jsonl(signals_path, signal)
                     for outcome in result.get("outcomes") or []:
                         _append_jsonl(outcomes_path, outcome); self.outcomes_recorded += 1
-                    if paper_active and event.get("venue") == "bitget" and event.get("event_type") in {"book_l1", "ticker"}:
+                    if not paper_state_blocked and paper_active and event.get("venue") == "bitget" and event.get("event_type") in {"book_l1", "ticker"}:
                         paper_result = self.paper.on_bitget_quote(event)
                         opened.extend(paper_result.get("opened") or []); closed.extend(paper_result.get("closed") or [])
                         paper_active = bool(self.ledger.open_positions()) or bool(self.ledger.pending_signals())
@@ -374,6 +476,7 @@ class CrossVenueService:
             "heartbeat_at": utc_now(), "pid": os.getpid(), "events_processed": self.events_processed,
             "last_processed_monotonic_ns": self.last_processed_monotonic_ns,
             "clock_epoch_reset_detected": self.clock_epoch_reset,
+            "clock_epoch_paper_state": self.clock_epoch_paper_state,
             "forward_boundary": self.forward_boundary,
             "late_events_dropped_causal_guard": self.late_events_dropped,
             "max_late_event_lag_ms": self.max_late_event_lag_ms,

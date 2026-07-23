@@ -1531,11 +1531,32 @@ def _research_components_status_payload(state: HealthState) -> dict[str, Any]:
             "can_continue_research": bool(project_memory_contract.get("can_continue_research")),
         },
         "edge_sprint_48h": {
-            "status": "HEALTHY" if edge_sprint_48h.get("status") in {"ACTIVE", "COMPLETED"} else "DEGRADED",
+            "status": (
+                "HEALTHY" if edge_sprint_48h.get("status") in {"ACTIVE", "COMPLETED"}
+                else "PAUSED" if edge_sprint_48h.get("status") == "PAUSED"
+                else "DEGRADED"
+            ),
             "artifact_status": edge_sprint_48h.get("status"),
             "sprint_id": edge_sprint_48h.get("sprint_id"),
             "updated_at": edge_sprint_48h.get("updated_at"),
             "planned_end_at": edge_sprint_48h.get("planned_end_at"),
+            "original_planned_wall_clock_end": edge_sprint_48h.get("original_planned_wall_clock_end"),
+            "runtime_accounting_version": edge_sprint_48h.get("runtime_accounting_version"),
+            "runtime_state": edge_sprint_48h.get("runtime_state"),
+            "accumulated_active_runtime_seconds": int(
+                edge_sprint_48h.get("accumulated_active_runtime_seconds") or 0
+            ),
+            "target_active_runtime_seconds": int(
+                edge_sprint_48h.get("target_active_runtime_seconds") or 172800
+            ),
+            "active_runtime_remaining_seconds": int(
+                edge_sprint_48h.get("active_runtime_remaining_seconds") or 0
+            ),
+            "estimated_completion_at_if_continuous": edge_sprint_48h.get(
+                "estimated_completion_at_if_continuous"
+            ),
+            "actual_completion_at": edge_sprint_48h.get("actual_completion_at"),
+            "pc_off_time_counts": bool(edge_sprint_48h.get("pc_off_time_counts", False)),
             "strategy_verdict": edge_sprint_48h.get("strategy_verdict"),
             "infrastructure_verdict": edge_sprint_48h.get("infrastructure_verdict"),
             "snapshot_count": int(edge_sprint_48h.get("snapshot_count") or 0),

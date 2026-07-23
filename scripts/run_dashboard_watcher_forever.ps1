@@ -10,8 +10,18 @@ Add-Content -LiteralPath $Log -Value ("{0} dashboard watcher started; artifact-o
 $host.UI.RawUI.WindowTitle = "BitgetBot Dashboard Watcher (ARTIFACT ONLY - NO LIVE)"
 Write-Host "DASHBOARD WATCHER - ARTIFACT ONLY" -ForegroundColor Cyan
 Write-Host "Heavy research is not executed here. NO LIVE."
-while ($true) {
-    & $Python -m app.research_lab research-dashboard-watch-v1043c --symbols BTCUSDT --interval-seconds 30 2>&1 | Tee-Object -FilePath $Log -Append
-    Write-Host "Dashboard watcher returned; retry in 5 seconds." -ForegroundColor Yellow
-    Start-Sleep -Seconds 5
+$Mutex = New-Object System.Threading.Mutex($false, "Local\BitgetBotDashboardWatcherV1043C")
+try { $Acquired = $Mutex.WaitOne(0) } catch [System.Threading.AbandonedMutexException] { $Acquired = $true }
+if (-not $Acquired) {
+    Write-Host "Dashboard watcher already active; exiting duplicate launcher." -ForegroundColor Yellow
+    exit 0
+}
+try {
+    while ($true) {
+        & $Python -m app.research_lab research-dashboard-watch-v1043c --symbols BTCUSDT --interval-seconds 30 2>&1 | Tee-Object -FilePath $Log -Append
+        Write-Host "Dashboard watcher returned; retry in 5 seconds." -ForegroundColor Yellow
+        Start-Sleep -Seconds 5
+    }
+} finally {
+    if ($Acquired) { $Mutex.ReleaseMutex() }
 }

@@ -506,6 +506,154 @@ def run_contract_audit(
     return state
 
 
+def migrate_protected_policy_baseline(
+    *, relative_path: str, expected_old_sha256: str,
+    expected_new_sha256: str, reason: str, apply: bool = False,
+    contract_path: Path = CONTRACT_PATH, state_path: Path = STATE_PATH,
+    decision_path: Path = DECISION_LEDGER_PATH,
+    sources: dict[str, Path] | None = None, env_path: Path | None = None,
+    policy_paths: Iterable[str] = PROTECTED_POLICY_PATHS,
+) -> dict[str, Any]:
+    """Migrate one reviewed protected file by exact old/new content hashes.
+
+    This is deliberately narrower than resetting the project-memory baseline. It
+    refuses any concurrent safety, account, boundary, environment, contract, or
+    second-policy change and records the approved hash transition in the
+    append-only decision ledger before changing the baseline.
+    """
+    allowed_paths = tuple(str(item).replace("\\", "/") for item in policy_paths)
+    target = str(relative_path or "").replace("\\", "/").strip()
+    old_expected = str(expected_old_sha256 or "").strip().lower()
+    new_expected = str(expected_new_sha256 or "").strip().lower()
+    clean_reason = " ".join(str(reason or "").split())
+
+    def valid_sha(value: str) -> bool:
+        return len(value) == 64 and all(char in "0123456789abcdef" for char in value)
+
+    blockers: list[str] = []
+    if target not in allowed_paths:
+        blockers.append("MIGRATION_TARGET_NOT_PROTECTED")
+    if not valid_sha(old_expected):
+        blockers.append("EXPECTED_OLD_SHA256_INVALID")
+    if not valid_sha(new_expected):
+        blockers.append("EXPECTED_NEW_SHA256_INVALID")
+    if old_expected == new_expected and valid_sha(old_expected):
+        blockers.append("POLICY_HASH_DID_NOT_CHANGE")
+    if len(clean_reason) < 16:
+        blockers.append("HUMAN_REVIEW_REASON_TOO_SHORT")
+
+    previous = _read_json(state_path, {}) or {}
+    baseline = previous.get("baseline") if isinstance(previous, dict) else None
+    if not isinstance(baseline, dict):
+        blockers.append("CONTRACT_BASELINE_NOT_FROZEN")
+
+    current = run_contract_audit(
+        apply=False, contract_path=contract_path, state_path=state_path,
+        decision_path=decision_path, sources=sources, env_path=env_path,
+        policy_paths=allowed_paths,
+    )
+    old_hashes = baseline.get("protected_policy_hashes") if isinstance(baseline, dict) else {}
+    old_hashes = old_hashes if isinstance(old_hashes, dict) else {}
+    new_hashes = current.get("protected_policy_hashes")
+    new_hashes = new_hashes if isinstance(new_hashes, dict) else {}
+    changed_paths = sorted(
+        key for key in set(old_hashes) | set(new_hashes)
+        if old_hashes.get(key) != new_hashes.get(key)
+    )
+    if changed_paths != [target]:
+        blockers.append("MIGRATION_REQUIRES_EXACTLY_ONE_MATCHING_POLICY_CHANGE")
+    if old_hashes.get(target) != old_expected:
+        blockers.append("BASELINE_SHA256_MISMATCH")
+    if new_hashes.get(target) != new_expected:
+        blockers.append("CURRENT_SHA256_MISMATCH")
+
+    allowed_violation = "PROTECTED_ORDER_OR_POLICY_PATH_CHANGED"
+    unrelated = [
+        item for item in current.get("violations") or []
+        if item != allowed_violation
+    ]
+    if unrelated:
+        blockers.extend(f"UNRELATED_CONTRACT_VIOLATION:{item}" for item in unrelated)
+    if allowed_violation not in (current.get("violations") or []):
+        blockers.append("EXPECTED_POLICY_CHANGE_VIOLATION_NOT_PRESENT")
+    blockers = sorted(set(blockers))
+
+    payload: dict[str, Any] = {
+        "schema": "project_memory_policy_migration.v1",
+        "status": "BLOCKED" if blockers else "READY_FOR_EXPLICIT_APPLY",
+        "apply_requested": bool(apply),
+        "target": target,
+        "expected_old_sha256": old_expected,
+        "expected_new_sha256": new_expected,
+        "changed_paths": changed_paths,
+        "reason": clean_reason,
+        "blockers": blockers,
+        "research_only": True,
+        "simulation_only": True,
+        "paper_filter_enabled": False,
+        "can_send_real_orders": False,
+        "auto_promotion": False,
+        "final_recommendation": "NO LIVE",
+    }
+    if blockers or not apply:
+        return payload
+
+    migration_id = _sha_bytes(_canonical({
+        "target": target,
+        "old_sha256": old_expected,
+        "new_sha256": new_expected,
+        "reason": clean_reason,
+        "contract_hash": current.get("contract_hash"),
+    }))
+    ledger_result = append_research_decision({
+        "dataset_hash": (current.get("evidence") or {}).get("dataset_hashes", {}).get("challenger"),
+        "commit": current.get("head"),
+        "hypothesis": "PROJECT_MEMORY_PROTECTED_POLICY_MIGRATION",
+        "proposed_change": {
+            "migration_id": migration_id,
+            "path": target,
+            "old_sha256": old_expected,
+            "new_sha256": new_expected,
+        },
+        "reason": clean_reason,
+        "tests": [
+            "EXACT_ONE_POLICY_PATH_CHANGED",
+            "OLD_AND_NEW_SHA256_MATCH",
+            "NO_UNRELATED_CONTRACT_VIOLATIONS",
+        ],
+        "result": "HUMAN_REVIEWED_HASH_MIGRATION_APPROVED",
+        "final_state": "RESEARCH_ONLY",
+    }, path=decision_path)
+
+    seed = json.loads(json.dumps(previous))
+    seed["baseline"]["protected_policy_hashes"] = dict(new_hashes)
+    seed["updated_at"] = utc_now()
+    seed["guardrails_status"] = "FAIL"
+    seed["can_continue_research"] = False
+    seed["violations"] = ["PROJECT_MEMORY_POLICY_MIGRATION_IN_PROGRESS"]
+    _atomic_json(state_path, seed)
+    final = run_contract_audit(
+        apply=True, contract_path=contract_path, state_path=state_path,
+        decision_path=decision_path, sources=sources, env_path=env_path,
+        policy_paths=allowed_paths,
+    )
+    if final.get("guardrails_status") != "PASS":
+        payload["status"] = "BLOCKED_AFTER_APPLY"
+        payload["blockers"] = list(final.get("violations") or ["POST_MIGRATION_AUDIT_FAILED"])
+        payload["migration_id"] = migration_id
+        payload["decision_ledger"] = ledger_result
+        return payload
+
+    payload.update({
+        "status": "MIGRATED",
+        "migration_id": migration_id,
+        "decision_ledger": ledger_result,
+        "guardrails_status": "PASS",
+        "can_continue_research": True,
+    })
+    return payload
+
+
 def contract_status() -> dict[str, Any]:
     value = _read_json(STATE_PATH, {}) or {}
     if not isinstance(value, dict) or not value:

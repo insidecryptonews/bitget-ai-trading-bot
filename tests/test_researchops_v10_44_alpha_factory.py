@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from app.labs import alpha_factory_v10_44 as AF
 from app.labs import shadow_simulation_tournament_v10_40 as SH
 
@@ -108,3 +110,16 @@ def test_alpha_factory_source_has_no_trading_side_effect_calls():
     ]
     for token in forbidden:
         assert token not in source
+
+
+def test_candidate_replay_honors_cooperative_runtime_deadline():
+    bars = _bars(3_000)
+    feats = AF.build_alpha_features(bars)
+    rule = AF._rule_defs()[0]
+    q = AF._quantiles(feats, int(len(feats) * 0.60))
+
+    with pytest.raises(AF.RuntimeBudgetExceeded):
+        AF._simulate_candidate(
+            rule, AF._exit_grid()[0], feats, bars, q,
+            n_tests=50, deadline_epoch_seconds=0,
+        )

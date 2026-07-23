@@ -58,4 +58,22 @@ Intentional changes to an active policy, account identity, boundary contract or
 the versioned contract require a separate human-reviewed migration. Deleting the
 runtime baseline to bypass a failure is not an approved migration.
 
+For a reviewed change to exactly one protected implementation file, use the
+hash-bound migration command. It is dry-run unless `--apply` is present and
+fails closed if any second policy, account, boundary, environment, contract or
+safety difference exists:
+
+```powershell
+python -m app.research_lab project-memory-policy-migrate-v1 `
+  --protected-path app/labs/cross_venue/service.py `
+  --expected-old-sha256 <frozen-sha256> `
+  --expected-new-sha256 <reviewed-sha256> `
+  --migration-reason "Human-reviewed fail-closed runtime hotfix" `
+  --apply
+```
+
+The exact transition is appended to the hash-chained research decision ledger
+before the frozen hash is changed. This command cannot change safety flags,
+accounts, forward boundaries, `.env`, paper policy, or execution settings.
+
 SIMULATION ONLY. RESEARCH ONLY. NO LIVE.

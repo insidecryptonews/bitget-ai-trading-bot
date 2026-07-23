@@ -1,7 +1,12 @@
 {
   "schema": "edge_sprint_48h.config.v1",
   "duration_hours": 48,
+  "target_active_runtime_seconds": 172800,
   "snapshot_interval_hours": 6,
+  "runtime_heartbeat_max_gap_seconds": 900,
+  "collector_heartbeat_max_age_seconds": 180,
+  "runtime_clock_skew_tolerance_seconds": 30,
+  "migration_snapshot_gap_grace_seconds": 900,
   "dataset_change_required_for_analysis": true,
   "holdout_max_accesses": 1,
   "seed": 480104,

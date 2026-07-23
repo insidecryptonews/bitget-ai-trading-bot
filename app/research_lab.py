@@ -7223,7 +7223,11 @@ class ResearchLab:
         from .labs import research_dashboard_v10_43c as DASH
         sym = (self._v107_csv_arg(symbols) or ["BTCUSDT"])[0]
         refresh = int(auto_refresh_seconds or 0) or None
-        r = DASH.build_dashboard(sym, auto_refresh_seconds=refresh)
+        # Dashboard generation is an operator read path. Reuse the bounded
+        # artifact/cache collector just like the watcher; heavy research has a
+        # separate guarded scheduler and must not be triggered implicitly here.
+        state = DASH.gather_state_fast(sym)
+        r = DASH.build_dashboard(sym, state=state, auto_refresh_seconds=refresh)
         return chr(10).join([
             "DASHBOARD_BUILD_COMPLETED",
             f"symbol: {sym}",
@@ -7393,6 +7397,20 @@ class ResearchLab:
 
         return json.dumps(contract_status(), indent=2, sort_keys=True, allow_nan=False)
 
+    def project_memory_policy_migrate_v1_cli(
+        self, *, protected_path="", expected_old_sha256="",
+        expected_new_sha256="", migration_reason="", apply=False,
+    ) -> str:
+        from .labs.project_memory_contract import migrate_protected_policy_baseline
+
+        return json.dumps(migrate_protected_policy_baseline(
+            relative_path=protected_path,
+            expected_old_sha256=expected_old_sha256,
+            expected_new_sha256=expected_new_sha256,
+            reason=migration_reason,
+            apply=bool(apply),
+        ), indent=2, sort_keys=True, allow_nan=False)
+
     def storage_disk_guard_v1_cli(self, *, apply=False) -> str:
         from .labs.storage_remote_restore_guard import disk_guard_status
 
@@ -7421,6 +7439,26 @@ class ResearchLab:
         from .labs.edge_sprint_48h import sprint_status
 
         return json.dumps(sprint_status(), indent=2, sort_keys=True, allow_nan=False)
+
+    def edge_sprint_pause_v1_cli(self, *, reason="USER_REQUESTED_SHUTDOWN") -> str:
+        from .labs.edge_sprint_48h import pause_sprint_session
+
+        return json.dumps(
+            pause_sprint_session(reason=reason), indent=2, sort_keys=True, allow_nan=False,
+        )
+
+    def edge_sprint_resume_v1_cli(self) -> str:
+        from .labs.edge_sprint_48h import resume_sprint_session
+
+        return json.dumps(resume_sprint_session(), indent=2, sort_keys=True, allow_nan=False)
+
+    def export_review_snapshot_v1_cli(self, *, apply=False, final=False) -> str:
+        from .labs.research_review_snapshot import export_review_snapshot
+
+        return json.dumps(
+            export_review_snapshot(apply=bool(apply), final=bool(final)),
+            indent=2, sort_keys=True, allow_nan=False,
+        )
 
     def research_demo_status_v1_cli(self) -> str:
         from .labs.isolated_research_demos import DiagnosticDemoLedger, edge_demo_status
@@ -9043,10 +9081,15 @@ def build_argument_parser() -> argparse.ArgumentParser:
             "continuous-edge-challenger-v2",
             "project-memory-contract-v1",
             "project-memory-status-v1",
+            "project-memory-policy-migrate-v1",
             "storage-disk-guard-v1",
             "storage-remote-restore-v1",
             "edge-sprint-cycle-v1",
             "edge-sprint-status-v1",
+            "edge-sprint-pause-v1",
+            "edge-sprint-resume-v1",
+            "export-review-snapshot-v1",
+            "edge-sprint-final-handoff-v1",
             "research-demo-status-v1",
             "ai-provider-audit-v1045",
             "ai-research-copilot-v1045",
@@ -9157,6 +9200,10 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--hours-forward", type=int, default=24, help="Horas hacia delante para ventana catalyst.")
     parser.add_argument("--file", default="", help="Backup data-vault para importar.")
     parser.add_argument("--apply", action="store_true", help="Aplica data-import. Sin esto, import es dry-run.")
+    parser.add_argument("--protected-path", default="", help="Ruta protegida exacta para migracion project-memory.")
+    parser.add_argument("--expected-old-sha256", default="", help="SHA-256 congelado esperado antes de la migracion.")
+    parser.add_argument("--expected-new-sha256", default="", help="SHA-256 revisado esperado despues de la migracion.")
+    parser.add_argument("--migration-reason", default="", help="Motivo humano explicito para migracion project-memory.")
     parser.add_argument("--dry-run", action="store_true", help="Fuerza data-import dry-run.")
     parser.add_argument("--upload", action="store_true", help="Sube data-export si external storage esta configurado.")
     parser.add_argument("--side", default="", help="Lado para labs V8.2: LONG o SHORT.")
@@ -9254,6 +9301,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--run-label", default="", help="V10.29 fixed assembled-run dir name (e.g. 'latest'), safely overwritten each assemble; empty = unique timestamped run id.")
     parser.add_argument("--source-file", default="", help="Closed local JSONL source for the Storage Efficiency V2 benchmark.")
     parser.add_argument("--source-id", default="", help="Verified storage partition id for the opt-in remote restore audit.")
+    parser.add_argument("--reason", default="USER_REQUESTED_SHUTDOWN", help="Audit reason recorded when pausing the active-runtime sprint.")
     return parser
 
 
@@ -9346,10 +9394,15 @@ PUBLIC_RESEARCH_ONLY_COMMANDS = frozenset({
     "continuous-edge-challenger-v2",
     "project-memory-contract-v1",
     "project-memory-status-v1",
+    "project-memory-policy-migrate-v1",
     "storage-disk-guard-v1",
     "storage-remote-restore-v1",
     "edge-sprint-cycle-v1",
     "edge-sprint-status-v1",
+    "edge-sprint-pause-v1",
+    "edge-sprint-resume-v1",
+    "export-review-snapshot-v1",
+    "edge-sprint-final-handoff-v1",
     "research-demo-status-v1",
     "ai-provider-audit-v1045",
     "ai-research-copilot-v1045",
@@ -9581,6 +9634,14 @@ def _dispatch_public_research_only(args) -> None:
         print(lab.project_memory_contract_v1_cli(apply=args.apply))
     elif args.command == "project-memory-status-v1":
         print(lab.project_memory_status_v1_cli())
+    elif args.command == "project-memory-policy-migrate-v1":
+        print(lab.project_memory_policy_migrate_v1_cli(
+            protected_path=args.protected_path,
+            expected_old_sha256=args.expected_old_sha256,
+            expected_new_sha256=args.expected_new_sha256,
+            migration_reason=args.migration_reason,
+            apply=args.apply,
+        ))
     elif args.command == "storage-disk-guard-v1":
         print(lab.storage_disk_guard_v1_cli(apply=args.apply))
     elif args.command == "storage-remote-restore-v1":
@@ -9591,6 +9652,14 @@ def _dispatch_public_research_only(args) -> None:
         print(lab.edge_sprint_cycle_v1_cli(apply=args.apply))
     elif args.command == "edge-sprint-status-v1":
         print(lab.edge_sprint_status_v1_cli())
+    elif args.command == "edge-sprint-pause-v1":
+        print(lab.edge_sprint_pause_v1_cli(reason=getattr(args, "reason", "USER_REQUESTED_SHUTDOWN")))
+    elif args.command == "edge-sprint-resume-v1":
+        print(lab.edge_sprint_resume_v1_cli())
+    elif args.command == "export-review-snapshot-v1":
+        print(lab.export_review_snapshot_v1_cli(apply=args.apply, final=False))
+    elif args.command == "edge-sprint-final-handoff-v1":
+        print(lab.export_review_snapshot_v1_cli(apply=args.apply, final=True))
     elif args.command == "research-demo-status-v1":
         print(lab.research_demo_status_v1_cli())
     elif args.command == "ai-provider-audit-v1045":

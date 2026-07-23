@@ -91,3 +91,29 @@ def test_dashboard_no_external_fetch_or_fake_metrics(tmp_path):
 def test_cli_registered():
     import app.research_lab as RL
     assert "research-dashboard-build-v1043c" in RL.PUBLIC_RESEARCH_ONLY_COMMANDS
+
+
+def test_dashboard_build_cli_uses_bounded_fast_state(monkeypatch):
+    import app.research_lab as RL
+
+    calls = []
+    monkeypatch.setattr(DASH, "gather_state_fast", lambda symbol: calls.append(("fast", symbol)) or STATE)
+    monkeypatch.setattr(
+        DASH,
+        "build_dashboard",
+        lambda symbol, **kwargs: calls.append(("build", kwargs.get("state"))) or {
+            "ws_persistent_verdict": "USABLE_WITH_GAPS",
+            "readiness": "RESEARCH_ONLY",
+            "auto_refresh_seconds": None,
+            "html": "local.html",
+            "json": "local.json",
+            "url": "file:///local.html",
+        },
+    )
+    lab = RL.ResearchLab.__new__(RL.ResearchLab)
+    text = lab.research_dashboard_build_v1043c_cli(symbols="BTCUSDT")
+
+    assert calls == [("fast", "BTCUSDT"), ("build", STATE)]
+    assert "DASHBOARD_BUILD_COMPLETED" in text
+    assert "can_send_real_orders: false" in text
+    assert "final_recommendation: NO LIVE" in text

@@ -3,6 +3,8 @@ import json
 import os
 from pathlib import Path
 
+import pytest
+
 from app.labs import research_dashboard_v10_43c as DASH
 
 
@@ -210,6 +212,17 @@ def test_lock_blocks_duplicate_watcher(tmp_path: Path):
     assert result["watcher_status"] == "WATCHER_ALREADY_RUNNING"
     assert result["mode"] == "RESEARCH_ONLY"
     assert result["final_recommendation"] == "NO LIVE"
+
+
+def test_windows_pid_probe_failure_keeps_lock_fail_closed(monkeypatch):
+    if os.name != "nt":
+        pytest.skip("Windows tasklist contract")
+
+    def unavailable(*args, **kwargs):
+        raise TimeoutError("simulated tasklist pressure")
+
+    monkeypatch.setattr("subprocess.run", unavailable)
+    assert DASH._pid_alive(999_999) is True
 
 
 def test_html_does_not_contain_fake_or_actionable_claims(tmp_path: Path):

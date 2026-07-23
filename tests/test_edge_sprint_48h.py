@@ -39,6 +39,18 @@ def _account(path: Path, account_id: str) -> Path:
     return path
 
 
+def _funnel_fixture() -> dict:
+    return {
+        "ati_shadow": {"signals": 0, "closed_outcomes": 0, "reconciliation": "PASS"},
+        "ati_paper": {"trades": 0, "open_positions": 0, "reconciliation": "PASS"},
+        "p11": {"closed_outcomes": 0, "reconciliation": "PASS"},
+        "cross_venue": {
+            "raw_evaluations": 1, "unique_episodes": 1, "paper_trades": 0,
+            "reconciliation": "PASS",
+        },
+    }
+
+
 def _memory_fixture(tmp_path: Path, monkeypatch) -> dict[str, Path]:
     contract = _write(tmp_path / "contract.json", {
         "schema": "bitget_research_project_contract.v1",
@@ -122,6 +134,88 @@ def test_project_memory_freezes_and_detects_boundary_account_env_and_policy_chan
     (tmp_path / ".env").unlink()
     paths["policy"].write_text("RESEARCH_ONLY=False\n", encoding="ascii")
     assert "PROTECTED_ORDER_OR_POLICY_PATH_CHANGED" in memory.run_contract_audit(**kwargs)["violations"]
+
+
+def test_project_memory_policy_migration_is_exact_hash_bound_and_audited(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    paths = _memory_fixture(tmp_path, monkeypatch)
+    state_path = tmp_path / "state.json"
+    decision_path = tmp_path / "decisions.jsonl"
+    kwargs = {
+        "contract_path": paths["contract"], "state_path": state_path,
+        "decision_path": decision_path,
+        "sources": {key: value for key, value in paths.items() if key not in {"contract", "policy"}},
+        "env_path": tmp_path / ".env", "policy_paths": ["policy.py"],
+    }
+    frozen = memory.run_contract_audit(apply=True, **kwargs)
+    old_hash = frozen["baseline"]["protected_policy_hashes"]["policy.py"]
+    frozen_accounts = frozen["baseline"]["accounts"]
+    frozen_boundaries = frozen["baseline"]["initial_boundaries"]
+
+    paths["policy"].write_text("RESEARCH_ONLY=True\nFIXED=True\n", encoding="ascii")
+    new_hash = memory._sha_file(paths["policy"])
+    preview = memory.migrate_protected_policy_baseline(
+        relative_path="policy.py", expected_old_sha256=old_hash,
+        expected_new_sha256=new_hash,
+        reason="Human-reviewed fail-closed clock epoch reset hotfix",
+        apply=False, **kwargs,
+    )
+    assert preview["status"] == "READY_FOR_EXPLICIT_APPLY"
+    assert memory.run_contract_audit(**kwargs)["guardrails_status"] == "FAIL"
+
+    wrong = memory.migrate_protected_policy_baseline(
+        relative_path="policy.py", expected_old_sha256="0" * 64,
+        expected_new_sha256=new_hash,
+        reason="Human-reviewed fail-closed clock epoch reset hotfix",
+        apply=True, **kwargs,
+    )
+    assert wrong["status"] == "BLOCKED"
+    assert "BASELINE_SHA256_MISMATCH" in wrong["blockers"]
+
+    migrated = memory.migrate_protected_policy_baseline(
+        relative_path="policy.py", expected_old_sha256=old_hash,
+        expected_new_sha256=new_hash,
+        reason="Human-reviewed fail-closed clock epoch reset hotfix",
+        apply=True, **kwargs,
+    )
+    assert migrated["status"] == "MIGRATED"
+    assert migrated["guardrails_status"] == "PASS"
+    final = memory.run_contract_audit(**kwargs)
+    assert final["guardrails_status"] == "PASS"
+    assert final["baseline"]["protected_policy_hashes"]["policy.py"] == new_hash
+    assert final["baseline"]["accounts"] == frozen_accounts
+    assert final["baseline"]["initial_boundaries"] == frozen_boundaries
+    assert memory.verify_decision_ledger(decision_path)["records"] == 2
+
+
+def test_project_memory_policy_migration_rejects_concurrent_contract_violation(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    paths = _memory_fixture(tmp_path, monkeypatch)
+    state_path = tmp_path / "state.json"
+    decision_path = tmp_path / "decisions.jsonl"
+    kwargs = {
+        "contract_path": paths["contract"], "state_path": state_path,
+        "decision_path": decision_path,
+        "sources": {key: value for key, value in paths.items() if key not in {"contract", "policy"}},
+        "env_path": tmp_path / ".env", "policy_paths": ["policy.py"],
+    }
+    frozen = memory.run_contract_audit(apply=True, **kwargs)
+    old_hash = frozen["baseline"]["protected_policy_hashes"]["policy.py"]
+    paths["policy"].write_text("RESEARCH_ONLY=True\nFIXED=True\n", encoding="ascii")
+    new_hash = memory._sha_file(paths["policy"])
+    (tmp_path / ".env").write_text("FAKE_ONLY=1\n", encoding="ascii")
+
+    report = memory.migrate_protected_policy_baseline(
+        relative_path="policy.py", expected_old_sha256=old_hash,
+        expected_new_sha256=new_hash,
+        reason="Human-reviewed fail-closed clock epoch reset hotfix",
+        apply=True, **kwargs,
+    )
+    assert report["status"] == "BLOCKED"
+    assert "UNRELATED_CONTRACT_VIOLATION:ENV_METADATA_CHANGED" in report["blockers"]
+    assert memory.verify_decision_ledger(decision_path)["records"] == 1
 
 
 def test_decision_ledger_is_hash_chained_and_rejects_tampering(tmp_path: Path) -> None:
@@ -276,11 +370,7 @@ def test_sprint_snapshots_deduplicate_dataset_and_never_opens_holdout_without_ca
     })
     dataset = {"status": "OK", "dataset_hash": "one", "verified_feature_files": 2}
     monkeypatch.setattr(sprint, "_dataset_snapshot", lambda: dict(dataset))
-    monkeypatch.setattr(sprint, "_funnel_snapshot", lambda: {
-        "ati": {"closed_outcomes": 0},
-        "p11": {"closed_outcomes": 0},
-        "cross_venue": {"raw_evaluations": 1, "unique_episodes": 1, "paper_trades": 0},
-    })
+    monkeypatch.setattr(sprint, "_funnel_snapshot", _funnel_fixture)
     monkeypatch.setattr(sprint, "CHALLENGER_PATH", _write(tmp_path / "challenger.json", {
         "status": "NEED_MORE_DATA", "state": "NEED_MORE_DATA", "candidates": [],
     }))
@@ -288,42 +378,68 @@ def test_sprint_snapshots_deduplicate_dataset_and_never_opens_holdout_without_ca
     monkeypatch.setattr(sprint, "SCHEDULER_PATH", tmp_path / "scheduler.json")
     monkeypatch.setattr(sprint, "ensure_diagnostic_demo", lambda **kwargs: {
         "status": "OPERABILITY DIAGNOSTIC ACTIVE - NOT EDGE", "trades": 0,
+        "reconciliation": "PASS",
     })
     monkeypatch.setattr(sprint, "edge_demo_status", lambda challenger, **_kwargs: {
         "status": "NO DEFENSIBLE CANDIDATE - DEMO NOT STARTED",
         "account_initialized": False, "gate": {"status": "NO_DEFENSIBLE_CANDIDATE"},
     })
+    monkeypatch.setattr(sprint, "_runtime_evidence", lambda **kwargs: {
+        "observed_at": kwargs["now"].isoformat(), "stack_healthy": True,
+        "data_growing": True, "runtime_qualified": True,
+        "progress_marker": {"at": kwargs["now"].isoformat()},
+        "progress_marker_hash": kwargs["now"].isoformat(), "blockers": [],
+    })
     start = datetime(2026, 7, 18, tzinfo=timezone.utc)
     kwargs = {
         "state_path": tmp_path / "state.json", "status_path": tmp_path / "status.json",
         "holdout_path": tmp_path / "seal.json", "report_root": tmp_path / "reports",
-        "lock_path": tmp_path / "lock",
+        "lock_path": tmp_path / "lock", "heartbeat_path": tmp_path / "heartbeats.jsonl",
+        "migration_path": tmp_path / "migration.json", "decision_path": tmp_path / "decisions.jsonl",
     }
     first = sprint.run_sprint_cycle(apply=True, now=start, **kwargs)
     assert first["status"] == "ACTIVE"
     assert first["snapshot_count"] == 1
     assert first["analysis_eligible"] is True
-    second = sprint.run_sprint_cycle(apply=True, now=start + timedelta(hours=1), **kwargs)
+    second = sprint.run_sprint_cycle(apply=True, now=start + timedelta(minutes=10), **kwargs)
     assert second["snapshot_count"] == 1
     assert second["analysis_eligible"] is False
-    third = sprint.run_sprint_cycle(apply=True, now=start + timedelta(hours=6), **kwargs)
+    third = second
+    for step in range(2, 37):
+        third = sprint.run_sprint_cycle(
+            apply=True, now=start + timedelta(minutes=10 * step), **kwargs,
+        )
     assert third["snapshot_count"] == 2
     assert third["analysis_eligible"] is False
     dataset["dataset_hash"] = "two"
     dataset["verified_feature_files"] = 3
-    fourth = sprint.run_sprint_cycle(apply=True, now=start + timedelta(hours=12), **kwargs)
+    fourth = third
+    for step in range(37, 73):
+        fourth = sprint.run_sprint_cycle(
+            apply=True, now=start + timedelta(minutes=10 * step), **kwargs,
+        )
     assert fourth["snapshot_count"] == 3
     assert fourth["analysis_eligible"] is True
+    state = json.loads((tmp_path / "state.json").read_text(encoding="utf-8"))
+    state.update({
+        "accumulated_active_runtime_seconds": 172_200,
+        "active_runtime_remaining_seconds": 600,
+        "last_snapshot_active_runtime_seconds": 151_200,
+        "last_runtime_observation_at": (start + timedelta(hours=12)).isoformat(),
+        "last_runtime_stack_healthy": True,
+        "runtime_state": "RUNNING",
+    })
+    (tmp_path / "state.json").write_text(json.dumps(state), encoding="utf-8")
     original_final_holdout = sprint._final_holdout
     monkeypatch.setattr(
         sprint, "_final_holdout",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("dry-run opened holdout")),
     )
-    preview = sprint.run_sprint_cycle(apply=False, now=start + timedelta(hours=49), **kwargs)
+    preview = sprint.run_sprint_cycle(apply=False, now=start + timedelta(hours=12, minutes=10), **kwargs)
     assert preview["status"] == "FINALIZATION_DUE_APPLY_REQUIRED"
     assert preview["holdout_preview"] == {"status": "NOT_ACCESSED_DRY_RUN", "access_count": 0}
     monkeypatch.setattr(sprint, "_final_holdout", original_final_holdout)
-    final = sprint.run_sprint_cycle(apply=True, now=start + timedelta(hours=49), **kwargs)
+    final = sprint.run_sprint_cycle(apply=True, now=start + timedelta(hours=12, minutes=10), **kwargs)
     assert final["status"] == "COMPLETED"
     assert final["holdout_access_count"] == 0
     assert final["holdout"]["status"] == "NOT_ACCESSED_NO_WATCH_ONLY_CANDIDATE"
@@ -381,10 +497,7 @@ def test_tampered_holdout_seal_blocks_cycle(tmp_path: Path, monkeypatch) -> None
     monkeypatch.setattr(sprint, "disk_guard_status", lambda write=False: {"level": "OK", "allow_challenger": True})
     monkeypatch.setattr(sprint, "remote_restore_status", lambda: {})
     monkeypatch.setattr(sprint, "_dataset_snapshot", lambda: {"dataset_hash": "one", "verified_feature_files": 1})
-    monkeypatch.setattr(sprint, "_funnel_snapshot", lambda: {
-        "ati": {"closed_outcomes": 0}, "p11": {"closed_outcomes": 0},
-        "cross_venue": {"raw_evaluations": 0, "unique_episodes": 0, "paper_trades": 0},
-    })
+    monkeypatch.setattr(sprint, "_funnel_snapshot", _funnel_fixture)
     monkeypatch.setattr(sprint, "CHALLENGER_PATH", _write(tmp_path / "challenger.json", {}))
     monkeypatch.setattr(sprint, "ensure_diagnostic_demo", lambda **kwargs: {"trades": 0})
     monkeypatch.setattr(sprint, "edge_demo_status", lambda challenger, **_kwargs: {"gate": {}})
@@ -407,7 +520,9 @@ def test_cli_scheduler_dashboard_and_http_are_research_only() -> None:
     commands = {
         "project-memory-contract-v1", "project-memory-status-v1",
         "storage-disk-guard-v1", "storage-remote-restore-v1",
-        "edge-sprint-cycle-v1", "edge-sprint-status-v1", "research-demo-status-v1",
+        "edge-sprint-cycle-v1", "edge-sprint-status-v1", "edge-sprint-pause-v1",
+        "edge-sprint-resume-v1", "export-review-snapshot-v1",
+        "edge-sprint-final-handoff-v1", "research-demo-status-v1",
     }
     assert commands <= research_lab.PUBLIC_RESEARCH_ONLY_COMMANDS
     scheduler = (ROOT / "scripts" / "run_storage_edge_scheduler.ps1").read_text(encoding="utf-8")
@@ -430,6 +545,20 @@ def test_cli_scheduler_dashboard_and_http_are_research_only() -> None:
     assert "NO DEFENSIBLE CANDIDATE" in html
     assert "No automatic start" in html
     assert "paper filter stays disabled" in html
+    sprint_html = dashboard._panel_edge_sprint({"edge_sprint_48h": {
+        "runtime_accounting_version": "ACTIVE_RUNTIME_V2",
+        "accumulated_active_runtime_seconds": 3600,
+        "target_active_runtime_seconds": 172800,
+        "active_runtime_remaining_seconds": 169200,
+        "populations": {
+            "ati_shadow_forward_signals": 29, "ati_shadow_forward_outcomes": 11,
+            "ati_paper_trades": 4, "ati_paper_open_positions": 1,
+        },
+    }})
+    assert "PC OFF TIME DOES NOT COUNT" in sprint_html
+    assert "ATI Shadow signals / outcomes" in sprint_html
+    assert "ATI Paper trades / open positions" in sprint_html
+    assert "EXPORT_REVIEW_SNAPSHOT.ps1" in sprint_html
 
 
 def test_new_http_endpoints_read_only_artifacts(tmp_path: Path, monkeypatch) -> None:
@@ -487,6 +616,8 @@ def test_health_components_keep_sprint_payload_compact(tmp_path: Path, monkeypat
     component = payload["components"]["edge_sprint_48h"]
     assert component["artifact_status"] == "ACTIVE"
     assert component["snapshot_count"] == 2
+    assert component["target_active_runtime_seconds"] == 172800
+    assert component["pc_off_time_counts"] is False
     assert "challenger" not in component
 
 
@@ -496,6 +627,7 @@ def test_new_productive_modules_contain_no_order_or_live_path() -> None:
         ROOT / "app" / "labs" / "storage_remote_restore_guard.py",
         ROOT / "app" / "labs" / "isolated_research_demos.py",
         ROOT / "app" / "labs" / "edge_sprint_48h.py",
+        ROOT / "app" / "labs" / "research_review_snapshot.py",
     ]
     forbidden = (
         "private_get(", "private_post(", "place_order(", "set_leverage(",

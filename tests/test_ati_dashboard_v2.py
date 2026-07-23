@@ -95,7 +95,10 @@ def test_health_components_are_separate_and_fail_closed_on_stale_heavy_metrics(
             "reconciliation": {"status": "PASS"},
         },
     }), encoding="utf-8")
+    scheduler = tmp_path / "scheduler_status.json"
+    scheduler.write_text(json.dumps({"status": "COMPLETED", "exit_code": 0}), encoding="utf-8")
     monkeypatch.setattr(health_server, "_RESEARCH_DASHBOARD_V1043C", dashboard)
+    monkeypatch.setattr(health_server, "_HEAVY_SCHEDULER_STATUS", scheduler)
     monkeypatch.setattr(health_server, "_ati_shadow_status_payload", lambda: {
         "status": "HEALTHY", "can_send_real_orders": False,
     })

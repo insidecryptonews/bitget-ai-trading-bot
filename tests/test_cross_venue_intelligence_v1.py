@@ -8,6 +8,7 @@ import json
 import math
 import os
 import time
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -571,6 +572,140 @@ def test_service_reorder_buffer_holds_recent_rows_without_advancing_offset(tmp_p
     clock["now"] = 1_200_000_000
     assert service.cycle()["cycle_events"] == 1
     assert service.offsets["bitget"] == path.stat().st_size
+
+
+def test_service_refreezes_unread_prior_boot_epoch_before_forward_processing(tmp_path, monkeypatch):
+    root = tmp_path / "external_data" / "staging" / "cross_venue_v1"
+    monkeypatch.setattr(S, "STAGING_ROOT", root)
+    runtime = tmp_path / "runtime"
+    monkeypatch.setattr(SV, "RUNTIME_ROOT", runtime)
+    monkeypatch.setattr(SV, "OFFSETS_PATH", runtime / "offsets.json")
+    monkeypatch.setattr(SV, "ENGINE_STATUS_PATH", runtime / "status.json")
+    monkeypatch.setattr(SV, "ENGINE_SNAPSHOT_PATH", runtime / "snapshot.json")
+    clock = {"now": 1_000_000_000}
+    monkeypatch.setattr(SV.time, "monotonic_ns", lambda: clock["now"])
+    config = dict(load_config())
+    config["active_venues"] = ["bitget"]
+    stream = root / "bitget" / "normalized" / "current.jsonl"
+    stream.parent.mkdir(parents=True, exist_ok=True)
+    prior_boot = _event("bitget", 20_000_000_000, 100, bid=99.99, ask=100.01)
+    stream.write_text(json.dumps(prior_boot) + "\n", encoding="utf-8")
+    S.atomic_json(SV.OFFSETS_PATH, {
+        "_schema": "cross_venue_stream_offsets.v2",
+        "_last_processed_monotonic_ns": 0,
+        "bitget": 0,
+    })
+
+    service = SV.CrossVenueService(
+        config=config, root=root, ledger=CrossVenueLedger(runtime / "paper.sqlite"),
+    )
+    assert service.clock_epoch_reset is True
+    assert service.clock_epoch_future_cursor_venues == ["bitget"]
+    assert service.offsets["bitget"] == stream.stat().st_size
+    assert service.forward_boundary["boundary_mode"] == (
+        "CLOCK_EPOCH_RESET_REFROZEN_AT_CURRENT_STREAM_END"
+    )
+    assert service.forward_boundary["clock_epoch_refrozen_at"]
+    assert service.forward_boundary["historical_rows_eligible_for_paper"] is False
+    assert service.cycle()["cycle_events"] == 0
+
+    clock["now"] = 2_000_000_000
+    forward = _event("bitget", 1_500_000_000, 101, bid=100.99, ask=101.01)
+    with stream.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(forward) + "\n")
+    assert service.cycle()["cycle_events"] == 1
+    assert service.last_processed_monotonic_ns == 1_500_000_000
+
+
+def test_service_blocks_pending_simulated_state_across_clock_epoch_reset(tmp_path, monkeypatch):
+    root = tmp_path / "external_data" / "staging" / "cross_venue_v1"
+    monkeypatch.setattr(S, "STAGING_ROOT", root)
+    runtime = tmp_path / "runtime"
+    monkeypatch.setattr(SV, "RUNTIME_ROOT", runtime)
+    monkeypatch.setattr(SV, "OFFSETS_PATH", runtime / "offsets.json")
+    monkeypatch.setattr(SV, "ENGINE_STATUS_PATH", runtime / "status.json")
+    monkeypatch.setattr(SV, "ENGINE_SNAPSHOT_PATH", runtime / "snapshot.json")
+    monkeypatch.setattr(SV.time, "monotonic_ns", lambda: 1_000_000_000)
+    config = dict(load_config())
+    config["active_venues"] = ["bitget"]
+    stream = root / "bitget" / "normalized" / "current.jsonl"
+    stream.parent.mkdir(parents=True, exist_ok=True)
+    stream.write_text(
+        json.dumps(_event("bitget", 20_000_000_000, 100, bid=99.99, ask=100.01)) + "\n",
+        encoding="utf-8",
+    )
+    S.atomic_json(SV.OFFSETS_PATH, {
+        "_schema": "cross_venue_stream_offsets.v2",
+        "_last_processed_monotonic_ns": 20_000_000_000,
+        "bitget": 0,
+    })
+    ledger = CrossVenueLedger(runtime / "paper.sqlite")
+    ledger.initialize()
+    ledger.record_signal({
+        "signal_id": "pending-prior-epoch",
+        "symbol": "BTCUSDT",
+        "direction": "LONG",
+        "decision_ts": "2026-07-22T00:00:00+00:00",
+        "decision_monotonic_ns": 20_000_000_000,
+        "status": "CANDIDATE_RESEARCH_ONLY",
+        "rejection_reason": None,
+    })
+
+    service = SV.CrossVenueService(config=config, root=root, ledger=ledger)
+    assert service.clock_epoch_paper_state == {
+        "blocked": True,
+        "open_positions": 0,
+        "pending_signals": 1,
+        "reason": "CLOCK_EPOCH_RESET_WITH_OPEN_PAPER_STATE_REQUIRES_MANUAL_REVIEW",
+    }
+    health = service.cycle()["health"]
+    assert health["status"] == "DEGRADED"
+    assert health["clock_epoch_paper_state"]["blocked"] is True
+    assert "CLOCK_EPOCH_RESET_WITH_OPEN_PAPER_STATE_REQUIRES_MANUAL_REVIEW" in health["errors"]
+
+
+def test_service_preserves_clock_epoch_refreeze_audit_on_normal_restart(tmp_path, monkeypatch):
+    root = tmp_path / "external_data" / "staging" / "cross_venue_v1"
+    monkeypatch.setattr(S, "STAGING_ROOT", root)
+    stream = root / "bitget" / "normalized" / "current.jsonl"
+    stream.parent.mkdir(parents=True, exist_ok=True)
+    stream.write_text("", encoding="utf-8")
+    runtime = tmp_path / "runtime"
+    runtime.mkdir(parents=True)
+    offsets_path = runtime / "stream_offsets.json"
+    offsets_path.write_text(json.dumps({
+        "_schema": "cross_venue_stream_offsets.v2",
+        "bitget": 0,
+        "_last_processed_monotonic_ns": 1,
+    }), encoding="utf-8")
+    boundary_path = runtime / "forward_boundary.json"
+    boundary_path.write_text(json.dumps({
+        "schema": "cross_venue_forward_boundary.v1",
+        "boundary_mode": "CLOCK_EPOCH_RESET_REFROZEN_AT_CURRENT_STREAM_END",
+        "initial_boundary_mode": "FROZEN_AT_CURRENT_STREAM_END",
+        "frozen_at": "2026-07-17T11:44:46+00:00",
+        "initial_offsets": {"bitget": 0},
+        "clock_epoch_reset_detected": True,
+        "clock_epoch_future_cursor_venues": ["bitget"],
+        "clock_epoch_refreeze_offsets": {"bitget": 123},
+    }), encoding="utf-8")
+    ledger = CrossVenueLedger(runtime / "paper.sqlite")
+    ledger.initialize()
+    monkeypatch.setattr(SV, "RUNTIME_ROOT", runtime)
+    monkeypatch.setattr(SV, "OFFSETS_PATH", offsets_path)
+    monkeypatch.setattr(SV, "ENGINE_STATUS_PATH", runtime / "status.json")
+    monkeypatch.setattr(SV, "ENGINE_SNAPSHOT_PATH", runtime / "snapshot.json")
+    monkeypatch.setattr(SV.time, "monotonic_ns", lambda: 2_000_000_000)
+    config = dict(load_config())
+    config["active_venues"] = ["bitget"]
+
+    service = SV.CrossVenueService(config=config, root=root, ledger=ledger)
+
+    assert service.clock_epoch_reset is False
+    assert service.forward_boundary["clock_epoch_reset_detected"] is True
+    assert datetime.fromisoformat(service.forward_boundary["clock_epoch_refrozen_at"])
+    assert service.forward_boundary["clock_epoch_future_cursor_venues"] == ["bitget"]
+    assert service.forward_boundary["clock_epoch_refreeze_offsets"] == {"bitget": 123}
 
 
 def test_service_adopts_only_coordinated_persisted_rollover_cursor(tmp_path, monkeypatch):

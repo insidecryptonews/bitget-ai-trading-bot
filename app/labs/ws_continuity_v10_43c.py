@@ -55,8 +55,9 @@ def load_persistent_bars(symbol: str = "BTCUSDT", bar_seconds: int = 60,
                             "source_dataset": SOURCE_DATASET}
     if not p.is_file() or p.is_symlink():
         return {"bars": [], "meta": meta}
-    rows: list[dict] = []
+    buckets: dict[int, dict[str, Any]] = {}
     dropped = 0
+    width = int(bar_seconds) * 1000
     try:
         with open(p, "r", newline="", encoding="utf-8", errors="ignore") as f:
             for r in csv.DictReader(f):
@@ -64,17 +65,49 @@ def load_persistent_bars(symbol: str = "BTCUSDT", bar_seconds: int = 60,
                 try:
                     if str(r.get("symbol", "")).upper() != symbol.upper():
                         continue
-                    int(float(r["timestamp"])); float(r["price"]); float(r["size"])
-                    rows.append(r)
+                    ts = int(float(r["timestamp"]))
+                    price = float(r["price"])
+                    size = float(r["size"])
+                    side = str(r.get("aggressor_side", "")).lower()
+                    bucket = (ts // width) * width
+                    cur = buckets.get(bucket)
+                    if cur is None:
+                        cur = {
+                            "symbol": symbol.upper(), "bar_start_ts": bucket,
+                            "bar_close_ts": bucket + width, "ts": bucket + width,
+                            "open": price, "high": price, "low": price, "close": price,
+                            "volume": 0.0, "buy_volume": 0.0, "sell_volume": 0.0,
+                            "n_trades": 0, "trade_count": 0, "max_trade": 0.0,
+                            "first_trade_ts": ts, "last_trade_ts": ts,
+                            "available_at": bucket + width,
+                        }
+                        buckets[bucket] = cur
+                    cur["high"] = max(float(cur["high"]), price)
+                    cur["low"] = min(float(cur["low"]), price)
+                    if ts < int(cur["first_trade_ts"]):
+                        cur["first_trade_ts"] = ts
+                        cur["open"] = price
+                    if ts >= int(cur["last_trade_ts"]):
+                        cur["last_trade_ts"] = ts
+                        cur["close"] = price
+                    cur["volume"] += size
+                    cur["n_trades"] += 1
+                    cur["trade_count"] += 1
+                    cur["max_trade"] = max(float(cur["max_trade"]), size)
+                    cur["available_at"] = max(int(cur["bar_close_ts"]), ts)
+                    if side == "buy":
+                        cur["buy_volume"] += size
+                    elif side == "sell":
+                        cur["sell_volume"] += size
+                    meta["n_trades_used"] += 1
                 except (KeyError, TypeError, ValueError):
                     dropped += 1
     except Exception:
         return {"bars": [], "meta": {**meta, "read_error": True}}
     meta["dropped_rows"] = dropped
-    meta["n_trades_used"] = len(rows)
     meta["ws_file_age_min"] = round(
         (datetime.now(timezone.utc).timestamp() - p.stat().st_mtime) / 60, 1)
-    bars = CE.build_bars_from_trades(rows, bar_seconds, symbol)
+    bars = [buckets[key] for key in sorted(buckets)]
     for b in bars:
         b["source_exchange"] = SOURCE_EXCHANGE
         b["source_dataset"] = SOURCE_DATASET

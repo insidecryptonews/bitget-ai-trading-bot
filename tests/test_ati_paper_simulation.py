@@ -441,6 +441,11 @@ def test_local_stack_scripts_are_closed_scope_and_research_only():
         text = (root / "scripts" / wrapper).read_text(encoding="utf-8")
         assert "Tee-Object" in text
         assert "data\\runtime\\local_stack\\logs" in text
+    dashboard_wrapper = (root / "scripts" / "run_dashboard_watcher_forever.ps1").read_text(
+        encoding="utf-8"
+    )
+    assert "BitgetBotDashboardWatcherV1043C" in dashboard_wrapper
+    assert "WaitOne(0)" in dashboard_wrapper
     scheduler = (root / "scripts" / "run_heavy_research_scheduler.ps1").read_text(encoding="utf-8")
     assert "next_run_at" in scheduler
     assert "Previous heavy refresh is current" in scheduler

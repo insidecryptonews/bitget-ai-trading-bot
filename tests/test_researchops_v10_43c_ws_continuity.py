@@ -61,6 +61,30 @@ def test_load_persistent_bars_has_source_tags_and_drops_corrupt(tmp_path):
     assert r["bars"][0]["available_at"] >= r["bars"][0]["bar_close_ts"]
 
 
+def test_streaming_persistent_bar_aggregation_matches_sorted_trade_contract(tmp_path):
+    rows = [
+        {**_trade("late", T0 + 50_000), "price": "102", "size": "2", "aggressor_side": "sell"},
+        {**_trade("early", T0 + 1_000), "price": "100", "size": "1", "aggressor_side": "buy"},
+        {**_trade("middle", T0 + 20_000), "price": "103", "size": "3", "aggressor_side": "buy"},
+        {**_trade("next", T0 + 61_000), "price": "101", "size": "4", "aggressor_side": "sell"},
+    ]
+    _write(tmp_path, rows)
+
+    report = PWS.load_persistent_bars("BTCUSDT", base=tmp_path)
+    expected = PWS.CE.build_bars_from_trades(rows, 60, "BTCUSDT")
+
+    assert report["meta"]["n_trades_raw"] == 4
+    assert report["meta"]["n_trades_used"] == 4
+    assert len(report["bars"]) == 2
+    for actual, reference in zip(report["bars"], expected):
+        for key in (
+            "bar_start_ts", "bar_close_ts", "open", "high", "low", "close",
+            "volume", "buy_volume", "sell_volume", "n_trades", "trade_count",
+            "max_trade", "first_trade_ts", "last_trade_ts", "available_at",
+        ):
+            assert actual[key] == reference[key]
+
+
 def test_3way_compare_recommends_persistent_but_keeps_gappy_blocker(monkeypatch):
     monkeypatch.setattr(PWS.CE, "load_dataset", lambda _s: {"bars": _bars(20, gap_every=5)})
     monkeypatch.setattr(PWS.WS, "load_ws_bars", lambda _s: {"bars": _bars(40, gap_every=12)})

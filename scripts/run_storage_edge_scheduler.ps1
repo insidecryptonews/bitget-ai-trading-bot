@@ -154,8 +154,29 @@ try {
         $sprintState = Read-JsonSafe $SprintStatus
         $sprintPass = (
             $sprintExit -eq 0 -and $null -ne $sprintState -and
-            [string]$sprintState.status -in @("ACTIVE", "COMPLETED")
+            [string]$sprintState.status -in @("ACTIVE", "PAUSED", "COMPLETED")
         )
+        $handoffStatus = "NOT_DUE"
+        $handoffExit = $null
+        $handoffPath = $null
+        if ($sprintState -and [string]$sprintState.status -eq "COMPLETED") {
+            $handoffPath = Join-Path $Repo (
+                "reports\research\48h_edge_sprint\" + [string]$sprintState.sprint_id +
+                "\HANDOFF_REVIEW_PACK.zip"
+            )
+            if (Test-Path -LiteralPath $handoffPath) {
+                $handoffStatus = "ALREADY_PRESENT"
+            } else {
+                & $Python -m app.research_lab edge-sprint-final-handoff-v1 --apply 2>&1 |
+                    Tee-Object -FilePath $LogPath -Append | Out-Host
+                $handoffExit = $LASTEXITCODE
+                $handoffStatus = if ($handoffExit -eq 0 -and (Test-Path -LiteralPath $handoffPath)) {
+                    "CREATED"
+                } else {
+                    "ERROR"
+                }
+            }
+        }
         $finished = [DateTime]::UtcNow
         $state = [ordered]@{
             schema = "storage_edge_scheduler.v1"
@@ -171,6 +192,12 @@ try {
             disk_guard_level = if ($diskGuard) { [string]$diskGuard.level } else { "UNKNOWN" }
             sprint_exit_code = $sprintExit
             sprint_status = if ($sprintState) { [string]$sprintState.status } else { "UNKNOWN" }
+            sprint_runtime_state = if ($sprintState) { [string]$sprintState.runtime_state } else { "UNKNOWN" }
+            sprint_active_runtime_seconds = if ($sprintState) { [int64]$sprintState.accumulated_active_runtime_seconds } else { 0 }
+            sprint_active_runtime_remaining_seconds = if ($sprintState) { [int64]$sprintState.active_runtime_remaining_seconds } else { 172800 }
+            sprint_handoff_status = $handoffStatus
+            sprint_handoff_exit_code = $handoffExit
+            sprint_handoff_path = $handoffPath
             challenger_eligible = $challengerEligible
             challenger_exit_code = $challengerExit
             challenger_skip_reason = if ($challengerEligible) { $null } elseif (-not $contractPass) { "PROJECT_MEMORY_CONTRACT" } elseif ($heavyRunning) { "HEAVY_RESEARCH_RUNNING" } elseif (-not $collectorsHealthy) { "COLLECTORS_NOT_HEALTHY" } elseif (-not $diskOk -or -not $allowChallenger) { "DISK_GUARD" } elseif (-not $intervalOk) { "MINIMUM_INTERVAL" } else { "NO_NEW_VERIFIED_PARTITIONS" }

@@ -1140,21 +1140,47 @@ def _panel_edge_sprint(d: dict) -> str:
     disk = report.get("disk_guard") or {}
     remote = report.get("remote_restore") or {}
     populations = report.get("populations") or {}
+    active_seconds = int(report.get("accumulated_active_runtime_seconds") or 0)
+    target_seconds = int(report.get("target_active_runtime_seconds") or 172800)
+    remaining_seconds = max(0, int(report.get("active_runtime_remaining_seconds") or 0))
     return (
         A._kv("Sprint", report.get("sprint_id") or "NOT_STARTED") +
         A._kv("Status", report.get("status") or "NOT_STARTED",
               A._state_kind(report.get("status") or "NEED_DATA")) +
-        A._kv("Start / planned end", f"{report.get('started_at')} / {report.get('planned_end_at')}") +
+        A._kv("Runtime accounting", report.get("runtime_accounting_version") or "LEGACY_UNKNOWN") +
+        A._kv("Runtime state", report.get("runtime_state") or "WAITING_FOR_VALID_HEARTBEAT") +
+        A._kv("Active / target / remaining",
+              f"{active_seconds / 3600:.2f}h / {target_seconds / 3600:.2f}h / {remaining_seconds / 3600:.2f}h") +
+        A._kv("Wall start / elapsed",
+              f"{report.get('started_at')} / {int(report.get('wall_clock_elapsed_seconds') or 0) / 3600:.2f}h") +
+        A._kv("Original wall-clock end", report.get("original_planned_wall_clock_end") or report.get("planned_end_at")) +
+        A._kv("Estimated completion if continuous", report.get("estimated_completion_at_if_continuous")) +
+        A._kv("Actual completion", report.get("actual_completion_at") or "NOT_COMPLETED") +
+        A._kv("Current session / resumes / shutdowns",
+              f"{report.get('current_session_started_at')} / {report.get('resume_count', 0)} / {report.get('shutdown_count', 0)}") +
+        A._kv("Last valid heartbeat", report.get("last_valid_heartbeat_at") or "WAITING") +
+        A._kv("Next runtime-qualified snapshot",
+              f"{report.get('next_runtime_qualified_cycle_active_seconds')}s / {report.get('next_runtime_qualified_cycle_at_if_continuous')}") +
         A._kv("Dataset initial / current",
               f"{report.get('initial_dataset_hash')} / {report.get('current_dataset_hash')}") +
         A._kv("Snapshots / holdout accesses",
               f"{report.get('snapshot_count', 0)} / {report.get('holdout_accesses', 0)}") +
-        A._kv("Last / next cycle", f"{report.get('last_cycle_at')} / {report.get('next_cycle_at')}") +
+        A._kv("Last cycle", report.get("last_cycle_at")) +
         A._kv("Disk / R2", f"{disk.get('level', 'UNKNOWN')} / {remote.get('status', 'BLOCKED')}") +
-        A._kv("Honest populations", populations) +
+        A._kv("ATI Shadow signals / outcomes",
+              f"{populations.get('ati_shadow_forward_signals', 0)} / {populations.get('ati_shadow_forward_outcomes', 0)}") +
+        A._kv("ATI Paper trades / open positions",
+              f"{populations.get('ati_paper_trades', 0)} / {populations.get('ati_paper_open_positions', 0)}") +
+        A._kv("P11 outcomes / Cross-Venue paper trades",
+              f"{populations.get('p11_outcomes', 0)} / {populations.get('cross_venue_paper_trades', 0)}") +
+        A._kv("Diagnostic / candidate-demo trades",
+              f"{populations.get('diagnostic_trades', 0)} / {populations.get('candidate_demo_trades', 0)}") +
         A._kv("Strategy verdict", report.get("strategy_verdict") or "NEED_MORE_FORWARD_DATA", "warn") +
         A._kv("Final recommendation", "NO LIVE", "bad") +
-        '<div class="sub">Six-hour snapshots, dataset-hash deduplication, sealed holdout, no policy mutation and no automatic promotion.</div>'
+        '<div class="sub"><strong>PC OFF TIME DOES NOT COUNT.</strong> Six active-hour snapshots, sealed holdout, no policy mutation and no automatic promotion.<br>'
+        'Review: <code>.\\scripts\\EXPORT_REVIEW_SNAPSHOT.ps1</code> &nbsp; '
+        'Start: <code>.\\scripts\\START_RESEARCH_SESSION.ps1</code> &nbsp; '
+        'Stop: <code>.\\scripts\\STOP_RESEARCH_SESSION.ps1</code></div>'
     )
 
 
@@ -1797,9 +1823,14 @@ def _pid_alive(pid: Any) -> bool:
         try:
             cp = subprocess.run(["tasklist", "/FI", f"PID eq {pid_i}", "/FO", "CSV", "/NH"],
                                 capture_output=True, text=True, timeout=2)
+            if cp.returncode != 0:
+                # Unknown liveness must keep the lock. Under CPU or memory
+                # pressure tasklist can time out/fail while the owner is alive;
+                # treating that as dead starts a second multi-GB watcher.
+                return True
             return str(pid_i) in cp.stdout
         except Exception:
-            return False
+            return True
     try:
         os.kill(pid_i, 0)
         return True
